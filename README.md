@@ -10,7 +10,8 @@ the result, and no game code or data in this repository.
 Used by:
 - [DS1-Rebuilt](https://github.com/JTM-rootstorm/DS1-Rebuilt) (Dungeon
   Siege, 2002), where it was developed;
-- a Call of Duty (2003) port, in progress.
+- [CoD1-Reissued](https://github.com/JTM-rootstorm/CoD1-Reissued) (Call
+  of Duty, 2003), in progress.
 
 ## What is here
 
