@@ -17,9 +17,10 @@
 // - Texture environments map to texture stage states. Textures are stored
 //   as A8R8G8B8 (alpha 1 for formats without alpha) or as DXT blocks; GL's
 //   per-base-format environment rules are applied when building stages.
-// - Winding: GL front faces are counter-clockwise in its y-up window
-//   space, which is clockwise in the device's y-down screen space, the
-//   device's own front-face convention.
+// - Winding: both APIs judge it as the triangle appears on screen (GL in
+//   its y-up window space, the device in its y-down screen space). GL's
+//   front faces are counter-clockwise; the device's are clockwise, so a
+//   GL front face is a device back face.
 
 #include "runtime/gl/context.h"
 
@@ -739,7 +740,7 @@ void Context::ApplyState() {
     bool cull_back = cull_face_ == BACK;
     if (cull_face_ == FRONT_AND_BACK) Unsupported("glCullFace", cull_face_);
     if (front_face_ == CW) cull_back = !cull_back;
-    cull = cull_back ? 3 : 2;  // CCW : CW (see the file comment)
+    cull = cull_back ? 2 : 3;  // CW : CCW (see the file comment)
   }
   RS(RS_CULLMODE, cull);
   RS(RS_FILLMODE, polygon_mode_ == POINT ? 1 : polygon_mode_ == LINE ? 2 : 3);

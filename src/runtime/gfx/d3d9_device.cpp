@@ -12,10 +12,12 @@
 #include <windows.h>
 #include <d3d9.h>
 
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -101,6 +103,7 @@ class D3D9Device final : public Device {
         vsync ? D3DPRESENT_INTERVAL_ONE : D3DPRESENT_INTERVAL_IMMEDIATE;
     pp.Flags = D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
     ReleaseTargets();
+    bool reset = false;
     if (!dev_) {
       Check(d3d_->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL,
                                reinterpret_cast<HWND>(window_),
@@ -127,6 +130,7 @@ class D3D9Device final : public Device {
         readback_ = nullptr;
       }
       Check(dev_->Reset(&pp), "Reset");
+      reset = true;
       for (auto& [id, d] : depths_)
         Check(dev_->CreateDepthStencilSurface(UINT(d.w), UINT(d.h), ToD3D(d.fmt),
                                               D3DMULTISAMPLE_NONE, 0, FALSE,
@@ -150,6 +154,7 @@ class D3D9Device final : public Device {
       dev_->ColorFill(*t, nullptr, D3DCOLOR_XRGB(0, 0, 0));
     }
     dev_->SetRenderTarget(0, backbuffer_);
+    if (reset) RestoreState();
   }
 
   TextureId CreateTexture(int w, int h, int levels, Format fmt,
@@ -289,6 +294,7 @@ class D3D9Device final : public Device {
   }
 
   void SetRenderState(uint32_t s, uint32_t v) override {
+    state_.rs[s] = v;
     switch (s) {
       case 47: {  // D3DRENDERSTATE_ZBIAS (0..16) -> DEPTHBIAS
         float bias = -float(v) * 0.000005f;
@@ -311,6 +317,7 @@ class D3D9Device final : public Device {
   }
 
   void SetTextureStageState(uint32_t stage, uint32_t type, uint32_t v) override {
+    state_.tss[{stage, type}] = v;
     switch (type) {
       case 12:  // ADDRESS (both)
         dev_->SetSamplerState(stage, D3DSAMP_ADDRESSU, v);
@@ -344,11 +351,13 @@ class D3D9Device final : public Device {
 
   void SetTexture(uint32_t stage, TextureId id) override {
     if (stage >= 8) return;
+    state_.tex[stage] = id;
     auto it = textures_.find(id);
     dev_->SetTexture(stage, it == textures_.end() ? nullptr : it->second);
   }
 
   void SetTransform(uint32_t type, const float m[16]) override {
+    std::memcpy(state_.xf[type].data(), m, sizeof(float) * 16);
     D3DTRANSFORMSTATETYPE t;
     switch (type) {
       case 1: t = D3DTS_WORLD; break;
@@ -361,28 +370,36 @@ class D3D9Device final : public Device {
   }
 
   void SetViewport(const Viewport& v) override {
+    state_.vp = v;
     D3DVIEWPORT9 vp{v.x, v.y, v.width, v.height, v.min_z, v.max_z};
     dev_->SetViewport(&vp);
   }
 
   void SetScissor(const Rect& r) override {
+    state_.scissor = r;
     RECT rc{r.left, r.top, r.right, r.bottom};
     dev_->SetScissorRect(&rc);
   }
 
   void SetMaterial(const Material& m) override {
+    state_.mat = m;
     static_assert(sizeof(Material) == sizeof(D3DMATERIAL9));
     dev_->SetMaterial(reinterpret_cast<const D3DMATERIAL9*>(&m));
   }
 
   void SetLight(uint32_t i, const Light& l) override {
+    state_.lights[i] = l;
     static_assert(sizeof(Light) == sizeof(D3DLIGHT9));
     dev_->SetLight(i, reinterpret_cast<const D3DLIGHT9*>(&l));
   }
 
-  void LightEnable(uint32_t i, bool e) override { dev_->LightEnable(i, e); }
+  void LightEnable(uint32_t i, bool e) override {
+    state_.light_on[i] = e;
+    dev_->LightEnable(i, e);
+  }
 
   void SetClipPlane(uint32_t i, const float p[4]) override {
+    std::memcpy(state_.clip[i].data(), p, sizeof(float) * 4);
     dev_->SetClipPlane(i, p);
   }
 
@@ -602,6 +619,35 @@ class D3D9Device final : public Device {
   DepthId current_depth_ = 0;
   bool in_scene_ = false;
   std::set<uint32_t> ignored_rs_;
+
+  // Everything set through the Device interface: D3D9's Reset discards
+  // device state, and front ends only send state when it changes.
+  struct State {
+    std::map<uint32_t, uint32_t> rs;
+    std::map<std::pair<uint32_t, uint32_t>, uint32_t> tss;
+    std::map<uint32_t, TextureId> tex;
+    std::map<uint32_t, std::array<float, 16>> xf;
+    std::optional<Viewport> vp;
+    std::optional<Rect> scissor;
+    std::optional<Material> mat;
+    std::map<uint32_t, Light> lights;
+    std::map<uint32_t, bool> light_on;
+    std::map<uint32_t, std::array<float, 4>> clip;
+  } state_;
+
+  void RestoreState() {
+    const State s = state_;
+    for (const auto& [k, v] : s.rs) SetRenderState(k, v);
+    for (const auto& [k, v] : s.tss) SetTextureStageState(k.first, k.second, v);
+    for (const auto& [k, v] : s.tex) SetTexture(k, v);
+    for (const auto& [k, v] : s.xf) SetTransform(k, v.data());
+    if (s.vp) SetViewport(*s.vp);
+    if (s.scissor) SetScissor(*s.scissor);
+    if (s.mat) SetMaterial(*s.mat);
+    for (const auto& [k, v] : s.lights) SetLight(k, v);
+    for (const auto& [k, v] : s.light_on) LightEnable(k, v);
+    for (const auto& [k, v] : s.clip) SetClipPlane(k, v.data());
+  }
 };
 
 }  // namespace
