@@ -113,6 +113,74 @@ int ec_case_applies(const EcCase *c, int eax) {
   return 1;
 }
 
+static const EcAttr kSourceDefaults2[] = {
+    {"EAX2 sample direct", 'i', 0},
+    {"EAX2 sample direct HF", 'i', 0},
+    {"EAX2 sample room", 'i', 0},
+    {"EAX2 sample room HF", 'i', 0},
+    {"EAX2 sample room rolloff", 'f', 0.0},
+    {"EAX2 sample obstruction", 'i', 0},
+    {"EAX2 sample obstruction LF ratio", 'f', 0.0},
+    {"EAX2 sample occlusion", 'i', 0},
+    {"EAX2 sample occlusion LF ratio", 'f', 0.25},
+    {"EAX2 sample occlusion room ratio", 'f', 0.5},
+    {"EAX2 sample outside volume HF", 'i', 0},
+    {"EAX2 sample air absorption", 'f', 1.0},
+    {"EAX2 sample flags", 'u', 7},
+};
+static const EcAttr kSourceDefaults3[] = {
+    {"EAX2 sample direct", 'i', 0},
+    {"EAX2 sample direct HF", 'i', 0},
+    {"EAX2 sample room", 'i', 0},
+    {"EAX2 sample room HF", 'i', 0},
+    {"EAX2 sample room rolloff", 'f', 0.0},
+    {"EAX2 sample obstruction", 'i', 0},
+    {"EAX2 sample obstruction LF ratio", 'f', 0.0},
+    {"EAX2 sample occlusion", 'i', 0},
+    {"EAX2 sample occlusion LF ratio", 'f', 0.25},
+    {"EAX2 sample occlusion room ratio", 'f', 1.5},
+    {"EAX2 sample outside volume HF", 'i', 0},
+    {"EAX2 sample air absorption", 'f', 1.0},
+    {"EAX2 sample flags", 'u', 7},
+    {"EAX3 sample exclusion", 'i', 0},
+    {"EAX3 sample exclusion LF ratio", 'f', 1.0},
+    {"EAX3 sample occlusion direct ratio", 'f', 1.0},
+    {"EAX3 sample doppler factor", 'f', 0.0},
+};
+/* EAX 1.0's default reverb mix: from the distance (EAX_REVERBMIX_USEDISTANCE). */
+static const EcAttr kSourceDefaults1[] = {
+    {"EAX sample reverb mix", 'f', -1.0},
+};
+
+int ec_source_defaults(int eax, const EcAttr **out) {
+  if (eax == 1) {
+    *out = kSourceDefaults1;
+    return (int)(sizeof kSourceDefaults1 / sizeof kSourceDefaults1[0]);
+  }
+  if (eax == 2) {
+    *out = kSourceDefaults2;
+    return (int)(sizeof kSourceDefaults2 / sizeof kSourceDefaults2[0]);
+  }
+  if (eax >= 3) {
+    *out = kSourceDefaults3;
+    return (int)(sizeof kSourceDefaults3 / sizeof kSourceDefaults3[0]);
+  }
+  *out = 0;
+  return 0;
+}
+
+int ec_attr_size_scaled(const char *name) {
+  static const char *const scaled[] = {
+      "EAX decay time",         "EAX2 reflections", "EAX2 reflections delay",
+      "EAX2 reverb",            "EAX2 reverb delay", "EAX3 echo time",
+      "EAX3 modulation time",
+  };
+  int i;
+  for (i = 0; i < (int)(sizeof scaled / sizeof scaled[0]); i++)
+    if (!strcmp(name, scaled[i])) return 1;
+  return 0;
+}
+
 /* ---- the case list ----------------------------------------------------- */
 
 #define EC_MAX_CASES 160

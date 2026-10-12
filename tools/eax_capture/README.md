@@ -59,13 +59,14 @@ Hear, whatever it gets, for its manifests), stop the long recording, and
 cut it into per-case files with:
 
 ```bash
-python3 -I tools/eax_capture/split_capture.py --long spdif.wav --capture capture/eax2 --out capture_spdif/eax2
+python3 -I tools/eax_capture/split_capture.py --long spdif.wav --capture capture --out capture_spdif
 ```
 
 Each recording starts with half a second of silence and a sync click;
-the splitter finds the clicks in order and cuts every case to the same
-length and click position as eaxcap.exe's own file. Run it once per
-provider directory, then analyze `capture_spdif` instead of `capture`.
+the splitter takes the recordings of every provider directory in the
+order they were made, finds the clicks in order and cuts every case to
+the same length and click position as eaxcap.exe's own file. Then
+analyze `capture_spdif` instead of `capture`.
 
 ## Building eaxcap.exe (Linux)
 
@@ -88,17 +89,16 @@ Make a folder with a short path, e.g. `C:\EAXCAP`, containing:
 
 ```
 C:\EAXCAP\eaxcap.exe          tools/eax_capture/build/eaxcap.exe
-C:\EAXCAP\mss32.dll           Call of Duty's mss32.dll (Miles 6.5e)
-C:\EAXCAP\miles\*.*           Call of Duty's miles folder, all of it
+C:\EAXCAP\mss32.dll           the game's Miles 6.x mss32.dll
+C:\EAXCAP\miles\*.*           the game's miles folder, all of it
 ```
 
-On this machine the game files are in
-`~/.local/share/Steam/steamapps/common/Call of Duty/` (`mss32.dll` and
-`miles/`: `msseax.m3d` is the EAX providers, `msssoft.m3d` Fast 2D,
-`mssds3d.m3d` DirectSound3D). Copy them by USB stick, network share or
-CD. They are the game's files: never commit them here. A different
-game's Miles 6.x should work too (the tool uses only exports both 6.1c
-and 6.5e have, and logs the version it found).
+Take them from the game whose EAX is being measured (Miles 6.5e for the
+EAX 3 provider; 6.1c works too: the tool uses only exports both have, and
+logs the version it found). In `miles\`, `msseax.m3d` holds the EAX
+providers, `msssoft.m3d` Fast 2D and `mssds3d.m3d` DirectSound3D. Copy
+them by USB stick, network share or CD. They are the game's files: never
+commit them here.
 
 Leave room for the recordings: 16-bit stereo at 48 kHz is 11 MB a minute;
 a full EAX 3 run is about 14 minutes (160 MB), EAX 2 13, EAX 1 8, Fast 2D
@@ -120,12 +120,24 @@ eaxcap --provider eax3,eax2,eax1,fast2d,ds3dhw --out capture
   waveIn device.
 - The level check plays a 1 kHz tone at -6 dBFS straight ahead; adjust the
   recording level until its peak is about -12 dBFS.
-- The full run asks for Enter, then records provider by provider. Keep the
-  small "eaxcap" window in front (DirectSound mutes programs without the
-  focus); close it to stop. Each line shows the case, its length, the
-  recording's peak and the latency of the sync click. `NO SYNC CLICK FOUND`
-  means nothing was recorded (wrong source or level); `CLIPPED` means the
-  level is too high.
+- The full run waits for Enter or Space in the small "eaxcap" window (not
+  the console), then records provider by provider; close the window to
+  stop. Keep it in front: DirectSound mutes programs without the focus, so
+  recording pauses until it is clicked again and a case that lost the
+  focus, or whose input overran, is recorded again. The window also keeps
+  the screen saver and monitor power-down away.
+- Each line shows the case, its length, the recording's peak and the
+  latency of the sync click. `NO SYNC CLICK FOUND` means nothing was
+  recorded (wrong source or level; after two in a row eaxcap waits for a
+  key); `CLIPPED` means the level is too high. At the end of each provider
+  it prints an `eaxcap ... --cases` line for any case that failed.
+- Every case starts from a complete known EAX state: when a provider opens,
+  eaxcap reads each environment preset's "EAX all parameters" from it, and
+  before each case it selects another environment, then the case's, writes
+  that preset back, and then sets the case's properties; both samples get
+  every source property set explicitly. It then reads everything back:
+  `MISMATCH` lines (and `state_mismatch` in the manifest) name properties
+  that do not read back as intended.
 - Other options: `--rate 44100` (default 48000, the Audigy's native rate),
   `--cases env_*,obst_*` (patterns), `--stim impulse,sweep,noise,tone` (in
   place of each case's own stimuli), `--miles DIR`, `--dry-run`, `--yes`.
@@ -192,10 +204,26 @@ the hardware was recorded at. Renders are 32-bit float WAVs.
 
 analyze.py needs numpy (scipy and matplotlib are not used). Either set
 can be analyzed alone (`--sim render` works before any hardware data
-exists). For each recording it finds the sync click (the first sound
-after the silent pre-roll), places the stimulus 0.25 s after it,
+exists).
+
+It first checks the hardware recordings' EAX state: eaxcap's own
+mismatches, focus losses, input overruns and missing sync clicks, and
+(with `--sim`) every property read back from the hardware against the
+render's, which starts every case fresh. A property that differs and has
+the previous recording's value was carried over; those cases are listed
+as an `eaxcap --provider ... --cases ...` line to record again. This also
+works on manifests from the first eaxcap.exe, which did not reset the EAX
+state between cases (without `--sim` it can only catch a property the
+previous case set).
+
+For each recording it then finds the sync click (the first sound after
+the samples were started), places the stimulus 0.25 s after it,
 deconvolves sweeps into impulse responses and prints, per provider, one
-row per case with `hardware/render` in each cell:
+row per case with `hardware/render` in each cell. Levels are relative to
+each set's own `level_tone` (else `src_dry_ref`, else `pan_az0`), so the
+card's gain and the recording level drop out; the raw references are
+printed first. The reverb is looked for from the reflections delay the
+provider reports, so the direct sound's filter ringing is not counted.
 
 - reverb cases: RT60 mid-band (500 Hz-1 kHz), at 4 kHz and 125 Hz, from
   the reverb-only energy decay curve with the noise floor removed (T20
@@ -210,7 +238,8 @@ row per case with `hardware/render` in each cell:
   against the family's reference case;
 - noise cases: level, left/right levels and balance, band levels.
 
-A summary of hardware-minus-render differences follows. `--tsv` writes
+A summary of hardware-minus-render differences of the relative metrics
+(decay, onset, wet/direct, the rel_* columns) follows. `--tsv` writes
 every metric (per octave band too) in long format; `--plot` writes SVG
 energy decay curves and magnitude responses per case.
 

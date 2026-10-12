@@ -4,13 +4,14 @@ line output, recorded while eaxcap.exe ran) into the per-case files of an
 eaxcap.exe output directory, so analyze.py can use it in place of the
 "What U Hear" recordings.
 
-    python3 -I split_capture.py --long spdif.wav --capture capture/eax2 \\
-                                --out capture_spdif/eax2
+    python3 -I split_capture.py --long spdif.wav --capture capture --out capture_spdif
 
-eaxcap.exe's manifests give the order of the recordings (start_tick_ms),
-their lengths and where the sync click sat in each; every recording
-starts with at least half a second of silence and then the click, so the
-long file is cut at each click found after a silence.
+--capture is eaxcap.exe's output directory (all its provider directories,
+recorded in one long file) or one provider directory. The manifests give
+the order of the recordings (start_tick_ms), their lengths and where the
+sync click sat in each; every recording starts with at least half a
+second of silence and then the click, so the long file is cut at each
+click found after a silence.
 """
 
 import argparse
@@ -23,7 +24,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from analyze import read_wav  # noqa: E402
+from analyze import load_manifest, read_wav  # noqa: E402
 
 
 def pcm16_map(path):
@@ -58,7 +59,8 @@ def write_wav16(path, x, rate):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--long", required=True, help="the long recording (WAV)")
-    ap.add_argument("--capture", required=True, help="eaxcap.exe's directory for one provider")
+    ap.add_argument("--capture", required=True,
+                    help="eaxcap.exe's output directory, or one provider directory in it")
     ap.add_argument("--out", required=True)
     ap.add_argument("--silence", type=float, default=0.3,
                     help="seconds of silence required before a click (default 0.3)")
@@ -75,26 +77,33 @@ def main():
         raw = np.repeat(raw[:, :1], 2, axis=1)
     raw = raw[:, :2]
 
+    # Every provider directory's manifests, in recording order.
+    if any(n.endswith(".json") and not n.startswith("run_") for n in os.listdir(a.capture)):
+        dirs = [("", a.capture)]
+    else:
+        dirs = [(d, os.path.join(a.capture, d)) for d in sorted(os.listdir(a.capture))
+                if os.path.isdir(os.path.join(a.capture, d))]
     manifests = []
-    for name in os.listdir(a.capture):
-        if name.endswith(".json"):
-            with open(os.path.join(a.capture, name), encoding="utf-8") as f:
-                meta = json.load(f)
-            if "start_tick_ms" in meta:
-                manifests.append((meta["start_tick_ms"], name[:-5], meta))
-    manifests.sort()
+    for sub, d in dirs:
+        for name in os.listdir(d):
+            if name.endswith(".json"):
+                meta = load_manifest(os.path.join(d, name))
+                if "start_tick_ms" in meta:
+                    manifests.append((meta["start_tick_ms"], sub, name[:-5], meta))
+    manifests.sort(key=lambda m: m[0])
     if not manifests:
         print("no eaxcap.exe manifests in %s" % a.capture, file=sys.stderr)
         return 1
-    if manifests[0][2]["rate"] != rate:
-        print("the long recording is %d Hz, the capture %d Hz" % (rate, manifests[0][2]["rate"]),
+    if manifests[0][3]["rate"] != rate:
+        print("the long recording is %d Hz, the capture %d Hz" % (rate, manifests[0][3]["rate"]),
               file=sys.stderr)
         return 1
 
-    os.makedirs(a.out, exist_ok=True)
-    for name in os.listdir(a.capture):
-        if name.startswith("stim_"):
-            shutil.copy(os.path.join(a.capture, name), os.path.join(a.out, name))
+    for sub, d in dirs:
+        os.makedirs(os.path.join(a.out, sub), exist_ok=True)
+        for name in os.listdir(d):
+            if name.startswith("stim_"):
+                shutil.copy(os.path.join(d, name), os.path.join(a.out, sub, name))
 
     # Threshold: well above the noise at the start of the long file.
     block = 4096
@@ -102,7 +111,7 @@ def main():
     thr = max(noise * 8, 10 ** (-60 / 20))
     need = int(a.silence * rate)
     pos = 0
-    for _, base, meta in manifests:
+    for _, sub, base, meta in manifests:
         click = None
         quiet = 0
         while pos < len(raw) and click is None:
@@ -124,12 +133,12 @@ def main():
         seg = np.zeros((n, 2))
         lo = max(start, 0)
         seg[lo - start:lo - start + min(n, len(raw) - lo)] = raw[lo:lo + n] * scale
-        write_wav16(os.path.join(a.out, base + ".wav"), seg, rate)
+        write_wav16(os.path.join(a.out, sub, base + ".wav"), seg, rate)
         meta = dict(meta, wavein="split from " + os.path.basename(a.long),
                     split_click_frame=click)
-        with open(os.path.join(a.out, base + ".json"), "w", encoding="utf-8") as f:
+        with open(os.path.join(a.out, sub, base + ".json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=1)
-        print("%-40s click at %8.3f s" % (base, click / rate))
+        print("%-50s click at %8.3f s" % (os.path.join(sub, base), click / rate))
         pos = start + n
     return 0
 

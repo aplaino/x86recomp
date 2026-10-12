@@ -250,11 +250,11 @@ void ReadBack(Json& j, const char* key, int ver, const EcAttrName* names, T* obj
 
 // A 3D sample's direct and reverb-send levels, as mss32.cpp's ApplyEax
 // sets them (the listener at the origin, distance factor 1).
-void ApplyLevels(audio::Voice& v, const eax::Source& s, const eax::Listener& listener,
-                 int ver) {
+void ApplyLevels(audio::Mixer& m, audio::Voice& v, const eax::Source& s,
+                 const eax::Listener& listener, int ver) {
   if (!ver) {
-    // Fast 2D: no environment (Miles 6.5's master reverb is off by default).
-    v.direct_lf = v.direct_hf = 1.0f;
+    // Fast 2D: the driver's dry level; no master reverb wet level is set.
+    v.direct_lf = v.direct_hf = m.digital_reverb().dry();
     return;
   }
   eax::Listener l = listener;
@@ -314,26 +314,26 @@ void Render(const Options& o, const char* provider, const std::string& tag, int 
   }
   ApplyAttrs(j, "listener_set", ver, c.l, c.nl, &l, eax::ListenerAttribute);
 
-  // The stimulus sample and the sync click, as the provider allocates them.
+  // The stimulus sample and the sync click as the provider allocates them,
+  // then every EAX property set explicitly, as eaxcap.exe does.
   eax::Source src, sync_src;
   if (ver == 2) src.occlusion_room_ratio = sync_src.occlusion_room_ratio = eax::kOcclusionRoomRatio2;
+  const EcAttr* defs;
+  int ndefs = ec_source_defaults(ver, &defs);
+  ApplyAttrs(j, "source_defaults_set", ver, defs, ndefs, &src, eax::SourceAttribute);
   ApplyAttrs(j, "source_set", ver, c.s, c.ns, &src, eax::SourceAttribute);
+  // The click: direct path only.
+  EcAttr sync_attr = ver >= 2 ? EcAttr{"EAX2 sample room", 'i', -10000}
+                              : EcAttr{"EAX sample reverb mix", 'f', 0.0};
   j.Open("sync", '{');
   j.Vec("pos", EC_SYNC_POS);
-  if (ver >= 2) {
-    int32_t room = -10000;
-    j.Num("EAX2 sample room", room);
-    j.Num("result", eax::SourceAttribute(&sync_src, "EAX2 sample room", ver, &room, true) ? 0 : 1);
-  } else if (ver == 1) {
-    float mix = 0;
-    j.Num("EAX sample reverb mix", mix);
-    j.Num("result",
-          eax::SourceAttribute(&sync_src, "EAX sample reverb mix", ver, &mix, true) ? 0 : 1);
-  }
+  ApplyAttrs(j, "defaults_set", ver, defs, ndefs, &sync_src, eax::SourceAttribute);
+  ApplyAttrs(j, "set", ver, &sync_attr, ver ? 1 : 0, &sync_src, eax::SourceAttribute);
   j.Close('}');
   if (ver) {
     ReadBack(j, "listener_readback", ver, ec_listener_names, &l, eax::ListenerAttribute);
     ReadBack(j, "source_readback", ver, ec_source_names, &src, eax::SourceAttribute);
+    ReadBack(j, "sync_readback", ver, ec_source_names, &sync_src, eax::SourceAttribute);
   }
 
   double decay = ver ? l.decay_time : 0.1;
@@ -356,8 +356,8 @@ void Render(const Options& o, const char* provider, const std::string& tag, int 
   audio::Voice stim, sync;
   InitVoice(stim, st.image, c.pos, c);
   InitVoice(sync, sync_image, EC_SYNC_POS, c);
-  ApplyLevels(stim, src, l, ver);
-  ApplyLevels(sync, sync_src, l, ver);
+  ApplyLevels(m, stim, src, l, ver);
+  ApplyLevels(m, sync, sync_src, l, ver);
 
   std::vector<float> out(size_t(total) * 2);
   for (int64_t pos = 0; pos < total;) {

@@ -21,6 +21,7 @@ import fnmatch
 import json
 import math
 import os
+import re
 import struct
 import sys
 
@@ -79,11 +80,23 @@ def read_wav(path):
     return rate, x[:len(x) // ch * ch].reshape(-1, ch)
 
 
+def load_manifest(path):
+    """A manifest, with the NaN/infinity spellings msvcrt prints (-1.#QNAN,
+    1.#INF, -1.#IND; written by eaxcap.exe before it wrote them as null)
+    read as null."""
+    with open(path, encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    text = re.sub(r"-?\d\.#(?:QNAN|SNAN|IND|INF)\d*", "null", text)
+    try:
+        return json.loads(text)
+    except ValueError as e:
+        raise ValueError("%s: %s" % (path, e))
+
+
 class Rec:
     def __init__(self, root, tag, base):
         self.dir = os.path.join(root, tag)
-        with open(os.path.join(self.dir, base + ".json"), encoding="utf-8") as f:
-            self.meta = json.load(f)
+        self.meta = load_manifest(os.path.join(self.dir, base + ".json"))
         self.rate, x = read_wav(os.path.join(self.dir, base + ".wav"))
         self.x = x if x.shape[1] == 2 else np.repeat(x[:, :1], 2, axis=1)
         self.case = self.meta["case"]
@@ -119,16 +132,20 @@ def discover(root):
 
 # ---- signal helpers --------------------------------------------------------------------
 
-def find_sync(x, rate):
-    """Index of the sync click: the first sample above the pre-roll's noise
-    (as eaxcap.c finds it), refined to the peak within 2 ms."""
+def find_sync(x, rate, start=None):
+    """Index of the sync click: the first sample from `start` (where the
+    samples were started; else 0.2 s in) above the noise of the 0.2 s
+    before it (as eaxcap.c finds it), refined to the peak within 2 ms."""
     a = np.abs(x).max(axis=1)
-    n0 = rate // 5
-    thr = max(a[:n0].max() * 8, 10 ** (-60 / 20))
-    hit = np.nonzero(a[n0:] > thr)[0]
+    if start is None or not 0 < start < len(a):
+        start = rate // 5
+    start = int(start)
+    noise = a[max(start - rate // 5, 0):start]
+    thr = max(noise.max() * 8 if len(noise) else 0.0, 10 ** (-60 / 20))
+    hit = np.nonzero(a[start:] > thr)[0]
     if not len(hit):
         return None
-    i = n0 + int(hit[0])
+    i = start + int(hit[0])
     return i + int(np.argmax(a[i:i + int(0.002 * rate) + 1]))
 
 
@@ -253,14 +270,19 @@ def decay_times(e, rate):
 
 # ---- per-recording metrics -------------------------------------------------------------
 
+def readback_value(meta, name):
+    v = (meta.get("listener_readback") or {}).get(name)
+    return float(v) if isinstance(v, (int, float)) else None
+
+
 def analyze(rec):
-    m = {}
+    m = {"_flags": []}
     rate = rec.rate
-    sync = find_sync(rec.x, rate)
+    started = rec.meta.get("started_at_frame")
+    sync = find_sync(rec.x, rate, started)
     if sync is None:
         m["error"] = "no sync click"
         return m, None
-    started = rec.meta.get("started_at_frame")
     if started is not None:
         m["latency_ms"] = 1000.0 * (sync - started) / rate
     t0 = sync + int(round(rec.meta["lead_s"] * rate))
@@ -285,6 +307,8 @@ def analyze(rec):
     w = int(0.002 * rate)
     d = pre - w + int(np.argmax(e[pre - w:pre + w + 1]))
     m["direct_dt_ms"] = 1000.0 * (d - pre) / rate
+    if abs(m["direct_dt_ms"]) > 1.8:
+        m["_flags"].append("direct sound at the edge of its +-2 ms search")
     d0, d1 = d - int(DIRECT_S[0] * rate), d + int(DIRECT_S[1] * rate) + 1
     ed = ir[d0:d1]
     m["direct_db"] = db(float((ed ** 2).sum()) / 2)
@@ -295,11 +319,16 @@ def analyze(rec):
         eb = (bands[fc] ** 2).sum(axis=1)
         m["band_%d" % fc] = db(energy(eb, noise_floor(eb)) / 2)
 
+    # The reverb starts at the reflections delay (when the manifest has it):
+    # before that is only the direct sound's filter ringing.
+    refl = readback_value(rec.meta, "EAX2 reflections delay")
+    w0 = max(d1, d + int((refl - 0.002) * rate)) if refl is not None else d1
+    m["wet_from_ms"] = 1000.0 * (w0 - d) / rate
     wet = e.copy()
-    wet[:d1] = 0
+    wet[:w0] = 0
     noise = noise_floor(wet)
     m["noise_db"] = db(noise / 2)
-    ew = energy(wet[d1:], noise)
+    ew = energy(wet[w0:], noise)
     m["wet_db"] = db(ew / 2)
     m["wetdry_db"] = m["wet_db"] - m["direct_db"]
     win = max(int(0.0005 * rate), 1)
@@ -312,10 +341,10 @@ def analyze(rec):
         # (and well above the noise) once the direct sound's own tail and
         # the deconvolution's ringing have fallen below that level.
         thr = max(env[peak] * 0.01, noise * 3)
-        below = np.nonzero(env[d1:peak + 1] < thr)[0]
-        start = d1 + int(below[0]) if len(below) else d1
+        below = np.nonzero(env[w0:peak + 1] < thr)[0]
+        start = w0 + int(below[0]) if len(below) else w0
         on = np.nonzero(env[start:] > thr)[0]
-        onset = start + int(on[0]) if len(on) else d1
+        onset = start + int(on[0]) if len(on) else w0
         m["onset_ms"] = 1000.0 * (onset - d) / rate
         early_end = onset + int(EARLY_S * rate)
         m["early_db"] = db(energy(wet[onset:early_end], noise) / 2)
@@ -323,10 +352,10 @@ def analyze(rec):
         rt, edt, curve = decay_times(wet[onset:], rate)
         m["rt"], m["edt"] = rt, edt
         curves["all"] = curve
-        wb = band_filter(ir[d1:], rate)
+        wb = band_filter(ir[w0:], rate)
         for fc in BANDS:
             eb = (wb[fc] ** 2).sum(axis=1)
-            rt, _, curve = decay_times(eb[max(onset - d1, 0):], rate)
+            rt, _, curve = decay_times(eb[max(onset - w0, 0):], rate)
             m["rt_%d" % fc] = rt
             curves[fc] = curve
         mid = [v for v in (m["rt_500"], m["rt_1000"]) if not math.isnan(v)]
@@ -354,6 +383,137 @@ def add_relative(results):
             if k.startswith(("direct_db", "wet_db", "band_", "level", "rt")) and k in rm:
                 if isinstance(m[k], float) and isinstance(rm[k], float):
                     m["rel_" + k] = m[k] - rm[k]
+
+
+# Absolute levels, which depend on the card's gain and recording level.
+LEVEL_KEYS = ("direct_db", "wet_db", "early_db", "late_db", "noise_db", "level", "level_L",
+              "level_R")
+# Each set's own level reference, first found: (case, stimulus, metric).
+LEVEL_REFS = [("level_tone", "tone", "level"), ("src_dry_ref", "sweep", "direct_db"),
+              ("pan_az0", "noise", "level")]
+
+
+def normalise(results):
+    """Makes every set's absolute levels relative to its own reference (per
+    provider). Returns {tag: (case, raw level)}."""
+    refs = {}
+    for tag in {k[0] for k in results}:
+        for case, stim, metric in LEVEL_REFS:
+            v = results.get((tag, case, stim), {}).get(metric)
+            if isinstance(v, float) and not math.isnan(v):
+                refs[tag] = ("%s.%s %s" % (case, stim, metric), v)
+                break
+    for (tag, case, stim), m in results.items():
+        if tag not in refs:
+            continue
+        off = refs[tag][1]
+        for k in list(m):
+            if (k in LEVEL_KEYS or k.startswith("band_") and stim != "noise") and \
+                    isinstance(m[k], float):
+                m["raw_" + k] = m[k]
+                m[k] = m[k] - off
+    return refs
+
+
+def close(name, a, b):
+    """Whether two read-back values agree, loosely enough to absorb how the
+    render converts EAX's presets (gains to mB, and the like)."""
+    if a is None or b is None:
+        return True
+    if isinstance(a, list) or isinstance(b, list):
+        if not (isinstance(a, list) and isinstance(b, list)) or len(a) != len(b):
+            return False
+        return all(x is None or y is None or abs(x - y) <= 0.05 for x, y in zip(a, b))
+    if name in ("EAX environment selection",):
+        return a == b
+    if isinstance(a, int) and isinstance(b, int) and not name.endswith(("ratio", "factor")):
+        return abs(a - b) <= 50
+    return abs(a - b) <= max(0.02, 0.1 * abs(b))
+
+
+SIZE_SCALED = {"EAX decay time", "EAX2 reflections", "EAX2 reflections delay", "EAX2 reverb",
+               "EAX2 reverb delay", "EAX3 echo time", "EAX3 modulation time"}
+
+
+def state_check(hw_metas, sim_metas, hw_results, out):
+    """Finds hardware recordings made in the wrong EAX state: eaxcap.exe's
+    own mismatches, and read-backs that differ from the render's (which
+    starts every case fresh), split into those equal to the previous
+    recording's (carried over: record again) and others. Prints a --cases
+    list per provider."""
+    by_tag = {}
+    for key, meta in hw_metas.items():
+        by_tag.setdefault(key[0], []).append((meta.get("start_tick_ms", 0), key))
+    found = False
+    for tag in sorted(by_tag):
+        order = [k for _, k in sorted(by_tag[tag])]
+        again, notes = [], []
+        prev = None
+        for key in order:
+            meta, sim = hw_metas[key], sim_metas.get(key)
+            issues, carried = [], []
+            for x in meta.get("state_mismatch") or []:
+                issues.append("eaxcap: %s %s intended %s, read %s" % (
+                    x.get("what"), x.get("name"), x.get("intended"), x.get("readback")))
+            if meta.get("focus_lost"):
+                issues.append("focus lost")
+                carried.append("focus")
+            if meta.get("wavein_overrun"):
+                issues.append("input overrun")
+                carried.append("overrun")
+            r = hw_results.get(key, {})
+            if r.get("error"):
+                issues.append(r["error"])
+                carried.append("error")
+            set_names = {a.get("name") for a in meta.get("listener_set") or []}
+            for part in ("listener_readback", "source_readback"):
+                got = meta.get(part) or {}
+                want = (sim or {}).get(part)
+                before = (hw_metas[prev].get(part) or {}) if prev else {}
+                prev_set = {a.get("name"): a.get("value") for a in
+                            (hw_metas[prev].get("listener_set" if part[0] == "l" else "source_set")
+                             or [])} if prev else {}
+                case_set = set_names if part[0] == "l" else \
+                    {a.get("name") for a in meta.get("source_set") or []}
+                for name, v in got.items():
+                    if v is None or name in ("EAX2 flags", "EAX2 sample flags"):
+                        continue
+                    if "EAX2 environment size" in set_names and name in SIZE_SCALED:
+                        continue
+                    if want is not None:
+                        if name not in want or close(name, v, want[name]):
+                            continue
+                        is_carry = name in before and close(name, v, before[name])
+                        what = "%s %s %s, render %s" % (part.split("_")[0], name, v, want[name])
+                    else:
+                        # No render: only a property the previous case set
+                        # and this one does not, still at that value.
+                        if name in case_set or name not in prev_set or \
+                                not close(name, v, prev_set[name]):
+                            continue
+                        is_carry = True
+                        what = "%s %s %s" % (part.split("_")[0], name, v)
+                    if is_carry:
+                        carried.append(name)
+                        issues.append("carried over from %s.%s: %s" % (prev[1], prev[2], what))
+                    else:
+                        issues.append("differs: " + what)
+            if issues:
+                found = True
+                r.setdefault("_flags", []).append("state")
+                notes.append("  %s.%s: %s" % (key[1], key[2], "; ".join(issues[:4]) +
+                                                ("; ..." if len(issues) > 4 else "")))
+                if carried and key[1] not in again:
+                    again.append(key[1])
+            prev = key
+        if notes:
+            out.write("\n[%s] state check\n" % tag + "\n".join(notes) + "\n")
+        if again:
+            out.write("Record these again (wrong state carried over, focus, overrun or no "
+                      "sync):\n  eaxcap --provider %s --cases %s\n" % (tag, ",".join(again)))
+    if not found:
+        out.write("\nState check: no hardware recording shows a wrong EAX state%s.\n" % (
+            "" if sim_metas else " (give --sim too for the full check)"))
 
 
 # ---- report -------------------------------------------------------------------------
@@ -392,12 +552,16 @@ def fmt(v, f):
     return f % v
 
 
-def report(hw, sim, keys, metas, out):
+def report(hw, sim, keys, metas, refs, out):
     sets = [n for n, r in (("hw", hw), ("sim", sim)) if r]
     both = len(sets) == 2
-    out.write("Columns: %s (latency is the sync click's, from sample start).\n" % (
+    out.write("Columns: %s.\n" % (
         "hardware/render; d* and rel are relative to the family's reference case"
         if both else sets[0]))
+    out.write("Levels are dB relative to each set's own level reference:\n")
+    for name, r in (("hw", refs.get("hw", {})), ("sim", refs.get("sim", {}))):
+        for tag in sorted(r):
+            out.write("  %-4s %-8s %s = %+.1f dB raw\n" % (name, tag, r[tag][0], r[tag][1]))
     last = None
     for key in keys:
         tag, case, stim = key
@@ -422,6 +586,8 @@ def report(hw, sim, keys, metas, out):
         for name, r in (("hw", hw), ("sim", sim)):
             if r and "error" in r.get(key, {"error": "missing"}):
                 notes.append("%s: %s" % (name, r.get(key, {}).get("error", "missing")))
+            elif r and r.get(key, {}).get("_flags"):
+                notes.append("%s: %s" % (name, ", ".join(r[key]["_flags"])))
         if notes:
             out.write("  (" + "; ".join(notes) + ")")
         out.write("\n")
@@ -429,9 +595,14 @@ def report(hw, sim, keys, metas, out):
     if both:
         out.write("\nSummary over cases present in both sets (hardware minus render):\n")
         for k, label in (("rt_mid", "RT mid (s)"), ("rt_4000", "RT 4k (s)"),
-                         ("onset_ms", "reverb onset (ms)"), ("early_db", "early dB"),
-                         ("late_db", "late dB"), ("direct_db", "direct dB"),
-                         ("rel_band_4000", "dry 4k shelf vs ref (dB)")):
+                         ("edt", "EDT (s)"), ("onset_ms", "reverb onset (ms)"),
+                         ("wetdry_db", "wet - direct (dB)"),
+                         ("rel_direct_db", "direct vs family ref (dB)"),
+                         ("rel_wet_db", "wet vs family ref (dB)"),
+                         ("rel_band_250", "dry 250 Hz vs ref (dB)"),
+                         ("rel_band_4000", "dry 4k shelf vs ref (dB)"),
+                         ("rel_level", "level vs family ref (dB)"),
+                         ("pan_db", "R - L (dB)")):
             d = [hw[x][k] - sim[x][k] for x in keys
                  if x in hw and x in sim and isinstance(hw[x].get(k), float)
                  and isinstance(sim[x].get(k), float)
@@ -551,7 +722,7 @@ def plot_case(dirname, key, data):
 
 # ---- main ---------------------------------------------------------------------------
 
-def run_set(root, keys, plots):
+def run_set(root, role, keys, plots):
     results = {}
     for key in keys:
         tag, case, stim = key
@@ -563,9 +734,10 @@ def run_set(root, keys, plots):
             m, extra = {"error": str(e)}, None
         results[key] = m
         if extra is not None:
-            plots.setdefault(key, {})[os.path.basename(os.path.normpath(root))] = extra
+            plots.setdefault(key, {})[role] = extra
+    refs = normalise(results)
     add_relative(results)
-    return results
+    return results, refs
 
 
 def main():
@@ -599,22 +771,34 @@ def main():
     # Case order as in the case list: by the manifests' file order is not
     # stable, so sort by (provider, group order, name).
     group_order = ["level", "env", "eax1", "listener", "source", "distance", "position"]
-    metas = {}
-    for k in keys:
-        root = a.hw if k in hw_files else a.sim
-        with open(os.path.join(root, k[0], "%s.%s.json" % (k[1], k[2])), encoding="utf-8") as f:
-            metas[k] = json.load(f)
+    def manifests(root, files):
+        loaded = {}
+        for k in files:
+            if a.provider and k[0] not in a.provider.split(","):
+                continue
+            if a.cases and not any(fnmatch.fnmatchcase(k[1], p) for p in a.cases.split(",")):
+                continue
+            try:
+                loaded[k] = load_manifest(os.path.join(root, k[0], "%s.%s.json" % (k[1], k[2])))
+            except (OSError, ValueError) as e:
+                print("warning: %s" % e, file=sys.stderr)
+        return loaded
+
+    hw_metas, sim_metas = manifests(a.hw, hw_files), manifests(a.sim, sim_files)
+    metas = {k: hw_metas.get(k) or sim_metas.get(k) for k in keys}
+    keys = [k for k in keys if metas[k]]
     keys = sorted(keys, key=lambda k: (k[0], group_order.index(metas[k].get("group"))
                                       if metas[k].get("group") in group_order else 99, k[1], k[2]))
 
     plots = {}
-    hw = run_set(a.hw, keys, plots) if a.hw else {}
-    sim = run_set(a.sim, keys, plots) if a.sim else {}
-    if a.hw and a.sim:
-        # Name the plot series by role, not directory.
-        hwn, simn = (os.path.basename(os.path.normpath(p)) for p in (a.hw, a.sim))
-        plots = {k: {("hw" if n == hwn else "sim"): v for n, v in d.items()} for k, d in plots.items()}
-    report(hw, sim, keys, metas, sys.stdout)
+    hw, hw_refs = run_set(a.hw, "hw", keys, plots) if a.hw else ({}, {})
+    sim, sim_refs = run_set(a.sim, "sim", keys, plots) if a.sim else ({}, {})
+    if a.hw:
+        hw_all = dict(hw)
+        for k in hw_metas:
+            hw_all.setdefault(k, {})
+        state_check(hw_metas, sim_metas, hw_all, sys.stdout)
+    report(hw, sim, keys, metas, {"hw": hw_refs, "sim": sim_refs}, sys.stdout)
     if a.tsv:
         write_tsv(a.tsv, [(n, r) for n, r in (("hw", hw), ("sim", sim)) if r])
         print("\nwrote %s" % a.tsv)

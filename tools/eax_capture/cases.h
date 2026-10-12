@@ -69,6 +69,16 @@ typedef struct {
 extern const EcAttrName ec_listener_names[];
 extern const EcAttrName ec_source_names[];
 
+/* Every source attribute of EAX version `eax` at its EAX default (EAX 2.0
+   and 3.0 differ in the occlusion room ratio; EAX 1.0 has only the reverb
+   mix), so each case can start from a complete known state. Returns the
+   count; *out points into a static table. */
+int ec_source_defaults(int eax, const EcAttr **out);
+
+/* Whether a listener attribute is one EAX rescales when the environment
+   size changes (with the *SCALE flags set). */
+int ec_attr_size_scaled(const char *name);
+
 /* Seconds to record after the stimulus ends for a reverb decaying in
    `decay_time` seconds (60 dB) with the given delays. */
 double ec_tail(double decay_time, double reflections_delay, double reverb_delay);

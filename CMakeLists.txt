@@ -195,10 +195,19 @@ endfunction()
 # compatible digital reverb against the original routines of the user's
 # installed mss32.dll (Miles 6.5e), lifted at build time with --only into
 # the build tree and run on the x87 model. Nothing from the DLL is kept in
-# the source tree; without the DLL there is no test.
+# the source tree; without the DLL there is no test. The routines' VAs are
+# those of one build, so any other DLL is skipped (by its SHA-256).
 function(recomp_add_digital_reverb_test)
   cmake_parse_arguments(A "" "DLL" "" ${ARGN})
   if(NOT EXISTS "${A_DLL}")
+    return()
+  endif()
+  # mss32.dll 6.5e as Call of Duty ships it.
+  set(_known 7855b8fbae917cb8449f2d4361ab61b5ecec4df0a11130d797cb0aa99b4260ea)
+  file(SHA256 "${A_DLL}" _hash)
+  if(NOT _hash STREQUAL _known)
+    message(STATUS "digital_reverb_oracle: ${A_DLL} is not the mss32.dll 6.5e build "
+                   "its addresses come from (SHA-256 ${_hash}); test skipped")
     return()
   endif()
   set(_dir "${CMAKE_CURRENT_BINARY_DIR}/digital_reverb_oracle")
