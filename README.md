@@ -53,6 +53,10 @@ recomp_lift --exe game.exe --symbols symbols --out generated \
   --manifest lifter.manifest
 ```
 
+DLLs the game loads itself are lifted in the same run (`--module
+game.dll --symbols dir [--manifest file]`, repeated) and listed in
+`GameConfig::lifted_dlls`.
+
 ## Requirements
 
 Linux x86-64 for now (macOS arm64 with Metal is planned; the code is

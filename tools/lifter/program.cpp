@@ -1,5 +1,6 @@
 #include "program.h"
 
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
@@ -37,28 +38,38 @@ bool ReadTsv(const std::string& path, Fn fn, std::string* err) {
 
 }  // namespace
 
-bool Program::Load(const std::string& exe, const std::string& symdir,
-                   std::string* err) {
-  if (!mem.Reserve()) {
+bool Program::Load(const std::string& path, const std::string& symdir,
+                   uint32_t base, std::string* err) {
+  if (!mem.base() && !mem.Reserve()) {
     *err = "cannot reserve guest arena";
     return false;
   }
-  if (!img.Load(exe, mem, err)) return false;
+  Module& m = modules.emplace_back();
+  m.name = std::filesystem::path(path).stem().string();
+  if (!m.img.Load(path, mem, err, base)) {
+    if (modules.size() > 1) *err += " (give the module another --base)";
+    return false;
+  }
+  const recomp::PeImage& img = m.img;
   for (const auto& s : img.sections)
     if (s.name == ".text") {
-      text_lo = s.va;
-      text_hi = s.va + s.vsize;
+      m.text_lo = s.va;
+      m.text_hi = s.va + s.vsize;
     }
-  if (!text_hi) {
+  if (!m.text_hi) {
     *err = "no .text section";
     return false;
   }
+  // Symbol files hold VAs at the preferred base; a moved module's are
+  // shifted by the same delta as its relocations.
+  const uint32_t delta = img.image_base - img.preferred_base;
+  auto in_text = [&](uint32_t va) { return va >= m.text_lo && va < m.text_hi; };
 
   // Ghidra's function list: entry, min, max, chunks, thunk, noreturn,
   // callconv, name.
   if (!ReadTsv(symdir + "/functions.tsv", [&](const auto& c) {
-        uint32_t entry = Hex(c[0]);
-        if (!InText(entry)) return;
+        uint32_t entry = Hex(c[0]) + delta;
+        if (!in_text(entry)) return;
         entries.insert(entry);
         if (c.size() > 5 && c[5] == "1") noreturn.insert(entry);
         if (c.size() > 7 && c[7].rfind("FUN_", 0) != 0) names[entry] = c[7];
@@ -69,8 +80,8 @@ bool Program::Load(const std::string& exe, const std::string& symdir,
   // FuBi calls through addresses), and its demangled name beats Ghidra's.
   if (!ReadTsv(symdir + "/exports.tsv", [&](const auto& c) {
         if (c.size() < 4 || c[1] != "func") return;
-        uint32_t va = Hex(c[0]);
-        if (!InText(va)) return;
+        uint32_t va = Hex(c[0]) + delta;
+        if (!in_text(va)) return;
         entries.insert(va);
         if (!c[3].empty()) names[va] = c[3];
       }, err))
@@ -78,13 +89,15 @@ bool Program::Load(const std::string& exe, const std::string& symdir,
 
   if (!ReadTsv(symdir + "/jumptables.tsv", [&](const auto& c) {
         if (c.size() < 2 || c[1].empty()) return;
-        auto& t = jumptables[Hex(c[0])];
-        for (const auto& s : Split(c[1], ',')) t.push_back(Hex(s));
+        auto& t = jumptables[Hex(c[0]) + delta];
+        for (const auto& s : Split(c[1], ',')) t.push_back(Hex(s) + delta);
       }, err))
     return false;
 
-  entries.insert(img.entry);
-  names.emplace(img.entry, "WinMainCRTStartup");
+  if (img.entry) {
+    entries.insert(img.entry);
+    names.emplace(img.entry, img.dll ? "_DllMainCRTStartup" : "WinMainCRTStartup");
+  }
 
   // Imports that never return; a call through their IAT slot ends a block.
   for (const auto& imp : img.imports)
@@ -113,7 +126,8 @@ bool Program::LoadManifest(const std::string& path, std::string* err) {
       return false;
     }
     std::getline(in >> std::ws, name);
-    uint32_t va = Hex(va_s);
+    const recomp::PeImage& img = modules.back().img;
+    uint32_t va = Hex(va_s) + (img.image_base - img.preferred_base);
     if (kind == "entry") {
       entries.insert(va);
       if (!name.empty()) names[va] = name;

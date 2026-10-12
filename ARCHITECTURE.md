@@ -152,14 +152,31 @@ lifter is tractable (rexglue-style: one C++ function per guest function).
   found in a game EXE is run lifted and natively from the same random
   state (tests/lift_*_test.cpp, `recomp_add_lift_tests`).
 
-### Multiple modules (planned, for Call of Duty)
+### Multiple modules
 Games that ship their logic in DLLs they LoadLibrary themselves (Call of
-Duty: gamex86/cgamex86/uix86.dll) need every module lifted. Plan: the
-lifter takes several images in one run, each with its symbols; modules
-load at their preferred bases (relocation only if two collide); the
-dispatcher keeps one dense table per module's .text; LoadLibrary of a
-lifted module maps it, runs its DllMain, and GetProcAddress returns real
-guest export addresses.
+Duty: gamex86/cgamex86/uix86.dll) have every module lifted:
+- One lifter run takes the EXE plus each DLL (`--module`, with its own
+  symbols and manifest). The images are mapped side by side as at run
+  time, so a VA, and the f_<va> name of its lifted function, identifies
+  its module; table.cpp lists them all. Pointer scans only accept
+  targets in the module the pointer was found in.
+- A DLL loads at its preferred base. If two modules overlap, the lifter
+  refuses and one gets `--base`: it is lifted from its relocated image,
+  and the game's GameConfig names the same base, because lifted code has
+  the module's addresses compiled in. A mismatch is caught at startup
+  (the DLL's entry point is not in the function table).
+- GameConfig::lifted_dlls lists them. All are mapped at startup (their
+  ranges are reserved before the allocator hands out memory); imports
+  are bound to HLE thunks like the EXE's. The dispatcher keeps one dense
+  table per module's .text.
+- LoadLibrary counts references and runs DllMain under a loader lock;
+  GetProcAddress returns the real export VA (by name or ordinal),
+  GetModuleHandle/GetModuleFileName know the module while it is loaded.
+  After the last FreeLibrary (DllMain detach) the next load maps the file
+  afresh, so the DLL starts from its initial data as after a real unload.
+- Static TLS in a lifted DLL is refused: Windows XP did not set it up for
+  LoadLibrary'd DLLs, so DLLs of that era have none.
+  DLL_THREAD_ATTACH/DETACH are not sent (not needed so far).
 
 ### x87: full 80-bit model
 Games depend on x87 state (Dungeon Siege runs all its float maths under
@@ -315,7 +332,6 @@ a game's threads gets explicit barriers via the manifest. Revisit before
 the macOS port.
 
 ## Roadmap
-- Multi-module lifting and LoadLibrary of lifted DLLs (Call of Duty).
 - opengl32/wgl HLE on gfx::Device (Call of Duty).
 - SDL_GPU backend (Vulkan) with the fixed-function generator, matched
   against the d3d9 backend.

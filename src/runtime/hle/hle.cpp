@@ -48,22 +48,16 @@ const std::vector<std::string>& KnownDlls() {
   return dlls;
 }
 
-std::string NormaliseDll(std::string dll) {
-  dll = win32::Lower(dll);
-  size_t slash = dll.find_last_of("\\/");
-  if (slash != std::string::npos) dll = dll.substr(slash + 1);
-  if (dll.find('.') == std::string::npos) dll += ".dll";
-  return dll;
-}
-
 uint32_t AddSlot(const std::string& dll, const std::string& name) {
   std::lock_guard<std::mutex> l(g_slots_mu);
   for (size_t i = 0; i < g_slots.size(); i++)
     if (g_slots[i].dll == dll && g_slots[i].name == name)
       return kThunkBase + uint32_t(i) * kThunkStride;
+  uint32_t thunk = kThunkBase + uint32_t(g_slots.size()) * kThunkStride;
+  if (thunk >= kReturnToHost) FatalF("thunk region exhausted");
   auto it = Registry().find({dll, name});
   g_slots.push_back({dll, name, it == Registry().end() ? nullptr : &it->second});
-  return kThunkBase + uint32_t(g_slots.size() - 1) * kThunkStride;
+  return thunk;
 }
 
 }  // namespace
@@ -72,21 +66,19 @@ Registrar::Registrar(const char* dll, const char* name, int nargs, Fn fn) {
   Registry()[{dll, name}] = Def{nargs, fn};
 }
 
-void BindImports() {
-  // The image loader already assigned thunk i to import i; mirror that
-  // numbering here so thunk addresses stay stable.
-  std::lock_guard<std::mutex> l(g_slots_mu);
-  g_slots.clear();
-  int missing = 0;
-  for (const auto& imp : g_proc->img.imports) {
-    std::string dll = NormaliseDll(imp.dll);
-    auto it = Registry().find({dll, imp.name});
-    const Def* def = it == Registry().end() ? nullptr : &it->second;
-    if (!def) missing++;
-    g_slots.push_back({dll, imp.name, def});
-  }
-  RECOMP_TRACE("hle: %zu imports bound, %d without a handler\n", g_slots.size(),
-            missing);
+std::string NormaliseDll(std::string dll) {
+  dll = win32::Lower(dll);
+  size_t slash = dll.find_last_of("\\/");
+  if (slash != std::string::npos) dll = dll.substr(slash + 1);
+  if (dll.find('.') == std::string::npos) dll += ".dll";
+  return dll;
+}
+
+uint32_t ImportThunk(const std::string& dll, const std::string& name) {
+  std::string n = NormaliseDll(dll);
+  if (!Registry().count({n, name}))
+    RECOMP_TRACE("hle: import %s!%s has no handler\n", n.c_str(), name.c_str());
+  return AddSlot(n, name);
 }
 
 void CallThunk(Ctx& c, uint32_t thunk) {

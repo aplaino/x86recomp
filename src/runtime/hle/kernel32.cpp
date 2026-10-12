@@ -124,12 +124,48 @@ HLE("kernel32.dll", GetVersionExA, 1) {
   return 1;
 }
 
+// Lifted DLLs (GameConfig::lifted_dlls) are mapped at startup; LoadLibrary
+// counts references and runs DllMain under the loader lock, as Windows
+// does. After the last FreeLibrary the next load maps the file afresh, so
+// the DLL sees initial data again as after a real unload.
+std::recursive_mutex g_loader_mu;
+
+Module* LiftedDll(const std::string& name) {
+  std::string n = NormaliseDll(name);
+  for (Module& m : g_proc->modules)
+    if (m.name == n) return &m;
+  return nullptr;
+}
+
+Module* LoadedDllAt(uint32_t hmodule) {
+  for (Module& m : g_proc->modules)
+    if (m.refs && m.img.image_base == hmodule) return &m;
+  return nullptr;
+}
+
+constexpr uint32_t kDllProcessDetach = 0, kDllProcessAttach = 1;
+
+// DllMain(hinstDLL, reason, NULL); false if it failed.
+bool CallDllMain(Ctx& c, Module& m, uint32_t reason) {
+  if (!m.img.entry) return true;
+  m.stale = true;
+  RECOMP_TRACE("  %s: DllMain(%u)\n", m.name.c_str(), reason);
+  return CallGuest(c, m.img.entry, {m.img.image_base, reason, 0}) != 0;
+}
+
 HLE("kernel32.dll", GetModuleHandleA, 1) {
   uint32_t name = Arg(c, 0);
   if (!name) return g_proc->img.image_base;
   std::string n = GStr(name);
-  std::string ln = Lower(n);
-  if (ln == "dungeonsiege.exe" || ln == "dungeonsiege") return g_proc->img.image_base;
+  std::string exe = Lower(Game().exe_name);
+  if (NormaliseDll(n) == exe || Lower(n) == exe.substr(0, exe.rfind('.')))
+    return g_proc->img.image_base;
+  if (Module* m = LiftedDll(n)) {
+    std::lock_guard<std::recursive_mutex> l(g_loader_mu);
+    if (m->refs) return m->img.image_base;
+    SetLastError(kErrorModNotFound);
+    return 0;
+  }
   uint32_t h = ModuleHandle(n);
   if (!h) SetLastError(kErrorModNotFound);
   return h;
@@ -139,8 +175,14 @@ HLE("kernel32.dll", GetModuleFileNameA, 3) {
   uint32_t mod = Arg(c, 0), buf = Arg(c, 1), size = Arg(c, 2);
   std::string path = GuestExePath();
   if (mod && mod != g_proc->img.image_base) {
-    SetLastError(kErrorModNotFound);
-    return 0;
+    std::lock_guard<std::recursive_mutex> l(g_loader_mu);
+    Module* m = LoadedDllAt(mod);
+    if (!m) {
+      SetLastError(kErrorModNotFound);
+      return 0;
+    }
+    path = GuestGameDir() + "\\" +
+           Game().lifted_dlls[size_t(m - g_proc->modules.data())].name;
   }
   if (!size) return 0;
   std::string s = path.substr(0, size - 1);
@@ -148,9 +190,21 @@ HLE("kernel32.dll", GetModuleFileNameA, 3) {
   return uint32_t(s.size());
 }
 
-// LoadLibraryA/ExA: only the HLE modules exist.
-uint32_t LoadModule(const char* api, uint32_t name) {
+// LoadLibraryA/ExA: lifted DLLs, and the HLE modules.
+uint32_t LoadModule(Ctx& c, const char* api, uint32_t name) {
   std::string n = GStr(name);
+  if (Module* m = LiftedDll(n)) {
+    std::lock_guard<std::recursive_mutex> l(g_loader_mu);
+    if (m->refs++) return m->img.image_base;
+    if (m->stale) MapModule(*m);
+    if (!CallDllMain(c, *m, kDllProcessAttach)) {
+      WarnF("%s(%s): DllMain failed\n", api, n.c_str());
+      m->refs = 0;
+      SetLastError(kErrorDllInitFailed);
+      return 0;
+    }
+    return m->img.image_base;
+  }
   uint32_t h = ModuleHandle(n);
   if (!h) {
     WarnF("%s(%s): not provided\n", api, n.c_str());
@@ -159,13 +213,28 @@ uint32_t LoadModule(const char* api, uint32_t name) {
   return h;
 }
 
-HLE("kernel32.dll", LoadLibraryA, 1) { return LoadModule("LoadLibraryA", Arg(c, 0)); }
-HLE("kernel32.dll", LoadLibraryExA, 3) { return LoadModule("LoadLibraryExA", Arg(c, 0)); }
+HLE("kernel32.dll", LoadLibraryA, 1) { return LoadModule(c, "LoadLibraryA", Arg(c, 0)); }
+HLE("kernel32.dll", LoadLibraryExA, 3) { return LoadModule(c, "LoadLibraryExA", Arg(c, 0)); }
 
-HLE("kernel32.dll", FreeLibrary, 1) { return 1; }
+HLE("kernel32.dll", FreeLibrary, 1) {
+  std::lock_guard<std::recursive_mutex> l(g_loader_mu);
+  if (Module* m = LoadedDllAt(Arg(c, 0)); m && --m->refs == 0)
+    CallDllMain(c, *m, kDllProcessDetach);
+  return 1;
+}
 
 HLE("kernel32.dll", GetProcAddress, 2) {
   uint32_t mod = Arg(c, 0), name = Arg(c, 1);
+  {
+    std::lock_guard<std::recursive_mutex> l(g_loader_mu);
+    if (Module* m = LoadedDllAt(mod)) {
+      std::string n = name < 0x10000 ? std::string() : GStr(name);
+      for (const PeExport& e : m->img.exports)
+        if (name < 0x10000 ? e.ordinal == name : e.name == n) return e.va;
+      SetLastError(kErrorProcNotFound);
+      return 0;
+    }
+  }
   if (name < 0x10000) {
     WarnF("GetProcAddress by ordinal %u: not supported\n", name);
     return 0;
@@ -469,7 +538,8 @@ uint32_t QueryMemory(uint32_t addr, uint32_t mbi) {
   Wr32(mbi + 12, end - page);
   Wr32(mbi + 16, committed ? kMemCommit : kMemReserve);
   Wr32(mbi + 20, committed ? ProtToWin(prot) : 0);
-  Wr32(mbi + 24, r.base == g_proc->img.image_base ? kMemImage : kMemPrivate);
+  const PeImage* img = ImageAt(r.base);
+  Wr32(mbi + 24, img && img->image_base == r.base ? kMemImage : kMemPrivate);
   return 28;
 }
 
@@ -500,11 +570,7 @@ HLE("kernel32.dll", IsBadWritePtr, 2) {
   return Readable(Arg(c, 0), Arg(c, 1)) ? 0 : 1;
 }
 HLE("kernel32.dll", IsBadCodePtr, 1) {
-  uint32_t p = Arg(c, 0);
-  return p >= g_proc->img.image_base &&
-                 p < g_proc->img.image_base + g_proc->img.image_size
-             ? 0
-             : 1;
+  return ImageAt(Arg(c, 0)) ? 0 : 1;
 }
 
 // ---- TLS (TlsAlloc slots live in the TEB at +0xE10, as on Windows) -------

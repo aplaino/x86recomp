@@ -43,6 +43,15 @@ struct GameConfig {
   // game's main window. Returns false if not available yet.
   bool (*game_cursor)(uint32_t userdata, int32_t* x, int32_t* y, float* kx,
                       float* ky) = nullptr;
+
+  // DLLs the game loads itself (LoadLibrary) whose code is lifted with
+  // the EXE (recomp_lift --module), e.g. Call of Duty's gamex86.dll. They
+  // are read from guest_dir (the host game directory) by file name.
+  struct LiftedDll {
+    std::string name;   // file name, e.g. "gamex86.dll"
+    uint32_t base = 0;  // the lifter's --base for it; 0 = preferred base
+  };
+  std::vector<LiftedDll> lifted_dlls;
 };
 
 // The running game's configuration (valid once RunProcess has started).
@@ -65,10 +74,23 @@ inline constexpr uint32_t kTebStride = 0x1000;
 // means the guest function returned to us.
 inline constexpr uint32_t kReturnToHost = kThunkBase + kThunkRegionSize - 0x10;
 
+// A lifted DLL (GameConfig::lifted_dlls). All of them are mapped at
+// startup, so their address ranges stay free; LoadLibrary makes one
+// visible and runs its DllMain.
+struct Module {
+  std::string name;  // lower case, e.g. "gamex86.dll"
+  std::string host_path;
+  gaddr base = 0;    // where the lifter put it; 0 = preferred base
+  PeImage img;
+  int refs = 0;        // LoadLibrary count (under kernel32's loader lock)
+  bool stale = false;  // has run since it was mapped: map afresh on load
+};
+
 struct Process {
   GameConfig game;
   GuestMemory mem;
   PeImage img;
+  std::vector<Module> modules;  // fixed after startup
   GuestAllocator vm;     // VirtualAlloc-style regions
   std::string game_dir;  // host path of the game install, no trailing '/'
   std::string game_args; // appended to the guest command line
@@ -103,6 +125,12 @@ std::string GStr(uint32_t va);                  // NUL-terminated char*
 std::u16string GWStr(uint32_t va);              // NUL-terminated WCHAR*
 void PutStr(uint32_t va, const std::string& s); // writes s + NUL
 void PutWStr(uint32_t va, const std::string& s); // ASCII s as WCHARs + NUL
+
+// The EXE's or a lifted DLL's image containing va, or null.
+const PeImage* ImageAt(uint32_t va);
+
+// (Re)maps lifted DLL m from its file: fresh data, imports bound.
+void MapModule(Module& m);
 
 // Calls guest function `va` with stdcall/cdecl arguments from the host
 // (WndProc, enumeration callbacks, thread start routines). Returns eax.

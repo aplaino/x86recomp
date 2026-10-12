@@ -24,6 +24,7 @@ inline constexpr uint32_t kErrorAlreadyExists = 183;
 inline constexpr uint32_t kErrorEnvVarNotFound = 203;
 inline constexpr uint32_t kErrorMoreData = 234;
 inline constexpr uint32_t kErrorInvalidAddress = 487;
+inline constexpr uint32_t kErrorDllInitFailed = 1114;
 inline constexpr uint32_t kErrorClassAlreadyExists = 1410;
 inline constexpr uint32_t kErrorCannotFindWndClass = 1407;
 inline constexpr uint32_t kErrorResourceNameNotFound = 1814;

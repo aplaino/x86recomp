@@ -41,9 +41,12 @@ struct Registrar {
 
 inline uint32_t Arg(const Ctx& c, int i) { return Rd32(c.esp + 4 + 4 * i); }
 
-// Binds every static import of the image to its handler. Call once after
-// the image is mapped.
-void BindImports();
+// IAT value for a static import dll!name of the EXE or a lifted DLL: its
+// handler's thunk (PeImage::Load's binder).
+uint32_t ImportThunk(const std::string& dll, const std::string& name);
+
+// "KERNEL32.dll", "C:\x\Foo" -> "kernel32.dll", "foo.dll".
+std::string NormaliseDll(std::string dll);
 
 // Called by Dispatch for any address in the thunk region.
 void CallThunk(Ctx& c, uint32_t thunk);

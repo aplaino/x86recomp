@@ -4,6 +4,15 @@
 //            [--manifest lifter.manifest] [--insns-per-file N] [--dump VA]
 //            [--x87-test OUT.cpp]   (forms for tests/lift_x87_test.cpp)
 //            [--int-test OUT.cpp]   (forms for tests/lift_int_test.cpp)
+//            [--module <game.dll> --symbols DIR [--manifest FILE]
+//             [--base HEX]]...
+//
+// Each --module adds a DLL the game loads itself, lifted into the same
+// output; --symbols/--manifest/--base after it apply to that DLL. DLLs
+// load at their preferred base unless --base moves them (needed only when
+// two modules overlap; the game's GameConfig must then give the same
+// base). Their functions go into gen_<module>_NNN.cpp, the EXE's into
+// gen_NNN.cpp, and table.cpp lists them all.
 //
 // Pass 1 discovers functions to a fixpoint (Ghidra entries + exports +
 // every direct call/tail-call target found while descending). Pass 2
@@ -11,12 +20,14 @@
 // that turned out to be an entry become tail calls consistently. Then the
 // functions are emitted into generated/gen_NNN.cpp plus a table file.
 
+#include <cctype>
 #include <cstdio>
 #include <deque>
 #include <filesystem>
 #include <fstream>
 #include <map>
 #include <string>
+#include <vector>
 
 #include "emit.h"
 #include "function.h"
@@ -67,19 +78,26 @@ const char* kFilePrologue =
 
 }  // namespace
 
+struct ModuleArgs {
+  std::string path, symdir, manifest;
+  uint32_t base = 0;
+};
+
 int main(int argc, char** argv) {
-  std::string exe, symdir = "symbols", outdir = "generated",
-              manifest = "lifter.manifest";
+  std::vector<ModuleArgs> mods{{"", "symbols", "lifter.manifest", 0}};
+  std::string outdir = "generated";
   uint64_t per_file = 12000;
   uint32_t dump = 0;
   std::string x87_test, int_test;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     auto val = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
-    if (a == "--exe") exe = val();
-    else if (a == "--symbols") symdir = val();
+    if (a == "--exe") mods[0].path = val();
+    else if (a == "--module") mods.push_back({val(), "", "", 0});
+    else if (a == "--symbols") mods.back().symdir = val();
+    else if (a == "--manifest") mods.back().manifest = val();
+    else if (a == "--base") mods.back().base = std::stoul(val(), nullptr, 16);
     else if (a == "--out") outdir = val();
-    else if (a == "--manifest") manifest = val();
     else if (a == "--insns-per-file") per_file = std::stoull(val());
     else if (a == "--dump") dump = std::stoul(val(), nullptr, 16);
     else if (a == "--x87-test") x87_test = val();
@@ -89,21 +107,28 @@ int main(int argc, char** argv) {
       return 2;
     }
   }
-  if (exe.empty()) {
+  if (mods[0].path.empty()) {
     std::fprintf(stderr, "usage: recomp_lift --exe game.exe "
-                         "[--symbols dir] [--out dir]\n");
+                         "[--symbols dir] [--out dir] "
+                         "[--module game.dll --symbols dir]...\n");
     return 2;
   }
 
   lifter::Program p;
   std::string err;
-  if (!p.Load(exe, symdir, &err)) {
-    std::fprintf(stderr, "load: %s\n", err.c_str());
-    return 1;
-  }
-  if (!manifest.empty() && !p.LoadManifest(manifest, &err)) {
-    std::fprintf(stderr, "manifest: %s\n", err.c_str());
-    return 1;
+  for (const ModuleArgs& m : mods) {
+    if (m.symdir.empty()) {
+      std::fprintf(stderr, "%s: --symbols missing\n", m.path.c_str());
+      return 2;
+    }
+    if (!p.Load(m.path, m.symdir, m.base, &err)) {
+      std::fprintf(stderr, "load %s: %s\n", m.path.c_str(), err.c_str());
+      return 1;
+    }
+    if (!m.manifest.empty() && !p.LoadManifest(m.manifest, &err)) {
+      std::fprintf(stderr, "manifest: %s\n", err.c_str());
+      return 1;
+    }
   }
   lifter::Decoder dec;
 
@@ -145,13 +170,15 @@ int main(int argc, char** argv) {
   // by code) or as a dword in initialised data (vtables, callback tables)
   // becomes a weak entry (Program::weak): lifted on its own for indirect
   // calls, but code running into it from elsewhere continues inline. A
-  // direct call or tail call makes it a strong entry.
+  // direct call or tail call makes it a strong entry. Only pointers into
+  // the module they were found in count: an image holds no static pointers
+  // into another one, so those are just numbers.
   size_t initial = p.entries.size();
   std::deque<uint32_t> work(p.entries.begin(), p.entries.end());
   std::set<uint32_t> done;
   size_t from_code_ptrs = 0, from_data_ptrs = 0;
-  auto candidate = [&](uint32_t t, size_t* counter) {
-    if (!p.InText(t) || p.entries.count(t)) return;
+  auto candidate = [&](const lifter::Module* m, uint32_t t, size_t* counter) {
+    if (p.TextOf(t) != m || p.entries.count(t)) return;
     lifter::Insn in;
     if (!dec.Decode(p, t, &in)) return;
     p.entries.insert(t);
@@ -159,11 +186,12 @@ int main(int argc, char** argv) {
     work.push_back(t);
     (*counter)++;
   };
-  for (const auto& sec : p.img.sections) {
-    if (sec.name != ".rdata" && sec.name != ".data") continue;
-    for (uint32_t a = sec.va; a + 4 <= sec.va + sec.vsize; a += 4)
-      candidate(p.mem.read<uint32_t>(a), &from_data_ptrs);
-  }
+  for (const auto& m : p.modules)
+    for (const auto& sec : m.img.sections) {
+      if (sec.name != ".rdata" && sec.name != ".data") continue;
+      for (uint32_t a = sec.va; a + 4 <= sec.va + sec.vsize; a += 4)
+        candidate(&m, p.mem.read<uint32_t>(a), &from_data_ptrs);
+    }
   while (!work.empty()) {
     uint32_t e = work.front();
     work.pop_front();
@@ -176,12 +204,13 @@ int main(int argc, char** argv) {
         p.weak.erase(t);  // really entered as a function
         if (p.entries.insert(t).second) work.push_back(t);
       }
+    const lifter::Module* fm = p.TextOf(e);
     for (const auto& [va, in] : f.insns) {
       if (!in.ok) continue;
       for (int i = 0; i < in.d.operand_count_visible; i++)
         if (in.ops[i].type == ZYDIS_OPERAND_TYPE_IMMEDIATE &&
             !in.ops[i].imm.is_relative)
-          candidate(static_cast<uint32_t>(in.ops[i].imm.value.u),
+          candidate(fm, static_cast<uint32_t>(in.ops[i].imm.value.u),
                     &from_code_ptrs);
     }
   }
@@ -199,6 +228,13 @@ int main(int argc, char** argv) {
   std::set<uint32_t> refs;
   uint64_t file_insns = 0;
   int file_no = 0;
+  // Output file names and per-module totals.
+  const lifter::Module* cur = &p.modules[0];
+  std::string prefix = "gen_";
+  struct ModuleStats {
+    uint64_t functions = 0, insns = 0;
+  };
+  std::map<const lifter::Module*, ModuleStats> per_module;
   auto flush = [&]() {
     if (body.empty()) return;
     std::string text = kFilePrologue;
@@ -208,15 +244,25 @@ int main(int argc, char** argv) {
       text += "void " + lifter::FnName(r) + "(::recomp::Ctx& c);\n";
     text += "\n" + body + "}  // namespace recomp::gen\n";
     Shorten(text);
-    char name[64];
-    std::snprintf(name, sizeof name, "gen_%03d.cpp", file_no++);
-    files[name] = std::move(text);
+    char num[16];
+    std::snprintf(num, sizeof num, "%03d.cpp", file_no++);
+    files[prefix + num] = std::move(text);
     body.clear();
     refs.clear();
     file_insns = 0;
   };
 
   for (uint32_t e : p.entries) {
+    if (const lifter::Module* m = p.TextOf(e); m && m != cur) {
+      flush();
+      cur = m;
+      file_no = 0;
+      prefix = "gen_";
+      if (m != &p.modules[0]) {
+        for (char ch : m->name) prefix += char(std::tolower(uint8_t(ch)));
+        prefix += "_";
+      }
+    }
     lifter::Function f;
     lifter::BuildFunction(p, dec, e, &f);
     for (const auto& w : f.warnings) {
@@ -227,6 +273,8 @@ int main(int argc, char** argv) {
     uint64_t before = stats.insns;
     em.EmitFunction(f, &body, &refs, &stats);
     file_insns += stats.insns - before;
+    per_module[cur].functions++;
+    per_module[cur].insns += stats.insns - before;
     if (file_insns >= per_file) flush();
   }
   flush();
@@ -271,6 +319,17 @@ int main(int argc, char** argv) {
     unimpl += n;
   }
   report += "warnings:\n" + report_warnings;
+  if (p.modules.size() > 1) {
+    report += "modules:\n";
+    for (const auto& m : p.modules) {
+      char buf[160];
+      std::snprintf(buf, sizeof buf, "  %s at %08X: %llu functions, %llu instructions\n",
+                    m.name.c_str(), m.img.image_base,
+                    (unsigned long long)per_module[&m].functions,
+                    (unsigned long long)per_module[&m].insns);
+      report += buf;
+    }
+  }
   WriteIfChanged(std::filesystem::path(outdir) / "lift_report.txt", report);
   std::printf("instructions: %llu, unimplemented sites: %llu, files: %zu\n",
               (unsigned long long)stats.insns, (unsigned long long)unimpl,

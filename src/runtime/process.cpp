@@ -282,6 +282,28 @@ static uint32_t RunOnMainThread(Thread* t, uint32_t entry) {
   return g_main_exit;
 }
 
+const PeImage* ImageAt(uint32_t va) {
+  const Process& p = *g_proc;
+  if (va - p.img.image_base < p.img.image_size) return &p.img;
+  for (const Module& m : p.modules)
+    if (va - m.img.image_base < m.img.image_size) return &m.img;
+  return nullptr;
+}
+
+void MapModule(Module& m) {
+  Process& p = *g_proc;
+  if (m.img.image_size) p.mem.Decommit(m.img.image_base, m.img.image_size);
+  std::string err;
+  if (!m.img.Load(m.host_path, p.mem, &err, m.base, hle::ImportThunk))
+    FatalF("lifted DLL %s: %s", m.name.c_str(), err.c_str());
+  // Windows XP did not set up static TLS for LoadLibrary'd DLLs either,
+  // so DLLs of that era have none.
+  if (m.img.has_tls)
+    FatalF("lifted DLL %s has static TLS (__declspec(thread)): not supported",
+           m.name.c_str());
+  m.stale = false;
+}
+
 int RunProcess(const GameConfig& game, const std::string& exe_path,
                const std::string& game_dir, const std::string& game_args) {
   g_proc = new Process;
@@ -294,11 +316,24 @@ int RunProcess(const GameConfig& game, const std::string& exe_path,
   StartWatchdog();
   if (!p.mem.Reserve()) FatalF("cannot reserve the guest arena");
   g_guest_base = p.mem.base();
+  // Calls to import thunks go to HLE handlers (Dispatch); nothing runs
+  // there, but the IAT values point at committed memory as on Windows.
+  if (!p.mem.Commit(kThunkBase, kThunkRegionSize, Prot::R))
+    FatalF("cannot commit the thunk region");
   std::string err;
-  if (!p.img.Load(exe_path, p.mem, &err)) FatalF("%s", err.c_str());
+  if (!p.img.Load(exe_path, p.mem, &err, 0, hle::ImportThunk))
+    FatalF("%s", err.c_str());
+  for (const auto& d : game.lifted_dlls) {
+    Module& m = p.modules.emplace_back();
+    m.name = hle::NormaliseDll(d.name);
+    m.host_path = HostPath(GuestGameDir() + "\\" + d.name);
+    m.base = d.base;
+    MapModule(m);
+  }
 
   p.vm.Init(&p.mem, 0x00010000, kThunkBase);
   p.vm.MarkReserved(p.img.image_base, p.img.image_size);
+  for (const Module& m : p.modules) p.vm.MarkReserved(m.img.image_base, m.img.image_size);
   p.vm.MarkReserved(hle::kModuleRegion, hle::kModuleRegionSize);
 
   // PEB: only the fields Win32 code commonly peeks at.
@@ -310,12 +345,12 @@ int RunProcess(const GameConfig& game, const std::string& exe_path,
   Wr16(kPebVa + 0xAC, 2600);   // OSBuildNumber
   Wr32(kPebVa + 0xB0, 2);      // OSPlatformId: VER_PLATFORM_WIN32_NT
 
-  // The image's TLS index: one module, so slot 0.
+  // The image's TLS index: the only module with static TLS (MapModule),
+  // so slot 0.
   if (p.img.has_tls) Wr32(p.img.tls.index_va, 0);
 
   InitDispatch();
   InitKernel32State();
-  hle::BindImports();
 
   Thread* main = CreateGuestThread(p.img.stack_reserve);
   return int(RunOnMainThread(main, p.img.entry));

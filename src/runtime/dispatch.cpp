@@ -1,8 +1,9 @@
 // Indirect control flow and the fatal paths of lifted code.
 //
 // Dispatch() maps a guest address to its lifted function through a dense
-// table over .text, or to an HLE handler for thunk addresses. Anything
-// else is fatal: there is no interpreter fallback (CLAUDE.md).
+// table over the .text of the EXE or of a lifted DLL, or to an HLE handler
+// for thunk addresses. Anything else is fatal: there is no interpreter
+// fallback (CLAUDE.md).
 
 #include <execinfo.h>
 #include <pthread.h>
@@ -31,8 +32,29 @@ bool g_trace = false;
 
 namespace {
 
-uint32_t g_text_lo = 0, g_text_size = 0;
-std::vector<GuestFn> g_table;
+// One per image: the EXE's first, then the lifted DLLs'. Built before any
+// guest code runs and never changed afterwards.
+struct CodeRange {
+  uint32_t lo = 0, size = 0;
+  std::vector<GuestFn> table;  // by va - lo
+};
+CodeRange g_exe;
+std::vector<CodeRange> g_dlls;
+
+CodeRange TextOf(const PeImage& img) {
+  CodeRange r;
+  for (const auto& s : img.sections)
+    if (s.name == ".text") {
+      r.lo = s.va;
+      r.size = s.vsize;
+    }
+  r.table.assign(r.size, nullptr);
+  for (uint32_t i = 0; i < kLiftedFunctionCount; i++) {
+    const LiftedFn& f = kLiftedFunctions[i];
+    if (f.va - r.lo < r.size) r.table[f.va - r.lo] = f.fn;
+  }
+  return r;
+}
 
 void DumpGuestState(const Ctx& c) {
   std::fprintf(stderr,
@@ -205,32 +227,35 @@ void InstallFaultHandler() {
 
 void InitDispatch() {
   InstallFaultHandler();
-  for (const auto& s : g_proc->img.sections)
-    if (s.name == ".text") {
-      g_text_lo = s.va;
-      g_text_size = s.vsize;
-    }
-  g_table.assign(g_text_size, nullptr);
-  for (uint32_t i = 0; i < kLiftedFunctionCount; i++) {
-    const LiftedFn& f = kLiftedFunctions[i];
-    if (f.va - g_text_lo < g_text_size) g_table[f.va - g_text_lo] = f.fn;
+  g_exe = TextOf(g_proc->img);
+  for (const Module& m : g_proc->modules) {
+    CodeRange& r = g_dlls.emplace_back(TextOf(m.img));
+    // A DLL lifted at another base, or not at all, has no functions here.
+    if (m.img.entry && !r.table[m.img.entry - r.lo])
+      FatalF("%s at %08X: its entry point %08X is not lifted (lift it with "
+             "recomp_lift --module, at the same --base)",
+             m.name.c_str(), m.img.image_base, m.img.entry);
   }
 }
 
 void Dispatch(Ctx& c, uint32_t target, uint32_t va) {
-  if (target - g_text_lo < g_text_size) {
-    if (GuestFn fn = g_table[target - g_text_lo]) {
-      fn(c);
+  const CodeRange* r = &g_exe;
+  if (target - r->lo >= r->size) {
+    if (target - kThunkBase < kThunkRegionSize) {
+      hle::CallThunk(c, target);
       return;
     }
-    FatalF("indirect branch to unlifted address %08X from %08X "
-           "(add it to the manifest as a function entry)", target, va);
+    r = nullptr;
+    for (const CodeRange& d : g_dlls)
+      if (target - d.lo < d.size) r = &d;
+    if (!r) FatalF("indirect branch to %08X from %08X: not code", target, va);
   }
-  if (target - kThunkBase < kThunkRegionSize) {
-    hle::CallThunk(c, target);
+  if (GuestFn fn = r->table[target - r->lo]) {
+    fn(c);
     return;
   }
-  FatalF("indirect branch to %08X from %08X: not code", target, va);
+  FatalF("indirect branch to unlifted address %08X from %08X "
+         "(add it to the manifest as a function entry)", target, va);
 }
 
 void Unimplemented(Ctx& c, uint32_t va, const char* what) {

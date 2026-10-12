@@ -1,7 +1,10 @@
 #pragma once
-// Everything the lifter knows about the binary: the mapped image, function
-// entries, names, no-return functions and switch tables. Inputs are the EXE
-// itself plus the TSVs exported from Ghidra into symbols/.
+// Everything the lifter knows about the program: the mapped images (the
+// EXE and any DLLs lifted with it), function entries, names, no-return
+// functions and switch tables. Inputs are the images themselves plus the
+// TSVs exported from Ghidra into each one's symbols directory. Images are
+// mapped side by side in one guest address space, so a VA (and with it a
+// lifted function's name) identifies its module.
 
 #include <cstdint>
 #include <map>
@@ -14,10 +17,15 @@
 
 namespace lifter {
 
-struct Program {
-  recomp::GuestMemory mem;
+struct Module {
+  std::string name;  // file name without extension, e.g. "gamex86"
   recomp::PeImage img;
   uint32_t text_lo = 0, text_hi = 0;  // [lo, hi) of .text
+};
+
+struct Program {
+  recomp::GuestMemory mem;
+  std::vector<Module> modules;  // [0] is the EXE
 
   std::set<uint32_t> entries;                 // function entry points
   // Entries known only from pointer scans (a dword in data or an
@@ -39,15 +47,24 @@ struct Program {
   std::set<uint32_t> resume_sites;            // manifest: calls/jmps that
                                               // abandon the stack (SEH)
 
-  bool Load(const std::string& exe, const std::string& symdir,
+  // Maps an image (at `base`, 0 for its preferred base) and reads its
+  // symbols. The first one is the EXE.
+  bool Load(const std::string& path, const std::string& symdir, uint32_t base,
             std::string* err);
 
-  // Applies lifter.manifest (entry/name/probe/resume lines).
+  // Applies the manifest of the module loaded last (entry/name/probe/
+  // resume lines, VAs at its preferred base).
   bool LoadManifest(const std::string& path, std::string* err);
 
-  bool InText(uint32_t va) const { return va >= text_lo && va < text_hi; }
+  // The module whose .text contains va, or null.
+  const Module* TextOf(uint32_t va) const {
+    for (const auto& m : modules)
+      if (va >= m.text_lo && va < m.text_hi) return &m;
+    return nullptr;
+  }
+  bool InText(uint32_t va) const { return TextOf(va) != nullptr; }
   const uint8_t* Bytes(uint32_t va) const { return mem.ptr<uint8_t>(va); }
-  size_t BytesLeft(uint32_t va) const { return text_hi - va; }
+  size_t BytesLeft(uint32_t va) const { return TextOf(va)->text_hi - va; }
 };
 
 }  // namespace lifter
