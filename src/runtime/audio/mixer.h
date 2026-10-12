@@ -85,6 +85,8 @@ class Mixer {
   // Opens the default playback device at `rate` Hz stereo. False if no
   // device (the game then runs without sound, as on a soundless PC).
   bool Open(int rate);
+  // No device: the caller pulls the mix with Mix() (offline rendering).
+  void OpenOffline(int rate);
   void Close();
 
   std::mutex& mu() { return mu_; }
@@ -104,6 +106,7 @@ class Mixer {
   void Mix(float* out, int frames);
 
  private:
+  void Init(int rate);
   void MixVoice(Voice& v, float* out, int frames, bool reverb);
   static void SettleLevels(Voice& v);
   void TargetGains(const Voice& v, float* l, float* r) const;

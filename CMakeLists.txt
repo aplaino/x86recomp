@@ -75,26 +75,31 @@ add_library(recomp_runtime OBJECT
 target_link_libraries(recomp_runtime PUBLIC recomp_image recomp_x87
                       SDL3::SDL3 Threads::Threads)
 
-# Miles Sound System (mss32) on the runtime's software mixer.
 if(FFMPEG_FOUND)
-  add_library(recomp_mss32 OBJECT
-    src/runtime/hle/mss32.cpp
+  # The software mixer, its sources, the EAX model and the reverb; no HLE
+  # in it (it logs through the runtime's WarnF).
+  add_library(recomp_audio STATIC
     src/runtime/audio/source.cpp
     src/runtime/audio/mixer.cpp
     src/runtime/audio/reverb.cpp
     src/runtime/audio/digital_reverb.cpp
     src/runtime/audio/eax.cpp)
-  target_link_libraries(recomp_mss32 PUBLIC recomp_runtime PkgConfig::FFMPEG
-                        OpenAL::OpenAL)
+  target_include_directories(recomp_audio PUBLIC src)
+  target_compile_features(recomp_audio PUBLIC cxx_std_20)
+  target_link_libraries(recomp_audio PUBLIC SDL3::SDL3 PkgConfig::FFMPEG OpenAL::OpenAL)
   # Per-sample host paths: optimised in every build type.
   set_source_files_properties(src/runtime/audio/mixer.cpp
-    src/runtime/audio/source.cpp TARGET_DIRECTORY recomp_mss32
+    src/runtime/audio/source.cpp TARGET_DIRECTORY recomp_audio
     PROPERTIES COMPILE_OPTIONS "-O2")
   # The digital reverb rounds like the original only without contraction
   # into FMA.
   set_source_files_properties(src/runtime/audio/digital_reverb.cpp
-    TARGET_DIRECTORY recomp_mss32
+    TARGET_DIRECTORY recomp_audio
     PROPERTIES COMPILE_OPTIONS "-O2;-ffp-contract=off")
+
+  # Miles Sound System (mss32) on the software mixer.
+  add_library(recomp_mss32 OBJECT src/runtime/hle/mss32.cpp)
+  target_link_libraries(recomp_mss32 PUBLIC recomp_runtime recomp_audio)
 
   # Bink video (binkw32) on ffmpeg; audio through the Miles mixer.
   add_library(recomp_bink OBJECT src/runtime/hle/binkw32.cpp)
@@ -224,3 +229,7 @@ if(PROJECT_IS_TOP_LEVEL)
   enable_testing()
 endif()
 add_subdirectory(tests)
+# Dev tool: renders the EAX capture cases with recomp_audio (eax_render).
+if(PROJECT_IS_TOP_LEVEL AND FFMPEG_FOUND)
+  add_subdirectory(tools/eax_capture)
+endif()

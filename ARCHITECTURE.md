@@ -349,6 +349,9 @@ so Wine is not a reference for this point. d3d7.cpp models it.
   recomp_add_digital_reverb_test lifts the original routines from the
   user's installed DLL at build time (`recomp_lift --only`) and compares;
   tests/digital_reverb_test checks a hash of our output on every host.
+  runtime/audio is its own library (`recomp_audio`, no HLE);
+  tools/eax_capture renders with it offline to compare against
+  recordings of real Creative hardware.
 - binkw32: ffmpeg (Bink demuxer from memory, binkvideo/binkaudio,
   swscale), audio into the Miles mixer.
 - dbghelp: UnDecorateSymbolName (LLVM's Microsoft demangler, normalised

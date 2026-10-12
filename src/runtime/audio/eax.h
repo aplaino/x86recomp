@@ -7,6 +7,7 @@
 // levels for its mixer voice.
 
 #include <cstdint>
+#include <string>
 
 #include "runtime/audio/reverb.h"
 
@@ -77,6 +78,18 @@ void ReadSource2(const uint8_t* p, Source* s);
 void WriteSource2(const Source& s, uint8_t* p);
 void ReadSource3(const uint8_t* p, Source* s);
 void WriteSource3(const Source& s, uint8_t* p);
+
+// Msseax.m3d's attribute names for single listener and source properties
+// (AIL_set_3D_provider_preference, AIL_3D_provider_attribute and their
+// sample counterparts). `version` is the provider's EAX version, 1-3; each
+// name exists for some versions only. Values are S32 mB levels, U32 flags
+// or F32 (pans 3 x F32); "EAX environment selection" loads that preset.
+// Copies between the property and `value`; false if the version has no
+// such name.
+bool ListenerAttribute(Listener* l, const std::string& name, int version, void* value,
+                       bool set);
+bool SourceAttribute(Source* s, const std::string& name, int version, void* value,
+                     bool set);
 
 // Linear levels of a source's direct path and its send to the listener's
 // reverb, below and above the HF reference.

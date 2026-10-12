@@ -34,7 +34,9 @@ Used by:
   and dbghelp.
 - **Tools**: Ghidra export scripts (`tools/ghidra`), a PE symbol dumper
   (`tools/pe_symbols.py`), dev-time reference checks (`tools/layout`,
-  `tools/undname`).
+  `tools/undname`), and EAX reference measurement (`tools/eax_capture`:
+  a Windows 98 recorder for Creative hardware, the same cases rendered by
+  the runtime, and their comparison).
 
 [ARCHITECTURE.md](ARCHITECTURE.md) describes the design.
 

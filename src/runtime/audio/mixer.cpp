@@ -107,24 +107,33 @@ bool Mixer::Open(int rate) {
     SDL_QuitSubSystem(SDL_INIT_AUDIO);
     return false;
   }
-  rate_ = rate;
-  split_ = 1.0f - std::exp(-2.0f * 3.14159265f * 5000.0f / float(rate));
-  reverb_.Open(rate);  // the device starts paused: no Mix runs yet
-  // The reverb's ring is whole mixer fragments; ours are chunks.
-  digital_.Open(rate, kChunk);
-  mixed_ = 0;
+  Init(rate);  // the device starts paused: no Mix runs yet
   SDL_ResumeAudioStreamDevice(stream_);
   WarnF("audio: %d Hz stereo on SDL driver '%s'\n", rate,
         SDL_GetCurrentAudioDriver());
   return true;
 }
 
+void Mixer::OpenOffline(int rate) {
+  if (!stream_) Init(rate);
+}
+
+void Mixer::Init(int rate) {
+  rate_ = rate;
+  split_ = 1.0f - std::exp(-2.0f * 3.14159265f * 5000.0f / float(rate));
+  reverb_.Open(rate);
+  // The reverb's ring is whole mixer fragments; ours are chunks.
+  digital_.Open(rate, kChunk);
+  mixed_ = 0;
+}
+
 void Mixer::Close() {
-  if (!stream_) return;
-  SDL_DestroyAudioStream(stream_);  // stops the callback first
-  stream_ = nullptr;
+  if (stream_) {
+    SDL_DestroyAudioStream(stream_);  // stops the callback first
+    stream_ = nullptr;
+    SDL_QuitSubSystem(SDL_INIT_AUDIO);
+  }
   reverb_.Close();
-  SDL_QuitSubSystem(SDL_INIT_AUDIO);
 }
 
 void Mixer::Add(Voice* v) {

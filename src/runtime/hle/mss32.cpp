@@ -1228,112 +1228,15 @@ HLE_NAMED("mss32.dll", "_AIL_set_3D_distance_factor@8", AIL_set_3D_distance_fact
 
 // ---- EAX attributes ---------------------------------------------------------------------
 //
-// Msseax.m3d's attribute names. Each applies to some EAX versions (bit 0
-// EAX 1.0, bit 1 2.0, bit 2 3.0); mB levels are S32, the rest F32.
-// "EAX all parameters" and "EAX sample all parameters" take the whole
-// property set in the provider's EAX version's layout (CoD passes the
-// 3.0 listener to the EAX 3 provider).
-
-constexpr uint8_t kE1 = 1, kE2 = 2, kE3 = 4, kE23 = kE2 | kE3;
-
-int VersionBit(Prov p) { return p == Prov::kEax1 ? kE1 : p == Prov::kEax2 ? kE2 : kE3; }
-
-struct Field {
-  const char* name;
-  uint8_t versions;
-  char type;  // 'i' S32, 'u' U32, 'f' F32, 'v' 3 x F32
-  size_t offset;
-};
-
-#define LF(name, v, t, m) {name, v, t, offsetof(audio::eax::Listener, m)}
-constexpr Field kListenerFields[] = {
-    LF("EAX decay time", kE1 | kE23, 'f', decay_time),
-    LF("EAX damping", kE1, 'f', decay_hf_ratio),
-    LF("EAX2 room", kE23, 'i', room),
-    LF("EAX2 room HF", kE23, 'i', room_hf),
-    LF("EAX2 room rolloff", kE23, 'f', room_rolloff_factor),
-    LF("EAX2 decay HF ratio", kE23, 'f', decay_hf_ratio),
-    LF("EAX2 reflections", kE23, 'i', reflections),
-    LF("EAX2 reflections delay", kE23, 'f', reflections_delay),
-    LF("EAX2 reverb", kE23, 'i', reverb),
-    LF("EAX2 reverb delay", kE23, 'f', reverb_delay),
-    LF("EAX2 environment size", kE23, 'f', environment_size),
-    LF("EAX2 environment diffusion", kE23, 'f', environment_diffusion),
-    LF("EAX2 air absorption", kE23, 'f', air_absorption_hf),
-    LF("EAX2 flags", kE23, 'u', flags),
-    LF("EAX3 room LF", kE3, 'i', room_lf),
-    LF("EAX3 decay LF ratio", kE3, 'f', decay_lf_ratio),
-    LF("EAX3 reflections pan", kE3, 'v', reflections_pan),
-    LF("EAX3 reverb pan", kE3, 'v', reverb_pan),
-    LF("EAX3 echo time", kE3, 'f', echo_time),
-    LF("EAX3 echo depth", kE3, 'f', echo_depth),
-    LF("EAX3 modulation time", kE3, 'f', modulation_time),
-    LF("EAX3 modulation depth", kE3, 'f', modulation_depth),
-    LF("EAX3 HF reference", kE3, 'f', hf_reference),
-    LF("EAX3 LF reference", kE3, 'f', lf_reference),
-};
-#undef LF
-
-#define SF(name, v, t, m) {name, v, t, offsetof(audio::eax::Source, m)}
-constexpr Field kSourceFields[] = {
-    SF("EAX sample reverb mix", kE1 | kE23, 'f', reverb_mix),
-    SF("EAX2 sample direct", kE23, 'i', direct),
-    SF("EAX2 sample direct HF", kE23, 'i', direct_hf),
-    SF("EAX2 sample room", kE23, 'i', room),
-    SF("EAX2 sample room HF", kE23, 'i', room_hf),
-    SF("EAX2 sample room rolloff", kE23, 'f', room_rolloff_factor),
-    SF("EAX2 sample obstruction", kE23, 'i', obstruction),
-    SF("EAX2 sample obstruction LF ratio", kE23, 'f', obstruction_lf_ratio),
-    SF("EAX2 sample occlusion", kE23, 'i', occlusion),
-    SF("EAX2 sample occlusion LF ratio", kE23, 'f', occlusion_lf_ratio),
-    SF("EAX2 sample occlusion room ratio", kE23, 'f', occlusion_room_ratio),
-    SF("EAX2 sample outside volume HF", kE23, 'i', outside_volume_hf),
-    SF("EAX2 sample air absorption", kE23, 'f', air_absorption_factor),
-    SF("EAX2 sample flags", kE23, 'u', flags),
-    SF("EAX3 sample exclusion", kE3, 'i', exclusion),
-    SF("EAX3 sample exclusion LF ratio", kE3, 'f', exclusion_lf_ratio),
-    SF("EAX3 sample occlusion direct ratio", kE3, 'f', occlusion_direct_ratio),
-    SF("EAX3 sample doppler factor", kE3, 'f', doppler_factor),
-};
-#undef SF
-
-// Copies field f between the property set at `obj` and guest memory.
-template <typename T>
-bool AccessField(const Field* fields, size_t n, const std::string& name, Prov p,
-                 T* obj, uint32_t guest, bool set) {
-  for (size_t i = 0; i < n; i++) {
-    const Field& f = fields[i];
-    if (name != f.name || !(f.versions & VersionBit(p))) continue;
-    uint8_t* field = reinterpret_cast<uint8_t*>(obj) + f.offset;
-    size_t size = f.type == 'v' ? 12 : 4;
-    if (set)
-      std::memcpy(field, GPtr(guest), size);
-    else
-      std::memcpy(GPtr(guest), field, size);
-    return true;
-  }
-  return false;
-}
+// Msseax.m3d's attribute names; the single properties are in
+// runtime/audio/eax.h. "EAX all parameters" and "EAX sample all
+// parameters" take the whole property set in the provider's EAX version's
+// layout (CoD passes the 3.0 listener to the EAX 3 provider).
 
 // Listener attribute `name` of EAX provider p: reads it into, or sets it
 // from, guest memory at `guest`. False if p has no such attribute.
 bool ListenerAttribute(Prov p, const std::string& name, uint32_t guest, bool set) {
   audio::eax::Listener& l = S().eax[int(p)];
-  if (name == "EAX environment selection") {
-    if (set)
-      l = audio::eax::Preset(Rd32(guest));
-    else
-      Wr32(guest, l.environment);
-    return true;
-  }
-  if (name == "EAX effect volume" && p == Prov::kEax1) {
-    // EAX 1.0's reverb volume (linear) is the room level here.
-    if (set)
-      l.room = audio::eax::GainToMb(F(Rd32(guest)));
-    else
-      Wr32(guest, std::bit_cast<uint32_t>(audio::eax::MbToGain(float(l.room))));
-    return true;
-  }
   if (name == "EAX all parameters") {
     uint8_t* q = GPtr(guest);
     if (p == Prov::kEax1) {
@@ -1356,7 +1259,7 @@ bool ListenerAttribute(Prov p, const std::string& name, uint32_t guest, bool set
     }
     return true;
   }
-  return AccessField(kListenerFields, std::size(kListenerFields), name, p, &l, guest, set);
+  return audio::eax::ListenerAttribute(&l, name, int(p), GPtr(guest), set);
 }
 
 // The same for a sample's EAX source properties.
@@ -1376,8 +1279,7 @@ bool SampleAttribute(Sample& s, const std::string& name, uint32_t guest, bool se
     }
     return true;
   }
-  return AccessField(kSourceFields, std::size(kSourceFields), name, s.prov, &s.eax, guest,
-                     set);
+  return audio::eax::SourceAttribute(&s.eax, name, int(s.prov), GPtr(guest), set);
 }
 
 uint32_t ListenerSize(Prov p, const std::string& name) {
