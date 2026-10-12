@@ -38,10 +38,6 @@ namespace recomp {
 // pointer, which automated (background) runs otherwise ignore.
 constexpr SDL_MouseID kTestPointer = 0xD51D51;
 
-namespace {
-
-// <ID>_BACKGROUND=1 (used for automated test runs): never move or hide the
-// host pointer and don't take focus when the window appears.
 bool Background() {
   static const bool bg = [] {
     const char* e = Env("BACKGROUND");
@@ -49,6 +45,8 @@ bool Background() {
   }();
   return bg;
 }
+
+namespace {
 
 
 // ---- messages and styles -----------------------------------------------------
@@ -123,6 +121,16 @@ std::map<std::string, WndClass> g_classes;
 std::map<uint32_t, Window> g_windows;
 std::map<uint32_t, Queue> g_queues;  // by tid
 std::vector<Timer> g_timers;
+
+// ClipCursor: while the game confines the cursor to one of our windows
+// (Quake 3-style mouse look), the cursor is virtual, as in exclusive mode.
+struct Clip {
+  bool on = false;
+  int32_t l = 0, t = 0, r = 0, b = 0;  // screen coordinates
+  uint32_t hwnd = 0;
+};
+Clip g_clip;
+uint32_t g_capture = 0;  // SetCapture
 
 // RegisterHotKey: a matching key press becomes WM_HOTKEY instead of a key
 // message, as on Windows (here only while one of our windows has focus).
@@ -444,19 +452,26 @@ void HandleSdlEvent(const SDL_Event& e) {
         g_real_y = int(e.motion.y * ky);
         g_pointer_inside = true;
       }
-      if (ExclusiveSize(h, &mw, &mh)) {
+      bool clipped = g_clip.on && g_clip.hwnd == h;
+      if (clipped || ExclusiveSize(h, &mw, &mh)) {
         // Virtual cursor: the game recentres it with SetCursorPos every
         // frame and steers its own pointer by the difference, as on a
         // fullscreen Windows desktop. Real motion moves the virtual
-        // position; the host pointer is never warped or confined.
+        // position; the host pointer is never warped (while clipped it
+        // is grabbed in SDL's relative mode instead).
         static float fx = 0, fy = 0;  // sub-pixel remainder
         fx += e.motion.xrel * kx;
         fy += e.motion.yrel * ky;
         int dx = int(fx), dy = int(fy);
         fx -= dx;
         fy -= dy;
-        g_mouse_x = std::clamp(g_mouse_x + dx, ox, ox + mw - 1);
-        g_mouse_y = std::clamp(g_mouse_y + dy, oy, oy + mh - 1);
+        if (clipped) {
+          g_mouse_x = std::clamp(g_mouse_x + dx, g_clip.l, std::max(g_clip.l, g_clip.r - 1));
+          g_mouse_y = std::clamp(g_mouse_y + dy, g_clip.t, std::max(g_clip.t, g_clip.b - 1));
+        } else {
+          g_mouse_x = std::clamp(g_mouse_x + dx, ox, ox + mw - 1);
+          g_mouse_y = std::clamp(g_mouse_y + dy, oy, oy + mh - 1);
+        }
       } else {
         g_mouse_x = ox + int(e.motion.x * kx);
         g_mouse_y = oy + int(e.motion.y * ky);
@@ -1034,6 +1049,13 @@ HLE("user32.dll", ShowWindow, 2) {
     Send(hwnd, WM_SETFOCUS, 0, 0);
   }
   return was ? 1 : 0;
+}
+
+// CloseWindow minimizes (it does not destroy).
+HLE("user32.dll", CloseWindow, 1) {
+  uint32_t show = ProcAddress(ModuleHandle("user32.dll"), "ShowWindow");
+  CallGuest(c, show, {Arg(c, 0), 6 /* SW_MINIMIZE */});
+  return 1;
 }
 
 HLE("user32.dll", UpdateWindow, 1) { return 1; }
@@ -1813,6 +1835,56 @@ HLE("user32.dll", SetCursorPos, 2) {
   g_mouse_x = g_recentre_x = int32_t(Arg(c, 0));
   g_mouse_y = g_recentre_y = int32_t(Arg(c, 1));
   g_last_recentre_ms = TickCount();
+  return 1;
+}
+
+// ClipCursor(RECT const*): NULL frees the cursor. A rectangle inside one
+// of our windows makes its cursor virtual and grabs the host pointer.
+HLE("user32.dll", ClipCursor, 1) {
+  uint32_t rc = Arg(c, 0);
+  SDL_Window* release = nullptr;
+  SDL_Window* grab = nullptr;
+  {
+    std::lock_guard<std::recursive_mutex> l(g_mu);
+    if (g_clip.on && g_clip.hwnd)
+      if (Window* w = Win(g_clip.hwnd)) release = w->sdl;
+    g_clip = {};
+    if (rc) {
+      g_clip.on = true;
+      g_clip.l = int32_t(Rd32(rc));
+      g_clip.t = int32_t(Rd32(rc + 4));
+      g_clip.r = int32_t(Rd32(rc + 8));
+      g_clip.b = int32_t(Rd32(rc + 12));
+      for (auto& [h, w] : g_windows) {
+        if (w.destroyed || !w.sdl) continue;
+        int ox, oy, cw, ch;
+        WindowOrigin(h, &ox, &oy);
+        ClientSize(w, &cw, &ch);
+        if (g_clip.l >= ox && g_clip.t >= oy && g_clip.r <= ox + cw + 1 &&
+            g_clip.b <= oy + ch + 1)
+          g_clip.hwnd = h, grab = w.sdl;
+      }
+      g_mouse_x = std::clamp(g_mouse_x, g_clip.l, std::max(g_clip.l, g_clip.r - 1));
+      g_mouse_y = std::clamp(g_mouse_y, g_clip.t, std::max(g_clip.t, g_clip.b - 1));
+    }
+  }
+  if (release && release != grab) SDL_SetWindowRelativeMouseMode(release, false);
+  if (grab && !Background()) SDL_SetWindowRelativeMouseMode(grab, true);
+  return 1;
+}
+
+// Mouse capture: there is one game window, so mouse messages go to it
+// either way; the capture window is only remembered.
+HLE("user32.dll", SetCapture, 1) {
+  std::lock_guard<std::recursive_mutex> l(g_mu);
+  uint32_t old = g_capture;
+  g_capture = Arg(c, 0);
+  return old;
+}
+
+HLE("user32.dll", ReleaseCapture, 0) {
+  std::lock_guard<std::recursive_mutex> l(g_mu);
+  g_capture = 0;
   return 1;
 }
 

@@ -8,6 +8,11 @@
 
 namespace recomp {
 
+// <ID>_BACKGROUND=1 (used for automated test runs): never move or hide the
+// host pointer, don't take focus when the window appears, and answer
+// message boxes with their default button.
+bool Background();
+
 // The SDL window behind a top-level HWND, or nullptr.
 SDL_Window* SdlWindowFor(uint32_t hwnd);
 

@@ -1,18 +1,21 @@
-// user32: keyboard layout (US), key state, system metrics/parameters, and
-// wsprintfA. Window management and the message loop are in
+// user32: keyboard layout (US), key state, system metrics/parameters,
+// message boxes and wsprintfA. Window management and the message loop are in
 // user32_window.cpp.
 
 #include <sys/stat.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <map>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "runtime/hle/hle.h"
 #include "runtime/hle/input_state.h"
 #include "runtime/hle/kernel32_state.h"
+#include "runtime/hle/user32_window.h"
 #include "runtime/hle/win32.h"
 #include "runtime/log.h"
 
@@ -345,33 +348,76 @@ HLE("user32.dll", SetCursor, 1) {
 
 HLE("user32.dll", MessageBeep, 1) { return 1; }
 
-std::string MessageBoxText(uint32_t text, uint32_t caption, bool wide) {
-  std::string t = wide ? Narrow(GWStr(text)) : GStr(text);
-  std::string cap = wide ? Narrow(GWStr(caption)) : GStr(caption);
-  return cap + ": " + t;
-}
-
-// No modal UI yet: log and pick the default button. IDOK = 1, IDYES = 6.
-uint32_t DefaultButton(uint32_t type) {
+// MessageBox(hwnd, text, caption, type) as a host dialog with the Win32
+// buttons, default button and icon; returns the ID of the button chosen.
+// Background runs log it and take the default button.
+uint32_t ShowMessageBox(uint32_t owner, const std::string& text,
+                        const std::string& caption, uint32_t type) {
+  struct Button {
+    uint32_t id;
+    const char* label;
+  };
+  constexpr uint32_t IDOK = 1, IDCANCEL = 2, IDABORT = 3, IDRETRY = 4,
+                     IDIGNORE = 5, IDYES = 6, IDNO = 7, IDTRYAGAIN = 10,
+                     IDCONTINUE = 11;
+  std::vector<Button> buttons;
   switch (type & 0xF) {
-    case 3:  // MB_YESNOCANCEL
-    case 4:  // MB_YESNO
-      return 6;
-    default:
-      return 1;
+    case 1: buttons = {{IDOK, "OK"}, {IDCANCEL, "Cancel"}}; break;
+    case 2: buttons = {{IDABORT, "Abort"}, {IDRETRY, "Retry"}, {IDIGNORE, "Ignore"}}; break;
+    case 3: buttons = {{IDYES, "Yes"}, {IDNO, "No"}, {IDCANCEL, "Cancel"}}; break;
+    case 4: buttons = {{IDYES, "Yes"}, {IDNO, "No"}}; break;
+    case 5: buttons = {{IDRETRY, "Retry"}, {IDCANCEL, "Cancel"}}; break;
+    case 6: buttons = {{IDCANCEL, "Cancel"}, {IDTRYAGAIN, "Try Again"}, {IDCONTINUE, "Continue"}}; break;
+    default: buttons = {{IDOK, "OK"}}; break;
   }
+  // MB_DEFBUTTON2..4 pick a later button.
+  size_t def = std::min<size_t>((type >> 8) & 0xF, buttons.size() - 1);
+  std::fprintf(stderr, "MessageBox: %s: %s\n", caption.c_str(), text.c_str());
+  if (Background()) {
+    std::fprintf(stderr, "MessageBox: answered \"%s\" (background run)\n",
+                 buttons[def].label);
+    return buttons[def].id;
+  }
+  std::vector<SDL_MessageBoxButtonData> sdl;
+  for (size_t i = 0; i < buttons.size(); i++) {
+    SDL_MessageBoxButtonFlags f = 0;
+    if (i == def) f |= SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT;
+    // Escape (and closing the box) mean Cancel, or OK when it is alone.
+    if (buttons[i].id == IDCANCEL || buttons.size() == 1)
+      f |= SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT;
+    sdl.push_back({f, int(buttons[i].id), buttons[i].label});
+  }
+  SDL_MessageBoxFlags flags = SDL_MESSAGEBOX_BUTTONS_LEFT_TO_RIGHT;
+  switch (type & 0xF0) {
+    case 0x10: flags |= SDL_MESSAGEBOX_ERROR; break;        // MB_ICONERROR
+    case 0x30: flags |= SDL_MESSAGEBOX_WARNING; break;      // MB_ICONWARNING
+    case 0x20:                                              // MB_ICONQUESTION
+    case 0x40: flags |= SDL_MESSAGEBOX_INFORMATION; break;  // MB_ICONINFORMATION
+  }
+  SDL_MessageBoxData data{};
+  data.flags = flags;
+  data.window = owner ? SdlWindowFor(owner) : nullptr;
+  data.title = caption.c_str();
+  data.message = text.c_str();
+  data.numbuttons = int(sdl.size());
+  data.buttons = sdl.data();
+  int chosen = -1;
+  if (!SDL_ShowMessageBox(&data, &chosen)) {
+    WarnF("MessageBox: cannot show a dialog (%s); answering \"%s\"\n",
+          SDL_GetError(), buttons[def].label);
+    return buttons[def].id;
+  }
+  // Closed without a button (no Cancel to map it to): the default.
+  return chosen < 0 ? buttons[def].id : uint32_t(chosen);
 }
 
 HLE("user32.dll", MessageBoxA, 4) {
-  std::fprintf(stderr, "MessageBox: %s\n",
-               MessageBoxText(Arg(c, 1), Arg(c, 2), false).c_str());
-  return DefaultButton(Arg(c, 3));
+  return ShowMessageBox(Arg(c, 0), GStr(Arg(c, 1)), GStr(Arg(c, 2)), Arg(c, 3));
 }
 
 HLE("user32.dll", MessageBoxW, 4) {
-  std::fprintf(stderr, "MessageBox: %s\n",
-               MessageBoxText(Arg(c, 1), Arg(c, 2), true).c_str());
-  return DefaultButton(Arg(c, 3));
+  return ShowMessageBox(Arg(c, 0), Narrow(GWStr(Arg(c, 1))),
+                        Narrow(GWStr(Arg(c, 2))), Arg(c, 3));
 }
 
 // ---- wsprintfA ------------------------------------------------------------------
