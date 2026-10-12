@@ -1,0 +1,817 @@
+// kernel32: process, memory, heaps, TLS, synchronisation basics, locale and
+// time. Files, kernel objects, resources and conversions, and SEH live in
+// kernel32_file.cpp, kernel32_sync.cpp, kernel32_misc.cpp and
+// kernel32_seh.cpp.
+
+#include <chrono>
+#include <cstring>
+#include <ctime>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <thread>
+
+#include "runtime/hle/hle.h"
+#include "runtime/hle/kernel32_state.h"
+#include "runtime/hle/win32.h"
+#include "runtime/log.h"
+
+namespace recomp {
+
+namespace {
+
+std::mutex g_heaps_mu;
+std::map<uint32_t, std::unique_ptr<GuestHeap>> g_heaps;
+GuestHeap* g_process_heap = nullptr;
+
+const auto g_start = std::chrono::steady_clock::now();
+
+GuestHeap* NewHeap(uint32_t initial, uint32_t max) {
+  auto h = std::make_unique<GuestHeap>(g_proc->vm, initial, max);
+  GuestHeap* raw = h.get();
+  if (!raw->handle()) return nullptr;
+  std::lock_guard<std::mutex> l(g_heaps_mu);
+  g_heaps[raw->handle()] = std::move(h);
+  return raw;
+}
+
+}  // namespace
+
+uint32_t HeapAllocProcess(uint32_t size, bool zero) {
+  return g_process_heap->Alloc(size, zero);
+}
+
+void HeapFreeProcess(uint32_t p) { g_process_heap->Free(p); }
+
+uint32_t TickCount() {
+  using namespace std::chrono;
+  return uint32_t(duration_cast<milliseconds>(steady_clock::now() - g_start).count());
+}
+
+void WriteSystemTime(uint32_t st, const std::tm& t, int ms) {
+  Wr16(st + 0, uint16_t(t.tm_year + 1900));
+  Wr16(st + 2, uint16_t(t.tm_mon + 1));
+  Wr16(st + 4, uint16_t(t.tm_wday));
+  Wr16(st + 6, uint16_t(t.tm_mday));
+  Wr16(st + 8, uint16_t(t.tm_hour));
+  Wr16(st + 10, uint16_t(t.tm_min));
+  Wr16(st + 12, uint16_t(t.tm_sec));
+  Wr16(st + 14, uint16_t(ms));
+}
+
+GuestHeap* FindHeap(uint32_t handle) {
+  std::lock_guard<std::mutex> l(g_heaps_mu);
+  auto it = g_heaps.find(handle);
+  return it == g_heaps.end() ? nullptr : it->second.get();
+}
+
+void InitKernel32State() {
+  Process& p = *g_proc;
+  g_process_heap = NewHeap(1u << 20, 0);
+  if (!g_process_heap) FatalF("cannot create the process heap");
+  p.process_heap = g_process_heap->handle();
+  Wr32(kPebVa + 0x18, p.process_heap);
+
+  std::string exe = GuestExePath();
+  std::string cmd = "\"" + exe + "\"";
+  if (!p.game_args.empty()) cmd += " " + p.game_args;
+  p.cmdline_a = HeapAllocProcess(uint32_t(cmd.size() + 1), false);
+  PutStr(p.cmdline_a, cmd);
+  std::u16string wcmd = win32::Widen(cmd);
+  p.cmdline_w = HeapAllocProcess(uint32_t(wcmd.size() * 2 + 2), true);
+  std::memcpy(GPtr(p.cmdline_w), wcmd.data(), wcmd.size() * 2);
+
+  // A small, fixed environment; the game only needs it to exist.
+  const char* env[] = {"PATH=C:\\WINDOWS\\system32;C:\\WINDOWS",
+                       "SystemRoot=C:\\WINDOWS", "windir=C:\\WINDOWS",
+                       "TEMP=C:\\TEMP", "TMP=C:\\TEMP"};
+  std::string block;
+  for (const char* e : env) block.append(e).push_back('\0');
+  block.push_back('\0');
+  p.environ_a = HeapAllocProcess(uint32_t(block.size()), false);
+  std::memcpy(GPtr(p.environ_a), block.data(), block.size());
+  std::u16string wblock = win32::Widen(block);
+  p.environ_w = HeapAllocProcess(uint32_t(wblock.size() * 2), false);
+  std::memcpy(GPtr(p.environ_w), wblock.data(), wblock.size() * 2);
+}
+
+namespace hle {
+namespace {
+
+using namespace win32;
+
+// ---- process / module ----------------------------------------------------
+
+HLE("kernel32.dll", GetVersion, 0) {
+  return 0x0A280105;  // Windows XP: build 2600, 5.1, NT platform
+}
+
+HLE("kernel32.dll", GetVersionExA, 1) {
+  uint32_t vi = Arg(c, 0);
+  uint32_t size = Rd32(vi);
+  Wr32(vi + 4, 5);
+  Wr32(vi + 8, 1);
+  Wr32(vi + 12, 2600);
+  Wr32(vi + 16, 2);  // VER_PLATFORM_WIN32_NT
+  std::memset(GPtr(vi + 20), 0, 128);
+  PutStr(vi + 20, "Service Pack 3");
+  if (size >= 156) {  // OSVERSIONINFOEXA
+    Wr16(vi + 148, 3);
+    Wr16(vi + 150, 0);
+    Wr16(vi + 152, 0x100);  // VER_SUITE_SINGLEUSERTS
+    Wr8(vi + 154, 1);       // VER_NT_WORKSTATION
+  }
+  return 1;
+}
+
+HLE("kernel32.dll", GetModuleHandleA, 1) {
+  uint32_t name = Arg(c, 0);
+  if (!name) return g_proc->img.image_base;
+  std::string n = GStr(name);
+  std::string ln = Lower(n);
+  if (ln == "dungeonsiege.exe" || ln == "dungeonsiege") return g_proc->img.image_base;
+  uint32_t h = ModuleHandle(n);
+  if (!h) SetLastError(kErrorModNotFound);
+  return h;
+}
+
+HLE("kernel32.dll", GetModuleFileNameA, 3) {
+  uint32_t mod = Arg(c, 0), buf = Arg(c, 1), size = Arg(c, 2);
+  std::string path = GuestExePath();
+  if (mod && mod != g_proc->img.image_base) {
+    SetLastError(kErrorModNotFound);
+    return 0;
+  }
+  if (!size) return 0;
+  std::string s = path.substr(0, size - 1);
+  PutStr(buf, s);
+  return uint32_t(s.size());
+}
+
+// LoadLibraryA/ExA: only the HLE modules exist.
+uint32_t LoadModule(const char* api, uint32_t name) {
+  std::string n = GStr(name);
+  uint32_t h = ModuleHandle(n);
+  if (!h) {
+    WarnF("%s(%s): not provided\n", api, n.c_str());
+    SetLastError(kErrorModNotFound);
+  }
+  return h;
+}
+
+HLE("kernel32.dll", LoadLibraryA, 1) { return LoadModule("LoadLibraryA", Arg(c, 0)); }
+HLE("kernel32.dll", LoadLibraryExA, 3) { return LoadModule("LoadLibraryExA", Arg(c, 0)); }
+
+HLE("kernel32.dll", FreeLibrary, 1) { return 1; }
+
+HLE("kernel32.dll", GetProcAddress, 2) {
+  uint32_t mod = Arg(c, 0), name = Arg(c, 1);
+  if (name < 0x10000) {
+    WarnF("GetProcAddress by ordinal %u: not supported\n", name);
+    return 0;
+  }
+  std::string n = GStr(name);
+  uint32_t a = ProcAddress(mod, n);
+  if (!a) SetLastError(kErrorProcNotFound);
+  return a;
+}
+
+HLE("kernel32.dll", GetCommandLineA, 0) { return g_proc->cmdline_a; }
+
+HLE("kernel32.dll", GetStartupInfoA, 1) {
+  uint32_t si = Arg(c, 0);
+  std::memset(GPtr(si), 0, 68);
+  Wr32(si, 68);
+  return 0;
+}
+
+HLE("kernel32.dll", GetEnvironmentStrings, 0) { return g_proc->environ_a; }
+HLE("kernel32.dll", GetEnvironmentStringsW, 0) { return g_proc->environ_w; }
+HLE("kernel32.dll", FreeEnvironmentStringsA, 1) { return 1; }
+HLE("kernel32.dll", FreeEnvironmentStringsW, 1) { return 1; }
+
+HLE("kernel32.dll", GetEnvironmentVariableA, 3) {
+  std::string name = GStr(Arg(c, 0));
+  uint32_t buf = Arg(c, 1), size = Arg(c, 2);
+  const char* env = g_proc->mem.ptr<const char>(g_proc->environ_a);
+  std::string key = Lower(name) + "=";
+  for (const char* e = env; *e; e += std::strlen(e) + 1) {
+    std::string kv = e;
+    if (Lower(kv.substr(0, key.size())) == key)
+      return CopyOut(buf, size, kv.substr(key.size()));
+  }
+  SetLastError(kErrorEnvVarNotFound);
+  return 0;
+}
+
+HLE("kernel32.dll", ExpandEnvironmentStringsA, 3) {
+  // No variable the game uses needs expanding; copy through.
+  std::string s = GStr(Arg(c, 0));
+  uint32_t buf = Arg(c, 1), size = Arg(c, 2);
+  if (s.size() + 1 <= size) PutStr(buf, s);
+  return uint32_t(s.size() + 1);
+}
+
+HLE("kernel32.dll", GetCurrentProcess, 0) { return 0xFFFFFFFF; }
+HLE("kernel32.dll", GetCurrentProcessId, 0) { return kGuestPid; }
+HLE("kernel32.dll", GetCurrentThread, 0) { return 0xFFFFFFFE; }
+HLE("kernel32.dll", GetCurrentThreadId, 0) { return CurrentThread()->tid; }
+
+HLE("kernel32.dll", ExitProcess, 1) {
+  uint32_t code = Arg(c, 0);
+  std::fflush(stdout);
+  std::fprintf(stderr, "ExitProcess(%u)\n", code);
+  std::fflush(stderr);
+  std::_Exit(int(code));
+}
+
+HLE("kernel32.dll", TerminateProcess, 2) {
+  if (Arg(c, 0) == 0xFFFFFFFF) {
+    std::fprintf(stderr, "TerminateProcess(self, %u)\n", Arg(c, 1));
+    std::_Exit(int(Arg(c, 1)));
+  }
+  return 0;
+}
+
+HLE("kernel32.dll", GetLastError, 0) {
+  return Rd32(CurrentThread()->teb + 0x34);
+}
+HLE("kernel32.dll", SetLastError, 1) {
+  SetLastError(Arg(c, 0));
+  return 0;
+}
+
+HLE("kernel32.dll", SetUnhandledExceptionFilter, 1) {
+  static uint32_t filter = 0;
+  uint32_t old = filter;
+  filter = Arg(c, 0);
+  return old;
+}
+
+HLE("kernel32.dll", IsDebuggerPresent, 0) { return 0; }
+
+HLE("kernel32.dll", OutputDebugStringA, 1) {
+  std::fprintf(stderr, "[guest] %s", GStr(Arg(c, 0)).c_str());
+  return 0;
+}
+
+HLE("kernel32.dll", SetHandleCount, 1) { return Arg(c, 0); }
+
+// Looked up dynamically by the CRT (Pentium FDIV check). Matches the CPU
+// that Cpuid() reports: MMX yes, no SSE/3DNow!, no FDIV erratum.
+HLE("kernel32.dll", IsProcessorFeaturePresent, 1) {
+  switch (Arg(c, 0)) {
+    case 3: return 1;  // PF_MMX_INSTRUCTIONS_AVAILABLE
+    case 8: return 1;  // PF_RDTSC_INSTRUCTION_AVAILABLE
+    default: return 0;
+  }
+}
+
+HLE("kernel32.dll", GetSystemInfo, 1) {
+  uint32_t si = Arg(c, 0);
+  std::memset(GPtr(si), 0, 36);
+  Wr16(si + 0, 0);            // PROCESSOR_ARCHITECTURE_INTEL
+  Wr32(si + 4, 0x1000);       // page size
+  Wr32(si + 8, 0x00010000);   // lowest application address
+  Wr32(si + 12, 0x7FFEFFFF);  // highest
+  uint32_t ncpu = GuestProcessorCount();
+  Wr32(si + 16, (1u << ncpu) - 1);  // active processor mask
+  Wr32(si + 20, ncpu);              // number of processors
+  Wr32(si + 24, 586);         // PROCESSOR_INTEL_PENTIUM
+  Wr32(si + 28, 0x10000);     // allocation granularity
+  Wr16(si + 32, 6);           // level
+  Wr16(si + 34, 0x0803);      // revision
+  return 0;
+}
+
+HLE("kernel32.dll", GlobalMemoryStatus, 1) {
+  // A roomy 2002-era machine: 1 GiB RAM, 1.5 GiB page file. Every value
+  // stays below 2 GiB: the game compares these as signed ints (a 2 GiB
+  // page file reads as negative and triggers its "swap file" error).
+  uint32_t ms = Arg(c, 0);
+  Wr32(ms + 0, 32);
+  Wr32(ms + 4, 30);           // memory load %
+  Wr32(ms + 8, 0x40000000);   // total phys
+  Wr32(ms + 12, 0x30000000);  // avail phys
+  Wr32(ms + 16, 0x60000000);  // total page file
+  Wr32(ms + 20, 0x50000000);  // avail page file
+  Wr32(ms + 24, 0x7FFE0000);  // total virtual
+  Wr32(ms + 28, 0x70000000);  // avail virtual
+  return 0;
+}
+
+HLE("kernel32.dll", GetComputerNameA, 2) {
+  uint32_t buf = Arg(c, 0), psize = Arg(c, 1);
+  std::string n = win32::Upper(Game().id) + "HOST";
+  if (Rd32(psize) < n.size() + 1) {
+    Wr32(psize, uint32_t(n.size() + 1));
+    SetLastError(kErrorBufferOverflow);
+    return 0;
+  }
+  PutStr(buf, n);
+  Wr32(psize, uint32_t(n.size()));
+  return 1;
+}
+
+// ---- heaps ---------------------------------------------------------------
+
+HLE("kernel32.dll", GetProcessHeap, 0) { return g_proc->process_heap; }
+
+HLE("kernel32.dll", HeapCreate, 3) {
+  GuestHeap* h = NewHeap(Arg(c, 1), Arg(c, 2));
+  return h ? h->handle() : 0;
+}
+
+HLE("kernel32.dll", HeapDestroy, 1) {
+  std::lock_guard<std::mutex> l(g_heaps_mu);
+  return g_heaps.erase(Arg(c, 0)) ? 1 : 0;
+}
+
+HLE("kernel32.dll", HeapAlloc, 3) {
+  GuestHeap* h = FindHeap(Arg(c, 0));
+  if (!h) FatalF("HeapAlloc on unknown heap %08X", Arg(c, 0));
+  return h->Alloc(Arg(c, 2), Arg(c, 1) & kHeapZeroMemory);
+}
+
+HLE("kernel32.dll", HeapFree, 3) {
+  uint32_t p = Arg(c, 2);
+  if (!p) return 1;
+  GuestHeap* h = FindHeap(Arg(c, 0));
+  if (!h || !h->Free(p)) {
+    WarnF("HeapFree(%08X, %08X): not a live block\n", Arg(c, 0), p);
+    return 0;
+  }
+  return 1;
+}
+
+HLE("kernel32.dll", HeapReAlloc, 4) {
+  GuestHeap* h = FindHeap(Arg(c, 0));
+  uint32_t flags = Arg(c, 1);
+  if (!h) return 0;
+  return h->ReAlloc(Arg(c, 2), Arg(c, 3), flags & kHeapZeroMemory,
+                    flags & kHeapReallocInPlaceOnly);
+}
+
+HLE("kernel32.dll", HeapSize, 3) {
+  GuestHeap* h = FindHeap(Arg(c, 0));
+  return h ? h->Size(Arg(c, 2)) : 0xFFFFFFFF;
+}
+
+HLE("kernel32.dll", GlobalAlloc, 2) {
+  // GMEM_MOVEABLE handles are returned as plain pointers; GlobalLock is
+  // then the identity. Only used for clipboard data here.
+  return HeapAllocProcess(Arg(c, 1), Arg(c, 0) & 0x40);
+}
+HLE("kernel32.dll", GlobalLock, 1) { return Arg(c, 0); }
+HLE("kernel32.dll", GlobalUnlock, 1) { return 1; }
+HLE("kernel32.dll", GlobalFree, 1) {
+  g_process_heap->Free(Arg(c, 0));
+  return 0;
+}
+
+HLE("kernel32.dll", LocalFree, 1) {
+  if (Arg(c, 0)) g_process_heap->Free(Arg(c, 0));
+  return 0;
+}
+
+// ---- virtual memory ------------------------------------------------------
+
+Prot ProtFromWin(uint32_t p) {
+  switch (p & 0xFF) {
+    case kPageNoAccess: return Prot::None;
+    case kPageReadOnly: return Prot::R;
+    case kPageReadWrite:
+    case kPageWriteCopy: return Prot::RW;
+    case kPageExecute: return Prot::X;
+    case kPageExecuteRead: return Prot::RX;
+    default: return Prot::RWX;
+  }
+}
+
+uint32_t ProtToWin(Prot p) {
+  switch (p) {
+    case Prot::None: return kPageNoAccess;
+    case Prot::R: return kPageReadOnly;
+    case Prot::RW: return kPageReadWrite;
+    case Prot::X: return kPageExecute;
+    case Prot::RX: return kPageExecuteRead;
+    default: return kPageExecuteReadWrite;
+  }
+}
+
+HLE("kernel32.dll", VirtualAlloc, 4) {
+  uint32_t addr = Arg(c, 0), size = Arg(c, 1), type = Arg(c, 2),
+           prot = Arg(c, 3);
+  GuestAllocator& vm = g_proc->vm;
+  // MEM_COMMIT with no address reserves and commits, like MEM_RESERVE|COMMIT.
+  if (!addr && (type & kMemCommit)) type |= kMemReserve;
+  if (type & kMemReserve) {
+    uint32_t base = vm.Reserve(addr, size + (addr & 0xFFFF),
+                               type & kMemTopDown);
+    if (!base) {
+      SetLastError(kErrorNotEnoughMemory);
+      return 0;
+    }
+    if (type & kMemCommit) vm.Commit(base, size, ProtFromWin(prot));
+    return addr ? addr & ~0xFFFu : base;
+  }
+  if (type & kMemCommit) {
+    if (!vm.Commit(addr, size, ProtFromWin(prot))) {
+      SetLastError(kErrorInvalidAddress);
+      return 0;
+    }
+    return addr & ~0xFFFu;
+  }
+  SetLastError(kErrorInvalidParameter);
+  return 0;
+}
+
+HLE("kernel32.dll", VirtualFree, 3) {
+  uint32_t addr = Arg(c, 0), size = Arg(c, 1), type = Arg(c, 2);
+  if (type & kMemRelease) return g_proc->vm.Release(addr) ? 1 : 0;
+  if (type & kMemDecommit) return g_proc->vm.Decommit(addr, size) ? 1 : 0;
+  return 0;
+}
+
+HLE("kernel32.dll", VirtualProtect, 4) {
+  uint32_t addr = Arg(c, 0), size = Arg(c, 1), prot = Arg(c, 2),
+           old = Arg(c, 3);
+  if (old) Wr32(old, ProtToWin(g_proc->mem.QueryProt(addr)));
+  return g_proc->mem.Protect(addr, size, ProtFromWin(prot)) ? 1 : 0;
+}
+
+HLE("kernel32.dll", VirtualLock, 2) { return 1; }
+
+uint32_t QueryMemory(uint32_t addr, uint32_t mbi) {
+  GuestMemory& mem = g_proc->mem;
+  GuestAllocator::Region r;
+  uint32_t page = addr & ~0xFFFu;
+  std::memset(GPtr(mbi), 0, 28);
+  if (!g_proc->vm.Find(addr, &r)) {
+    uint32_t base, size;
+    g_proc->vm.FreeGap(addr, &base, &size);
+    Wr32(mbi + 0, base);
+    Wr32(mbi + 12, size);
+    Wr32(mbi + 16, kMemFree);
+    Wr32(mbi + 20, kPageNoAccess);
+    return 28;
+  }
+  // Extend over pages with the same state.
+  bool committed = mem.IsCommitted(page);
+  Prot prot = mem.QueryProt(page);
+  uint32_t end = page;
+  while (end < r.base + r.size && mem.IsCommitted(end) == committed &&
+         (!committed || mem.QueryProt(end) == prot))
+    end += 0x1000;
+  Wr32(mbi + 0, page);
+  Wr32(mbi + 4, r.base);
+  Wr32(mbi + 8, kPageReadWrite);
+  Wr32(mbi + 12, end - page);
+  Wr32(mbi + 16, committed ? kMemCommit : kMemReserve);
+  Wr32(mbi + 20, committed ? ProtToWin(prot) : 0);
+  Wr32(mbi + 24, r.base == g_proc->img.image_base ? kMemImage : kMemPrivate);
+  return 28;
+}
+
+HLE("kernel32.dll", VirtualQuery, 3) {
+  uint32_t r = QueryMemory(Arg(c, 0), Arg(c, 1));
+  uint32_t m = Arg(c, 1);
+  RECOMP_TRACE("  VirtualQuery(%X): base %X alloc %X size %X state %X prot %X\n",
+            Arg(c, 0), Rd32(m), Rd32(m + 4), Rd32(m + 12), Rd32(m + 16),
+            Rd32(m + 20));
+  return r;
+}
+
+HLE("kernel32.dll", VirtualQueryEx, 4) {
+  return QueryMemory(Arg(c, 1), Arg(c, 2));
+}
+
+bool Readable(uint32_t p, uint32_t n) {
+  if (!n) return true;
+  for (uint32_t a = p & ~0xFFFu; a < p + n && a >= (p & ~0xFFFu); a += 0x1000)
+    if (!g_proc->mem.IsCommitted(a)) return false;
+  return true;
+}
+
+HLE("kernel32.dll", IsBadReadPtr, 2) {
+  return Readable(Arg(c, 0), Arg(c, 1)) ? 0 : 1;
+}
+HLE("kernel32.dll", IsBadWritePtr, 2) {
+  return Readable(Arg(c, 0), Arg(c, 1)) ? 0 : 1;
+}
+HLE("kernel32.dll", IsBadCodePtr, 1) {
+  uint32_t p = Arg(c, 0);
+  return p >= g_proc->img.image_base &&
+                 p < g_proc->img.image_base + g_proc->img.image_size
+             ? 0
+             : 1;
+}
+
+// ---- TLS (TlsAlloc slots live in the TEB at +0xE10, as on Windows) -------
+
+std::mutex g_tls_mu;
+uint64_t g_tls_used = 0;
+
+HLE("kernel32.dll", TlsAlloc, 0) {
+  std::lock_guard<std::mutex> l(g_tls_mu);
+  for (uint32_t i = 0; i < 64; i++)
+    if (!(g_tls_used & (1ull << i))) {
+      g_tls_used |= 1ull << i;
+      return i;
+    }
+  return 0xFFFFFFFF;
+}
+
+HLE("kernel32.dll", TlsFree, 1) {
+  std::lock_guard<std::mutex> l(g_tls_mu);
+  g_tls_used &= ~(1ull << (Arg(c, 0) & 63));
+  return 1;
+}
+
+HLE("kernel32.dll", TlsGetValue, 1) {
+  uint32_t i = Arg(c, 0);
+  if (i >= 64) return 0;
+  SetLastError(0);
+  return Rd32(CurrentThread()->teb + 0xE10 + 4 * i);
+}
+
+HLE("kernel32.dll", TlsSetValue, 2) {
+  uint32_t i = Arg(c, 0);
+  if (i >= 64) return 0;
+  Wr32(CurrentThread()->teb + 0xE10 + 4 * i, Arg(c, 1));
+  return 1;
+}
+
+// ---- critical sections ---------------------------------------------------
+// The guest CRITICAL_SECTION (24 bytes) is only an identity; the lock is a
+// host recursive mutex keyed by its address. Fields the guest might read
+// (LockCount, RecursionCount, OwningThread) are kept roughly in sync.
+
+std::mutex g_cs_mu;
+std::map<uint32_t, std::unique_ptr<std::recursive_mutex>> g_cs;
+
+std::recursive_mutex* CsFor(uint32_t cs) {
+  std::lock_guard<std::mutex> l(g_cs_mu);
+  auto& m = g_cs[cs];
+  if (!m) m = std::make_unique<std::recursive_mutex>();
+  return m.get();
+}
+
+HLE("kernel32.dll", InitializeCriticalSection, 1) {
+  uint32_t cs = Arg(c, 0);
+  std::memset(GPtr(cs), 0, 24);
+  Wr32(cs + 4, 0xFFFFFFFF);  // LockCount: -1 = free
+  CsFor(cs);
+  return 0;
+}
+
+HLE("kernel32.dll", DeleteCriticalSection, 1) {
+  std::lock_guard<std::mutex> l(g_cs_mu);
+  g_cs.erase(Arg(c, 0));
+  return 0;
+}
+
+HLE("kernel32.dll", EnterCriticalSection, 1) {
+  uint32_t cs = Arg(c, 0);
+  CsFor(cs)->lock();
+  Wr32(cs + 8, Rd32(cs + 8) + 1);  // RecursionCount
+  Wr32(cs + 12, CurrentThread()->tid);
+  return 0;
+}
+
+HLE("kernel32.dll", LeaveCriticalSection, 1) {
+  uint32_t cs = Arg(c, 0);
+  uint32_t rc = Rd32(cs + 8);
+  Wr32(cs + 8, rc ? rc - 1 : 0);
+  if (rc <= 1) Wr32(cs + 12, 0);
+  CsFor(cs)->unlock();
+  return 0;
+}
+
+// ---- interlocked ---------------------------------------------------------
+
+HLE("kernel32.dll", InterlockedIncrement, 1) {
+  return __atomic_add_fetch(reinterpret_cast<uint32_t*>(GPtr(Arg(c, 0))), 1,
+                            __ATOMIC_SEQ_CST);
+}
+HLE("kernel32.dll", InterlockedDecrement, 1) {
+  return __atomic_sub_fetch(reinterpret_cast<uint32_t*>(GPtr(Arg(c, 0))), 1,
+                            __ATOMIC_SEQ_CST);
+}
+HLE("kernel32.dll", InterlockedExchange, 2) {
+  return __atomic_exchange_n(reinterpret_cast<uint32_t*>(GPtr(Arg(c, 0))),
+                             Arg(c, 1), __ATOMIC_SEQ_CST);
+}
+
+// ---- time ----------------------------------------------------------------
+
+HLE("kernel32.dll", GetTickCount, 0) { return TickCount(); }
+
+HLE("kernel32.dll", QueryPerformanceFrequency, 1) {
+  Wr64(Arg(c, 0), 10000000);
+  return 1;
+}
+
+HLE("kernel32.dll", QueryPerformanceCounter, 1) {
+  using namespace std::chrono;
+  Wr64(Arg(c, 0), uint64_t(
+      duration_cast<nanoseconds>(steady_clock::now() - g_start).count() / 100));
+  return 1;
+}
+
+HLE("kernel32.dll", GetSystemTimeAsFileTime, 1) {
+  using namespace std::chrono;
+  auto ns = duration_cast<nanoseconds>(system_clock::now().time_since_epoch()).count();
+  Wr64(Arg(c, 0), uint64_t(ns / 100) + kFileTimeUnixEpoch);
+  return 0;
+}
+
+HLE("kernel32.dll", GetSystemTime, 1) {
+  using namespace std::chrono;
+  auto now = system_clock::now();
+  std::time_t tt = system_clock::to_time_t(now);
+  std::tm t{};
+  gmtime_r(&tt, &t);
+  int ms = int(duration_cast<milliseconds>(now.time_since_epoch()).count() % 1000);
+  WriteSystemTime(Arg(c, 0), t, ms);
+  return 0;
+}
+
+HLE("kernel32.dll", GetLocalTime, 1) {
+  using namespace std::chrono;
+  auto now = system_clock::now();
+  std::time_t tt = system_clock::to_time_t(now);
+  std::tm t{};
+  localtime_r(&tt, &t);
+  int ms = int(duration_cast<milliseconds>(now.time_since_epoch()).count() % 1000);
+  WriteSystemTime(Arg(c, 0), t, ms);
+  return 0;
+}
+
+HLE("winmm.dll", timeGetTime, 0) { return TickCount(); }
+
+HLE("kernel32.dll", Sleep, 1) {
+  std::this_thread::sleep_for(std::chrono::milliseconds(Arg(c, 0)));
+  return 0;
+}
+
+// ---- code pages and locale -----------------------------------------------
+
+HLE("kernel32.dll", GetACP, 0) { return 1252; }
+HLE("kernel32.dll", GetOEMCP, 0) { return 437; }
+HLE("kernel32.dll", IsValidCodePage, 1) {
+  uint32_t cp = Arg(c, 0);
+  return cp == 1252 || cp == 437 || cp == 0 ? 1 : 0;
+}
+
+HLE("kernel32.dll", GetCPInfo, 2) {
+  uint32_t info = Arg(c, 1);
+  std::memset(GPtr(info), 0, 20);
+  Wr32(info, 1);       // MaxCharSize
+  Wr8(info + 4, '?');  // DefaultChar
+  return 1;
+}
+
+HLE("kernel32.dll", MultiByteToWideChar, 6) {
+  uint32_t src = Arg(c, 2), dst = Arg(c, 4);
+  int32_t n = int32_t(Arg(c, 3)), cap = int32_t(Arg(c, 5));
+  if (n < 0) n = int32_t(std::strlen(g_proc->mem.ptr<const char>(src)) + 1);
+  if (!cap) return uint32_t(n);
+  if (n > cap) {
+    SetLastError(kErrorInsufficientBuffer);
+    return 0;
+  }
+  for (int32_t i = 0; i < n; i++)
+    Wr16(dst + 2 * i, Cp1252ToUnicode(g_proc->mem.read<uint8_t>(src + i)));
+  return uint32_t(n);
+}
+
+HLE("kernel32.dll", WideCharToMultiByte, 8) {
+  uint32_t src = Arg(c, 2), dst = Arg(c, 4), used_default = Arg(c, 7);
+  int32_t n = int32_t(Arg(c, 3)), cap = int32_t(Arg(c, 5));
+  if (n < 0) n = int32_t(GWStr(src).size() + 1);
+  if (used_default) Wr32(used_default, 0);
+  if (!cap) return uint32_t(n);
+  if (n > cap) {
+    SetLastError(kErrorInsufficientBuffer);
+    return 0;
+  }
+  for (int32_t i = 0; i < n; i++) {
+    bool ok = true;
+    uint8_t ch = UnicodeToCp1252(Rd16(src + 2 * i), &ok);
+    if (!ok && used_default) Wr32(used_default, 1);
+    Wr8(dst + i, ch);
+  }
+  return uint32_t(n);
+}
+
+HLE("kernel32.dll", GetStringTypeW, 4) {
+  uint32_t type = Arg(c, 0), src = Arg(c, 1), out = Arg(c, 3);
+  int32_t n = int32_t(Arg(c, 2));
+  if (type != kCtCtype1) return 0;
+  if (n < 0) n = int32_t(GWStr(src).size() + 1);
+  for (int32_t i = 0; i < n; i++) Wr16(out + 2 * i, CharType1(Rd16(src + 2 * i)));
+  return 1;
+}
+
+HLE("kernel32.dll", GetStringTypeA, 5) {
+  uint32_t type = Arg(c, 1), src = Arg(c, 2), out = Arg(c, 4);
+  int32_t n = int32_t(Arg(c, 3));
+  if (type != kCtCtype1) return 0;
+  if (n < 0) n = int32_t(std::strlen(g_proc->mem.ptr<const char>(src)) + 1);
+  for (int32_t i = 0; i < n; i++)
+    Wr16(out + 2 * i,
+         CharType1(Cp1252ToUnicode(g_proc->mem.read<uint8_t>(src + i))));
+  return 1;
+}
+
+HLE("kernel32.dll", LCMapStringW, 6) {
+  uint32_t flags = Arg(c, 1), src = Arg(c, 2), dst = Arg(c, 4);
+  int32_t n = int32_t(Arg(c, 3)), cap = int32_t(Arg(c, 5));
+  if (n < 0) n = int32_t(GWStr(src).size() + 1);
+  if (!cap) return uint32_t(n);
+  if (n > cap) return 0;
+  for (int32_t i = 0; i < n; i++)
+    Wr16(dst + 2 * i, MapCase(Rd16(src + 2 * i), flags));
+  return uint32_t(n);
+}
+
+HLE("kernel32.dll", LCMapStringA, 6) {
+  uint32_t flags = Arg(c, 1), src = Arg(c, 2), dst = Arg(c, 4);
+  int32_t n = int32_t(Arg(c, 3)), cap = int32_t(Arg(c, 5));
+  if (n < 0) n = int32_t(std::strlen(g_proc->mem.ptr<const char>(src)) + 1);
+  if (!cap) return uint32_t(n);
+  if (n > cap) return 0;
+  for (int32_t i = 0; i < n; i++) {
+    bool ok;
+    uint16_t u = MapCase(Cp1252ToUnicode(g_proc->mem.read<uint8_t>(src + i)),
+                         flags);
+    Wr8(dst + i, UnicodeToCp1252(u, &ok));
+  }
+  return uint32_t(n);
+}
+
+HLE("kernel32.dll", GetUserDefaultLCID, 0) { return 0x0409; }
+HLE("kernel32.dll", GetUserDefaultLangID, 0) { return 0x0409; }
+HLE("kernel32.dll", IsValidLocale, 2) { return Arg(c, 0) == 0x0409 ? 1 : 0; }
+
+HLE("kernel32.dll", EnumSystemLocalesA, 2) {
+  uint32_t buf = HeapAllocProcess(16, true);
+  PutStr(buf, "00000409");
+  CallGuest(c, Arg(c, 0), {buf});
+  g_process_heap->Free(buf);
+  return 1;
+}
+
+std::string LocaleString(uint32_t type) {
+  switch (type & 0xFFFF) {
+    case 0x0001: return "0409";            // LOCALE_ILANGUAGE
+    case 0x0002: return "English (United States)";
+    case 0x0003: return "ENU";             // LOCALE_SABBREVLANGNAME
+    case 0x0004: return "English";         // LOCALE_SNATIVELANGNAME
+    case 0x0005: return "1";               // LOCALE_ICOUNTRY
+    case 0x0006: return "United States";
+    case 0x0007: return "USA";             // LOCALE_SABBREVCTRYNAME
+    case 0x0009: return "0409";            // LOCALE_IDEFAULTLANGUAGE
+    case 0x000A: return "1";               // LOCALE_IDEFAULTCOUNTRY
+    case 0x000B: return "437";             // LOCALE_IDEFAULTCODEPAGE
+    case 0x000E: return ".";               // LOCALE_SDECIMAL
+    case 0x000F: return ",";               // LOCALE_STHOUSAND
+    case 0x0010: return "3;0";             // LOCALE_SGROUPING
+    case 0x0014: return "$";               // LOCALE_SCURRENCY
+    case 0x0015: return ".";               // LOCALE_SMONDECIMALSEP
+    case 0x0016: return ",";               // LOCALE_SMONTHOUSANDSEP
+    case 0x0018: return "3;0";
+    case 0x0019: return "2";
+    case 0x001A: return "2";
+    case 0x001B: return "0";
+    case 0x001C: return "0";
+    case 0x0050: return "";                // LOCALE_SPOSITIVESIGN
+    case 0x0051: return "-";               // LOCALE_SNEGATIVESIGN
+    case 0x0059: return "en";              // LOCALE_SISO639LANGNAME
+    case 0x005A: return "US";              // LOCALE_SISO3166CTRYNAME
+    case 0x1001: return "English";         // LOCALE_SENGLANGUAGE
+    case 0x1002: return "United States";   // LOCALE_SENGCOUNTRY
+    case 0x1004: return "1252";            // LOCALE_IDEFAULTANSICODEPAGE
+    default: return {};
+  }
+}
+
+// GetLocaleInfoA/W(lcid, type, buf, cap).
+uint32_t LocaleInfo(Ctx& c, bool wide) {
+  std::string s = LocaleString(Arg(c, 1));
+  if (s.empty() && (Arg(c, 1) & 0xFFFF) != 0x0050) {
+    WarnF("GetLocaleInfo%c(%X, %X): unknown type\n", wide ? 'W' : 'A', Arg(c, 0),
+          Arg(c, 1));
+    SetLastError(kErrorInvalidParameter);
+    return 0;
+  }
+  return PutCounted(Arg(c, 2), Arg(c, 3), s, wide);
+}
+
+HLE("kernel32.dll", GetLocaleInfoA, 4) { return LocaleInfo(c, false); }
+HLE("kernel32.dll", GetLocaleInfoW, 4) { return LocaleInfo(c, true); }
+
+}  // namespace
+}  // namespace hle
+}  // namespace recomp
