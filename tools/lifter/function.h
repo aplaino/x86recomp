@@ -64,6 +64,15 @@ Flow Classify(const Program& p, const Function& f, const Insn& in,
 void BuildFunction(const Program& p, const Decoder& dec, uint32_t entry,
                    Function* out);
 
+// Targets of a switch jump table that Ghidra did not export, recognised
+// in f from MSVC's bounds-checked forms ending at the indirect jmp `jmp`
+// (other instructions may be scheduled in between):
+//   cmp r, N; ja default; jmp [r*4+table]
+//   cmp r, N; ja default; movzx r2, byte [r+index]; jmp [r2*4+table]
+// False if `jmp` is not one of them or a target leaves its module's .text.
+bool RecoverJumpTable(const Program& p, const Function& f, const Insn& jmp,
+                      std::vector<uint32_t>* targets);
+
 // A direct branch target that is another (strong) function entry: reached
 // by a tail call, not lifted into f. See Program::weak.
 bool IsOtherEntry(const Program& p, const Function& f, uint32_t t);

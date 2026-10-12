@@ -195,12 +195,31 @@ int main(int argc, char** argv) {
       for (uint32_t a = sec.va; a + 4 <= sec.va + sec.vsize; a += 4)
         candidate(&m, p.mem.read<uint32_t>(a), &from_data_ptrs);
     }
+  size_t recovered_tables = 0;
   while (!work.empty()) {
     uint32_t e = work.front();
     work.pop_front();
     if (!done.insert(e).second) continue;
     lifter::Function f;
     lifter::BuildFunction(p, dec, e, &f);
+    // Switch tables Ghidra did not export: recover them and rebuild, as
+    // their targets may hold further switches.
+    for (bool more = true; more;) {
+      more = false;
+      for (const auto& [va, in] : f.insns) {
+        std::vector<uint32_t> targets;
+        if (p.jumptables.count(va) ||
+            !lifter::RecoverJumpTable(p, f, in, &targets))
+          continue;
+        p.jumptables[va] = std::move(targets);
+        recovered_tables++;
+        more = true;
+      }
+      if (more) {
+        f = {};
+        lifter::BuildFunction(p, dec, e, &f);
+      }
+    }
     for (const auto* s : {&f.direct_calls, &f.tail_calls})
       for (uint32_t t : *s) {
         if (!p.InText(t)) continue;
@@ -221,6 +240,8 @@ int main(int argc, char** argv) {
               "%zu via code pointers, %zu via data pointers; %zu weak)\n",
               p.entries.size(), initial, p.entries.size() - initial,
               from_code_ptrs, from_data_ptrs, p.weak.size());
+  std::printf("jump tables: %zu from Ghidra, %zu recovered\n",
+              p.jumptables.size() - recovered_tables, recovered_tables);
 
   // Pass 2: final CFGs and emission.
   std::filesystem::create_directories(outdir);

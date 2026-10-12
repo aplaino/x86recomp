@@ -1,5 +1,6 @@
 #include "function.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <deque>
 
@@ -105,6 +106,108 @@ Flow Classify(const Program& p, const Function& f, const Insn& in,
     return Flow::Branch;
   }
   return Flow::Fall;
+}
+
+namespace {
+
+ZydisRegister Full(ZydisRegister r) {
+  return ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LEGACY_32, r);
+}
+
+bool WritesReg(const Insn& in, ZydisRegister r) {
+  for (int i = 0; i < in.d.operand_count; i++)
+    if (in.ops[i].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+        (in.ops[i].actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) &&
+        Full(in.ops[i].reg.value) == Full(r))
+      return true;
+  return false;
+}
+
+bool WritesFlags(const Insn& in) {
+  return in.d.cpu_flags &&
+         (in.d.cpu_flags->modified | in.d.cpu_flags->set_0 |
+          in.d.cpu_flags->set_1 | in.d.cpu_flags->undefined) != 0;
+}
+
+// The decoded instruction of f that ends at va, if any.
+const Insn* Before(const Function& f, uint32_t va) {
+  auto it = f.insns.lower_bound(va);
+  if (it == f.insns.begin()) return nullptr;
+  --it;
+  return it->second.ok && it->second.next() == va ? &it->second : nullptr;
+}
+
+}  // namespace
+
+bool RecoverJumpTable(const Program& p, const Function& f, const Insn& jmp,
+                      std::vector<uint32_t>* targets) {
+  const auto& m = jmp.ops[0];
+  if (!jmp.ok || jmp.d.mnemonic != ZYDIS_MNEMONIC_JMP ||
+      m.type != ZYDIS_OPERAND_TYPE_MEMORY || m.mem.base != ZYDIS_REGISTER_NONE ||
+      m.mem.index == ZYDIS_REGISTER_NONE || m.mem.scale != 4)
+    return false;
+  // MSVC places the tables in .text after the function.
+  const Module* mod = p.TextOf(jmp.va);
+  auto in_text = [&](uint32_t a, uint32_t n) {
+    return n && p.TextOf(a) == mod && p.TextOf(a + n - 1) == mod;
+  };
+  // Walk back from the jmp through the straight-line code before it
+  // (the compiler schedules unrelated instructions in between): an
+  // optional movzx from the byte index table, the ja, then the cmp that
+  // sets its flags.
+  ZydisRegister r = m.mem.index;
+  uint32_t index = 0;
+  bool two_level = false, seen_ja = false;
+  const Insn* in = &jmp;
+  for (int steps = 0; steps < 8; steps++) {
+    in = Before(f, in->va);
+    if (!in) return false;
+    const auto& o0 = in->ops[0];
+    const auto& o1 = in->ops[1];
+    if (!seen_ja) {
+      if (in->d.mnemonic == ZYDIS_MNEMONIC_JNBE) {
+        seen_ja = true;
+      } else if (!two_level && in->d.mnemonic == ZYDIS_MNEMONIC_MOVZX &&
+                 o0.type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                 Full(o0.reg.value) == Full(r) &&
+                 o1.type == ZYDIS_OPERAND_TYPE_MEMORY && o1.size == 8 &&
+                 o1.mem.base != ZYDIS_REGISTER_NONE &&
+                 o1.mem.index == ZYDIS_REGISTER_NONE) {
+        two_level = true;
+        index = static_cast<uint32_t>(o1.mem.disp.value);
+        r = o1.mem.base;
+      } else if (WritesReg(*in, r) || in->d.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE) {
+        return false;
+      }
+      continue;
+    }
+    if (!WritesFlags(*in)) {
+      if (WritesReg(*in, r)) return false;
+      continue;
+    }
+    if (in->d.mnemonic != ZYDIS_MNEMONIC_CMP ||
+        o0.type != ZYDIS_OPERAND_TYPE_REGISTER || Full(o0.reg.value) != Full(r) ||
+        o1.type != ZYDIS_OPERAND_TYPE_IMMEDIATE || o1.imm.value.u >= 4096)
+      return false;
+    uint32_t cases = static_cast<uint32_t>(o1.imm.value.u) + 1;
+    if (two_level) {
+      // A byte index table picks the entry.
+      if (!in_text(index, cases)) return false;
+      uint32_t n = cases;
+      cases = 0;
+      for (uint32_t i = 0; i < n; i++)
+        cases = std::max<uint32_t>(cases, p.mem.read<uint8_t>(index + i) + 1u);
+    }
+    if (!in_text(static_cast<uint32_t>(m.mem.disp.value), cases * 4)) return false;
+    targets->clear();
+    for (uint32_t i = 0; i < cases; i++) {
+      uint32_t t = p.mem.read<uint32_t>(static_cast<uint32_t>(m.mem.disp.value) + 4 * i);
+      if (p.TextOf(t) != mod) return false;
+      targets->push_back(t);
+    }
+    return true;
+  }
+  return false;
 }
 
 void BuildFunction(const Program& p, const Decoder& dec, uint32_t entry,
