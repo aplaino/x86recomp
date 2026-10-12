@@ -83,7 +83,8 @@ void MakeDirs(const std::string& path) {
 }
 
 std::string ReportPath(const char* kind) {
-  std::string dir = DataDir() + "/" + kind + "s";
+  std::string k = kind;  // crash -> crashes, hang -> hangs
+  std::string dir = DataDir() + "/" + k + (k.ends_with("sh") ? "es" : "s");
   MakeDirs(dir);
   char name[64];
   std::snprintf(name, sizeof name, "/%s-%ld-%d.txt", kind, long(std::time(nullptr)),

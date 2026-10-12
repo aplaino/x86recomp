@@ -13,12 +13,14 @@
 #include <cmath>
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
 #include <map>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -53,8 +55,10 @@ bool Background() {
 enum : uint32_t {
   WM_CREATE = 0x0001, WM_DESTROY = 0x0002, WM_MOVE = 0x0003,
   WM_SIZE = 0x0005, WM_ACTIVATE = 0x0006, WM_SETFOCUS = 0x0007,
-  WM_KILLFOCUS = 0x0008, WM_GETTEXTLENGTH = 0x000E, WM_CLOSE = 0x0010,
+  WM_KILLFOCUS = 0x0008, WM_SETTEXT = 0x000C, WM_GETTEXT = 0x000D,
+  WM_GETTEXTLENGTH = 0x000E, WM_CLOSE = 0x0010,
   WM_QUIT = 0x0012, WM_ERASEBKGND = 0x0014, WM_SHOWWINDOW = 0x0018,
+  WM_SETFONT = 0x0030, WM_GETFONT = 0x0031, WM_TIMER = 0x0113,
   WM_ACTIVATEAPP = 0x001C, WM_NCCREATE = 0x0081, WM_NCDESTROY = 0x0082,
   WM_NCHITTEST = 0x0084, WM_KEYDOWN = 0x0100, WM_KEYUP = 0x0101, WM_CHAR = 0x0102,
   WM_SYSKEYDOWN = 0x0104, WM_SYSKEYUP = 0x0105, WM_SYSCHAR = 0x0106,
@@ -90,6 +94,10 @@ struct Window {
   bool minimized = false;      // as the game asked (IsIconic)
   int mode_w = 0, mode_h = 0;  // DirectDraw exclusive mode, see header
   SDL_Window* sdl = nullptr;
+  // Built-in controls (see "built-in control classes"): the text is
+  // `title`; selection, font, image and check state are kept here.
+  uint32_t sel_lo = 0, sel_hi = 0, font = 0, image = 0, check = 0;
+  uint32_t limit = 30000;  // edit text limit (EM_SETLIMITTEXT)
 };
 
 struct Msg {
@@ -103,10 +111,18 @@ struct Queue {
   uint32_t quit_code = 0;
 };
 
+// SetTimer: WM_TIMER is not queued but synthesised when the owning
+// thread's queue has nothing else for the caller, as on Windows.
+struct Timer {
+  uint32_t hwnd, id, elapse, proc, tid;
+  int64_t due;  // TickCount() of the next WM_TIMER
+};
+
 std::recursive_mutex g_mu;
 std::map<std::string, WndClass> g_classes;
 std::map<uint32_t, Window> g_windows;
 std::map<uint32_t, Queue> g_queues;  // by tid
+std::vector<Timer> g_timers;
 std::condition_variable_any g_queue_cv;
 uint32_t g_next_hwnd = 0x00010010;
 uint16_t g_next_atom = 0xC100;
@@ -500,6 +516,15 @@ bool TakeMessage(uint32_t hwnd, uint32_t lo, uint32_t hi, bool remove, Msg* out)
     if (remove) q.quit = false;
     return true;
   }
+  const uint32_t now = TickCount();
+  for (Timer& t : g_timers) {
+    Msg m{t.hwnd, WM_TIMER, t.id, t.proc, now, g_mouse_x, g_mouse_y};
+    if (t.tid != CurrentThread()->tid || int64_t(now) < t.due || !Matches(m, hwnd, lo, hi))
+      continue;
+    *out = m;
+    if (remove) t.due = int64_t(now) + t.elapse;
+    return true;
+  }
   return false;
 }
 
@@ -765,6 +790,21 @@ std::string ClassKey(uint32_t name) {
   return name < 0x10000 ? "#" + std::to_string(name) : Lower(GStr(name));
 }
 
+// The system control classes every process has (see "built-in control
+// classes" below). Their window procedures are host handlers behind
+// thunks, so games can subclass them and chain with CallWindowProc.
+void EnsureSystemClasses() {
+  std::lock_guard<std::recursive_mutex> l(g_mu);
+  if (g_classes.count("edit")) return;
+  for (const char* n : {"static", "edit", "button"}) {
+    WndClass k;
+    k.name = n;
+    k.wndproc = ThunkFor("user32.dll", std::string("<") + n + ">");
+    k.atom = g_next_atom++;
+    g_classes[n] = k;
+  }
+}
+
 HLE("user32.dll", RegisterClassA, 1) {
   uint32_t wc = Arg(c, 0);
   WndClass k;
@@ -802,6 +842,7 @@ HLE("user32.dll", CreateWindowExA, 12) {
   int32_t x = int32_t(Arg(c, 4)), y = int32_t(Arg(c, 5)), w = int32_t(Arg(c, 6)),
           h = int32_t(Arg(c, 7));
   std::string cls = ClassKey(cls_va);
+  EnsureSystemClasses();
   Window win;
   {
     std::lock_guard<std::recursive_mutex> l(g_mu);
@@ -900,6 +941,7 @@ HLE("user32.dll", DestroyWindow, 1) {
     w->sdl = nullptr;
     w->destroyed = true;
   }
+  std::erase_if(g_timers, [&](const Timer& t) { return t.hwnd == hwnd; });
   if (g_focus == hwnd) g_focus = 0;
   if (g_active == hwnd) g_active = 0;
   return 1;
@@ -1329,9 +1371,47 @@ HLE("user32.dll", SendMessageA, 4) {
 
 HLE("user32.dll", DispatchMessageA, 1) {
   uint32_t m = Arg(c, 0);
-  uint32_t hwnd = Rd32(m);
+  uint32_t hwnd = Rd32(m), msg = Rd32(m + 4);
+  // WM_TIMER from a timer with a TIMERPROC goes to the procedure.
+  if (msg == WM_TIMER && Rd32(m + 12))
+    return CallGuest(c, Rd32(m + 12), {hwnd, msg, Rd32(m + 8), Rd32(m + 16)});
   if (!hwnd) return 0;
-  return Send(hwnd, Rd32(m + 4), Rd32(m + 8), Rd32(m + 12));
+  return Send(hwnd, msg, Rd32(m + 8), Rd32(m + 12));
+}
+
+// ---- timers ------------------------------------------------------------------------
+
+HLE("user32.dll", SetTimer, 4) {
+  uint32_t hwnd = Arg(c, 0), id = Arg(c, 1), elapse = Arg(c, 2), proc = Arg(c, 3);
+  std::lock_guard<std::recursive_mutex> l(g_mu);
+  uint32_t tid = CurrentThread()->tid;
+  if (hwnd) {
+    Window* w = Win(hwnd);
+    if (!w) return 0;
+    tid = w->tid;
+  } else {
+    // A thread timer: the system picks the id.
+    static uint32_t next_id = 0x7F00;
+    id = ++next_id;
+  }
+  elapse = std::clamp<uint32_t>(elapse, 10, 0x7FFFFFFF);  // USER_TIMER_MINIMUM
+  for (Timer& t : g_timers)
+    if (t.hwnd == hwnd && t.id == id) {  // same timer: reset it
+      t = Timer{hwnd, id, elapse, proc, tid, int64_t(TickCount()) + elapse};
+      return hwnd ? 1 : id;
+    }
+  g_timers.push_back(Timer{hwnd, id, elapse, proc, tid, int64_t(TickCount()) + elapse});
+  return hwnd ? 1 : id;
+}
+
+HLE("user32.dll", KillTimer, 2) {
+  uint32_t hwnd = Arg(c, 0), id = Arg(c, 1);
+  std::lock_guard<std::recursive_mutex> l(g_mu);
+  auto it = std::find_if(g_timers.begin(), g_timers.end(),
+                         [&](const Timer& t) { return t.hwnd == hwnd && t.id == id; });
+  if (it == g_timers.end()) return 0;
+  g_timers.erase(it);
+  return 1;
 }
 
 HLE("user32.dll", TranslateMessage, 1) {
@@ -1398,6 +1478,186 @@ HLE("user32.dll", DefWindowProcA, 4) {
     default:
       return 0;
   }
+}
+
+// ---- built-in control classes ------------------------------------------------------
+//
+// "static", "edit" and "button" exist in every Windows process. Nothing is
+// drawn; the text (the window title) and state are kept so the game can
+// read them back. A read-only multi-line edit is a log the game appends to
+// (Quake 3-style console windows): appended text is echoed to stdout,
+// which is where that log is visible here.
+
+constexpr uint32_t ES_MULTILINE = 0x0004, ES_READONLY = 0x0800;
+constexpr uint32_t EM_GETSEL = 0x00B0, EM_SETSEL = 0x00B1, EM_LINESCROLL = 0x00B6,
+                   EM_SCROLLCARET = 0x00B7, EM_GETLINECOUNT = 0x00BA,
+                   EM_REPLACESEL = 0x00C2, EM_SETLIMITTEXT = 0x00C5,
+                   EM_SETREADONLY = 0x00CF;
+constexpr uint32_t BM_GETCHECK = 0x00F0, BM_SETCHECK = 0x00F1, BM_GETSTATE = 0x00F2;
+constexpr uint32_t STM_SETICON = 0x0170, STM_GETICON = 0x0171, STM_SETIMAGE = 0x0172,
+                   STM_GETIMAGE = 0x0173;
+
+uint32_t CallDefWindowProc(Ctx& c, uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp) {
+  uint32_t def = ProcAddress(ModuleHandle("user32.dll"), "DefWindowProcA");
+  return CallGuest(c, def, {hwnd, msg, wp, lp});
+}
+
+// Messages every control handles the same way; false if `msg` is not one.
+bool CommonControlMsg(Window& w, uint32_t msg, uint32_t wp, uint32_t lp, uint32_t* r) {
+  switch (msg) {
+    case WM_NCCREATE: *r = 1; return true;
+    case WM_CREATE: *r = 0; return true;
+    case WM_SETTEXT: w.title = lp ? GStr(lp) : ""; *r = 1; return true;
+    case WM_GETTEXT: {
+      if (!wp) { *r = 0; return true; }
+      std::string t = w.title.substr(0, wp - 1);
+      PutStr(lp, t);
+      *r = uint32_t(t.size());
+      return true;
+    }
+    case WM_GETTEXTLENGTH: *r = uint32_t(w.title.size()); return true;
+    case WM_SETFONT: w.font = wp; *r = 0; return true;
+    case WM_GETFONT: *r = w.font; return true;
+    default: return false;
+  }
+}
+
+// Writes s to stdout with CRLF and lone CR as plain newlines.
+void EchoLog(const std::string& s) {
+  std::string out;
+  for (size_t i = 0; i < s.size(); i++) {
+    if (s[i] == '\r') {
+      if (i + 1 < s.size() && s[i + 1] == '\n') continue;
+      out += '\n';
+    } else {
+      out += s[i];
+    }
+  }
+  std::fwrite(out.data(), 1, out.size(), stdout);
+  std::fflush(stdout);
+}
+
+// Unknown control messages are reported once each and return 0.
+void UnhandledControlMsg(const char* cls, uint32_t msg) {
+  static std::set<std::pair<std::string, uint32_t>> seen;
+  if (seen.insert({cls, msg}).second)
+    WarnF("%s control: message %04X not modelled, returning 0\n", cls, msg);
+}
+
+HLE_NAMED("user32.dll", "<static>", StaticWndProc, 4) {
+  uint32_t hwnd = Arg(c, 0), msg = Arg(c, 1), wp = Arg(c, 2), lp = Arg(c, 3), r = 0;
+  {
+    std::lock_guard<std::recursive_mutex> l(g_mu);
+    Window* w = Win(hwnd);
+    if (!w) return 0;
+    if (CommonControlMsg(*w, msg, wp, lp, &r)) return r;
+    switch (msg) {
+      case STM_SETIMAGE: case STM_SETICON: r = w->image; w->image = msg == STM_SETICON ? wp : lp; return r;
+      case STM_GETIMAGE: case STM_GETICON: return w->image;
+    }
+    if (msg >= 0x0170 && msg <= 0x017F) {
+      UnhandledControlMsg("static", msg);
+      return 0;
+    }
+  }
+  return CallDefWindowProc(c, hwnd, msg, wp, lp);
+}
+
+HLE_NAMED("user32.dll", "<button>", ButtonWndProc, 4) {
+  uint32_t hwnd = Arg(c, 0), msg = Arg(c, 1), wp = Arg(c, 2), lp = Arg(c, 3), r = 0;
+  {
+    std::lock_guard<std::recursive_mutex> l(g_mu);
+    Window* w = Win(hwnd);
+    if (!w) return 0;
+    if (CommonControlMsg(*w, msg, wp, lp, &r)) return r;
+    switch (msg) {
+      case BM_GETCHECK: return w->check;
+      case BM_SETCHECK: w->check = wp; return 0;
+      case BM_GETSTATE: return w->check;
+    }
+    if (msg >= 0x00F0 && msg <= 0x00FF) {
+      UnhandledControlMsg("button", msg);
+      return 0;
+    }
+  }
+  return CallDefWindowProc(c, hwnd, msg, wp, lp);
+}
+
+HLE_NAMED("user32.dll", "<edit>", EditWndProc, 4) {
+  uint32_t hwnd = Arg(c, 0), msg = Arg(c, 1), wp = Arg(c, 2), lp = Arg(c, 3), r = 0;
+  std::string echo;
+  {
+    std::lock_guard<std::recursive_mutex> l(g_mu);
+    Window* w = Win(hwnd);
+    if (!w) return 0;
+    if (msg == WM_SETTEXT) w->sel_lo = w->sel_hi = 0;
+    if (CommonControlMsg(*w, msg, wp, lp, &r)) return r;
+    const uint32_t len = uint32_t(w->title.size());
+    w->sel_lo = std::min(w->sel_lo, len);
+    w->sel_hi = std::min(w->sel_hi, len);
+    // Replaces the selection with t (cut to the text limit), caret after it.
+    auto replace = [&](const std::string& t) {
+      uint32_t room = w->limit - std::min(w->limit, len - (w->sel_hi - w->sel_lo));
+      std::string ins = t.substr(0, room);
+      w->title.replace(w->sel_lo, w->sel_hi - w->sel_lo, ins);
+      w->sel_lo = w->sel_hi = w->sel_lo + uint32_t(ins.size());
+      return ins;
+    };
+    switch (msg) {
+      case EM_GETSEL:
+        if (wp) Wr32(wp, w->sel_lo);
+        if (lp) Wr32(lp, w->sel_hi);
+        return MkLparam(int(std::min(w->sel_lo, 0xFFFFu)), int(std::min(w->sel_hi, 0xFFFFu)));
+      case EM_SETSEL: {
+        int32_t a = int32_t(wp), b = int32_t(lp);
+        if (a == -1) {  // remove the selection, keep the caret
+          w->sel_lo = w->sel_hi;
+          return 1;
+        }
+        uint32_t ua = a < 0 ? len : std::min(uint32_t(a), len);
+        uint32_t ub = b < 0 ? len : std::min(uint32_t(b), len);
+        w->sel_lo = std::min(ua, ub);
+        w->sel_hi = std::max(ua, ub);
+        return 1;
+      }
+      case EM_REPLACESEL: {
+        std::string ins = replace(lp ? GStr(lp) : "");
+        if ((w->style & (ES_MULTILINE | ES_READONLY)) == (ES_MULTILINE | ES_READONLY))
+          echo = ins;
+        break;
+      }
+      case EM_LINESCROLL: return (w->style & ES_MULTILINE) ? 1 : 0;
+      case EM_SCROLLCARET: return 1;
+      case EM_GETLINECOUNT:
+        return 1 + uint32_t(std::count(w->title.begin(), w->title.end(), '\n'));
+      case EM_SETLIMITTEXT:
+        w->limit = wp ? wp : ((w->style & ES_MULTILINE) ? 0xFFFFFFFFu : 0x7FFFFFFEu);
+        return 0;
+      case EM_SETREADONLY:
+        w->style = wp ? (w->style | ES_READONLY) : (w->style & ~ES_READONLY);
+        return 1;
+      case WM_CHAR:
+        if (w->style & ES_READONLY) return 0;
+        if (wp == 8) {  // backspace: the selection, or the character before
+          if (w->sel_lo == w->sel_hi && w->sel_lo > 0) w->sel_lo--;
+          replace("");
+        } else if (wp >= 32 && wp < 256) {
+          replace(std::string(1, char(wp)));
+        }
+        return 0;
+      default:
+        if (msg >= 0x00B0 && msg <= 0x00DF) {
+          UnhandledControlMsg("edit", msg);
+          return 0;
+        }
+        break;
+    }
+  }
+  if (msg == EM_REPLACESEL) {
+    if (!echo.empty()) EchoLog(echo);
+    return 0;
+  }
+  return CallDefWindowProc(c, hwnd, msg, wp, lp);
 }
 
 HLE("user32.dll", MsgWaitForMultipleObjects, 5) {

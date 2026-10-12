@@ -1,8 +1,9 @@
 // kernel32: handles, guest<->host paths, files, directories, find.
 //
 // Guest paths are Windows paths. GuestGameDir() ("C:\Dungeon Siege\...")
-// maps onto the game install (read-mostly); any other path maps below the
-// per-user data directory ($XDG_DATA_HOME/<id>/drive_c/...), where saves and
+// maps onto the game install, read-only, with writes going to an overlay
+// (see HostPath); any other path maps below the per-user data directory
+// ($XDG_DATA_HOME/<id>/drive_c/...), where saves and
 // settings end up. Lookups are case-insensitive like NTFS.
 
 #include <dirent.h>
@@ -14,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <set>
 #include <mutex>
 #include <vector>
 
@@ -48,8 +50,8 @@ struct FileObject : KObject {
 
 struct FindObject : KObject {
   FindObject() : KObject(Type::Find) {}
-  std::vector<std::string> names;  // matching entries (guest spelling)
-  std::string host_dir;
+  // Matching entries: host directory and name (as on disk).
+  std::vector<std::pair<std::string, std::string>> entries;
   size_t next = 0;
 };
 
@@ -133,18 +135,78 @@ std::string GuestCurrentDir() {
   return g_cwd.empty() ? GuestGameDir() : g_cwd;
 }
 
-std::string HostPath(const std::string& guest_path) {
-  std::string g = AbsGuest(guest_path);
+namespace {
+
+std::string OverlayRoot() { return DataDir() + "/install"; }
+
+// Components below the guest install directory, or false if g (absolute)
+// is not inside it.
+bool InstallComponents(const std::string& g, std::vector<std::string>* comps) {
   std::string lg = win32::Lower(g);
   std::string lroot = win32::Lower(GuestGameDir());
-  if (lg == lroot || lg.rfind(lroot + "\\", 0) == 0) {
-    auto comps = Components("C:\\" + g.substr(std::min(g.size(), lroot.size() + 1)));
-    return Resolve(g_proc->game_dir, comps);
+  if (lg != lroot && lg.rfind(lroot + "\\", 0) != 0) return false;
+  *comps = Components("C:\\" + g.substr(std::min(g.size(), lroot.size() + 1)));
+  return true;
+}
+
+bool Exists(const std::string& host, struct stat* st = nullptr) {
+  struct stat s;
+  return stat(host.c_str(), st ? st : &s) == 0;
+}
+
+// Copies regular file `from` to `to` (created or truncated).
+bool CopyHostFile(const std::string& from, const std::string& to) {
+  int in = open(from.c_str(), O_RDONLY | O_CLOEXEC);
+  if (in < 0) return false;
+  int out = open(to.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+  if (out < 0) {
+    close(in);
+    return false;
+  }
+  char buf[65536];
+  ssize_t n;
+  bool ok = true;
+  while ((n = read(in, buf, sizeof buf)) > 0)
+    if (write(out, buf, size_t(n)) != n) ok = false;
+  close(in);
+  close(out);
+  return ok && n == 0;
+}
+
+}  // namespace
+
+std::string HostPath(const std::string& guest_path, PathAccess access) {
+  std::string g = AbsGuest(guest_path);
+  std::vector<std::string> comps;
+  if (InstallComponents(g, &comps)) {
+    std::string over = Resolve(OverlayRoot(), comps);
+    if (access == PathAccess::kRead) {
+      return Exists(over) ? over : Resolve(g_proc->game_dir, comps);
+    }
+    // Mirror the parent directory into the overlay if the guest sees it.
+    std::string parent = over.substr(0, over.find_last_of('/'));
+    std::vector<std::string> pcomps(comps.begin(), comps.end() - (comps.empty() ? 0 : 1));
+    struct stat st;
+    if (!Exists(parent) && Exists(Resolve(g_proc->game_dir, pcomps), &st) &&
+        S_ISDIR(st.st_mode))
+      MakeDirs(parent);
+    std::string inst = Resolve(g_proc->game_dir, comps);
+    if (access == PathAccess::kUpdate && !Exists(over) && Exists(inst, &st) &&
+        S_ISREG(st.st_mode))
+      CopyHostFile(inst, over);
+    return over;
   }
   // Everything else lives in the per-user tree, by drive letter.
   std::string root = UserDataRoot();
   if (g[0] != 'C') root += std::string("/drive_") + char(std::tolower(g[0]));
   return Resolve(root, Components(g));
+}
+
+std::vector<std::string> HostDirs(const std::string& guest_dir) {
+  std::string g = AbsGuest(guest_dir);
+  std::vector<std::string> comps;
+  if (!InstallComponents(g, &comps)) return {HostPath(g)};
+  return {Resolve(OverlayRoot(), comps), Resolve(g_proc->game_dir, comps)};
 }
 
 uint32_t NewHandle(std::shared_ptr<KObject> obj) {
@@ -251,6 +313,11 @@ HLE("kernel32.dll", CreateFileA, 7) {
   int flags = write ? (read ? O_RDWR : O_WRONLY) : O_RDONLY;
   struct stat st;
   bool exists = stat(path.c_str(), &st) == 0;
+  // Writes never touch the install (see HostPath): truncating opens get a
+  // fresh overlay file, others a copy of the install's.
+  if (write && !(exists && S_ISDIR(st.st_mode)))
+    path = HostPath(gpath, disp == 2 || disp == 5 || !exists ? PathAccess::kWrite
+                                                             : PathAccess::kUpdate);
   switch (disp) {
     case 1: if (exists) { SetLastError(kErrorFileExists); return kInvalidHandle; }
             flags |= O_CREAT; break;                  // CREATE_NEW
@@ -338,6 +405,16 @@ HLE("kernel32.dll", SetFilePointer, 4) {
   return uint32_t(r);
 }
 
+HLE("kernel32.dll", SetEndOfFile, 1) {
+  int fd = FdOf(Arg(c, 0));
+  off_t pos = fd < 0 ? -1 : lseek(fd, 0, SEEK_CUR);
+  if (pos < 0 || ftruncate(fd, pos) != 0) {
+    SetLastError(fd < 0 ? kErrorInvalidHandle : ErrnoToWin(errno));
+    return 0;
+  }
+  return 1;
+}
+
 HLE("kernel32.dll", GetFileSize, 2) {
   int fd = FdOf(Arg(c, 0));
   struct stat st;
@@ -381,18 +458,62 @@ HLE("kernel32.dll", GetFileAttributesA, 1) {
 
 HLE("kernel32.dll", SetFileAttributesA, 2) { return 1; }
 
+// A file that exists only in the (read-only) install cannot be deleted
+// or moved away.
+bool InstallOnly(const std::string& gpath) {
+  return HostPath(gpath) != HostPath(gpath, PathAccess::kWrite);
+}
+
 HLE("kernel32.dll", DeleteFileA, 1) {
-  if (unlink(HostPath(GStr(Arg(c, 0))).c_str()) != 0) {
+  std::string g = GStr(Arg(c, 0));
+  if (InstallOnly(g) && Exists(HostPath(g))) {
+    SetLastError(kErrorAccessDenied);
+    return 0;
+  }
+  if (unlink(HostPath(g, PathAccess::kWrite).c_str()) != 0) {
     SetLastError(ErrnoToWin(errno));
     return 0;
   }
   return 1;
 }
 
+HLE("kernel32.dll", CopyFileA, 3) {
+  std::string from = HostPath(GStr(Arg(c, 0)));
+  std::string to = HostPath(GStr(Arg(c, 1)), PathAccess::kWrite);
+  int in = open(from.c_str(), O_RDONLY | O_CLOEXEC);
+  if (in < 0) {
+    SetLastError(ErrnoToWin(errno));
+    return 0;
+  }
+  int flags = O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | (Arg(c, 2) ? O_EXCL : 0);
+  int out = open(to.c_str(), flags, 0644);
+  if (out < 0) {
+    SetLastError(errno == EEXIST ? 80 /* ERROR_FILE_EXISTS */ : ErrnoToWin(errno));
+    close(in);
+    return 0;
+  }
+  char buf[65536];
+  ssize_t n;
+  bool ok = true;
+  while ((n = read(in, buf, sizeof buf)) > 0)
+    if (write(out, buf, size_t(n)) != n) ok = false;
+  if (n < 0) ok = false;
+  close(in);
+  close(out);
+  if (!ok) SetLastError(ErrnoToWin(errno));
+  return ok ? 1 : 0;
+}
+
 HLE("kernel32.dll", MoveFileA, 2) {
-  std::string from = HostPath(GStr(Arg(c, 0))), to = HostPath(GStr(Arg(c, 1)));
+  std::string gfrom = GStr(Arg(c, 0));
+  if (InstallOnly(gfrom) && Exists(HostPath(gfrom))) {
+    SetLastError(kErrorAccessDenied);
+    return 0;
+  }
+  std::string from = HostPath(gfrom, PathAccess::kWrite);
+  std::string to = HostPath(GStr(Arg(c, 1)), PathAccess::kWrite);
   struct stat st;
-  if (stat(to.c_str(), &st) == 0) {
+  if (stat(HostPath(GStr(Arg(c, 1))).c_str(), &st) == 0) {
     SetLastError(kErrorAlreadyExists);
     return 0;
   }
@@ -404,7 +525,12 @@ HLE("kernel32.dll", MoveFileA, 2) {
 }
 
 HLE("kernel32.dll", CreateDirectoryA, 2) {
-  std::string path = HostPath(GStr(Arg(c, 0)));
+  std::string g = GStr(Arg(c, 0));
+  if (Exists(HostPath(g))) {
+    SetLastError(kErrorAlreadyExists);
+    return 0;
+  }
+  std::string path = HostPath(g, PathAccess::kWrite);
   MakeDirs(path.substr(0, path.find_last_of('/')));
   if (mkdir(path.c_str(), 0755) != 0) {
     SetLastError(errno == EEXIST ? kErrorAlreadyExists : ErrnoToWin(errno));
@@ -414,7 +540,7 @@ HLE("kernel32.dll", CreateDirectoryA, 2) {
 }
 
 HLE("kernel32.dll", RemoveDirectoryA, 1) {
-  if (rmdir(HostPath(GStr(Arg(c, 0))).c_str()) != 0) {
+  if (rmdir(HostPath(GStr(Arg(c, 0)), PathAccess::kWrite).c_str()) != 0) {
     SetLastError(ErrnoToWin(errno));
     return 0;
   }
@@ -463,7 +589,8 @@ HLE("kernel32.dll", GetTempFileNameA, 4) {
   full += name;
   PutStr(Arg(c, 3), full);
   if (!Arg(c, 2)) {
-    int fd = open(HostPath(full).c_str(), O_CREAT | O_WRONLY | O_CLOEXEC, 0644);
+    int fd = open(HostPath(full, PathAccess::kWrite).c_str(),
+                  O_CREAT | O_WRONLY | O_CLOEXEC, 0644);
     if (fd >= 0) close(fd);
   }
   return unique;
@@ -490,23 +617,25 @@ HLE("kernel32.dll", FindFirstFileA, 2) {
   size_t s = pattern.find_last_of('\\');
   std::string gdir = pattern.substr(0, s), mask = pattern.substr(s + 1);
   if (gdir.size() == 2) gdir += '\\';
-  std::string hdir = HostPath(gdir);
   auto f = std::make_shared<FindObject>();
-  f->host_dir = hdir;
-  if (DIR* d = opendir(hdir.c_str())) {
-    std::string lmask = Lower(mask);
-    if (lmask == "*.*") lmask = "*";
+  std::string lmask = Lower(mask);
+  if (lmask == "*.*") lmask = "*";
+  std::set<std::string> seen;  // lower case: the overlay hides the install
+  for (const std::string& hdir : HostDirs(gdir)) {
+    DIR* d = opendir(hdir.c_str());
+    if (!d) continue;
     while (dirent* e = readdir(d)) {
-      if (fnmatch(lmask.c_str(), Lower(e->d_name).c_str(), 0) == 0)
-        f->names.push_back(e->d_name);
+      std::string ln = Lower(e->d_name);
+      if (fnmatch(lmask.c_str(), ln.c_str(), 0) == 0 && seen.insert(ln).second)
+        f->entries.push_back({hdir, e->d_name});
     }
     closedir(d);
   }
-  if (f->names.empty()) {
+  if (f->entries.empty()) {
     SetLastError(kErrorFileNotFound);
     return kInvalidHandle;
   }
-  FillFindData(Arg(c, 1), hdir, f->names[0]);
+  FillFindData(Arg(c, 1), f->entries[0].first, f->entries[0].second);
   f->next = 1;
   return NewHandle(f);
 }
@@ -518,11 +647,12 @@ HLE("kernel32.dll", FindNextFileA, 2) {
     return 0;
   }
   auto* f = static_cast<FindObject*>(o.get());
-  if (f->next >= f->names.size()) {
+  if (f->next >= f->entries.size()) {
     SetLastError(kErrorNoMoreFiles);
     return 0;
   }
-  FillFindData(Arg(c, 1), f->host_dir, f->names[f->next++]);
+  const auto& [hdir, name] = f->entries[f->next++];
+  FillFindData(Arg(c, 1), hdir, name);
   return 1;
 }
 

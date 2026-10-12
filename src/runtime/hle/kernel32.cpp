@@ -3,13 +3,16 @@
 // kernel32_file.cpp, kernel32_sync.cpp, kernel32_misc.cpp and
 // kernel32_seh.cpp.
 
+#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <ctime>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #include "runtime/hle/hle.h"
 #include "runtime/hle/kernel32_state.h"
@@ -65,6 +68,8 @@ GuestHeap* FindHeap(uint32_t handle) {
   return it == g_heaps.end() ? nullptr : it->second.get();
 }
 
+void SetEnvironmentBlock(const std::vector<std::string>& vars);
+
 void InitKernel32State() {
   Process& p = *g_proc;
   g_process_heap = NewHeap(1u << 20, 0);
@@ -82,12 +87,25 @@ void InitKernel32State() {
   std::memcpy(GPtr(p.cmdline_w), wcmd.data(), wcmd.size() * 2);
 
   // A small, fixed environment; the game only needs it to exist.
-  const char* env[] = {"PATH=C:\\WINDOWS\\system32;C:\\WINDOWS",
+  SetEnvironmentBlock({"PATH=C:\\WINDOWS\\system32;C:\\WINDOWS",
                        "SystemRoot=C:\\WINDOWS", "windir=C:\\WINDOWS",
-                       "TEMP=C:\\TEMP", "TMP=C:\\TEMP"};
+                       "TEMP=C:\\TEMP", "TMP=C:\\TEMP"});
+}
+
+std::vector<std::string> EnvironmentVars() {
+  std::vector<std::string> vars;
+  const char* env = g_proc->mem.ptr<const char>(g_proc->environ_a);
+  for (const char* e = env; *e; e += std::strlen(e) + 1) vars.push_back(e);
+  return vars;
+}
+
+void SetEnvironmentBlock(const std::vector<std::string>& vars) {
+  Process& p = *g_proc;
   std::string block;
-  for (const char* e : env) block.append(e).push_back('\0');
+  for (const std::string& e : vars) block.append(e).push_back('\0');
   block.push_back('\0');
+  // The old blocks stay allocated: the game may still hold pointers into
+  // them (GetEnvironmentStrings).
   p.environ_a = HeapAllocProcess(uint32_t(block.size()), false);
   std::memcpy(GPtr(p.environ_a), block.data(), block.size());
   std::u16string wblock = win32::Widen(block);
@@ -273,12 +291,59 @@ HLE("kernel32.dll", GetEnvironmentVariableA, 3) {
   return 0;
 }
 
+// value null: delete the variable.
+uint32_t SetEnvVar(const std::string& name, const std::string* value) {
+  if (name.empty() || name.find('=') != std::string::npos) {
+    SetLastError(kErrorInvalidParameter);
+    return 0;
+  }
+  std::vector<std::string> vars = EnvironmentVars();
+  std::string key = Lower(name) + "=";
+  std::erase_if(vars, [&](const std::string& kv) {
+    return Lower(kv.substr(0, key.size())) == key;
+  });
+  if (value) vars.push_back(name + "=" + *value);
+  SetEnvironmentBlock(vars);
+  return 1;
+}
+
+HLE("kernel32.dll", SetEnvironmentVariableA, 2) {
+  std::string v = Arg(c, 1) ? GStr(Arg(c, 1)) : "";
+  return SetEnvVar(GStr(Arg(c, 0)), Arg(c, 1) ? &v : nullptr);
+}
+
+HLE("kernel32.dll", SetEnvironmentVariableW, 2) {
+  std::string v = Arg(c, 1) ? Narrow(GWStr(Arg(c, 1))) : "";
+  return SetEnvVar(Narrow(GWStr(Arg(c, 0))), Arg(c, 1) ? &v : nullptr);
+}
+
 HLE("kernel32.dll", ExpandEnvironmentStringsA, 3) {
   // No variable the game uses needs expanding; copy through.
   std::string s = GStr(Arg(c, 0));
   uint32_t buf = Arg(c, 1), size = Arg(c, 2);
   if (s.size() + 1 <= size) PutStr(buf, s);
   return uint32_t(s.size() + 1);
+}
+
+HLE("kernel32.dll", SetErrorMode, 1) {
+  static std::atomic<uint32_t> mode{0};
+  return mode.exchange(Arg(c, 0));
+}
+
+// Power requests (keep the display on) have no effect here; the previous
+// state is reported as on Windows.
+HLE("kernel32.dll", SetThreadExecutionState, 1) {
+  static std::atomic<uint32_t> state{0x80000000};  // ES_CONTINUOUS
+  uint32_t v = Arg(c, 0);
+  return (v & 0x80000000) ? state.exchange(v) : state.load();
+}
+
+// Console control events (Ctrl+C, close) are never delivered: the host
+// terminal's signals end the process directly. Registration succeeds.
+HLE("kernel32.dll", SetConsoleCtrlHandler, 2) { return 1; }
+
+HLE("kernel32.dll", GetSystemDirectoryA, 2) {
+  return CopyOut(Arg(c, 0), Arg(c, 1), "C:\\WINDOWS\\system32");
 }
 
 HLE("kernel32.dll", GetCurrentProcess, 0) { return 0xFFFFFFFF; }
@@ -371,6 +436,39 @@ HLE("kernel32.dll", GlobalMemoryStatus, 1) {
   return 0;
 }
 
+// The same machine as GlobalMemoryStatus, through MEMORYSTATUSEX.
+HLE("kernel32.dll", GlobalMemoryStatusEx, 1) {
+  uint32_t ms = Arg(c, 0);
+  if (Rd32(ms) != 64) {
+    SetLastError(kErrorInvalidParameter);
+    return 0;
+  }
+  Wr32(ms + 4, 30);
+  Wr64(ms + 8, 0x40000000);
+  Wr64(ms + 16, 0x30000000);
+  Wr64(ms + 24, 0x60000000);
+  Wr64(ms + 32, 0x50000000);
+  Wr64(ms + 40, 0x7FFE0000);
+  Wr64(ms + 48, 0x70000000);
+  Wr64(ms + 56, 0);  // ullAvailExtendedVirtual: reserved
+  return 1;
+}
+
+// a * b / c in 64 bits, rounded to nearest with halves away from zero;
+// -1 if c is 0 or the result does not fit in an int.
+HLE("kernel32.dll", MulDiv, 3) {
+  int64_t p = int64_t(int32_t(Arg(c, 0))) * int32_t(Arg(c, 1));
+  int64_t d = int32_t(Arg(c, 2));
+  if (d == 0) return 0xFFFFFFFFu;
+  if (d < 0) {
+    p = -p;
+    d = -d;
+  }
+  int64_t q = (p >= 0 ? p + d / 2 : p - d / 2) / d;
+  if (q > INT32_MAX || q < -INT32_MAX) return 0xFFFFFFFFu;
+  return uint32_t(int32_t(q));
+}
+
 HLE("kernel32.dll", GetComputerNameA, 2) {
   uint32_t buf = Arg(c, 0), psize = Arg(c, 1);
   std::string n = win32::Upper(Game().id) + "HOST";
@@ -434,6 +532,10 @@ HLE("kernel32.dll", GlobalAlloc, 2) {
   return HeapAllocProcess(Arg(c, 1), Arg(c, 0) & 0x40);
 }
 HLE("kernel32.dll", GlobalLock, 1) { return Arg(c, 0); }
+HLE("kernel32.dll", GlobalSize, 1) {
+  uint32_t s = g_process_heap->Size(Arg(c, 0));
+  return s == 0xFFFFFFFF ? 0 : s;
+}
 HLE("kernel32.dll", GlobalUnlock, 1) { return 1; }
 HLE("kernel32.dll", GlobalFree, 1) {
   g_process_heap->Free(Arg(c, 0));
@@ -633,6 +735,15 @@ HLE("kernel32.dll", InitializeCriticalSection, 1) {
   return 0;
 }
 
+HLE("kernel32.dll", InitializeCriticalSectionAndSpinCount, 2) {
+  uint32_t cs = Arg(c, 0);
+  std::memset(GPtr(cs), 0, 24);
+  Wr32(cs + 4, 0xFFFFFFFF);
+  Wr32(cs + 20, Arg(c, 1));  // SpinCount (no effect here)
+  CsFor(cs);
+  return 1;
+}
+
 HLE("kernel32.dll", DeleteCriticalSection, 1) {
   std::lock_guard<std::mutex> l(g_cs_mu);
   g_cs.erase(Arg(c, 0));
@@ -716,7 +827,37 @@ HLE("kernel32.dll", GetLocalTime, 1) {
   return 0;
 }
 
+// The host's current UTC offset as a zone without DST transitions
+// (TIME_ZONE_ID_UNKNOWN): the guest's local time then equals the host's
+// now, though not across a DST change while it runs.
+HLE("kernel32.dll", GetTimeZoneInformation, 1) {
+  uint32_t tzi = Arg(c, 0);
+  std::time_t now = std::time(nullptr);
+  std::tm t{};
+  localtime_r(&now, &t);
+  std::memset(GPtr(tzi), 0, 172);
+  Wr32(tzi + 0, uint32_t(int32_t(-t.tm_gmtoff / 60)));  // Bias, minutes
+  std::u16string name = Widen(t.tm_zone ? t.tm_zone : "UTC").substr(0, 31);
+  std::memcpy(GPtr(tzi + 4), name.data(), name.size() * 2);    // StandardName
+  std::memcpy(GPtr(tzi + 88), name.data(), name.size() * 2);   // DaylightName
+  return 0;
+}
+
 HLE("winmm.dll", timeGetTime, 0) { return TickCount(); }
+// The host timer is always fine-grained; nothing to change.
+HLE("winmm.dll", timeBeginPeriod, 1) { return Arg(c, 0) ? 0 : 97; }  // TIMERR_NOCANDO
+HLE("winmm.dll", timeEndPeriod, 1) { return Arg(c, 0) ? 0 : 97; }
+
+// No joystick or MIDI input drivers: games see zero devices.
+HLE("winmm.dll", joyGetNumDevs, 0) { return 0; }
+HLE("winmm.dll", joyGetDevCapsA, 3) { return 6; }   // MMSYSERR_NODRIVER
+HLE("winmm.dll", joyGetPosEx, 2) { return 6; }
+HLE("winmm.dll", midiInGetNumDevs, 0) { return 0; }
+HLE("winmm.dll", midiInGetDevCapsA, 3) { return 2; }  // MMSYSERR_BADDEVICEID
+HLE("winmm.dll", midiInOpen, 5) { return 2; }
+HLE("winmm.dll", midiInStart, 1) { return 5; }  // MMSYSERR_INVALHANDLE
+HLE("winmm.dll", midiInStop, 1) { return 5; }
+HLE("winmm.dll", midiInClose, 1) { return 5; }
 
 HLE("kernel32.dll", Sleep, 1) {
   std::this_thread::sleep_for(std::chrono::milliseconds(Arg(c, 0)));

@@ -11,6 +11,10 @@ namespace recomp {
 
 struct Flags {
   bool cf, pf, af, zf, sf, of, df;
+  // AC (bit 18) and ID (bit 21) are just storage, but user code can flip
+  // them on every CPU since the 486 (AC) and every one with CPUID (ID),
+  // and that is how it detects them.
+  bool ac, id;
 };
 
 struct Thread;
@@ -37,7 +41,8 @@ struct Ctx {
 inline uint32_t PackEFlags(const Flags& f) {
   return (f.cf ? 0x1u : 0) | 0x2u | (f.pf ? 0x4u : 0) | (f.af ? 0x10u : 0) |
          (f.zf ? 0x40u : 0) | (f.sf ? 0x80u : 0) | 0x200u |
-         (f.df ? 0x400u : 0) | (f.of ? 0x800u : 0);
+         (f.df ? 0x400u : 0) | (f.of ? 0x800u : 0) | (f.ac ? 0x40000u : 0) |
+         (f.id ? 0x200000u : 0);
 }
 inline void UnpackEFlags(Flags& f, uint32_t v) {
   f.cf = v & 0x1;
@@ -47,6 +52,8 @@ inline void UnpackEFlags(Flags& f, uint32_t v) {
   f.sf = v & 0x80;
   f.df = v & 0x400;
   f.of = v & 0x800;
+  f.ac = v & 0x40000;
+  f.id = v & 0x200000;
 }
 
 }  // namespace recomp

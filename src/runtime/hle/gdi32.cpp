@@ -21,6 +21,7 @@ HLE("gdi32.dll", GetStockObject, 1) { return 0x00E00000u | (Arg(c, 0) & 0xFF); }
 HLE("gdi32.dll", CreateFontA, 14) { return NewGdi(); }
 HLE("gdi32.dll", CreateFontIndirectA, 1) { return NewGdi(); }
 HLE("gdi32.dll", CreateHatchBrush, 2) { return NewGdi(); }
+HLE("gdi32.dll", CreateSolidBrush, 1) { return NewGdi(); }
 HLE("gdi32.dll", CreateCompatibleDC, 1) { return NewGdi(); }
 HLE("gdi32.dll", CreateCompatibleBitmap, 3) { return NewGdi(); }
 HLE("gdi32.dll", DeleteObject, 1) { return 1; }

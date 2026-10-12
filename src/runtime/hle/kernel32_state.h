@@ -51,7 +51,19 @@ bool CloseHandleValue(uint32_t h);
 // guest current directory) to a host path, resolving case-insensitively
 // against what exists on disk. Paths outside known roots map below the
 // per-user data directory.
-std::string HostPath(const std::string& guest_path);
+//
+// The game install is never written: below the guest install directory,
+// paths resolve to an overlay in the per-user data directory
+// ($XDG_DATA_HOME/<id>/install) when the file exists there, else to the
+// install. kWrite always gives the overlay path (creating the overlay's
+// parent directories when the guest can see that directory); kUpdate also
+// copies an install-only file into the overlay first (open for update).
+enum class PathAccess { kRead, kWrite, kUpdate };
+std::string HostPath(const std::string& guest_path,
+                     PathAccess access = PathAccess::kRead);
+// The install and overlay directories behind a guest directory, for
+// merged listings (overlay first). One entry outside the install.
+std::vector<std::string> HostDirs(const std::string& guest_dir);
 std::string GuestCurrentDir();
 
 // Thrown by ExitThread to unwind a guest thread's host stack back to its

@@ -1416,6 +1416,25 @@ void InsnEmitter::Emit() {
       L("edx = ::recomp::lift::Rd<uint32_t>(B, esp + 20); ecx = ::recomp::lift::Rd<uint32_t>(B, esp + 24);");
       L("eax = ::recomp::lift::Rd<uint32_t>(B, esp + 28); esp += 32;");
       return;
+    // 16-bit forms (66 60 / 66 61): word pushes; POPA writes only the low
+    // halves, so the upper 16 bits of every register survive.
+    case ZYDIS_MNEMONIC_PUSHA:
+      L("const uint32_t s = esp;");
+      for (const char* r : {"eax", "ecx", "edx", "ebx", "s", "ebp", "esi", "edi"})
+        L(Fmt("esp -= 2; ::recomp::lift::Wr<uint16_t>(B, esp, uint16_t(%s));", r));
+      return;
+    case ZYDIS_MNEMONIC_POPA: {
+      int off = 0;
+      for (const char* r : std::initializer_list<const char*>{
+               "edi", "esi", "ebp", nullptr, "ebx", "edx", "ecx", "eax"}) {
+        if (r)
+          L(Fmt("%s = ::recomp::lift::SetLo16(%s, ::recomp::lift::Rd<uint16_t>(B, esp + %du));",
+                r, r, off));
+        off += 2;
+      }
+      L("esp += 16;");
+      return;
+    }
     case ZYDIS_MNEMONIC_PUSHFD:
       Push32("::recomp::PackEFlags(F)");
       return;

@@ -2,6 +2,8 @@
 // wsprintfA. Window management and the message loop are in
 // user32_window.cpp.
 
+#include <sys/stat.h>
+
 #include <atomic>
 #include <cstring>
 #include <map>
@@ -10,6 +12,7 @@
 
 #include "runtime/hle/hle.h"
 #include "runtime/hle/input_state.h"
+#include "runtime/hle/kernel32_state.h"
 #include "runtime/hle/win32.h"
 #include "runtime/log.h"
 
@@ -228,6 +231,8 @@ HLE("user32.dll", GetSystemMetrics, 1) {
     case 13: return 32;   // SM_CXCURSOR
     case 14: return 32;
     case 15: return 19;   // SM_CYMENU
+    case 16: return uint32_t(g_display_w);       // SM_CXFULLSCREEN: the work
+    case 17: return uint32_t(g_display_h - 19);  // area minus a caption
     case 19: return 1;    // SM_MOUSEPRESENT
     case 23: return 0;    // SM_SWAPBUTTON
     case 32: return 4;    // SM_CXFRAME
@@ -310,6 +315,27 @@ HLE("user32.dll", RegisterWindowMessageA, 1) {
 // Cursors and icons: opaque handles; the visible cursor is SDL's.
 HLE("user32.dll", LoadCursorA, 2) { return 0x00010000u | (Arg(c, 1) & 0xFFFF); }
 HLE("user32.dll", LoadIconA, 2) { return 0x00020000u | (Arg(c, 1) & 0xFFFF); }
+
+// Images are opaque handles too: nothing is drawn through GDI. A file
+// (LR_LOADFROMFILE) must exist, as the game may check for the splash
+// bitmap; resource bitmaps are not read.
+HLE("user32.dll", LoadImageA, 6) {
+  uint32_t name = Arg(c, 1), type = Arg(c, 2), flags = Arg(c, 5);
+  static std::atomic<uint32_t> next{0x00030000};
+  if (flags & 0x10) {  // LR_LOADFROMFILE
+    struct stat st;
+    std::string path = HostPath(GStr(name));
+    if (stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+      SetLastError(2);  // ERROR_FILE_NOT_FOUND
+      return 0;
+    }
+    return next += 0x10;
+  }
+  if (type == 1) return 0x00020000u | (name & 0xFFFF);  // IMAGE_ICON
+  if (type == 2) return 0x00010000u | (name & 0xFFFF);  // IMAGE_CURSOR
+  WarnF("LoadImageA: bitmap resource %X not read; returning a handle\n", name);
+  return next += 0x10;
+}
 HLE("user32.dll", SetCursor, 1) {
   static uint32_t cur = 0;
   uint32_t old = cur;
