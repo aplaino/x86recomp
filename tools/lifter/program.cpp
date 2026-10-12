@@ -138,6 +138,10 @@ bool Program::LoadManifest(const std::string& path, std::string* err) {
     } else if (kind == "probe") {
       entries.insert(va);
       probes[va] = name.empty() ? "probe" : name;
+    } else if (kind == "replace") {
+      entries.insert(va);
+      replaced.insert(va);
+      if (!name.empty()) names[va] = name;
     } else {
       *err = path + ":" + std::to_string(no) + ": unknown directive " + kind;
       return false;

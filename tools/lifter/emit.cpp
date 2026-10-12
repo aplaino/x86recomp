@@ -1621,7 +1621,11 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
   std::string& o = *out;
   auto nm = p_.names.find(f.entry);
   o += "// " + (nm != p_.names.end() ? nm->second : FnName(f.entry)) + "\n";
-  o += "void " + FnName(f.entry) + "(::recomp::Ctx& c) {\n  LIFT_ENTER\n";
+  // A replaced function keeps its lifted body under another name, for the
+  // replacement to call or be diffed against; every call site still
+  // reaches f_X, which the game project defines.
+  o += "void " + FnName(f.entry) + (p_.replaced.count(f.entry) ? "_lifted" : "") +
+       "(::recomp::Ctx& c) {\n  LIFT_ENTER\n";
   // Functions that register an SEH frame (write fs:[0]) can be resumed into
   // by their __except blocks; see GuestResume.
   bool seh = false;

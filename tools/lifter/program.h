@@ -44,6 +44,9 @@ struct Program {
   std::map<uint32_t, std::vector<uint32_t>> jumptables;  // jmp va -> targets
   std::set<uint32_t> noreturn_iat;            // IAT slots of ExitProcess etc.
   std::map<uint32_t, std::string> probes;     // manifest: probe on entry
+  std::set<uint32_t> replaced;                // manifest: the game project
+                                              // defines f_X; the lifted body
+                                              // is emitted as f_X_lifted
   std::set<uint32_t> resume_sites;            // manifest: calls/jmps that
                                               // abandon the stack (SEH)
 

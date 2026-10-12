@@ -100,7 +100,10 @@ its lifted code with `recomp_add_lifted()`, and fills a
 
 Game-specific patches to lifted code (fixes, enhancements such as
 widescreen) live in the game project as hand-written replacements of
-specific lifted functions.
+specific lifted functions. `replace <va>` in a manifest makes the lifter
+emit that function's body as `f_<VA>_lifted`; every call site and the
+dispatch table still reach `f_<VA>`, which the game project defines (in
+`recomp::gen`) and which may call the lifted body.
 
 ## Decisions
 
