@@ -373,6 +373,12 @@ the macOS port.
 
 ## Roadmap
 - opengl32/wgl HLE on gfx::Device (Call of Duty).
+- EAX for the audio HLE, shared by every game: Dungeon Siege and Call
+  of Duty both have EAX paths and fall back to "Miles Fast 2D
+  Positional Audio" today. Offer EAX-capable Miles 3D providers (and the
+  EAX property sets games query; DirectSound3D games later) rendered
+  through OpenAL Soft (EFX reverb and filters; it also implements the
+  EAX 1-5 API), which runs on macOS too.
 - SDL_GPU backend (Vulkan) with the fixed-function generator, matched
   against the d3d9 backend.
 - macOS arm64: Metal via SDL_GPU, platform layer (signals, ucontext,
