@@ -1,7 +1,8 @@
 # x86recomp
 
 Static recompilation of 32-bit x86 Windows games into native 64-bit
-programs. A game's machine code is translated ahead of time into C++ and
+programs: the scaffold that gets a game running natively while its code
+is replaced, piece by piece, with hand-written C++. A game's machine code is translated ahead of time into C++ and
 linked against a runtime that reimplements the parts of Windows and its
 middleware the game uses. There is no emulator, interpreter or Wine in
 the result, and no game code or data in this repository.
@@ -20,6 +21,9 @@ Used by:
 - **x87 model** (`src/runtime/x87.cpp`): exact 80-bit x87 (precision and
   rounding control, status-word flags) on Berkeley SoftFloat with
   integer fast paths, tested bit for bit against a real x87.
+- **SSE/SSE2** (`src/runtime/sse.cpp`): the XMM registers and MXCSR,
+  with SoftFloat lanes and x86 NaN rules, tested bit for bit against the
+  CPU like the x87 model.
 - **Runtime** (`src/runtime`): the guest's 4 GiB address space, PE
   loading, threads, SEH, crash and hang reports.
 - **HLE** (`src/runtime/hle`): Win32 (kernel32, user32, gdi32, advapi32,

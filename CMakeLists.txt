@@ -32,9 +32,9 @@ add_library(recomp_image STATIC
 target_include_directories(recomp_image PUBLIC src)
 target_compile_features(recomp_image PUBLIC cxx_std_20)
 
-# --- x87 model (SoftFloat 3e) -----------------------------------------
+# --- x87 and SSE models (SoftFloat 3e) ---------------------------------
 include(cmake/softfloat.cmake)  # defines target `softfloat`
-add_library(recomp_x87 STATIC src/runtime/x87.cpp)
+add_library(recomp_x87 STATIC src/runtime/x87.cpp src/runtime/sse.cpp)
 target_include_directories(recomp_x87 PUBLIC src)
 target_compile_features(recomp_x87 PUBLIC cxx_std_20)
 target_link_libraries(recomp_x87 PRIVATE softfloat)
@@ -134,8 +134,8 @@ function(recomp_add_lifted target dir)
 endfunction()
 
 # recomp_add_lift_tests(EXE <exe> SYMBOLS <dir> MANIFEST <file>): oracle
-# tests that run every x87 and integer instruction form found in the EXE
-# lifted and natively (x86-64 hosts only).
+# tests that run every x87, integer and SSE instruction form found in the
+# EXE lifted and natively (x86-64 hosts only).
 function(recomp_add_lift_tests)
   cmake_parse_arguments(A "" "EXE;SYMBOLS;MANIFEST" "" ${ARGN})
   if(NOT EXISTS "${A_EXE}" OR
@@ -143,7 +143,7 @@ function(recomp_add_lift_tests)
     return()
   endif()
   set(_tests "${RECOMP_ROOT}/tests")
-  foreach(_kind x87 int)
+  foreach(_kind x87 int sse)
     set(_forms "${CMAKE_CURRENT_BINARY_DIR}/lift_${_kind}_forms.cpp")
     add_custom_command(OUTPUT "${_forms}"
       COMMAND recomp_lift --exe "${A_EXE}" --symbols "${A_SYMBOLS}"
@@ -158,6 +158,7 @@ function(recomp_add_lift_tests)
   endforeach()
   set_tests_properties(lift_x87 PROPERTIES TIMEOUT 600)
   set_tests_properties(lift_int PROPERTIES TIMEOUT 900)
+  set_tests_properties(lift_sse PROPERTIES TIMEOUT 900)
 endfunction()
 
 if(PROJECT_IS_TOP_LEVEL)

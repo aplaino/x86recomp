@@ -7,6 +7,19 @@ calls (HLE). It was built for Dungeon Siege (DS1-Rebuilt) and is shared
 with the Call of Duty port; the game projects hold everything specific
 to one game (entry point config, manifest, symbols, game hooks).
 
+## Scaffold, not the destination
+Recompilation is how a game first runs natively, not how it stays. The
+end state of each port is native source: lifted functions are replaced
+by hand-written C++ one subsystem at a time until nothing lifted is
+left, and the lifter, guest arena and HLE fall away with them. That
+shapes the design:
+- The lifted code stays exact (integer flags, x87, SSE, MXCSR), so it is
+  the reference every hand-written replacement is diffed against.
+- Replacements must be able to take over any function by address and
+  work on the same guest state while their neighbours are still lifted.
+- Nothing that only the scaffold needs (CPUID answers, the guest heap,
+  thunks) should leak into the native code that replaces it.
+
 ## Goals and hard constraints
 1. Native Linux first; macOS on Apple Silicon with a native Metal
    renderer is a requirement, not an afterthought. Nothing in the lifter
@@ -250,6 +263,30 @@ particles). The lifter therefore turns straight-line x87 code into runs:
   guest exception raised inside it sees the FPU state from the start of
   the run in its CONTEXT, and an __except unwind out of the run drops
   the run's changes.
+
+### SSE/SSE2
+Every PC these games still run on has SSE2, so their SSE paths (MSVC's
+SSE2 maths library, engine SIMD loops) are what they actually execute;
+CPUID reports a fixed SSE2-class CPU (Pentium M, family 6 model 13),
+never the host's: lifted code must behave the same on every machine,
+Apple Silicon included (it has no CPUID), and nothing is claimed that
+the lifter does not implement (no SSE3+). The XMM registers and MXCSR
+live in Ctx and are used in place (never cached in locals).
+- Float lanes go through SoftFloat with the SSE NaN rules applied in
+  runtime/sse.cpp (the shared SoftFloat build carries the x87 ones):
+  one NaN operand is returned quieted, two give the first source, SNaN
+  raises IE; invalid operations give the default NaN. Rounding control,
+  every sticky flag (IE DE ZE OE UE PE) and precedence (a zero divisor
+  suppresses DE for a denormal dividend) match the hardware.
+- Not modelled, fatal if reached: unmasked SIMD exceptions (#XM), and
+  FTZ/DAZ actually changing a result.
+- Integer and data-movement forms are plain portable C++.
+- tests/lift_sse_test runs every SSE form in a game EXE lifted and
+  natively from random states rich in special values (2.44M checks over
+  Call of Duty's 244 forms, all bit-exact).
+- In the native port these sites go away: CRT maths becomes the host
+  libm, engine SIMD becomes portable C++ (or SIMDe/sse2neon where speed
+  matters), validated against the lifted reference.
 
 ### Graphics: API HLE over gfx::Device
 Games' graphics APIs are implemented as HLE over one backend-neutral

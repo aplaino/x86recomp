@@ -330,8 +330,10 @@ HLE("kernel32.dll", SetHandleCount, 1) { return Arg(c, 0); }
 // that Cpuid() reports: MMX yes, no SSE/3DNow!, no FDIV erratum.
 HLE("kernel32.dll", IsProcessorFeaturePresent, 1) {
   switch (Arg(c, 0)) {
-    case 3: return 1;  // PF_MMX_INSTRUCTIONS_AVAILABLE
-    case 8: return 1;  // PF_RDTSC_INSTRUCTION_AVAILABLE
+    case 3: return 1;   // PF_MMX_INSTRUCTIONS_AVAILABLE
+    case 6: return 1;   // PF_XMMI_INSTRUCTIONS_AVAILABLE (SSE)
+    case 8: return 1;   // PF_RDTSC_INSTRUCTION_AVAILABLE
+    case 10: return 1;  // PF_XMMI64_INSTRUCTIONS_AVAILABLE (SSE2)
     default: return 0;
   }
 }

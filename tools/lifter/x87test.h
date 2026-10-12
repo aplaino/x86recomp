@@ -1,5 +1,5 @@
 #pragma once
-// Generators for tests/lift_x87_test.cpp and tests/lift_int_test.cpp; see
+// Generators for tests/lift_{x87,int,sse}_test.cpp; see
 // x87test.cpp.
 
 #include <string>
@@ -11,5 +11,7 @@ class Decoder;
 int WriteX87Test(const Program& p, const Decoder& dec, const std::string& out,
                  const char* prologue);
 int WriteIntTest(const Program& p, const Decoder& dec, const std::string& out,
+                 const char* prologue);
+int WriteSseTest(const Program& p, const Decoder& dec, const std::string& out,
                  const char* prologue);
 }  // namespace lifter

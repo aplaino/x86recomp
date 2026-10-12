@@ -286,8 +286,13 @@ void RaiseDivideError(Ctx& c, uint32_t va) {
 }
 
 void Cpuid(Ctx& c) {
-  // Report a plain Pentium III-class CPU: the binary has no SSE code, and
-  // a stable answer keeps behaviour identical on every host.
+  // A fixed CPU, never the host's: lifted code behaves the same on every
+  // machine (Apple Silicon has no CPUID), and nothing beyond SSE2 is
+  // claimed. SSE and SSE2 are reported because every PC these games still
+  // run on has them, so their SSE paths are the ones that matter
+  // (runtime/sse.h). MMX comes with any SSE CPU; no supported game has
+  // MMX code, and the lifter would report it as unimplemented. Family 6
+  // model 13 (Pentium M) is a real SSE2 part without SSE3.
   switch (c.eax) {
     case 0:
       c.eax = 2;
@@ -296,10 +301,10 @@ void Cpuid(Ctx& c) {
       c.ecx = 0x6C65746E;
       break;
     case 1:
-      c.eax = 0x00000683;  // family 6, model 8, stepping 3
+      c.eax = 0x000006D8;  // family 6, model 13, stepping 8
       c.ebx = 0;
       c.ecx = 0;
-      c.edx = 0x0183F9FF;  // fpu tsc cx8 cmov mmx fxsr (no sse)
+      c.edx = 0x0783F9FF;  // fpu tsc cx8 cmov mmx fxsr sse sse2
       break;
     default:
       c.eax = c.ebx = c.ecx = c.edx = 0;

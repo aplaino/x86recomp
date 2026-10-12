@@ -24,6 +24,7 @@
 #include "runtime/lifted.h"
 #include "runtime/log.h"
 #include "runtime/runtime.h"
+#include "runtime/sse.h"
 #include "runtime/watchdog.h"
 
 namespace recomp {
@@ -179,6 +180,7 @@ Thread* CreateGuestThread(uint32_t stack_size) {
   c.thread = t.get();
   x87::Init(c.fpu);
   x87::SetControlWord(c.fpu, 0x027F);  // Windows default for new threads
+  c.mxcsr = sse::kMxcsrDefault;
 
   Thread* raw_t = t.get();
   std::lock_guard<std::mutex> l(g_threads_mu);

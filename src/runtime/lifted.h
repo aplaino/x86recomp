@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "runtime/ctx.h"
+#include "runtime/sse.h"
 #include "runtime/x87.h"
 
 namespace recomp {

@@ -217,7 +217,22 @@ int WriteX87Test(const Program& p, const Decoder& dec, const std::string& out,
 
 namespace {
 
+bool BadOperands(const Insn& in);
+
 bool Excluded(const Insn& in) {
+  // SSE/MMX forms (some are DATAXFER/LOGICAL, not the SSE category): the
+  // integer test compares only general registers and memory.
+  for (int i = 0; i < in.d.operand_count; i++)
+    if (in.ops[i].type == ZYDIS_OPERAND_TYPE_REGISTER) {
+      ZydisRegisterClass rc = ZydisRegisterGetClass(in.ops[i].reg.value);
+      if (rc == ZYDIS_REGCLASS_XMM || rc == ZYDIS_REGCLASS_MMX) return true;
+    }
+  switch (in.d.meta.isa_set) {
+    case ZYDIS_ISA_SET_SSEMXCSR: case ZYDIS_ISA_SET_SSE_PREFETCH:
+      return true;
+    default:
+      break;
+  }
   switch (in.d.meta.category) {
     case ZYDIS_CATEGORY_X87_ALU: case ZYDIS_CATEGORY_COND_BR:
     case ZYDIS_CATEGORY_UNCOND_BR: case ZYDIS_CATEGORY_CALL:
@@ -255,6 +270,12 @@ bool Excluded(const Insn& in) {
       break;
   }
   if (in.d.opcode == 0x82 && in.d.opcode_map == ZYDIS_OPCODE_MAP_DEFAULT) return true;
+  return BadOperands(in);
+}
+
+// Operands neither run can reproduce: esp, eip, segment registers, fs/gs
+// memory, and lea forms that would change meaning in 64-bit mode.
+bool BadOperands(const Insn& in) {
   for (int i = 0; i < in.d.operand_count; i++) {
     const auto& o = in.ops[i];
     if (o.type == ZYDIS_OPERAND_TYPE_REGISTER) {
@@ -277,6 +298,24 @@ bool Excluded(const Insn& in) {
   return false;
 }
 
+// SSE/SSE2 forms for tests/lift_sse_test.cpp: XMM-register forms only
+// (no MMX), without ldmxcsr (random memory would #GP or unmask) and
+// prefetches (no effect to compare).
+bool SseCandidate(const Insn& in) {
+  switch (in.d.meta.isa_set) {
+    case ZYDIS_ISA_SET_SSE: case ZYDIS_ISA_SET_SSE2: case ZYDIS_ISA_SET_SSEMXCSR:
+      break;
+    default:
+      return false;
+  }
+  if (in.d.mnemonic == ZYDIS_MNEMONIC_LDMXCSR) return false;
+  for (int i = 0; i < in.d.operand_count; i++)
+    if (in.ops[i].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+        ZydisRegisterGetClass(in.ops[i].reg.value) == ZYDIS_REGCLASS_MMX)
+      return false;
+  return !BadOperands(in);
+}
+
 // 32-bit GPR number (0..7) behind a register of any width, or -1.
 int GprNum(ZydisRegister r) {
   ZydisRegister l = ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LEGACY_32, r);
@@ -286,8 +325,12 @@ int GprNum(ZydisRegister r) {
 
 }  // namespace
 
-int WriteIntTest(const Program& p, const Decoder& dec, const std::string& out,
-                 const char* prologue) {
+namespace {
+
+// The integer and SSE tests share the form extraction: each distinct
+// instruction (by bytes) with its memory operand rewritten to [base].
+int WriteFormTest(const Program& p, const Decoder& dec, const std::string& out,
+                  const char* prologue, bool sse) {
   struct IForm {
     std::vector<uint8_t> bytes;
     std::string text;
@@ -300,7 +343,7 @@ int WriteIntTest(const Program& p, const Decoder& dec, const std::string& out,
     Function f;
     BuildFunction(p, dec, e, &f);
     for (const auto& [va, in] : f.insns) {
-      if (!in.ok || Excluded(in)) continue;
+      if (!in.ok || (sse ? !SseCandidate(in) : Excluded(in))) continue;
       const uint8_t* raw = p.Bytes(va);
       std::vector<uint8_t> b;
       int base = -1;
@@ -376,7 +419,9 @@ int WriteIntTest(const Program& p, const Decoder& dec, const std::string& out,
   std::vector<uint32_t> vas;
   std::string o = LiftSnippets(dec, prologue, code, &vas);
   if (o.empty()) return 1;
-  o += "#include \"lift_int_forms.h\"\nextern const IntForm kIntForms[] = {\n";
+  const std::string kind = sse ? "Sse" : "Int";
+  o += std::string("#include \"lift_") + (sse ? "sse" : "int") + "_forms.h\"\n" +
+       "extern const " + kind + "Form k" + kind + "Forms[] = {\n";
   for (size_t i = 0; i < all.size(); i++) {
     const IForm& fm = *all[i];
     char buf[512];
@@ -386,10 +431,23 @@ int WriteIntTest(const Program& p, const Decoder& dec, const std::string& out,
                   Literal(fm.text).c_str(), fm.example_va);
     o += buf;
   }
-  o += "};\nextern const int kIntFormCount = " + std::to_string(all.size()) + ";\n";
+  o += "};\nextern const int k" + kind + "FormCount = " + std::to_string(all.size()) +
+       ";\n";
   if (WriteFile(out, o)) return 1;
-  std::printf("integer forms: %zu -> %s\n", all.size(), out.c_str());
+  std::printf("%s forms: %zu -> %s\n", sse ? "SSE" : "integer", all.size(), out.c_str());
   return 0;
+}
+
+}  // namespace
+
+int WriteIntTest(const Program& p, const Decoder& dec, const std::string& out,
+                 const char* prologue) {
+  return WriteFormTest(p, dec, out, prologue, false);
+}
+
+int WriteSseTest(const Program& p, const Decoder& dec, const std::string& out,
+                 const char* prologue) {
+  return WriteFormTest(p, dec, out, prologue, true);
 }
 
 }  // namespace lifter

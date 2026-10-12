@@ -15,11 +15,20 @@ struct Flags {
 
 struct Thread;
 
+// An SSE register: 16 bytes, lanes little-endian (as in guest memory).
+struct Xmm {
+  uint8_t b[16];
+};
+
 struct Ctx {
   uint32_t eax, ecx, edx, ebx, esp, ebp, esi, edi;
   Flags f;
   uint32_t fs_base;  // guest VA of this thread's TEB
   x87::State fpu;
+  // SSE state. Unlike the integer registers these are never cached in
+  // locals: lifted code operates on them in place (runtime/sse.h).
+  Xmm xmm[8];
+  uint32_t mxcsr;
   Thread* thread;    // runtime-owned per-thread data
 };
 

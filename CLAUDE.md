@@ -35,6 +35,14 @@ of the game project where they came up.
 - The x87 FPU is modelled exactly (80-bit registers, CW precision and
   rounding, SW condition codes, per-thread state). Never map x87 to
   host double.
+- SSE/SSE2 likewise: lanes through runtime/sse.cpp (SoftFloat + x86 NaN
+  rules + exact MXCSR flags), never host float/double arithmetic.
+  Changes must keep tests/lift_sse_test passing.
+- CPUID is a fixed SSE2-class CPU, never the host's. Claim a feature only
+  once the lifter implements it bit-exactly and an oracle test covers it.
+- The recompilation is scaffolding for a native port: keep lifted code
+  exact (it is the reference for hand-written replacements) and keep
+  scaffold-only mechanisms out of replacement code.
 
 ## Rules
 - Nothing game-specific in this repo: game paths, names, registry
@@ -51,6 +59,9 @@ of the game project where they came up.
   put new ones in the matching recomp_* target in CMakeLists.txt.
 - lifted.h semantics changes must keep tests/lift_semantics_test.cpp
   passing (bit-exact against the host CPU).
+- Another session may be working in the main checkout: do parallel work
+  in a separate git worktree (e.g. ../x86recomp-<topic>) and build games
+  against it in their own build dirs (-DX86RECOMP_DIR=...).
 - Guest addresses stay below 0x80000000 unless a game has done the
   large-address audit (ARCHITECTURE.md), and then only behind its flag.
 - The guest arena base is chosen at startup and is not a compile-time
