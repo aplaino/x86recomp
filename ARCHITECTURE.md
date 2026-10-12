@@ -337,12 +337,18 @@ so Wine is not a reference for this point. d3d7.cpp models it.
 - mss32 (Miles): our own mixer on an SDL3 audio stream (runtime/audio):
   resampling, loop counts, gain ramps, the "Miles Fast 2D Positional
   Audio" model, MP3 through libavcodec. Miles' EAX providers (EAX 1.0,
-  2.0, 3.0, with Msseax.m3d's attribute names and struct layouts) and
-  Miles 6.5's digital master reverb: voices get two-band (5 kHz) direct
-  and send levels from the EAX source model (runtime/audio/eax), and the
-  sends go to reverb buses rendered by OpenAL Soft's EFX EAX reverb on a
-  loopback device; direct sound never leaves our mixer, so the Fast 2D
-  path is unchanged.
+  2.0, 3.0, with Msseax.m3d's attribute names and struct layouts): voices
+  get two-band (5 kHz) direct and send levels from the EAX source model
+  (runtime/audio/eax), and the send goes to a reverb bus rendered by
+  OpenAL Soft's EFX EAX reverb on a loopback device; direct sound never
+  leaves our mixer, so the Fast 2D path is unchanged. Miles 6.5's digital
+  master reverb (room types, reverb time/predelay/damping, driver and
+  sample/stream wet levels) is our Miles-compatible Schroeder reverb
+  (runtime/audio/digital_reverb), written from a behavioural description
+  of mss32 6.5e's (Call of Duty's FINDINGS.md) and bit-exact with it:
+  recomp_add_digital_reverb_test lifts the original routines from the
+  user's installed DLL at build time (`recomp_lift --only`) and compares;
+  tests/digital_reverb_test checks a hash of our output on every host.
 - binkw32: ffmpeg (Bink demuxer from memory, binkvideo/binkaudio,
   swscale), audio into the Miles mixer.
 - dbghelp: UnDecorateSymbolName (LLVM's Microsoft demangler, normalised

@@ -4,9 +4,10 @@
 // mixer hands it each bus's send signal and adds the wet result to its own
 // mix. Direct sound never goes through OpenAL.
 //
-// Buses are independent reverbs (an EAX listener environment, Miles'
-// digital master reverb). All calls come from the audio thread with the
-// mixer's lock held, so OpenAL only ever runs there.
+// Bus 0 is the open EAX provider's listener environment (Miles 6.5's
+// digital master reverb is DigitalReverb, not OpenAL). All calls come from
+// the audio thread with the mixer's lock held, so OpenAL only ever runs
+// there.
 
 #include <cstdint>
 #include <vector>
@@ -33,7 +34,7 @@ struct ReverbParams {
 
 class Reverb {
  public:
-  static constexpr int kBuses = 2;
+  static constexpr int kBuses = 1;
 
   ~Reverb();
   // A loopback device at `rate` Hz stereo float. False (and a warning) if

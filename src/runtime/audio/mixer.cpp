@@ -110,6 +110,9 @@ bool Mixer::Open(int rate) {
   rate_ = rate;
   split_ = 1.0f - std::exp(-2.0f * 3.14159265f * 5000.0f / float(rate));
   reverb_.Open(rate);  // the device starts paused: no Mix runs yet
+  // The reverb's ring is whole mixer fragments; ours are chunks.
+  digital_.Open(rate, kChunk);
+  mixed_ = 0;
   SDL_ResumeAudioStreamDevice(stream_);
   WarnF("audio: %d Hz stereo on SDL driver '%s'\n", rate,
         SDL_GetCurrentAudioDriver());
@@ -192,7 +195,7 @@ void Mixer::TargetGains(const Voice& v, float* l, float* r) const {
   *r = sr / 2048.0f;
 }
 
-void Mixer::MixVoice(Voice& v, float* out, int frames) {
+void Mixer::MixVoice(Voice& v, float* out, int frames, bool reverb) {
   if (!v.src || (!v.primed_ && !Prime(v))) {
     v.state = Voice::State::Done;
     v.eos = true;
@@ -226,10 +229,22 @@ void Mixer::MixVoice(Voice& v, float* out, int frames) {
     dshf[b] = (v.send_hf[b] - v.cur_shf_[b]) / frames;
   }
   const float send_gain = v.volume * master_;
+  // The digital reverb's wet scale, out of 2048 like Miles' other mixer
+  // gains; a sample mixed with a non-zero one keeps the tail alive.
+  float wet = 0;
+  if (reverb && v.wet > 0) {
+    int scale = std::min<int>(int(std::lround(digital_.wet() * v.wet * v.volume * master_ * 2048)),
+                              2048);
+    if (scale > 0) {
+      digital_.KeepAlive(now_ms());
+      wet = scale / 2048.0f;
+    }
+  }
   for (int i = 0; i < frames; i++) {
     float f = float(v.frac_);
     float sl = v.a_[0] + (v.b_[0] - v.a_[0]) * f;
     float sr = v.a_[1] + (v.b_[1] - v.a_[1]) * f;
+    if (wet != 0) wet_[i] += 0.5f * (sl + sr) * wet;
     v.cur_l_ += dl;
     v.cur_r_ += dr;
     if (banded) {
@@ -297,13 +312,26 @@ void Mixer::Mix(float* out, int frames) {
   std::lock_guard<std::mutex> l(mu_);
   if (has_reverb())
     for (auto& s : sends_) s.assign(size_t(frames) * 2, 0.0f);
+  bool reverb = digital_.Begin(now_ms());
+  if (reverb) wet_.assign(size_t(frames), 0.0f);
   for (Voice* v : voices_)
-    if (v->state == Voice::State::Playing) MixVoice(*v, out, frames);
+    if (v->state == Voice::State::Playing) MixVoice(*v, out, frames, reverb);
   if (has_reverb()) {
     const float* sends[Reverb::kBuses];
     for (int b = 0; b < Reverb::kBuses; b++) sends[b] = sends_[b].data();
     reverb_.Render(sends, out, frames);
   }
+  // The digital reverb works on Miles' 32-bit mix scale.
+  if (reverb) {
+    wet_int_.resize(size_t(frames));
+    for (int i = 0; i < frames; i++)
+      wet_int_[i] = int32_t(std::lrint(std::clamp(double(wet_[i]) * DigitalReverb::kScale,
+                                                  -2147483648.0, 2147483647.0)));
+    reverb_out_.assign(size_t(frames) * 2, 0);
+    digital_.Render(wet_int_.data(), frames, reverb_out_.data(), true);
+    for (int i = 0; i < 2 * frames; i++) out[i] += float(reverb_out_[i]) / DigitalReverb::kScale;
+  }
+  mixed_ += uint64_t(frames);
   for (int i = 0; i < 2 * frames; i++) out[i] = std::clamp(out[i], -1.0f, 1.0f);
 }
 

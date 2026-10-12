@@ -7,6 +7,7 @@
 //            [--sse-test OUT.cpp]   (forms for tests/lift_sse_test.cpp)
 //            [--module <game.dll> --symbols DIR [--manifest FILE]
 //             [--base HEX]]...
+//            [--only VA[,VA...]]   (just these functions and their callees)
 //
 // Each --module adds a DLL the game loads itself, lifted into the same
 // output; --symbols/--manifest/--base after it apply to that DLL. DLLs
@@ -14,6 +15,10 @@
 // two modules overlap; the game's GameConfig must then give the same
 // base). Their functions go into gen_<module>_NNN.cpp, the EXE's into
 // gen_NNN.cpp, and table.cpp lists them all.
+//
+// --only lifts the given functions and whatever they call or tail-call
+// directly, nothing else (no Ghidra entries, exports or pointer
+// discovery): for oracle tests that run a few original routines lifted.
 //
 // Pass 1 discovers functions to a fixpoint (Ghidra entries + exports +
 // every direct call/tail-call target found while descending). Pass 2
@@ -90,6 +95,7 @@ int main(int argc, char** argv) {
   uint64_t per_file = 12000;
   uint32_t dump = 0;
   std::string x87_test, int_test, sse_test;
+  std::set<uint32_t> only;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     auto val = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -104,6 +110,15 @@ int main(int argc, char** argv) {
     else if (a == "--x87-test") x87_test = val();
     else if (a == "--int-test") int_test = val();
     else if (a == "--sse-test") sse_test = val();
+    else if (a == "--only") {
+      std::string list = val();
+      for (size_t pos = 0; pos < list.size();) {
+        size_t end = list.find(',', pos);
+        if (end == std::string::npos) end = list.size();
+        only.insert(std::stoul(list.substr(pos, end - pos), nullptr, 16));
+        pos = end + 1;
+      }
+    }
     else {
       std::fprintf(stderr, "unknown argument %s\n", a.c_str());
       return 2;
@@ -176,6 +191,10 @@ int main(int argc, char** argv) {
   // direct call or tail call makes it a strong entry. Only pointers into
   // the module they were found in count: an image holds no static pointers
   // into another one, so those are just numbers.
+  if (!only.empty()) {
+    p.entries = only;
+    p.weak.clear();
+  }
   size_t initial = p.entries.size();
   std::deque<uint32_t> work(p.entries.begin(), p.entries.end());
   std::set<uint32_t> done;
@@ -191,6 +210,7 @@ int main(int argc, char** argv) {
   };
   for (const auto& m : p.modules)
     for (const auto& sec : m.img.sections) {
+      if (!only.empty()) break;
       if (sec.name != ".rdata" && sec.name != ".data") continue;
       for (uint32_t a = sec.va; a + 4 <= sec.va + sec.vsize; a += 4)
         candidate(&m, p.mem.read<uint32_t>(a), &from_data_ptrs);
@@ -227,6 +247,7 @@ int main(int argc, char** argv) {
         if (p.entries.insert(t).second) work.push_back(t);
       }
     const lifter::Module* fm = p.TextOf(e);
+    if (!only.empty()) continue;
     for (const auto& [va, in] : f.insns) {
       if (!in.ok) continue;
       for (int i = 0; i < in.d.operand_count_visible; i++)

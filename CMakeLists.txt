@@ -13,8 +13,8 @@ include(FetchContent)
 find_package(SDL3 REQUIRED CONFIG)
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
-# OpenAL Soft (LGPL, linked dynamically): EFX reverb for EAX and Miles'
-# digital master reverb, rendered on a loopback device (no output).
+# OpenAL Soft (LGPL, linked dynamically): EFX reverb for EAX, rendered on
+# a loopback device (no output).
 find_package(OpenAL CONFIG REQUIRED)
 # ffmpeg (LGPL, linked dynamically): MP3 for Miles streams, Bink movies.
 pkg_check_modules(FFMPEG IMPORTED_TARGET
@@ -82,6 +82,7 @@ if(FFMPEG_FOUND)
     src/runtime/audio/source.cpp
     src/runtime/audio/mixer.cpp
     src/runtime/audio/reverb.cpp
+    src/runtime/audio/digital_reverb.cpp
     src/runtime/audio/eax.cpp)
   target_link_libraries(recomp_mss32 PUBLIC recomp_runtime PkgConfig::FFMPEG
                         OpenAL::OpenAL)
@@ -89,6 +90,11 @@ if(FFMPEG_FOUND)
   set_source_files_properties(src/runtime/audio/mixer.cpp
     src/runtime/audio/source.cpp TARGET_DIRECTORY recomp_mss32
     PROPERTIES COMPILE_OPTIONS "-O2")
+  # The digital reverb rounds like the original only without contraction
+  # into FMA.
+  set_source_files_properties(src/runtime/audio/digital_reverb.cpp
+    TARGET_DIRECTORY recomp_mss32
+    PROPERTIES COMPILE_OPTIONS "-O2;-ffp-contract=off")
 
   # Bink video (binkw32) on ffmpeg; audio through the Miles mixer.
   add_library(recomp_bink OBJECT src/runtime/hle/binkw32.cpp)
@@ -178,6 +184,40 @@ function(recomp_add_lift_tests)
   set_tests_properties(lift_x87 PROPERTIES TIMEOUT 600)
   set_tests_properties(lift_int PROPERTIES TIMEOUT 900)
   set_tests_properties(lift_sse PROPERTIES TIMEOUT 900)
+endfunction()
+
+# recomp_add_digital_reverb_test(DLL <mss32.dll>): checks the Miles-
+# compatible digital reverb against the original routines of the user's
+# installed mss32.dll (Miles 6.5e), lifted at build time with --only into
+# the build tree and run on the x87 model. Nothing from the DLL is kept in
+# the source tree; without the DLL there is no test.
+function(recomp_add_digital_reverb_test)
+  cmake_parse_arguments(A "" "DLL" "" ${ARGN})
+  if(NOT EXISTS "${A_DLL}")
+    return()
+  endif()
+  set(_dir "${CMAKE_CURRENT_BINARY_DIR}/digital_reverb_oracle")
+  foreach(_tsv functions exports jumptables)
+    file(WRITE "${_dir}/symbols/${_tsv}.tsv" "header\n")
+  endforeach()
+  file(WRITE "${_dir}/empty.manifest" "")
+  set(_gen "${_dir}/gen/gen_000.cpp" "${_dir}/gen/table.cpp")
+  add_custom_command(OUTPUT ${_gen}
+    COMMAND recomp_lift --exe "${A_DLL}" --symbols "${_dir}/symbols"
+            --manifest "${_dir}/empty.manifest"
+            --only 2112AA10,2112AA70,2112ACE0,2112B040,2112B0F0,2112BCC0
+            --out "${_dir}/gen"
+    DEPENDS recomp_lift "${A_DLL}"
+    COMMENT "Lifting mss32's reverb routines for digital_reverb_oracle_test")
+  add_executable(digital_reverb_oracle_test "${RECOMP_ROOT}/tests/digital_reverb_test.cpp"
+                 "${RECOMP_ROOT}/src/runtime/audio/digital_reverb.cpp" ${_gen})
+  target_compile_definitions(digital_reverb_oracle_test PRIVATE DIGITAL_REVERB_ORACLE)
+  target_include_directories(digital_reverb_oracle_test PRIVATE "${RECOMP_ROOT}/src")
+  target_link_libraries(digital_reverb_oracle_test PRIVATE recomp_x87 recomp_image)
+  target_compile_options(digital_reverb_oracle_test PRIVATE -O2 -ffp-contract=off
+                         -fno-strict-aliasing)
+  add_test(NAME digital_reverb_oracle COMMAND digital_reverb_oracle_test "${A_DLL}")
+  set_tests_properties(digital_reverb_oracle PROPERTIES TIMEOUT 600)
 endfunction()
 
 if(PROJECT_IS_TOP_LEVEL)

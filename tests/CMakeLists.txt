@@ -18,6 +18,16 @@ target_compile_options(x87_fast_test PRIVATE -O2)
 add_test(NAME x87_fast COMMAND x87_fast_test)
 set_tests_properties(x87_fast PROPERTIES TIMEOUT 300)
 
+# digital_reverb_test: the Miles-compatible digital reverb against a hash
+# of its own output recorded when it matched the original
+# (recomp_add_digital_reverb_test compares with the original itself);
+# portable.
+add_executable(digital_reverb_test digital_reverb_test.cpp
+               ${PROJECT_SOURCE_DIR}/src/runtime/audio/digital_reverb.cpp)
+target_include_directories(digital_reverb_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_options(digital_reverb_test PRIVATE -O2 -ffp-contract=off)
+add_test(NAME digital_reverb COMMAND digital_reverb_test)
+
 # lift_semantics_test checks the integer/flag helpers in lifted.h against
 # the host CPU the same way.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")

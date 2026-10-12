@@ -6,8 +6,9 @@
 // panning) and Miles' EAX providers (Msseax.m3d: EAX 1.0, 2.0 and 3.0, with
 // its attribute names and struct layouts), which position sounds the same
 // way and add the listener's environment and per-sample EAX levels
-// (runtime/audio/eax.h). Miles 6.5's digital master reverb (room type and
-// per-sample/stream wet levels) runs on a second reverb bus.
+// (runtime/audio/eax.h). Miles 6.5's digital master reverb (room type,
+// reverb and levels, per-sample/stream wet levels) is our compatible
+// implementation (runtime/audio/digital_reverb.h).
 //
 // Miles 6.5 changed some exports under the same names (3D sample volume
 // from S32 0-127 to F32 0-1, returned in st(0)); the API generation is
@@ -71,9 +72,8 @@ constexpr ProviderDef kProviders[] = {
     {0x3D0004, "Creative Labs EAX 3 (TM)", Prov::kEax3},
 };
 constexpr int kProviderCount = int(std::size(kProviders));
-// Reverb buses: the open EAX provider's environment, and Miles 6.5's
-// digital master reverb.
-constexpr int kBusEax = 0, kBusMaster = 1;
+// The OpenAL reverb bus of the open EAX provider's environment.
+constexpr int kBusEax = 0;
 
 struct Sample {
   uint32_t handle = 0;
@@ -84,7 +84,7 @@ struct Sample {
   uint32_t eos_cb = 0;
   uint32_t seq = 0;   // bumped whenever an old end-of-sample event goes stale
   float vol = 1.0f, pan = 0.5f;  // Miles 6.5 levels (S32 APIs map to them)
-  float dry = 1.0f, wet = 0.0f;  // reverb levels (master reverb bus)
+  float dry = 1.0f, wet = 0.0f;  // digital master reverb levels
   Prov prov = Prov::kFast2D;     // 3D samples: the allocating provider
   audio::eax::Source eax;        // 3D samples on EAX providers
   bool start_pos_set = false;  // set_sample_position before start
@@ -142,7 +142,6 @@ struct State {
   uint32_t seq = 0;  // source of Sample/Stream::seq, unique across reuse
   bool float_api = false;  // Miles 6.5 or later (see the file comment)
   float distance_factor = 1.0f;
-  uint32_t room_type = 0;
 };
 
 State& S() {
@@ -210,10 +209,18 @@ const ProviderDef* ProviderOf(uint32_t h) {
   return nullptr;
 }
 
-// Reverb levels on the direct path and the master reverb send.
+// Reverb levels on the direct path and the master reverb send; the
+// driver's dry level scales every sample's.
 void SetReverbLevels(Voice& v, float dry, float wet) {
-  v.direct_lf = v.direct_hf = dry;
-  v.send_lf[kBusMaster] = v.send_hf[kBusMaster] = wet;
+  v.direct_lf = v.direct_hf = dry * audio::GetMixer().digital_reverb().dry();
+  v.wet = wet;
+}
+
+// Miles 6.5 wakes its digital master reverb when a sample with a wet level
+// starts, resumes or gets new levels while playing.
+void WakeReverb(const Voice& v) {
+  audio::Mixer& m = audio::GetMixer();
+  m.digital_reverb().Wake(v.wet, m.now_ms());
 }
 
 // Volume and pan; 2D sounds also take their reverb levels here, 3D samples
@@ -252,7 +259,7 @@ void ApplyEax(Sample& s) {
   v.direct_hf = lv.direct_hf;
   v.send_lf[kBusEax] = on ? lv.room_lf : 0.0f;
   v.send_hf[kBusEax] = on ? lv.room_hf : 0.0f;
-  v.send_lf[kBusMaster] = v.send_hf[kBusMaster] = 0.0f;
+  v.wet = 0.0f;
 }
 
 void ApplyEaxAll() {
@@ -310,6 +317,7 @@ void Start(Voice& v, uint32_t* seq, int64_t from) {
   v.state = Voice::State::Playing;
   *seq = NextSeq();
   audio::GetMixer().Add(&v);
+  WakeReverb(v);
 }
 
 // Builds the voice's source from headerless data once its format is known.
@@ -661,6 +669,7 @@ HLE_NAMED("mss32.dll", "_AIL_set_sample_reverb_levels@12", AIL_set_sample_reverb
     s->dry = std::clamp(F(Arg(c, 1)), 0.0f, 1.0f);
     s->wet = std::clamp(F(Arg(c, 2)), 0.0f, 1.0f);
     ApplyVolume(*s);
+    if (s->v.state == Voice::State::Playing) WakeReverb(s->v);
   }
   return 0;
 }
@@ -889,6 +898,7 @@ void Stop(Sample& s) {
 void Resume(Sample& s) {
   if (s.v.state == Voice::State::Paused) {
     s.v.state = Voice::State::Playing;
+    WakeReverb(s.v);
   } else if (s.v.state != Voice::State::Playing) {
     // Resuming a sample that was never started plays it from the offset
     // set with set_sample_position / set_3D_sample_offset.
@@ -1100,6 +1110,7 @@ HLE_NAMED("mss32.dll", "_AIL_set_3D_sample_effects_level@8", AIL_set_3D_sample_e
     s->eax.reverb_mix = level < 0 ? -1.0f : std::min(level, 1.0f);
     s->wet = std::clamp(level, 0.0f, 1.0f);
     ApplyEax(*s);
+    if (s->v.state == Voice::State::Playing) WakeReverb(s->v);
   }
   return 0;
 }
@@ -1375,14 +1386,17 @@ uint32_t ListenerSize(Prov p, const std::string& name) {
                                                   : audio::eax::kListener3Size;
 }
 
-// AIL_3D_provider_attribute(lib, name, void* value). Names a provider
-// lacks leave *value unchanged, which is how games detect a missing
-// feature (Call of Duty probes "EAX3 room LF" to enable EAX).
+// AIL_3D_provider_attribute(lib, name, void* value). Miles 6.5 first
+// stores -1, which is what a name the provider lacks leaves; games detect
+// missing features that way (Call of Duty enables EAX unless "EAX3 room
+// LF" reads -1).
 HLE_NAMED("mss32.dll", "_AIL_3D_provider_attribute@12", AIL_3D_provider_attribute, 3) {
   std::string name = GStr(Arg(c, 1));
   uint32_t out = Arg(c, 2);
+  if (!out || !EnsureReadable(c, out, 4)) return 0;
+  Wr32(out, 0xFFFFFFFF);
   const ProviderDef* d = ProviderOf(Arg(c, 0));
-  if (!d || !out || !EnsureReadable(c, out, ListenerSize(d->kind, name))) return 0;
+  if (!d || !EnsureReadable(c, out, ListenerSize(d->kind, name))) return 0;
   std::lock_guard<std::mutex> l(Mu());
   if (name == "Maximum supported samples") {
     Wr32(out, S().prefs[1]);  // DIG_MIXER_CHANNELS
@@ -1559,6 +1573,7 @@ HLE_NAMED("mss32.dll", "_AIL_pause_stream@8", AIL_pause_stream, 2) {
     } else if (s->v.state == Voice::State::Paused) {
       s->v.state = Voice::State::Playing;
       audio::GetMixer().Add(&s->v);
+      WakeReverb(s->v);
     }
   }
   return 0;
@@ -1610,6 +1625,7 @@ HLE_NAMED("mss32.dll", "_AIL_set_stream_reverb_levels@12", AIL_set_stream_reverb
     s->dry = std::clamp(F(Arg(c, 1)), 0.0f, 1.0f);
     s->wet = std::clamp(F(Arg(c, 2)), 0.0f, 1.0f);
     ApplyVolume(*s);
+    if (s->v.state == Voice::State::Playing) WakeReverb(s->v);
   }
   return 0;
 }
@@ -1724,13 +1740,70 @@ HLE_NAMED("mss32.dll", "_AIL_release_timer_handle@4", AIL_release_timer_handle, 
 
 // ---- misc ----------------------------------------------------------------------------------
 
-// AIL_set_digital_master_room_type(dig, room): the master reverb's
-// environment (EAX environment numbers, rendered with EAX's presets).
+// Miles 6.5's digital master reverb. The driver's dry level scales every
+// sample's direct path, so a change reapplies all levels.
+void ApplyLevelsAll() {
+  for (auto& [h, s] : S().samples) {
+    if (s->is3d)
+      ApplyEax(*s);
+    else
+      ApplyVolume(*s);
+  }
+  for (auto& [h, s] : S().streams) ApplyVolume(*s);
+}
+
+// AIL_set_digital_master_room_type(dig, room): an entry of Miles' room
+// table (the EAX environment numbers) as reverb time, predelay, damping
+// and wet level, with dry level 1. Miles does not range-check; rooms past
+// its table are refused here.
 HLE_NAMED("mss32.dll", "_AIL_set_digital_master_room_type@8", AIL_set_digital_master_room_type, 2) {
   std::lock_guard<std::mutex> l(Mu());
-  S().room_type = Arg(c, 1);
-  audio::GetMixer().SetReverb(kBusMaster,
-                              audio::eax::ToReverb(audio::eax::Preset(Arg(c, 1))));
+  int32_t room = int32_t(Arg(c, 1));
+  if (room < 0 || room >= audio::DigitalReverb::kRooms) {
+    WarnF("mss32: AIL_set_digital_master_room_type: room %d out of range\n", room);
+    return 0;
+  }
+  audio::Mixer& m = audio::GetMixer();
+  m.digital_reverb().SetRoomType(room, m.now_ms());
+  ApplyLevelsAll();
+  return 0;
+}
+
+// AIL_set_digital_master_reverb(dig, F32 time, F32 predelay, F32 damping).
+HLE_NAMED("mss32.dll", "_AIL_set_digital_master_reverb@16", AIL_set_digital_master_reverb, 4) {
+  std::lock_guard<std::mutex> l(Mu());
+  audio::Mixer& m = audio::GetMixer();
+  m.digital_reverb().SetReverb(F(Arg(c, 1)), F(Arg(c, 2)), F(Arg(c, 3)), m.now_ms());
+  return 0;
+}
+
+// AIL_digital_master_reverb(dig, F32* time, F32* predelay, F32* damping).
+HLE_NAMED("mss32.dll", "_AIL_digital_master_reverb@16", AIL_digital_master_reverb, 4) {
+  std::lock_guard<std::mutex> l(Mu());
+  const audio::DigitalReverb& r = audio::GetMixer().digital_reverb();
+  if (Arg(c, 1)) Wr32(Arg(c, 1), std::bit_cast<uint32_t>(r.time()));
+  if (Arg(c, 2)) Wr32(Arg(c, 2), std::bit_cast<uint32_t>(r.predelay()));
+  if (Arg(c, 3)) Wr32(Arg(c, 3), std::bit_cast<uint32_t>(r.damping()));
+  return 0;
+}
+
+// AIL_set_digital_master_reverb_levels(dig, F32 dry, F32 wet).
+HLE_NAMED("mss32.dll", "_AIL_set_digital_master_reverb_levels@12",
+          AIL_set_digital_master_reverb_levels, 3) {
+  std::lock_guard<std::mutex> l(Mu());
+  audio::Mixer& m = audio::GetMixer();
+  m.digital_reverb().SetLevels(F(Arg(c, 1)), F(Arg(c, 2)), m.now_ms());
+  ApplyLevelsAll();
+  return 0;
+}
+
+// AIL_digital_master_reverb_levels(dig, F32* dry, F32* wet).
+HLE_NAMED("mss32.dll", "_AIL_digital_master_reverb_levels@12", AIL_digital_master_reverb_levels,
+          3) {
+  std::lock_guard<std::mutex> l(Mu());
+  const audio::DigitalReverb& r = audio::GetMixer().digital_reverb();
+  if (Arg(c, 1)) Wr32(Arg(c, 1), std::bit_cast<uint32_t>(r.dry()));
+  if (Arg(c, 2)) Wr32(Arg(c, 2), std::bit_cast<uint32_t>(r.wet()));
   return 0;
 }
 
