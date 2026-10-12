@@ -123,6 +123,13 @@ std::map<std::string, WndClass> g_classes;
 std::map<uint32_t, Window> g_windows;
 std::map<uint32_t, Queue> g_queues;  // by tid
 std::vector<Timer> g_timers;
+
+// RegisterHotKey: a matching key press becomes WM_HOTKEY instead of a key
+// message, as on Windows (here only while one of our windows has focus).
+struct HotKey {
+  uint32_t hwnd, id, mods, vk, tid;
+};
+std::vector<HotKey> g_hotkeys;
 std::condition_variable_any g_queue_cv;
 uint32_t g_next_hwnd = 0x00010010;
 uint16_t g_next_atom = 0xC100;
@@ -402,6 +409,23 @@ void HandleSdlEvent(const SDL_Event& e) {
       bool alt = g_key_down[0x12];
       bool sys = alt || gvk == 0x79 /* F10 */ || gvk == 0x12;
       if (alt) lp |= 1u << 29;
+      if (down) {
+        uint32_t mods = (alt ? 1u : 0) | (g_key_down[0x11] ? 2u : 0) |
+                        (g_key_down[0x10] ? 4u : 0);  // MOD_ALT, CONTROL, SHIFT
+        const HotKey* hk = nullptr;
+        {
+          std::lock_guard<std::recursive_mutex> l(g_mu);
+          for (const HotKey& k : g_hotkeys)
+            if (k.vk == gvk && (k.mods & 7) == mods) hk = &k;
+          if (hk) {
+            HotKey k = *hk;
+            Msg m{k.hwnd, 0x0312 /* WM_HOTKEY */, k.id, mods | gvk << 16, TickCount(),
+                  g_mouse_x, g_mouse_y};
+            PostTo(k.tid, m);
+            break;
+          }
+        }
+      }
       uint32_t msg = down ? (sys ? WM_SYSKEYDOWN : WM_KEYDOWN)
                           : (sys ? WM_SYSKEYUP : WM_KEYUP);
       Post(h, msg, gvk, lp);
@@ -758,6 +782,10 @@ void PumpHostEvents() {
   InjectTestInput();
   WatchdogHeartbeat();
 }
+
+uint32_t DcForWindow(uint32_t hwnd) { return hwnd ? 0x40000000u | hwnd : 0x00D00001u; }
+
+uint32_t WindowForDc(uint32_t hdc) { return hdc & 0x40000000u ? hdc & ~0x40000000u : 0; }
 
 SDL_Window* SdlWindowFor(uint32_t hwnd) {
   std::lock_guard<std::recursive_mutex> l(g_mu);
@@ -1379,6 +1407,39 @@ HLE("user32.dll", DispatchMessageA, 1) {
   return Send(hwnd, msg, Rd32(m + 8), Rd32(m + 12));
 }
 
+// ---- hot keys ------------------------------------------------------------------------
+
+HLE("user32.dll", RegisterHotKey, 4) {
+  uint32_t hwnd = Arg(c, 0), id = Arg(c, 1), mods = Arg(c, 2), vk = Arg(c, 3);
+  std::lock_guard<std::recursive_mutex> l(g_mu);
+  uint32_t tid = CurrentThread()->tid;
+  if (hwnd) {
+    Window* w = Win(hwnd);
+    if (!w) return 0;
+    tid = w->tid;
+  }
+  for (const HotKey& k : g_hotkeys)
+    if ((k.hwnd == hwnd && k.id == id) || (k.vk == vk && (k.mods & 7) == (mods & 7))) {
+      SetLastError(1409);  // ERROR_HOTKEY_ALREADY_REGISTERED
+      return 0;
+    }
+  g_hotkeys.push_back({hwnd, id, mods, vk, tid});
+  return 1;
+}
+
+HLE("user32.dll", UnregisterHotKey, 2) {
+  std::lock_guard<std::recursive_mutex> l(g_mu);
+  auto it = std::find_if(g_hotkeys.begin(), g_hotkeys.end(), [&](const HotKey& k) {
+    return k.hwnd == Arg(c, 0) && k.id == Arg(c, 1);
+  });
+  if (it == g_hotkeys.end()) {
+    SetLastError(1419);  // ERROR_HOTKEY_NOT_REGISTERED
+    return 0;
+  }
+  g_hotkeys.erase(it);
+  return 1;
+}
+
 // ---- timers ------------------------------------------------------------------------
 
 HLE("user32.dll", SetTimer, 4) {
@@ -1797,16 +1858,48 @@ HLE("user32.dll", EnumDisplaySettingsA, 3) {
   return 1;
 }
 
+// Display modes are virtual: the host's mode never changes. A mode the
+// game switches to becomes the screen it sees (GetSystemMetrics,
+// EnumDisplaySettings), as after a real switch; its fullscreen window is
+// then an SDL window of that size. NULL restores the desktop size.
+HLE("user32.dll", ChangeDisplaySettingsA, 2) {
+  EnsureSdlVideo();
+  static int desktop_w = 0, desktop_h = 0;
+  if (!desktop_w) {
+    desktop_w = g_display_w;
+    desktop_h = g_display_h;
+  }
+  uint32_t dm = Arg(c, 0), flags = Arg(c, 1);
+  if (!dm) {
+    g_display_w = desktop_w;
+    g_display_h = desktop_h;
+    return 0;  // DISP_CHANGE_SUCCESSFUL
+  }
+  uint32_t fields = Rd32(dm + 40);
+  int w = (fields & 0x00080000) ? int(Rd32(dm + 108)) : g_display_w;  // DM_PELSWIDTH
+  int h = (fields & 0x00100000) ? int(Rd32(dm + 112)) : g_display_h;  // DM_PELSHEIGHT
+  int bpp = (fields & 0x00040000) ? int(Rd32(dm + 104)) : 32;         // DM_BITSPERPEL
+  bool known = false;
+  for (const Mode& m : Modes()) known |= m.w == w && m.h == h && m.bpp == bpp;
+  if (!known) return uint32_t(-2);  // DISP_CHANGE_BADMODE
+  if (flags & 2) return 0;          // CDS_TEST
+  g_display_w = w;
+  g_display_h = h;
+  return 0;
+}
+
 // ---- painting and GDI device contexts (no GDI drawing reaches the screen;
 // the game renders through DirectDraw) -------------------------------------------------
 
-HLE("user32.dll", GetDC, 1) { return 0x00D00001; }
+// Device contexts are named after their window (see DcForWindow); the
+// screen DC (GetDC(NULL)) is a constant.
+HLE("user32.dll", GetDC, 1) { return DcForWindow(Arg(c, 0)); }
 HLE("user32.dll", ReleaseDC, 2) { return 1; }
 HLE("user32.dll", BeginPaint, 2) {
-  uint32_t ps = Arg(c, 1);
+  uint32_t ps = Arg(c, 1), dc = DcForWindow(Arg(c, 0));
   std::memset(GPtr(ps), 0, 64);
-  Wr32(ps, 0x00D00001);
-  return 0x00D00001;
+  Wr32(ps, dc);
+  return dc;
 }
 HLE("user32.dll", EndPaint, 2) { return 1; }
 HLE("user32.dll", FillRect, 3) { return 1; }

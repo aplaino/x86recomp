@@ -11,6 +11,11 @@ namespace recomp {
 // The SDL window behind a top-level HWND, or nullptr.
 SDL_Window* SdlWindowFor(uint32_t hwnd);
 
+// HDCs: GetDC(hwnd) returns DcForWindow(hwnd); WindowForDc maps it back
+// (0 for the screen DC or anything else).
+uint32_t DcForWindow(uint32_t hwnd);
+uint32_t WindowForDc(uint32_t hdc);
+
 // Ensures SDL video is initialised (main thread only).
 void EnsureSdlVideo();
 

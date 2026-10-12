@@ -365,6 +365,11 @@ class D3D9Device final : public Device {
     dev_->SetViewport(&vp);
   }
 
+  void SetScissor(const Rect& r) override {
+    RECT rc{r.left, r.top, r.right, r.bottom};
+    dev_->SetScissorRect(&rc);
+  }
+
   void SetMaterial(const Material& m) override {
     static_assert(sizeof(Material) == sizeof(D3DMATERIAL9));
     dev_->SetMaterial(reinterpret_cast<const D3DMATERIAL9*>(&m));

@@ -9,6 +9,7 @@
 // there are no silent default stubs.
 
 #include <cstdint>
+#include <initializer_list>
 #include <string>
 
 #include "runtime/ctx.h"
@@ -37,6 +38,14 @@ struct Def {
 
 struct Registrar {
   Registrar(const char* dll, const char* name, int nargs, Fn fn);
+};
+
+// The full export table of a DLL we provide, for games that GetProcAddress
+// every entry point up front and only call some (Quake 3's QGL loads all
+// of opengl32). GetProcAddress then returns a thunk for any listed name;
+// calling one without a handler is fatal and names it, as for imports.
+struct Exports {
+  Exports(const char* dll, std::initializer_list<const char*> names);
 };
 
 inline uint32_t Arg(const Ctx& c, int i) { return Rd32(c.esp + 4 + 4 * i); }

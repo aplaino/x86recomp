@@ -6,7 +6,9 @@
 //   - SDL_GPU with a fixed-function shader generator (later): Vulkan on
 //     Linux, Metal on macOS.
 // Numeric enums (render states, texture stage states, transform types,
-// primitive types, FVF codes) are D3D7's. Plain data structs mirror the
+// primitive types, FVF codes) are D3D7's; render states D3D7 lacks use
+// D3D9's numbers (COLORWRITEENABLE 168, SCISSORTESTENABLE 174,
+// SLOPESCALEDEPTHBIAS 175, DEPTHBIAS 195). Plain data structs mirror the
 // D3D7 ones (which D3D9 also kept unchanged).
 
 #include <cstdint>
@@ -117,6 +119,8 @@ class Device {
   virtual void SetTexture(uint32_t stage, TextureId t) = 0;
   virtual void SetTransform(uint32_t type, const float m[16]) = 0;
   virtual void SetViewport(const Viewport& v) = 0;
+  // In render-target pixels; used while SCISSORTESTENABLE (174) is set.
+  virtual void SetScissor(const Rect& r) = 0;
   virtual void SetMaterial(const Material& m) = 0;
   virtual void SetLight(uint32_t index, const Light& l) = 0;
   virtual void LightEnable(uint32_t index, bool enable) = 0;

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <map>
 #include <mutex>
+#include <set>
 #include <deque>
 #include <vector>
 
@@ -21,6 +22,13 @@ namespace {
 std::map<std::pair<std::string, std::string>, Def>& Registry() {
   static std::map<std::pair<std::string, std::string>, Def> r;
   return r;
+}
+
+// Real export tables of provided DLLs whose games fetch every entry point
+// up front (see Exports in hle.h).
+std::map<std::string, std::set<std::string>>& DeclaredExports() {
+  static std::map<std::string, std::set<std::string>> e;
+  return e;
 }
 
 struct Slot {
@@ -44,7 +52,7 @@ const std::vector<std::string>& KnownDlls() {
       "kernel32.dll", "user32.dll",  "gdi32.dll",    "advapi32.dll",
       "ole32.dll",    "version.dll", "winmm.dll",    "wsock32.dll",
       "ddraw.dll",    "mss32.dll",   "binkw32.dll",  "dbghelp.dll",
-      "imm32.dll",    "shfolder.dll", "ntdll.dll"};
+      "imm32.dll",    "shfolder.dll", "ntdll.dll",   "opengl32.dll"};
   return dlls;
 }
 
@@ -64,6 +72,11 @@ uint32_t AddSlot(const std::string& dll, const std::string& name) {
 
 Registrar::Registrar(const char* dll, const char* name, int nargs, Fn fn) {
   Registry()[{dll, name}] = Def{nargs, fn};
+}
+
+Exports::Exports(const char* dll, std::initializer_list<const char*> names) {
+  auto& s = DeclaredExports()[dll];
+  for (const char* n : names) s.insert(n);
 }
 
 std::string NormaliseDll(std::string dll) {
@@ -143,6 +156,9 @@ uint32_t ProcAddress(uint32_t hmodule, const std::string& name) {
   if (hmodule < kModuleRegion || idx >= k.size()) return 0;
   const std::string& dll = k[idx];
   if (!Registry().count({dll, name})) {
+    auto ex = DeclaredExports().find(dll);
+    if (ex != DeclaredExports().end() && ex->second.count(name))
+      return AddSlot(dll, name);  // a real export; fatal if ever called
     WarnF("GetProcAddress(%s, %s): not implemented, returning NULL\n",
           dll.c_str(), name.c_str());
     return 0;
