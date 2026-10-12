@@ -1,7 +1,14 @@
-// mss32 (Miles Sound System 6): the 68 entry points the game imports,
-// implemented on the host mixer (runtime/audio). 2D samples, 3D samples
-// (the "Miles Fast 2D Positional Audio" provider: distance attenuation
-// and panning), MP3/WAV streams and timers.
+// mss32 (Miles Sound System 6.x): the entry points games import,
+// implemented on the host mixer (runtime/audio). 2D samples (from WAV
+// files or headerless PCM / IMA ADPCM in memory, and double-buffered
+// streaming), 3D samples (the "Miles Fast 2D Positional Audio" provider:
+// distance attenuation and panning), MP3/WAV streams, timers and format
+// conversion.
+//
+// Miles 6.5 changed some exports under the same names (3D sample volume
+// from S32 0-127 to F32 0-1, returned in st(0)); the API generation is
+// read from the mss32.dll that ships with the game (Dungeon Siege 6.1c,
+// Call of Duty 6.5e).
 //
 // Callbacks (end of sample/stream, timers) run on a Miles service thread,
 // as with the real library: a guest thread created at driver open that
@@ -19,6 +26,7 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -28,6 +36,7 @@
 #include <vector>
 
 #include "runtime/audio/mixer.h"
+#include "runtime/audio/source.h"
 #include "runtime/hle/hle.h"
 #include "runtime/hle/kernel32_state.h"
 #include "runtime/log.h"
@@ -53,9 +62,22 @@ struct Sample {
   int64_t length = 0;       // frames
   uint32_t eos_cb = 0;
   uint32_t seq = 0;   // bumped whenever an old end-of-sample event goes stale
-  int volume = 127;
+  float vol = 1.0f, pan = 0.5f;  // Miles 6.5 levels (S32 APIs map to them)
+  float dry = 1.0f;              // reverb dry level (no reverb engine)
   bool start_pos_set = false;  // set_sample_position before start
   int64_t start_pos = 0;
+  // Headerless data (set_sample_type/address/adpcm_block_size), decoded
+  // when first needed.
+  audio::RawFormat raw;
+  std::vector<uint8_t> raw_data;
+  bool raw_dirty = false;
+  // Double-buffered streaming (load_sample_buffer): the queue the voice
+  // plays, and where each loaded buffer ends in it.
+  audio::QueueSource* queue = nullptr;
+  std::vector<int64_t> pending_ends;
+  int64_t retired_end = 0;  // queue frame where the oldest pending buffer starts
+  int64_t queued = 0;
+  int next_buffer = 0;
 };
 
 struct Stream {
@@ -63,7 +85,7 @@ struct Stream {
   Voice v;
   uint32_t cb = 0;
   uint32_t seq = 0;
-  int volume = 127;
+  float vol = 1.0f, pan = 0.5f, dry = 1.0f;
 };
 
 struct Timer {
@@ -92,6 +114,9 @@ struct State {
   bool service_started = false;
   uint32_t provider_name = 0;
   uint32_t seq = 0;  // source of Sample/Stream::seq, unique across reuse
+  bool float_api = false;  // Miles 6.5 or later (see the file comment)
+  float distance_factor = 1.0f;
+  uint32_t room_type = 0;
 };
 
 State& S() {
@@ -150,7 +175,14 @@ uint32_t StatusOf(const Voice& v) {
   }
 }
 
-void ApplyVolume(Sample& s) { s.v.volume = s.volume / 127.0f; }
+void ApplyVolume(Sample& s) {
+  s.v.volume = s.vol * s.dry;
+  s.v.pan = s.pan;
+}
+void ApplyVolume(Stream& s) {
+  s.v.volume = s.vol * s.dry;
+  s.v.pan = s.pan;
+}
 
 // Puts a sample back to its just-initialised state.
 void ResetSample(Sample& s) {
@@ -158,8 +190,18 @@ void ResetSample(Sample& s) {
   s.v.eos = false;
   s.v.loops = 1;
   s.v.rate = 0;
-  s.volume = 127;
+  s.vol = 1.0f;
+  s.pan = 0.5f;
+  s.dry = 1.0f;
   ApplyVolume(s);
+  s.raw = {};
+  s.raw_data.clear();
+  s.raw_dirty = false;
+  s.queue = nullptr;
+  s.pending_ends.clear();
+  s.retired_end = 0;
+  s.queued = 0;
+  s.next_buffer = 0;
   s.eos_cb = 0;
   s.seq = NextSeq();
   s.start_pos_set = false;
@@ -184,7 +226,24 @@ void Start(Voice& v, uint32_t* seq, int64_t from) {
   audio::GetMixer().Add(&v);
 }
 
+// Builds the voice's source from headerless data once its format is known.
+void EnsureSource(Sample& s) {
+  if (!s.raw_dirty) return;
+  s.raw_dirty = false;
+  s.raw.rate = s.v.rate > 0 ? int(s.v.rate) : 22050;
+  std::string err;
+  s.v.src = audio::MakeRawSource(s.raw_data.data(), s.raw_data.size(), s.raw, &err);
+  if (!s.v.src) {
+    WarnF("mss32: sample %08X: %s\n", s.handle, err.c_str());
+    return;
+  }
+  s.v.Seek(0);
+  s.bytes_per_frame = s.raw.adpcm ? 0 : s.raw.channels * s.raw.bits / 8;
+  s.length = s.v.src->Length();
+}
+
 void Play(Sample& s, int64_t from) {
+  EnsureSource(s);
   if (!s.v.src) return;
   s.start_pos_set = false;
   Start(s.v, &s.seq, from);
@@ -312,9 +371,28 @@ uint32_t SetFile(Ctx& c, uint32_t h, uint32_t image, bool is3d, const char* fn) 
 
 // ---- library / driver ---------------------------------------------------------------
 
+// "Version 6.5e" in the game's own mss32.dll: 6.5 or later uses the F32
+// API variants.
+bool GameMilesIsFloatApi() {
+  std::string path = HostPath(GuestGameDir() + "\\mss32.dll");
+  FILE* f = std::fopen(path.c_str(), "rb");
+  if (!f) return false;
+  std::vector<char> b(1 << 20);
+  size_t n = std::fread(b.data(), 1, b.size(), f);
+  std::fclose(f);
+  std::string s(b.data(), n);
+  size_t at = s.find("Version 6.");
+  if (at == std::string::npos) return false;
+  int minor = std::atoi(s.c_str() + at + 10);
+  RECOMP_TRACE("  mss32: game ships Miles 6.%d\n", minor);
+  return minor >= 5;
+}
+
 HLE_NAMED("mss32.dll", "_AIL_startup@0", AIL_startup, 0) {
+  bool fl = GameMilesIsFloatApi();
   std::lock_guard<std::mutex> l(Mu());
   InitPrefs(S());
+  S().float_api = fl;
   return 1;
 }
 
@@ -464,9 +542,149 @@ HLE_NAMED("mss32.dll", "_AIL_set_sample_loop_count@8", AIL_set_sample_loop_count
 HLE_NAMED("mss32.dll", "_AIL_set_sample_volume@8", AIL_set_sample_volume, 2) {
   std::lock_guard<std::mutex> l(Mu());
   if (Sample* s = FindSample(Arg(c, 0), false, "AIL_set_sample_volume")) {
-    s->volume = std::clamp<int>(int32_t(Arg(c, 1)), 0, 127);
+    s->vol = std::clamp<int>(int32_t(Arg(c, 1)), 0, 127) / 127.0f;
     ApplyVolume(*s);
   }
+  return 0;
+}
+
+// Miles 6.5: AIL_set_sample_volume_pan(S, F32 volume 0..1, F32 pan 0..1).
+HLE_NAMED("mss32.dll", "_AIL_set_sample_volume_pan@12", AIL_set_sample_volume_pan, 3) {
+  std::lock_guard<std::mutex> l(Mu());
+  if (Sample* s = FindSample(Arg(c, 0), false, "AIL_set_sample_volume_pan")) {
+    s->vol = std::clamp(F(Arg(c, 1)), 0.0f, 1.0f);
+    s->pan = std::clamp(F(Arg(c, 2)), 0.0f, 1.0f);
+    ApplyVolume(*s);
+  }
+  return 0;
+}
+
+HLE_NAMED("mss32.dll", "_AIL_sample_volume_pan@12", AIL_sample_volume_pan, 3) {
+  std::lock_guard<std::mutex> l(Mu());
+  Sample* s = FindSample(Arg(c, 0), false, "AIL_sample_volume_pan");
+  if (Arg(c, 1)) Wr32(Arg(c, 1), std::bit_cast<uint32_t>(s ? s->vol : 0.0f));
+  if (Arg(c, 2)) Wr32(Arg(c, 2), std::bit_cast<uint32_t>(s ? s->pan : 0.5f));
+  return 0;
+}
+
+// Reverb needs an EAX provider; the dry level still scales the sample.
+HLE_NAMED("mss32.dll", "_AIL_set_sample_reverb_levels@12", AIL_set_sample_reverb_levels, 3) {
+  std::lock_guard<std::mutex> l(Mu());
+  if (Sample* s = FindSample(Arg(c, 0), false, "AIL_set_sample_reverb_levels")) {
+    s->dry = std::clamp(F(Arg(c, 1)), 0.0f, 1.0f);
+    ApplyVolume(*s);
+  }
+  return 0;
+}
+
+// ---- headerless sample data (Miles 6.5 style) -----------------------------------------
+
+// AIL_set_sample_type(S, format, flags): DIG_F_* (bit 0 16-bit, bit 1
+// stereo, bit 2 IMA ADPCM), DIG_PCM_SIGN (1) for signed 8-bit.
+HLE_NAMED("mss32.dll", "_AIL_set_sample_type@12", AIL_set_sample_type, 3) {
+  std::lock_guard<std::mutex> l(Mu());
+  Sample* s = FindSample(Arg(c, 0), false, "AIL_set_sample_type");
+  if (!s) return 0;
+  uint32_t fmt = Arg(c, 1), flags = Arg(c, 2);
+  s->raw.channels = fmt & 2 ? 2 : 1;
+  s->raw.adpcm = fmt & 4;
+  s->raw.bits = s->raw.adpcm ? 4 : fmt & 1 ? 16 : 8;
+  s->raw.pcm_signed = flags & 1;
+  if (flags & 2) WarnF("mss32: DIG_PCM_ORDER (big-endian samples) not supported\n");
+  s->raw_dirty = true;
+  return 0;
+}
+
+// AIL_set_sample_address(S, void const* start, U32 len): played from
+// memory on Windows; copied here (the mixer never reads guest memory).
+HLE_NAMED("mss32.dll", "_AIL_set_sample_address@12", AIL_set_sample_address, 3) {
+  uint32_t ptr = Arg(c, 1), len = Arg(c, 2);
+  if (len && !EnsureReadable(c, ptr, len)) {
+    WarnF("mss32: AIL_set_sample_address: unreadable data %08X+%u\n", ptr, len);
+    return 0;
+  }
+  std::lock_guard<std::mutex> l(Mu());
+  Sample* s = FindSample(Arg(c, 0), false, "AIL_set_sample_address");
+  if (!s) return 0;
+  audio::GetMixer().Remove(&s->v);
+  s->v.state = Voice::State::Idle;
+  s->v.src.reset();
+  s->queue = nullptr;
+  s->raw_data.assign(GPtr(ptr), GPtr(ptr) + len);
+  s->raw_dirty = true;
+  s->start_pos_set = false;
+  return 0;
+}
+
+HLE_NAMED("mss32.dll", "_AIL_set_sample_adpcm_block_size@8", AIL_set_sample_adpcm_block_size, 2) {
+  std::lock_guard<std::mutex> l(Mu());
+  if (Sample* s = FindSample(Arg(c, 0), false, "AIL_set_sample_adpcm_block_size")) {
+    s->raw.block_size = Arg(c, 1);
+    s->raw_dirty = true;
+  }
+  return 0;
+}
+
+// ---- double-buffered streaming ------------------------------------------------------
+
+constexpr int kBytesPerFrame[8] = {1, 2, 2, 4, 1, 1, 1, 1};
+
+// AIL_minimum_sample_buffer_size(dig, rate, format): bytes for 100 ms.
+HLE_NAMED("mss32.dll", "_AIL_minimum_sample_buffer_size@12", AIL_minimum_sample_buffer_size, 3) {
+  int32_t rate = int32_t(Arg(c, 1));
+  return uint32_t(std::max(rate, 1) / 10 * kBytesPerFrame[Arg(c, 2) & 3]);
+}
+
+// Retires loaded buffers the mixer has consumed.
+void RetireBuffers(Sample& s) {
+  if (!s.queue) return;
+  int64_t done = s.queue->Consumed();
+  while (!s.pending_ends.empty() && s.pending_ends.front() <= done) {
+    s.retired_end = s.pending_ends.front();
+    s.pending_ends.erase(s.pending_ends.begin());
+  }
+}
+
+// AIL_sample_buffer_ready(S): which of the two buffers to fill next, or -1.
+HLE_NAMED("mss32.dll", "_AIL_sample_buffer_ready@4", AIL_sample_buffer_ready, 1) {
+  std::lock_guard<std::mutex> l(Mu());
+  Sample* s = FindSample(Arg(c, 0), false, "AIL_sample_buffer_ready");
+  if (!s) return 0xFFFFFFFF;
+  RetireBuffers(*s);
+  return s->pending_ends.size() < 2 ? uint32_t(s->next_buffer) : 0xFFFFFFFF;
+}
+
+// AIL_load_sample_buffer(S, buff_num, void const* buffer, U32 len): queues
+// PCM in the sample's format and starts it if it is not playing.
+HLE_NAMED("mss32.dll", "_AIL_load_sample_buffer@16", AIL_load_sample_buffer, 4) {
+  uint32_t ptr = Arg(c, 2), len = Arg(c, 3);
+  if (len && !EnsureReadable(c, ptr, len)) return 0;
+  std::lock_guard<std::mutex> l(Mu());
+  Sample* s = FindSample(Arg(c, 0), false, "AIL_load_sample_buffer");
+  if (!s) return 0;
+  if (!s->queue) {
+    audio::GetMixer().Remove(&s->v);
+    int rate = s->v.rate > 0 ? int(s->v.rate) : 22050;
+    auto q = std::make_unique<audio::QueueSource>(s->raw.channels, rate);
+    s->queue = q.get();
+    s->v.src = std::move(q);
+    s->raw_dirty = false;
+    s->pending_ends.clear();
+    s->retired_end = 0;
+    s->queued = 0;
+  }
+  std::vector<float> frames;
+  std::string err;
+  if (len && !audio::DecodeRaw(GPtr(ptr), len, s->raw, &frames, &err)) {
+    WarnF("mss32: AIL_load_sample_buffer: %s\n", err.c_str());
+    return 0;
+  }
+  int n = int(frames.size()) / s->raw.channels;
+  s->queue->Push(frames.data(), n);
+  s->queued += n;
+  s->pending_ends.push_back(s->queued);
+  s->next_buffer = (int(Arg(c, 1)) + 1) & 1;
+  if (s->v.state != Voice::State::Playing) Start(s->v, &s->seq, 0);
   return 0;
 }
 
@@ -507,7 +725,16 @@ void SetPosition(Sample& s, uint32_t bytes) {
   }
 }
 
-uint32_t PositionOf(const Sample& s) {
+uint32_t PositionOf(Sample& s) {
+  // Double-buffered: the offset into the buffer playing now, 0 once all
+  // have played. Games add it to the bytes they have loaded to clock
+  // cinematics.
+  if (s.queue) {
+    RetireBuffers(s);
+    if (s.pending_ends.empty() || s.raw.adpcm) return 0;
+    int64_t f = std::max<int64_t>(s.queue->Consumed() - s.retired_end, 0);
+    return uint32_t(f * s.raw.channels * s.raw.bits / 8);
+  }
   int64_t f = s.start_pos_set ? s.start_pos : s.v.Position();
   if (s.v.state == Voice::State::Done) f = s.length;
   return uint32_t(f * s.bytes_per_frame);
@@ -530,6 +757,7 @@ HLE_NAMED("mss32.dll", "_AIL_sample_position@4", AIL_sample_position, 1) {
 HLE_NAMED("mss32.dll", "_AIL_sample_ms_position@12", AIL_sample_ms_position, 3) {
   std::lock_guard<std::mutex> l(Mu());
   Sample* s = FindSample(Arg(c, 0), false, "AIL_sample_ms_position");
+  if (s) EnsureSource(*s);
   uint32_t total = 0, cur = 0;
   if (s && s->v.src && s->v.src->rate()) {
     double r = s->v.src->rate();
@@ -539,6 +767,23 @@ HLE_NAMED("mss32.dll", "_AIL_sample_ms_position@12", AIL_sample_ms_position, 3) 
   }
   if (Arg(c, 1)) Wr32(Arg(c, 1), total);
   if (Arg(c, 2)) Wr32(Arg(c, 2), cur);
+  return 0;
+}
+
+// AIL_set_sample_ms_position(S, S32 ms).
+HLE_NAMED("mss32.dll", "_AIL_set_sample_ms_position@8", AIL_set_sample_ms_position, 2) {
+  std::lock_guard<std::mutex> l(Mu());
+  Sample* s = FindSample(Arg(c, 0), false, "AIL_set_sample_ms_position");
+  if (!s) return 0;
+  EnsureSource(*s);
+  if (!s->v.src) return 0;
+  int64_t f = int64_t(int32_t(Arg(c, 1))) * s->v.src->rate() / 1000;
+  if (s->v.state == Voice::State::Playing || s->v.state == Voice::State::Paused) {
+    s->v.Seek(f);
+  } else {
+    s->start_pos_set = true;
+    s->start_pos = f;
+  }
   return 0;
 }
 
@@ -757,19 +1002,112 @@ HLE_NAMED("mss32.dll", "_AIL_set_3D_sample_distances@12", AIL_set_3D_sample_dist
   return 0;
 }
 
+// S32 0..127 before Miles 6.5, F32 0..1 from 6.5 on.
 HLE_NAMED("mss32.dll", "_AIL_set_3D_sample_volume@8", AIL_set_3D_sample_volume, 2) {
   std::lock_guard<std::mutex> l(Mu());
   if (Sample* s = FindSample(Arg(c, 0), true, "AIL_set_3D_sample_volume")) {
-    s->volume = std::clamp<int>(int32_t(Arg(c, 1)), 0, 127);
+    s->vol = S().float_api ? std::clamp(F(Arg(c, 1)), 0.0f, 1.0f)
+                           : std::clamp<int>(int32_t(Arg(c, 1)), 0, 127) / 127.0f;
     ApplyVolume(*s);
   }
   return 0;
 }
 
+// S32 in eax before Miles 6.5; from 6.5 on an F32, returned in st(0).
 HLE_NAMED("mss32.dll", "_AIL_3D_sample_volume@4", AIL_3D_sample_volume, 1) {
   std::lock_guard<std::mutex> l(Mu());
   Sample* s = FindSample(Arg(c, 0), true, "AIL_3D_sample_volume");
-  return s ? uint32_t(s->volume) : 0;
+  float v = s ? s->vol : 0.0f;
+  if (S().float_api) {
+    x87::LoadF32(c.fpu, std::bit_cast<uint32_t>(v));
+    return 0;
+  }
+  return uint32_t(std::lround(v * 127));
+}
+
+// AIL_set_3D_sample_info(S, AILSOUNDINFO const*): the sample plays the
+// described data from memory (copied here). Like set_3D_sample_file it
+// resets the sample.
+HLE_NAMED("mss32.dll", "_AIL_set_3D_sample_info@8", AIL_set_3D_sample_info, 2) {
+  uint32_t info = Arg(c, 1);
+  uint32_t format = Rd32(info), data = Rd32(info + 4), len = Rd32(info + 8);
+  if (len && !EnsureReadable(c, data, len)) return 0;
+  std::lock_guard<std::mutex> l(Mu());
+  Sample* s = FindSample(Arg(c, 0), true, "AIL_set_3D_sample_info");
+  if (!s) return 0;
+  audio::GetMixer().Remove(&s->v);
+  s->v.src.reset();
+  uint32_t keep_cb = s->eos_cb;
+  ResetSample(*s);
+  s->eos_cb = keep_cb;
+  if (format != 1 && format != 0x11) {
+    WarnF("mss32: AIL_set_3D_sample_info: wave format %u not supported\n", format);
+    return 0;
+  }
+  s->raw.adpcm = format == 0x11;
+  s->raw.rate = int(Rd32(info + 12));
+  s->raw.bits = int(Rd32(info + 16));
+  s->raw.channels = int(Rd32(info + 20));
+  s->raw.block_size = Rd32(info + 28);
+  s->raw_data.assign(GPtr(data), GPtr(data) + len);
+  std::string err;
+  s->v.src = audio::MakeRawSource(s->raw_data.data(), len, s->raw, &err);
+  if (!s->v.src) {
+    WarnF("mss32: AIL_set_3D_sample_info: %s\n", err.c_str());
+    return 0;
+  }
+  s->bytes_per_frame = s->raw.adpcm ? 0 : s->raw.channels * s->raw.bits / 8;
+  s->length = s->v.src->Length();
+  return 1;
+}
+
+// AIL_3D_position(obj, F32* x, F32* y, F32* z): the listener or a sample.
+HLE_NAMED("mss32.dll", "_AIL_3D_position@16", AIL_3D_position, 4) {
+  std::lock_guard<std::mutex> l(Mu());
+  State& st = S();
+  audio::Vec3 p{};
+  uint32_t obj = Arg(c, 0);
+  if (obj && obj == st.listener) {
+    p = st.lpos;
+  } else if (Sample* s = FindSample(obj, true, "AIL_3D_position")) {
+    p = s->v.pos;
+  }
+  if (Arg(c, 1)) Wr32(Arg(c, 1), std::bit_cast<uint32_t>(p.x));
+  if (Arg(c, 2)) Wr32(Arg(c, 2), std::bit_cast<uint32_t>(p.y));
+  if (Arg(c, 3)) Wr32(Arg(c, 3), std::bit_cast<uint32_t>(p.z));
+  return 0;
+}
+
+// Distances are in game units; the factor (units to metres) only matters
+// for Doppler, which the Fast 2D provider does not model.
+HLE_NAMED("mss32.dll", "_AIL_set_3D_distance_factor@8", AIL_set_3D_distance_factor, 2) {
+  std::lock_guard<std::mutex> l(Mu());
+  S().distance_factor = F(Arg(c, 1));
+  return 0;
+}
+
+// Provider attributes: only the sample count is defined for the Fast 2D
+// provider; queries for anything else (EAX) leave *value unchanged, which
+// is how games detect a missing feature.
+HLE_NAMED("mss32.dll", "_AIL_3D_provider_attribute@12", AIL_3D_provider_attribute, 3) {
+  std::string name = GStr(Arg(c, 1));
+  if (Arg(c, 0) == kProvider && name == "Maximum supported samples" && Arg(c, 2)) {
+    std::lock_guard<std::mutex> l(Mu());
+    Wr32(Arg(c, 2), S().prefs[1]);  // DIG_MIXER_CHANNELS
+    return 0;
+  }
+  RECOMP_TRACE("  AIL_3D_provider_attribute(%s): not provided\n", name.c_str());
+  return 0;
+}
+
+HLE_NAMED("mss32.dll", "_AIL_set_3D_provider_preference@12", AIL_set_3D_provider_preference, 3) {
+  RECOMP_TRACE("  AIL_set_3D_provider_preference(%s): not provided\n", GStr(Arg(c, 1)).c_str());
+  return kM3dNotEnabled;
+}
+
+HLE_NAMED("mss32.dll", "_AIL_set_3D_sample_preference@12", AIL_set_3D_sample_preference, 3) {
+  RECOMP_TRACE("  AIL_set_3D_sample_preference(%s): not provided\n", GStr(Arg(c, 1)).c_str());
+  return kM3dNotEnabled;
 }
 
 HLE_NAMED("mss32.dll", "_AIL_set_3D_sample_loop_count@8", AIL_set_3D_sample_loop_count, 2) {
@@ -920,8 +1258,8 @@ HLE_NAMED("mss32.dll", "_AIL_set_stream_loop_count@8", AIL_set_stream_loop_count
 HLE_NAMED("mss32.dll", "_AIL_set_stream_volume@8", AIL_set_stream_volume, 2) {
   std::lock_guard<std::mutex> l(Mu());
   if (Stream* s = FindStream(Arg(c, 0), "AIL_set_stream_volume")) {
-    s->volume = std::clamp<int>(int32_t(Arg(c, 1)), 0, 127);
-    s->v.volume = s->volume / 127.0f;
+    s->vol = std::clamp<int>(int32_t(Arg(c, 1)), 0, 127) / 127.0f;
+    ApplyVolume(*s);
   }
   return 0;
 }
@@ -929,7 +1267,79 @@ HLE_NAMED("mss32.dll", "_AIL_set_stream_volume@8", AIL_set_stream_volume, 2) {
 HLE_NAMED("mss32.dll", "_AIL_stream_volume@4", AIL_stream_volume, 1) {
   std::lock_guard<std::mutex> l(Mu());
   Stream* s = FindStream(Arg(c, 0), "AIL_stream_volume");
-  return s ? uint32_t(s->volume) : 0;
+  return s ? uint32_t(std::lround(s->vol * 127)) : 0;
+}
+
+HLE_NAMED("mss32.dll", "_AIL_set_stream_volume_pan@12", AIL_set_stream_volume_pan, 3) {
+  std::lock_guard<std::mutex> l(Mu());
+  if (Stream* s = FindStream(Arg(c, 0), "AIL_set_stream_volume_pan")) {
+    s->vol = std::clamp(F(Arg(c, 1)), 0.0f, 1.0f);
+    s->pan = std::clamp(F(Arg(c, 2)), 0.0f, 1.0f);
+    ApplyVolume(*s);
+  }
+  return 0;
+}
+
+HLE_NAMED("mss32.dll", "_AIL_stream_volume_pan@12", AIL_stream_volume_pan, 3) {
+  std::lock_guard<std::mutex> l(Mu());
+  Stream* s = FindStream(Arg(c, 0), "AIL_stream_volume_pan");
+  if (Arg(c, 1)) Wr32(Arg(c, 1), std::bit_cast<uint32_t>(s ? s->vol : 0.0f));
+  if (Arg(c, 2)) Wr32(Arg(c, 2), std::bit_cast<uint32_t>(s ? s->pan : 0.5f));
+  return 0;
+}
+
+HLE_NAMED("mss32.dll", "_AIL_set_stream_reverb_levels@12", AIL_set_stream_reverb_levels, 3) {
+  std::lock_guard<std::mutex> l(Mu());
+  if (Stream* s = FindStream(Arg(c, 0), "AIL_set_stream_reverb_levels")) {
+    s->dry = std::clamp(F(Arg(c, 1)), 0.0f, 1.0f);
+    ApplyVolume(*s);
+  }
+  return 0;
+}
+
+HLE_NAMED("mss32.dll", "_AIL_stream_playback_rate@4", AIL_stream_playback_rate, 1) {
+  std::lock_guard<std::mutex> l(Mu());
+  Stream* s = FindStream(Arg(c, 0), "AIL_stream_playback_rate");
+  if (!s || !s->v.src) return 0;
+  return uint32_t(s->v.rate > 0 ? std::lround(s->v.rate) : s->v.src->rate());
+}
+
+HLE_NAMED("mss32.dll", "_AIL_set_stream_playback_rate@8", AIL_set_stream_playback_rate, 2) {
+  std::lock_guard<std::mutex> l(Mu());
+  if (Stream* s = FindStream(Arg(c, 0), "AIL_set_stream_playback_rate"))
+    s->v.rate = float(int32_t(Arg(c, 1)));
+  return 0;
+}
+
+// AIL_stream_ms_position(S, S32* total_ms, S32* current_ms); the total is
+// 0 when the length is unknown without decoding (MP3).
+HLE_NAMED("mss32.dll", "_AIL_stream_ms_position@12", AIL_stream_ms_position, 3) {
+  std::lock_guard<std::mutex> l(Mu());
+  Stream* s = FindStream(Arg(c, 0), "AIL_stream_ms_position");
+  uint32_t total = 0, cur = 0;
+  if (s && s->v.src && s->v.src->rate()) {
+    double r = s->v.src->rate();
+    int64_t len = s->v.src->Length();
+    if (len > 0) total = uint32_t(len * 1000.0 / r);
+    cur = uint32_t(s->v.Position() * 1000.0 / r);
+  }
+  if (Arg(c, 1)) Wr32(Arg(c, 1), total);
+  if (Arg(c, 2)) Wr32(Arg(c, 2), cur);
+  return 0;
+}
+
+HLE_NAMED("mss32.dll", "_AIL_set_stream_ms_position@8", AIL_set_stream_ms_position, 2) {
+  std::lock_guard<std::mutex> l(Mu());
+  Stream* s = FindStream(Arg(c, 0), "AIL_set_stream_ms_position");
+  if (!s || !s->v.src) return 0;
+  int64_t f = int64_t(int32_t(Arg(c, 1))) * s->v.src->rate() / 1000;
+  if (!s->v.src->Seek(f)) {
+    WarnF("mss32: AIL_set_stream_ms_position(%d): this stream can only restart\n",
+          int32_t(Arg(c, 1)));
+    f = 0;
+  }
+  s->v.Seek(f);
+  return 0;
 }
 
 HLE_NAMED("mss32.dll", "_AIL_register_stream_callback@8", AIL_register_stream_callback, 2) {
@@ -997,6 +1407,128 @@ HLE_NAMED("mss32.dll", "_AIL_release_timer_handle@4", AIL_release_timer_handle, 
 
 // ---- misc ----------------------------------------------------------------------------------
 
+// Room types (reverb presets) need an EAX provider.
+HLE_NAMED("mss32.dll", "_AIL_set_digital_master_room_type@8", AIL_set_digital_master_room_type, 2) {
+  std::lock_guard<std::mutex> l(Mu());
+  S().room_type = Arg(c, 1);
+  return 0;
+}
+
+// The DirectSound focus window: SDL's audio is not tied to a window.
+HLE_NAMED("mss32.dll", "_AIL_set_DirectSound_HWND@8", AIL_set_DirectSound_HWND, 2) {
+  return 0;
+}
+
+// The mixer's CPU load is not measured; report none.
+HLE_NAMED("mss32.dll", "_AIL_digital_CPU_percent@4", AIL_digital_CPU_percent, 1) { return 0; }
+
+// ---- format conversion ---------------------------------------------------------------
+
+// AILMIXINFO starts with the source's AILSOUNDINFO; the rest is Miles'
+// own decoder state.
+bool ReadSoundInfo(uint32_t info, audio::RawFormat* f, uint32_t* data, uint32_t* len) {
+  uint32_t format = Rd32(info);
+  if (format != 1 && format != 0x11) return false;
+  f->adpcm = format == 0x11;
+  *data = Rd32(info + 4);
+  *len = Rd32(info + 8);
+  f->rate = int(Rd32(info + 12));
+  f->bits = int(Rd32(info + 16));
+  f->channels = int(Rd32(info + 20));
+  f->block_size = Rd32(info + 28);
+  return f->rate > 0;
+}
+
+// Frames out of a source of `in_frames` frames at `in_rate`, at `out_rate`.
+int64_t ConvertedFrames(int64_t in_frames, int in_rate, uint32_t out_rate) {
+  return (in_frames * int64_t(out_rate) + in_rate - 1) / in_rate;
+}
+
+int64_t SourceFrames(const audio::RawFormat& f, uint32_t len) {
+  if (!f.adpcm) return len / uint32_t(f.channels * f.bits / 8);
+  uint32_t spb = (f.block_size - 4 * uint32_t(f.channels)) * 2 / uint32_t(f.channels) + 1;
+  uint32_t blocks = len / f.block_size, rest = len % f.block_size;
+  int64_t n = int64_t(blocks) * spb;
+  if (rest > 4u * uint32_t(f.channels))
+    n += (rest - 4 * uint32_t(f.channels)) * 2 / uint32_t(f.channels) + 1;
+  return n;
+}
+
+// Only one source is supported: the size of AILMIXINFO (and so where a
+// second one starts) is Miles-internal.
+bool OneSource(uint32_t n, const char* fn) {
+  if (n == 1) return true;
+  WarnF("mss32: %s with %u sources: only one is supported\n", fn, n);
+  return n > 1;  // convert the first
+}
+
+// AIL_size_processed_digital_audio(dest_rate, dest_format, num_srcs,
+// AILMIXINFO const* src) -> bytes AIL_process_digital_audio will write.
+HLE_NAMED("mss32.dll", "_AIL_size_processed_digital_audio@16", AIL_size_processed_digital_audio, 4) {
+  uint32_t rate = Arg(c, 0), fmt = Arg(c, 1), src = Arg(c, 3);
+  audio::RawFormat f;
+  uint32_t data, len;
+  if (!OneSource(Arg(c, 2), "AIL_size_processed_digital_audio") ||
+      !ReadSoundInfo(src, &f, &data, &len))
+    return 0;
+  return uint32_t(ConvertedFrames(SourceFrames(f, len), f.rate, rate) * kBytesPerFrame[fmt & 3]);
+}
+
+// AIL_process_digital_audio(dest, dest_size, dest_rate, dest_format,
+// num_srcs, AILMIXINFO* src): decodes the source, resamples it (linear)
+// and writes dest_format into dest; returns the bytes written.
+HLE_NAMED("mss32.dll", "_AIL_process_digital_audio@24", AIL_process_digital_audio, 6) {
+  uint32_t dest = Arg(c, 0), size = Arg(c, 1), rate = Arg(c, 2), fmt = Arg(c, 3) & 3,
+           src = Arg(c, 5);
+  audio::RawFormat f;
+  uint32_t data, len;
+  if (!OneSource(Arg(c, 4), "AIL_process_digital_audio") || !ReadSoundInfo(src, &f, &data, &len) ||
+      !EnsureReadable(c, data, len)) {
+    WarnF("mss32: AIL_process_digital_audio: source not handled\n");
+    return 0;
+  }
+  std::vector<float> in;
+  std::string err;
+  if (!audio::DecodeRaw(GPtr(data), len, f, &in, &err)) {
+    WarnF("mss32: AIL_process_digital_audio: %s\n", err.c_str());
+    return 0;
+  }
+  int out_ch = fmt & 2 ? 2 : 1, bpf = kBytesPerFrame[fmt];
+  int64_t in_frames = int64_t(in.size()) / f.channels;
+  if (!in_frames) return 0;
+  int64_t frames = std::min<int64_t>(size / uint32_t(bpf),
+                                     ConvertedFrames(in_frames, f.rate, rate));
+  double step = double(f.rate) / rate;
+  uint8_t* d = GPtr(dest);
+  auto at = [&](int64_t frame, int ch) { return in[size_t(frame) * f.channels + size_t(ch)]; };
+  for (int64_t o = 0; o < frames; o++) {
+    double pos = double(o) * step;
+    int64_t a = std::min<int64_t>(int64_t(pos), in_frames - 1);
+    int64_t b = std::min<int64_t>(a + 1, in_frames - 1);
+    float t = float(pos - double(a));
+    for (int ch = 0; ch < out_ch; ch++) {
+      float v;
+      if (out_ch == 1 && f.channels == 2) {  // stereo to mono: the average
+        float l = at(a, 0) + (at(b, 0) - at(a, 0)) * t;
+        float r = at(a, 1) + (at(b, 1) - at(a, 1)) * t;
+        v = 0.5f * (l + r);
+      } else {
+        int sc = std::min(ch, f.channels - 1);
+        v = at(a, sc) + (at(b, sc) - at(a, sc)) * t;
+      }
+      v = std::clamp(v, -1.0f, 1.0f);
+      size_t i = size_t(o) * size_t(out_ch) + size_t(ch);
+      if (fmt & 1) {
+        int16_t s16 = int16_t(std::lround(v * 32767.0f));
+        std::memcpy(d + 2 * i, &s16, 2);
+      } else {
+        d[i] = uint8_t(std::lround(v * 127.0f) + 128);
+      }
+    }
+  }
+  return uint32_t(frames * bpf);
+}
+
 // AIL_WAV_info(void const* data, AILSOUNDINFO* info) -> nonzero if a WAV.
 HLE_NAMED("mss32.dll", "_AIL_WAV_info@8", AIL_WAV_info, 2) {
   uint32_t data = Arg(c, 0), info = Arg(c, 1);
@@ -1013,7 +1545,15 @@ HLE_NAMED("mss32.dll", "_AIL_WAV_info@8", AIL_WAV_info, 2) {
   Wr32(info + 0x0C, w.rate);
   Wr32(info + 0x10, w.bits);
   Wr32(info + 0x14, w.channels);
-  Wr32(info + 0x18, w.block_align ? w.data_len / w.block_align : 0);
+  uint32_t frames = w.block_align ? w.data_len / w.block_align : 0;
+  if (w.format == 0x11 && w.block_align > 4u * w.channels && w.channels) {
+    audio::RawFormat f;
+    f.adpcm = true;
+    f.channels = w.channels;
+    f.block_size = w.block_align;
+    frames = uint32_t(SourceFrames(f, w.data_len));
+  }
+  Wr32(info + 0x18, frames);  // sample frames
   Wr32(info + 0x1C, w.block_align);
   Wr32(info + 0x20, data + w.data_offset);
   return 1;

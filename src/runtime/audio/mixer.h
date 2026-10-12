@@ -30,6 +30,7 @@ struct Voice {
   std::unique_ptr<Source> src;
   State state = State::Idle;
   float volume = 1.0f;  // linear amplitude
+  float pan = 0.5f;     // non-positional voices: 0 left, 0.5 centre, 1 right
   float rate = 0;       // source frames per second; 0 = the source's own
   int loops = 1;        // total passes; 0 = forever
   int passes = 0;       // completed passes

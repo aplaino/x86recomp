@@ -221,6 +221,134 @@ std::unique_ptr<Source> MakeWavSource(Bytes data, std::string* err) {
   return std::make_unique<WavSource>(std::move(data), w);
 }
 
+// ---- headerless PCM and IMA ADPCM ------------------------------------------
+
+namespace {
+
+// Already-decoded frames.
+class FloatSource : public Source {
+ public:
+  FloatSource(std::vector<float> frames, int channels, int rate)
+      : f_(std::move(frames)) {
+    channels_ = channels;
+    rate_ = rate;
+    n_ = int64_t(f_.size()) / channels;
+  }
+  int Read(float* out, int n) override {
+    int got = int(std::min<int64_t>(n, n_ - pos_));
+    std::memcpy(out, f_.data() + pos_ * channels_, size_t(got) * channels_ * sizeof(float));
+    pos_ += got;
+    return got;
+  }
+  bool Seek(int64_t f) override {
+    pos_ = std::clamp<int64_t>(f, 0, n_);
+    return true;
+  }
+  int64_t Length() const override { return n_; }
+
+ private:
+  std::vector<float> f_;
+  int64_t n_ = 0, pos_ = 0;
+};
+
+// IMA ADPCM (the step table and index adjustments of the IMA standard).
+constexpr int16_t kImaStep[89] = {
+    7,     8,     9,     10,    11,    12,    13,    14,    16,    17,    19,
+    21,    23,    25,    28,    31,    34,    37,    41,    45,    50,    55,
+    60,    66,    73,    80,    88,    97,    107,   118,   130,   143,   157,
+    173,   190,   209,   230,   253,   279,   307,   337,   371,   408,   449,
+    494,   544,   598,   658,   724,   796,   876,   963,   1060,  1166,  1282,
+    1411,  1552,  1707,  1878,  2066,  2272,  2499,  2749,  3024,  3327,  3660,
+    4026,  4428,  4871,  5358,  5894,  6484,  7132,  7845,  8630,  9493,  10442,
+    11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794,
+    32767};
+constexpr int kImaIndex[8] = {-1, -1, -1, -1, 2, 4, 6, 8};
+
+struct ImaState {
+  int pred = 0, index = 0;
+  int Decode(int nibble) {
+    int step = kImaStep[index];
+    int diff = step >> 3;
+    if (nibble & 1) diff += step >> 2;
+    if (nibble & 2) diff += step >> 1;
+    if (nibble & 4) diff += step;
+    if (nibble & 8) diff = -diff;
+    pred = std::clamp(pred + diff, -32768, 32767);
+    index = std::clamp(index + kImaIndex[nibble & 7], 0, 88);
+    return pred;
+  }
+};
+
+// One WAV IMA ADPCM block: a 4-byte header per channel (first sample,
+// step index), then 4-byte groups per channel in turn, low nibble first.
+void DecodeImaBlock(const uint8_t* b, size_t len, int ch, std::vector<float>* out) {
+  if (len < size_t(4 * ch)) return;
+  ImaState st[2];
+  for (int c = 0; c < ch; c++) {
+    st[c].pred = int16_t(Le16(b + 4 * c));
+    st[c].index = std::clamp<int>(b[4 * c + 2], 0, 88);
+  }
+  size_t data = len - 4 * size_t(ch);
+  size_t per_ch = data * 2 / size_t(ch);  // samples per channel after the header
+  size_t base = out->size();
+  out->resize(base + (per_ch + 1) * size_t(ch));
+  float* o = out->data() + base;
+  for (int c = 0; c < ch; c++) o[c] = st[c].pred / 32768.0f;
+  const uint8_t* p = b + 4 * ch;
+  for (size_t group = 0; group * 8 < per_ch; group++)
+    for (int c = 0; c < ch; c++)
+      for (int k = 0; k < 4; k++) {
+        uint8_t byte = p[(group * size_t(ch) + size_t(c)) * 4 + size_t(k)];
+        for (int half = 0; half < 2; half++) {
+          size_t i = group * 8 + size_t(k) * 2 + size_t(half);  // sample index
+          int v = st[c].Decode(half ? byte >> 4 : byte & 0xF);
+          if (i < per_ch) o[(1 + i) * size_t(ch) + size_t(c)] = v / 32768.0f;
+        }
+      }
+}
+
+}  // namespace
+
+bool DecodeRaw(const uint8_t* data, size_t len, const RawFormat& f, std::vector<float>* out,
+               std::string* err) {
+  out->clear();
+  if (f.channels < 1 || f.channels > 2 || f.rate <= 0) {
+    *err = "bad channel count or rate";
+    return false;
+  }
+  if (f.adpcm) {
+    if (f.block_size < 4u * uint32_t(f.channels)) {
+      *err = "IMA ADPCM without a block size";
+      return false;
+    }
+    for (size_t off = 0; off < len; off += f.block_size)
+      DecodeImaBlock(data + off, std::min<size_t>(f.block_size, len - off), f.channels, out);
+    return true;
+  }
+  if (f.bits == 16) {
+    out->resize(len / 2 / size_t(f.channels) * size_t(f.channels));
+    for (size_t i = 0; i < out->size(); i++)
+      (*out)[i] = int16_t(Le16(data + 2 * i)) * (1.0f / 32768.0f);
+    return true;
+  }
+  if (f.bits == 8) {
+    out->resize(len / size_t(f.channels) * size_t(f.channels));
+    for (size_t i = 0; i < out->size(); i++)
+      (*out)[i] = f.pcm_signed ? int8_t(data[i]) * (1.0f / 128.0f)
+                               : (data[i] - 128) * (1.0f / 128.0f);
+    return true;
+  }
+  *err = "unsupported PCM bit depth " + std::to_string(f.bits);
+  return false;
+}
+
+std::unique_ptr<Source> MakeRawSource(const uint8_t* data, size_t len, const RawFormat& f,
+                                      std::string* err) {
+  std::vector<float> frames;
+  if (!DecodeRaw(data, len, f, &frames, err)) return nullptr;
+  return std::make_unique<FloatSource>(std::move(frames), f.channels, f.rate);
+}
+
 std::unique_ptr<Source> MakeMp3Source(Bytes data, std::string* err) {
   auto s = std::make_unique<Mp3Source>(std::move(data));
   if (!s->Init(err)) return nullptr;
@@ -269,6 +397,11 @@ void QueueSource::Push(const float* frames, int n) {
   q_.insert(q_.end(), frames, frames + size_t(n) * channels_);
 }
 
+int64_t QueueSource::Consumed() {
+  std::lock_guard<std::mutex> l(mu_);
+  return consumed_;
+}
+
 void QueueSource::Finish() {
   std::lock_guard<std::mutex> l(mu_);
   finished_ = true;
@@ -280,6 +413,7 @@ int QueueSource::Read(float* out, int n) {
   size_t take = std::min<size_t>(avail, n);
   std::memcpy(out, q_.data() + head_, take * channels_ * sizeof(float));
   head_ += take * channels_;
+  consumed_ += int64_t(take);
   if (finished_) return int(take);
   // Underrun: keep the voice alive with silence.
   std::fill(out + take * channels_, out + size_t(n) * channels_, 0.0f);

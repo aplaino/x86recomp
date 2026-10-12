@@ -53,6 +53,22 @@ std::unique_ptr<Source> MakeMp3Source(Bytes data, std::string* err);
 // WAV if the data is RIFF, else MP3.
 std::unique_ptr<Source> MakeSource(Bytes data, std::string* err);
 
+// Headerless sample data, as Miles plays from memory: PCM (8-bit unsigned
+// unless pcm_signed, or 16-bit little-endian) or IMA ADPCM in WAV's block
+// layout (WAVE_FORMAT_IMA_ADPCM, `block_size` bytes per block).
+struct RawFormat {
+  int channels = 1, bits = 16, rate = 22050;
+  bool adpcm = false, pcm_signed = false;
+  uint32_t block_size = 0;
+};
+// Decodes to float frames once; false (and *err) if the format is not
+// handled.
+std::unique_ptr<Source> MakeRawSource(const uint8_t* data, size_t len,
+                                      const RawFormat& f, std::string* err);
+// The same decode into interleaved float frames (for format conversion).
+bool DecodeRaw(const uint8_t* data, size_t len, const RawFormat& f,
+               std::vector<float>* out, std::string* err);
+
 // Interleaved float frames from a decoded libavcodec frame (float or s16,
 // planar or packed), keeping the first `out_ch` channels.
 void ConvertFrame(const AVFrame* f, int out_ch, float* out);
@@ -64,6 +80,8 @@ class QueueSource : public Source {
   QueueSource(int channels, int rate);
   void Push(const float* frames, int n);
   void Finish();
+  // Frames read since creation (pushed frames are consumed in order).
+  int64_t Consumed();
   int Read(float* out, int n) override;
   bool Seek(int64_t f) override { return f == 0; }
 
@@ -71,6 +89,7 @@ class QueueSource : public Source {
   std::mutex mu_;
   std::vector<float> q_;
   size_t head_ = 0;  // index into q_ of the next sample to play
+  int64_t consumed_ = 0;
   bool finished_ = false;
 };
 

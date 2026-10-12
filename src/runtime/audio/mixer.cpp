@@ -149,8 +149,12 @@ void Mixer::SetListener(const Vec3& pos, const Vec3& face, const Vec3& up) {
 //    balance table, the near one stays full; gains are out of 2048.
 void Mixer::TargetGains(const Voice& v, float* l, float* r) const {
   float g = v.volume * master_;
+  // Mss32's balance table: 2 * pan up to 62, then full (128).
+  auto bal = [](int p) { return p < 63 ? 2 * p : 128; };
   if (!v.positional) {
-    *l = *r = g;
+    int p = int(std::lround(std::clamp(v.pan, 0.0f, 1.0f) * 127));
+    *l = g * float(bal(127 - p)) / 128.0f;
+    *r = g * float(bal(p)) / 128.0f;
     return;
   }
   static const auto pan_table = [] {
@@ -177,8 +181,6 @@ void Mixer::TargetGains(const Voice& v, float* l, float* r) const {
     float dot = Dot(rel, Cross(lup_, lface_)) / d;
     pan = pan_table[std::clamp<long>(std::lrint((dot + 1) * 1024), 0, 2048)];
   }
-  // Mss32's balance table: 2 * pan up to 62, then full (128).
-  auto bal = [](int p) { return p < 63 ? 2 * p : 128; };
   int mv = std::clamp(vol * int(std::lround(master_ * 127)) / 127, 0, 127);
   int sl = bal(127 - pan) * mv / 8, sr = bal(pan) * mv / 8;
   if (sl >= 0x7F0) sl = 0x7FF;
