@@ -312,10 +312,14 @@ void Cpuid(Ctx& c) {
   }
 }
 
+// A 3 GHz TSC. Games time it against QueryPerformanceCounter to measure
+// the CPU and pick detail settings (Call of Duty's configure.csv wants
+// 2000 MHz for its best row), so it must not read slower than the
+// machines they were tuned for.
 uint64_t Rdtsc(Ctx& c) {
   (void)c;
   using namespace std::chrono;
-  return uint64_t(
+  return 3 * uint64_t(
       duration_cast<nanoseconds>(steady_clock::now().time_since_epoch())
           .count());
 }

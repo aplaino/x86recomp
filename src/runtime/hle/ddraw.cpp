@@ -43,7 +43,9 @@ constexpr guest::GUID kIID_IDirectDraw7 = {0x15e65ec0, 0x3b9c, 0x11d2, {0xb9, 0x
 constexpr guest::GUID kIID_IDirectDrawSurface7 = {0x06675a80, 0x3b9b, 0x11d2, {0xb9, 0x2f, 0x00, 0x60, 0x97, 0x97, 0xea, 0x5b}};
 constexpr guest::GUID kIID_IDirectDrawGammaControl = {0x69C11C3E, 0xB46B, 0x11D1, {0xAD, 0x7A, 0x00, 0xC0, 0x4F, 0xC2, 0x9B, 0x4E}};
 
-constexpr uint32_t kVidMemTotal = 64u << 20, kVidMemFree = kVidMemTotal - (8u << 20);
+// GameConfig::video_memory_mb, with 8 MB in use (the primary surface).
+uint32_t VidMemTotal() { return Game().video_memory_mb << 20; }
+uint32_t VidMemFree() { return VidMemTotal() - (8u << 20); }
 
 State g_state;
 Uint64 g_last_present_ms = 0;  // SDL ticks of the last frame Present
@@ -687,8 +689,8 @@ HLE_NAMED("ddraw.dll", "IDirectDraw7::GetCaps", DD7_GetCaps, 3) {
                   0x200 /*NOPAGELOCKREQUIRED*/;
       k.dwCKeyCaps = 0x200;  // DDCKEYCAPS_SRCBLT
       k.dwZBufferBitDepths = 0x400 | 0x200 | 0x100;  // 16, 24, 32
-      k.dwVidMemTotal = kVidMemTotal;
-      k.dwVidMemFree = kVidMemFree;
+      k.dwVidMemTotal = VidMemTotal();
+      k.dwVidMemFree = VidMemFree();
       k.ddsCaps.dwCaps = DDSCAPS_3DDEVICE | DDSCAPS_TEXTURE | DDSCAPS_ZBUFFER |
                          DDSCAPS_FLIP | DDSCAPS_PRIMARYSURFACE |
                          DDSCAPS_BACKBUFFER | DDSCAPS_VIDEOMEMORY |
@@ -704,8 +706,8 @@ HLE_NAMED("ddraw.dll", "IDirectDraw7::GetCaps", DD7_GetCaps, 3) {
 }
 
 HLE_NAMED("ddraw.dll", "IDirectDraw7::GetAvailableVidMem", DD7_GetAvailableVidMem, 4) {
-  if (Arg(c, 2)) Wr32(Arg(c, 2), kVidMemTotal);
-  if (Arg(c, 3)) Wr32(Arg(c, 3), kVidMemFree);
+  if (Arg(c, 2)) Wr32(Arg(c, 2), VidMemTotal());
+  if (Arg(c, 3)) Wr32(Arg(c, 3), VidMemFree());
   return DD_OK;
 }
 

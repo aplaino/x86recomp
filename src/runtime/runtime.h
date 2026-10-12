@@ -44,6 +44,11 @@ struct GameConfig {
   bool (*game_cursor)(uint32_t userdata, int32_t* x, int32_t* y, float* kx,
                       float* ky) = nullptr;
 
+  // Video memory DirectDraw reports, in MB. Games pick detail settings
+  // from it (Dungeon Siege's best profile is a 64 MB GeForce3; Call of
+  // Duty's configure.csv tops out at 256).
+  uint32_t video_memory_mb = 64;
+
   // DLLs the game loads itself (LoadLibrary) whose code is lifted with
   // the EXE (recomp_lift --module), e.g. Call of Duty's gamex86.dll. They
   // are read from guest_dir (the host game directory) by file name.
