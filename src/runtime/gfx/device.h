@@ -8,7 +8,8 @@
 // Numeric enums (render states, texture stage states, transform types,
 // primitive types, FVF codes) are D3D7's; render states D3D7 lacks use
 // D3D9's numbers (COLORWRITEENABLE 168, SCISSORTESTENABLE 174,
-// SLOPESCALEDEPTHBIAS 175, DEPTHBIAS 195). Plain data structs mirror the
+// SLOPESCALEDEPTHBIAS 175, DEPTHBIAS 195), and FVFs may use D3D9's
+// XYZW position (0x4002: homogeneous, untransformed). Plain data structs mirror the
 // D3D7 ones (which D3D9 also kept unchanged).
 
 #include <cstdint>

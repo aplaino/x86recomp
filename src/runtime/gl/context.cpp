@@ -72,7 +72,7 @@ enum : uint32_t {
   TA_COMPLEMENT = 0x10, TA_ALPHAREPLICATE = 0x20,
 };
 enum : uint32_t {
-  FVF_XYZ = 0x002, FVF_NORMAL = 0x010, FVF_DIFFUSE = 0x040,
+  FVF_XYZ = 0x002, FVF_XYZW = 0x4002, FVF_NORMAL = 0x010, FVF_DIFFUSE = 0x040,
   PT_POINTLIST = 1, PT_LINELIST = 2, PT_LINESTRIP = 3, PT_TRIANGLELIST = 4,
   PT_TRIANGLESTRIP = 5, PT_TRIANGLEFAN = 6,
   TS_VIEW = 2, TS_PROJECTION = 3, TS_TEXTURE0 = 16, TS_WORLD = 1,
@@ -390,6 +390,7 @@ void Context::DepthMask(bool on) { depth_mask_ = on; }
 void Context::DepthRange(double n, double f) {
   depth_near_ = std::clamp(n, 0.0, 1.0);
   depth_far_ = std::clamp(f, 0.0, 1.0);
+  matrices_dirty_ = true;  // the device keeps the range in its viewport
 }
 
 void Context::ColorMask(bool r, bool g, bool b, bool a) {
@@ -1425,27 +1426,23 @@ void Context::DrawVertices(Enum mode, const std::vector<Vtx>& verts,
   ApplyMatrices();
 
   bool normals = enabled_.count(LIGHTING);
-  uint32_t fvf = FVF_XYZ | (normals ? FVF_NORMAL : 0) | FVF_DIFFUSE | (uint32_t(ntex) << 8);
-  uint32_t nofs = normals ? 12 : 0;
-  uint32_t stride = 16 + nofs + 8 * uint32_t(ntex);
+  // Homogeneous positions (w != 1, e.g. w = 0 for points at infinity)
+  // go to the device as they are.
+  bool xyzw = std::any_of(verts.begin(), verts.end(),
+                          [](const Vtx& v) { return v.pos[3] != 1; });
+  uint32_t fvf = (xyzw ? FVF_XYZW : FVF_XYZ) | (normals ? FVF_NORMAL : 0) |
+                 FVF_DIFFUSE | (uint32_t(ntex) << 8);
+  uint32_t pofs = xyzw ? 16 : 12;
+  uint32_t nofs = pofs + (normals ? 12 : 0);
+  uint32_t stride = nofs + 4 + 8 * uint32_t(ntex);
   std::vector<uint8_t> buf(verts.size() * stride);
-  bool warned_w = false;
   for (size_t i = 0; i < verts.size(); i++) {
     const Vtx& v = verts[i];
-    float pos[3] = {v.pos[0], v.pos[1], v.pos[2]};
-    if (v.pos[3] != 1) {
-      if (v.pos[3] == 0) {
-        if (!warned_w) Unsupported("vertex with w = 0", 0);
-        warned_w = true;
-      } else {
-        for (float& c : pos) c /= v.pos[3];
-      }
-    }
     uint8_t* d = buf.data() + i * stride;
-    std::memcpy(d, pos, 12);
-    if (normals) std::memcpy(d + 12, v.normal, 12);
-    std::memcpy(d + 12 + nofs, &v.color, 4);
-    for (int u = 0; u < ntex; u++) std::memcpy(d + 16 + nofs + 8 * u, v.tc[u], 8);
+    std::memcpy(d, v.pos, pofs);
+    if (normals) std::memcpy(d + pofs, v.normal, 12);
+    std::memcpy(d + nofs, &v.color, 4);
+    for (int u = 0; u < ntex; u++) std::memcpy(d + nofs + 4 + 8 * u, v.tc[u], 8);
   }
   std::vector<uint16_t> i16(idx.begin(), idx.end());
   dev_->Draw(prim, fvf, buf.data(), uint32_t(verts.size()), stride, i16.data(),

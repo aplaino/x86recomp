@@ -134,6 +134,7 @@ uint32_t FvfStride(uint32_t fvf) {
     case 0x00C: s = 28; break;
     case 0x00E: s = 32; break;
   }
+  if ((fvf & 0x400E) == 0x4002) s = 16;  // XYZW (D3D9)
   if (fvf & 0x010) s += 12;  // NORMAL
   if (fvf & 0x020) s += 4;   // RESERVED1 (D3D7) / PSIZE (D3D9)
   if (fvf & 0x040) s += 4;   // DIFFUSE

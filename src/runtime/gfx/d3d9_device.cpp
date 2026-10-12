@@ -154,7 +154,11 @@ class D3D9Device final : public Device {
       dev_->ColorFill(*t, nullptr, D3DCOLOR_XRGB(0, 0, 0));
     }
     dev_->SetRenderTarget(0, backbuffer_);
-    if (reset) RestoreState();
+    if (reset) {
+      // Reset also unbinds the targets.
+      SetRenderTarget(current_color_, current_depth_);
+      RestoreState();
+    }
   }
 
   TextureId CreateTexture(int w, int h, int levels, Format fmt,
@@ -238,6 +242,7 @@ class D3D9Device final : public Device {
   }
 
   void SetRenderTarget(TextureId color, DepthId depth) override {
+    current_color_ = color;
     if (color) {
       auto it = textures_.find(color);
       if (it != textures_.end()) {
@@ -616,6 +621,7 @@ class D3D9Device final : public Device {
   std::map<uint32_t, Target> targets_;  // render-target textures (default pool)
   std::map<uint32_t, Depth> depths_;
   uint32_t next_id_ = 1;
+  TextureId current_color_ = 0;  // 0: the game's back buffer
   DepthId current_depth_ = 0;
   bool in_scene_ = false;
   std::set<uint32_t> ignored_rs_;
