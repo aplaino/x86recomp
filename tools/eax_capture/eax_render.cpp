@@ -7,7 +7,11 @@
 // directly and no audio device is opened.
 //
 //   eax_render --out DIR [--provider fast2d,eax1,eax2,eax3] [--rate 48000]
-//              [--cases LIST] [--stim LIST] [--quiet]
+//              [--cases LIST] [--stim LIST] [--miles-version 6.5|6.1] [--quiet]
+//
+// --miles-version picks whose Fast 2D the fast2d set renders: Miles 6.5's
+// (msssoft.m3d, the default: eaxcap.exe records the Miles a game ships,
+// e.g. Call of Duty's 6.5e) or 6.1c's (Mssfast.m3d).
 
 #include <AL/al.h>
 
@@ -66,6 +70,7 @@ struct Options {
   std::string out = "render", providers = "fast2d,eax1,eax2,eax3", cases;
   unsigned stimuli = 0;
   int rate = 48000;
+  bool miles65 = true;
 };
 
 // ---- JSON, as eaxcap.c writes it ------------------------------------------------
@@ -253,8 +258,10 @@ void ReadBack(Json& j, const char* key, int ver, const EcAttrName* names, T* obj
 void ApplyLevels(audio::Mixer& m, audio::Voice& v, const eax::Source& s,
                  const eax::Listener& listener, int ver) {
   if (!ver) {
-    // Fast 2D: the driver's dry level; no master reverb wet level is set.
-    v.direct_lf = v.direct_hf = m.digital_reverb().dry();
+    // Fast 2D: the driver's dry level (a Miles 6.5 voice gets it in the
+    // mixer); no master reverb wet level is set.
+    if (v.miles == audio::Voice::Miles::k61)
+      v.direct_lf = v.direct_hf = m.digital_reverb().dry();
     return;
   }
   eax::Listener l = listener;
@@ -267,13 +274,15 @@ void ApplyLevels(audio::Mixer& m, audio::Voice& v, const eax::Source& s,
   v.send_hf[kBusEax] = lv.room_hf;
 }
 
-void InitVoice(audio::Voice& v, const audio::Bytes& image, const float* pos, const EcCase& c) {
+void InitVoice(audio::Voice& v, const audio::Bytes& image, const float* pos, const EcCase& c,
+               audio::Voice::Miles miles) {
   std::string err;
   v.src = audio::MakeWavSource(image, &err);
   if (!v.src) {
     std::fprintf(stderr, "error: %s\n", err.c_str());
     std::exit(1);
   }
+  v.miles = miles;
   v.positional = true;
   v.pos = {pos[0], pos[1], pos[2]};
   v.min_dist = c.min_dist;
@@ -300,6 +309,7 @@ void Render(const Options& o, const char* provider, const std::string& tag, int 
   j.Str("provider", provider);
   j.Str("provider_tag", tag);
   j.Num("eax_version", ver);
+  if (!ver) j.Str("miles", o.miles65 ? "6.5" : "6.1c");
   j.Num("rate", rate);
 
   // The provider's listener: EAX's defaults, the environment, the case.
@@ -353,9 +363,11 @@ void Render(const Options& o, const char* provider, const std::string& tag, int 
   if (ver) m.SetReverb(kBusEax, eax::ToReverb(l));
   if (g_al_version.empty() && ver) g_al_version = alGetString(AL_VERSION);
 
+  // EAX voices position by the 6.1c rule, as mss32.cpp does.
+  auto miles = !ver && o.miles65 ? audio::Voice::Miles::k65 : audio::Voice::Miles::k61;
   audio::Voice stim, sync;
-  InitVoice(stim, st.image, c.pos, c);
-  InitVoice(sync, sync_image, EC_SYNC_POS, c);
+  InitVoice(stim, st.image, c.pos, c, miles);
+  InitVoice(sync, sync_image, EC_SYNC_POS, c, miles);
   ApplyLevels(m, stim, src, l, ver);
   ApplyLevels(m, sync, sync_src, l, ver);
 
@@ -424,7 +436,8 @@ bool Selected(const std::string& list, const std::string& tag, const std::string
 int Usage() {
   std::fprintf(stderr,
                "usage: eax_render [--out DIR] [--provider fast2d,eax1,eax2,eax3|all]\n"
-               "                  [--rate 44100|48000] [--cases LIST] [--stim LIST] [--quiet]\n");
+               "                  [--rate 44100|48000] [--cases LIST] [--stim LIST]\n"
+               "                  [--miles-version 6.5|6.1] [--quiet]\n");
   return 2;
 }
 
@@ -447,6 +460,10 @@ int main(int argc, char** argv) {
       o.rate = std::atoi(argv[++i]);
     } else if (a == "--cases") {
       o.cases = argv[++i];
+    } else if (a == "--miles-version") {
+      std::string m = argv[++i];
+      if (m != "6.5" && m != "6.1") return Usage();
+      o.miles65 = m == "6.5";
     } else if (a == "--stim") {
       o.stimuli = ec_stim_parse(argv[++i]);
       if (!o.stimuli) return Usage();

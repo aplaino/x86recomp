@@ -149,11 +149,16 @@ void Mixer::SetListener(const Vec3& pos, const Vec3& face, const Vec3& up) {
   lpos_ = pos;
   lface_ = Normalize(face, {0, 0, 1});
   lup_ = Normalize(up, {0, 1, 0});
+  listener65_ = miles65::MakeListener(pos, face, up);
 }
 
-// Positional voices follow the Miles Fast 2D provider (Mssfast.m3d) exactly:
-// it reduces each 3D sample to a 2D volume and pan, which Mss32 turns into
-// channel gains.
+// Miles 6.5 voices: runtime/audio/miles65.h.
+//
+// Miles 6.1c: positional voices follow its Fast 2D provider (Mssfast.m3d)
+// exactly: it reduces each 3D sample to a 2D volume and pan, which Mss32
+// turns into channel gains. (The asymmetry at +-90 degrees is the
+// original's: hard left leaves 2/128 on the right, hard right nothing on
+// the left; Call of Duty's FINDINGS.md.)
 //  - volume: 127 / 10^((A + B) / 20) with A = -20 log10(vol / 127) and B =
 //    6 dB per doubling of distance beyond min_dist (so vol * min_dist / d),
 //    rounded and clamped to 0..127; 0 past max_dist; then * 71 / 100 when
@@ -162,7 +167,18 @@ void Mixer::SetListener(const Vec3& pos, const Vec3& face, const Vec3& up) {
 //    2049-entry table; 64 when the source is at the listener.
 //  - Mss32: v = vol * master / 127; the far channel scales by a linear
 //    balance table, the near one stays full; gains are out of 2048.
-void Mixer::TargetGains(const Voice& v, float* l, float* r) const {
+void Mixer::TargetGains(const Voice& v, float* l, float* r, float* send_volume) const {
+  *send_volume = v.volume;
+  if (v.miles == Voice::Miles::k65) {
+    miles65::Levels lv =
+        v.positional
+            ? miles65::Fast2D({v.pos, v.volume, v.min_dist, v.max_dist}, listener65_)
+            : miles65::FromVolumePan(v.volume, v.pan);
+    *l = float(miles65::DirectGain(lv.left, master_, digital_.dry(), v.dry)) / 2048.0f;
+    *r = float(miles65::DirectGain(lv.right, master_, digital_.dry(), v.dry)) / 2048.0f;
+    *send_volume = lv.volume;
+    return;
+  }
   float g = v.volume * master_;
   // Mss32's balance table: 2 * pan up to 62, then full (128).
   auto bal = [](int p) { return p < 63 ? 2 * p : 128; };
@@ -210,8 +226,8 @@ void Mixer::MixVoice(Voice& v, float* out, int frames, bool reverb) {
     v.eos = true;
     return;
   }
-  float tl, tr;
-  TargetGains(v, &tl, &tr);
+  float tl, tr, send_volume;
+  TargetGains(v, &tl, &tr, &send_volume);
   if (!v.gains_valid_) {
     v.cur_l_ = tl;
     v.cur_r_ = tr;
@@ -242,8 +258,7 @@ void Mixer::MixVoice(Voice& v, float* out, int frames, bool reverb) {
   // gains; a sample mixed with a non-zero one keeps the tail alive.
   float wet = 0;
   if (reverb && v.wet > 0) {
-    int scale = std::min<int>(int(std::lround(digital_.wet() * v.wet * v.volume * master_ * 2048)),
-                              2048);
+    int scale = miles65::WetGain(send_volume, master_, digital_.wet(), v.wet);
     if (scale > 0) {
       digital_.KeepAlive(now_ms());
       wet = scale / 2048.0f;

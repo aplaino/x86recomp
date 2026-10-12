@@ -201,6 +201,9 @@ audio device: it pulls the mixer offline (`Mixer::OpenOffline`), with the
 OpenAL Soft reverb on its loopback device as in the game, and sets each
 voice's levels the way `mss32.cpp`'s `ApplyEax` does. Render at the rate
 the hardware was recorded at. Renders are 32-bit float WAVs.
+`--miles-version 6.5|6.1` picks whose Fast 2D the fast2d set follows
+(default 6.5, msssoft.m3d; 6.1 is Mssfast.m3d's); the EAX sets always
+position by the 6.1c rule, as `mss32.cpp` does.
 
 analyze.py needs numpy (scipy and matplotlib are not used). Either set
 can be analyzed alone (`--sim render` works before any hardware data

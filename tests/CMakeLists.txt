@@ -28,6 +28,15 @@ target_include_directories(digital_reverb_test PRIVATE ${PROJECT_SOURCE_DIR}/src
 target_compile_options(digital_reverb_test PRIVATE -O2 -ffp-contract=off)
 add_test(NAME digital_reverb COMMAND digital_reverb_test)
 
+# fast2d_test: Miles 6.5's sample levels and Fast 2D against a hash of
+# their own output recorded when they matched the original
+# (recomp_add_fast2d_test compares with the original itself); portable.
+add_executable(fast2d_test fast2d_test.cpp ${PROJECT_SOURCE_DIR}/src/runtime/audio/miles65.cpp)
+target_include_directories(fast2d_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_features(fast2d_test PRIVATE cxx_std_20)
+target_compile_options(fast2d_test PRIVATE -O2 -ffp-contract=off)
+add_test(NAME fast2d COMMAND fast2d_test)
+
 # lift_semantics_test checks the integer/flag helpers in lifted.h against
 # the host CPU the same way.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")

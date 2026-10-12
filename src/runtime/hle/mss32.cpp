@@ -11,9 +11,10 @@
 // implementation (runtime/audio/digital_reverb.h).
 //
 // Miles 6.5 changed some exports under the same names (3D sample volume
-// from S32 0-127 to F32 0-1, returned in st(0)); the API generation is
-// read from the mss32.dll that ships with the game (Dungeon Siege 6.1c,
-// Call of Duty 6.5e).
+// from S32 0-127 to F32 0-1, returned in st(0)), and how volume, pan and
+// a 3D position become channel gains (Voice::miles; runtime/audio/
+// miles65.h); the generation is read from the mss32.dll that ships with
+// the game (Dungeon Siege 6.1c, Call of Duty 6.5e).
 //
 // Callbacks (end of sample/stream, timers) run on a Miles service thread,
 // as with the real library: a guest thread created at driver open that
@@ -42,6 +43,7 @@
 #include <vector>
 
 #include "runtime/audio/eax.h"
+#include "runtime/audio/miles65.h"
 #include "runtime/audio/mixer.h"
 #include "runtime/audio/source.h"
 #include "runtime/hle/hle.h"
@@ -209,10 +211,23 @@ const ProviderDef* ProviderOf(uint32_t h) {
   return nullptr;
 }
 
+// Whose mixer a sample's gains follow (Voice::miles): Miles 6.5's for
+// 2D samples, streams and Fast 2D 3D samples of a 6.5 game. EAX voices
+// keep the 6.1c rule: on Miles' EAX providers the sound card places
+// them, not Miles' mixer.
+Voice::Miles MilesOf(bool is3d, Prov p) {
+  return S().float_api && (!is3d || p == Prov::kFast2D) ? Voice::Miles::k65
+                                                         : Voice::Miles::k61;
+}
+
 // Reverb levels on the direct path and the master reverb send; the
-// driver's dry level scales every sample's.
+// driver's dry level scales every sample's (Miles 6.5 voices: in the
+// mixer, with the gains).
 void SetReverbLevels(Voice& v, float dry, float wet) {
-  v.direct_lf = v.direct_hf = dry * audio::GetMixer().digital_reverb().dry();
+  if (v.miles == Voice::Miles::k65)
+    v.dry = dry;
+  else
+    v.direct_lf = v.direct_hf = dry * audio::GetMixer().digital_reverb().dry();
   v.wet = wet;
 }
 
@@ -277,6 +292,7 @@ void ApplyEaxListener() {
 
 // Puts a sample back to its just-initialised state.
 void ResetSample(Sample& s) {
+  s.v.miles = MilesOf(s.is3d, s.prov);
   s.v.state = Voice::State::Idle;
   s.v.eos = false;
   s.v.loops = 1;
@@ -300,9 +316,13 @@ void ResetSample(Sample& s) {
   s.start_pos = 0;
   if (s.is3d) {
     s.v.positional = true;
-    s.v.pos = {};
     s.v.min_dist = 1.0f;
-    s.v.max_dist = 1e30f;
+    if (s.v.miles == Voice::Miles::k65) {
+      s.v.max_dist = 200.0f;  // msssoft.m3d's; it keeps the position
+    } else {
+      s.v.pos = {};
+      s.v.max_dist = 1e30f;
+    }
     ApplyEax(s);
   }
 }
@@ -442,6 +462,14 @@ std::unique_ptr<audio::Source> LoadImage(Ctx& c, uint32_t image, int* bpf,
   *bpf = src->bytes_per_frame();
   *len = src->Length();
   return src;
+}
+
+// The format of the WAV file image at `data`; false if it is not one.
+bool WavInfoOf(Ctx& c, uint32_t data, audio::WavInfo* w) {
+  if (!data || !EnsureReadable(c, data, 12)) return false;
+  uint32_t size = audio::RiffSize(GPtr(data));
+  if (!size || !EnsureReadable(c, data, size)) return false;
+  return audio::ParseWav(GPtr(data), size, w);
 }
 
 uint32_t SetFile(Ctx& c, uint32_t h, uint32_t image, bool is3d, const char* fn) {
@@ -642,21 +670,28 @@ HLE_NAMED("mss32.dll", "_AIL_set_sample_volume@8", AIL_set_sample_volume, 2) {
   return 0;
 }
 
-// Miles 6.5: AIL_set_sample_volume_pan(S, F32 volume 0..1, F32 pan 0..1).
+// Miles 6.5: AIL_set_sample_volume_pan(S, F32 volume 0..1, F32 pan 0..1),
+// not clamped (runtime/audio/miles65.h).
 HLE_NAMED("mss32.dll", "_AIL_set_sample_volume_pan@12", AIL_set_sample_volume_pan, 3) {
   std::lock_guard<std::mutex> l(Mu());
   if (Sample* s = FindSample(Arg(c, 0), false, "AIL_set_sample_volume_pan")) {
-    s->vol = std::clamp(F(Arg(c, 1)), 0.0f, 1.0f);
-    s->pan = std::clamp(F(Arg(c, 2)), 0.0f, 1.0f);
+    s->vol = F(Arg(c, 1));
+    s->pan = F(Arg(c, 2));
     ApplyVolume(*s);
   }
   return 0;
 }
 
+// Miles 6.5 reports the volume back through its level fields.
+float ReportedVolume(float vol, float pan) {
+  return audio::miles65::ReportedVolume(audio::miles65::FromVolumePan(vol, pan));
+}
+
 HLE_NAMED("mss32.dll", "_AIL_sample_volume_pan@12", AIL_sample_volume_pan, 3) {
   std::lock_guard<std::mutex> l(Mu());
   Sample* s = FindSample(Arg(c, 0), false, "AIL_sample_volume_pan");
-  if (Arg(c, 1)) Wr32(Arg(c, 1), std::bit_cast<uint32_t>(s ? s->vol : 0.0f));
+  if (Arg(c, 1))
+    Wr32(Arg(c, 1), std::bit_cast<uint32_t>(s ? ReportedVolume(s->vol, s->pan) : 0.0f));
   if (Arg(c, 2)) Wr32(Arg(c, 2), std::bit_cast<uint32_t>(s ? s->pan : 0.5f));
   return 0;
 }
@@ -1012,6 +1047,19 @@ HLE_NAMED("mss32.dll", "_AIL_set_3D_room_type@8", AIL_set_3D_room_type, 2) {
   return 0;
 }
 
+// Miles 6.5's Fast 2D (msssoft.m3d) takes only mono PCM; it refuses other
+// data before touching the sample.
+bool Fast2DRefuses(const Sample& s, uint32_t format, uint32_t channels) {
+  if (s.v.miles != Voice::Miles::k65) return false;
+  if (format != 1)
+    SetError("Not linear PCM data");
+  else if (channels != 1)
+    SetError("Not mono data");
+  else
+    return false;
+  return true;
+}
+
 HLE_NAMED("mss32.dll", "_AIL_allocate_3D_sample_handle@4", AIL_allocate_3D_sample_handle, 1) {
   std::lock_guard<std::mutex> l(Mu());
   State& st = S();
@@ -1036,10 +1084,13 @@ HLE_NAMED("mss32.dll", "_AIL_release_3D_sample_handle@4", AIL_release_3D_sample_
 // AIL_set_3D_sample_file(S, file_image) -> nonzero on success. Like
 // AIL_set_sample_file it also resets the sample.
 HLE_NAMED("mss32.dll", "_AIL_set_3D_sample_file@8", AIL_set_3D_sample_file, 2) {
+  audio::WavInfo w;
+  bool wav = WavInfoOf(c, Arg(c, 1), &w);
   {
     std::lock_guard<std::mutex> l(Mu());
     Sample* s = FindSample(Arg(c, 0), true, "AIL_set_3D_sample_file");
     if (!s) return 0;
+    if (wav && Fast2DRefuses(*s, w.format, w.channels)) return 0;
     audio::GetMixer().Remove(&s->v);
     s->v.src.reset();
     uint32_t keep_cb = s->eos_cb;
@@ -1102,13 +1153,14 @@ HLE_NAMED("mss32.dll", "_AIL_register_3D_EOS_callback@8", AIL_register_3D_EOS_ca
 }
 
 // AIL_set_3D_sample_effects_level(S, F32 level): the reverb send, 0..1;
-// negative is the provider's default (full on EAX, none on Fast 2D).
+// negative is EAX's default (full). Fast 2D (Miles 6.5's master reverb
+// send) takes the magnitude.
 HLE_NAMED("mss32.dll", "_AIL_set_3D_sample_effects_level@8", AIL_set_3D_sample_effects_level, 2) {
   std::lock_guard<std::mutex> l(Mu());
   if (Sample* s = FindSample(Arg(c, 0), true, "AIL_set_3D_sample_effects_level")) {
     float level = F(Arg(c, 1));
     s->eax.reverb_mix = level < 0 ? -1.0f : std::min(level, 1.0f);
-    s->wet = std::clamp(level, 0.0f, 1.0f);
+    s->wet = std::fabs(level);
     ApplyEax(*s);
     if (s->v.state == Voice::State::Playing) WakeReverb(s->v);
   }
@@ -1145,7 +1197,7 @@ HLE_NAMED("mss32.dll", "_AIL_set_3D_sample_distances@12", AIL_set_3D_sample_dist
 HLE_NAMED("mss32.dll", "_AIL_set_3D_sample_volume@8", AIL_set_3D_sample_volume, 2) {
   std::lock_guard<std::mutex> l(Mu());
   if (Sample* s = FindSample(Arg(c, 0), true, "AIL_set_3D_sample_volume")) {
-    s->vol = S().float_api ? std::clamp(F(Arg(c, 1)), 0.0f, 1.0f)
+    s->vol = S().float_api ? F(Arg(c, 1))  // msssoft.m3d keeps it as given
                            : std::clamp<int>(int32_t(Arg(c, 1)), 0, 127) / 127.0f;
     ApplyVolume(*s);
   }
@@ -1174,6 +1226,7 @@ HLE_NAMED("mss32.dll", "_AIL_set_3D_sample_info@8", AIL_set_3D_sample_info, 2) {
   std::lock_guard<std::mutex> l(Mu());
   Sample* s = FindSample(Arg(c, 0), true, "AIL_set_3D_sample_info");
   if (!s) return 0;
+  if (Fast2DRefuses(*s, format, Rd32(info + 20))) return 0;
   audio::GetMixer().Remove(&s->v);
   s->v.src.reset();
   uint32_t keep_cb = s->eos_cb;
@@ -1442,6 +1495,8 @@ HLE_NAMED("mss32.dll", "_AIL_open_stream@12", AIL_open_stream, 3) {
   s->handle = NewBlock(st);
   s->v.src = std::move(src);
   s->v.state = Voice::State::Paused;  // opened, not started
+  s->v.miles = MilesOf(false, Prov::kFast2D);
+  ApplyVolume(*s);
   uint32_t h = s->handle;
   RECOMP_TRACE("  AIL_open_stream(%s) -> %08X (%d Hz, %d ch)\n", name.c_str(), h,
             s->v.src->rate(), s->v.src->channels());
@@ -1506,8 +1561,8 @@ HLE_NAMED("mss32.dll", "_AIL_stream_volume@4", AIL_stream_volume, 1) {
 HLE_NAMED("mss32.dll", "_AIL_set_stream_volume_pan@12", AIL_set_stream_volume_pan, 3) {
   std::lock_guard<std::mutex> l(Mu());
   if (Stream* s = FindStream(Arg(c, 0), "AIL_set_stream_volume_pan")) {
-    s->vol = std::clamp(F(Arg(c, 1)), 0.0f, 1.0f);
-    s->pan = std::clamp(F(Arg(c, 2)), 0.0f, 1.0f);
+    s->vol = F(Arg(c, 1));
+    s->pan = F(Arg(c, 2));
     ApplyVolume(*s);
   }
   return 0;
@@ -1516,7 +1571,8 @@ HLE_NAMED("mss32.dll", "_AIL_set_stream_volume_pan@12", AIL_set_stream_volume_pa
 HLE_NAMED("mss32.dll", "_AIL_stream_volume_pan@12", AIL_stream_volume_pan, 3) {
   std::lock_guard<std::mutex> l(Mu());
   Stream* s = FindStream(Arg(c, 0), "AIL_stream_volume_pan");
-  if (Arg(c, 1)) Wr32(Arg(c, 1), std::bit_cast<uint32_t>(s ? s->vol : 0.0f));
+  if (Arg(c, 1))
+    Wr32(Arg(c, 1), std::bit_cast<uint32_t>(s ? ReportedVolume(s->vol, s->pan) : 0.0f));
   if (Arg(c, 2)) Wr32(Arg(c, 2), std::bit_cast<uint32_t>(s ? s->pan : 0.5f));
   return 0;
 }
@@ -1827,11 +1883,8 @@ HLE_NAMED("mss32.dll", "_AIL_process_digital_audio@24", AIL_process_digital_audi
 // AIL_WAV_info(void const* data, AILSOUNDINFO* info) -> nonzero if a WAV.
 HLE_NAMED("mss32.dll", "_AIL_WAV_info@8", AIL_WAV_info, 2) {
   uint32_t data = Arg(c, 0), info = Arg(c, 1);
-  if (!data || !EnsureReadable(c, data, 12)) return 0;
-  uint32_t size = audio::RiffSize(GPtr(data));
-  if (!size || !EnsureReadable(c, data, size)) return 0;
   audio::WavInfo w;
-  if (!audio::ParseWav(GPtr(data), size, &w)) return 0;
+  if (!WavInfoOf(c, data, &w)) return 0;
   // AILSOUNDINFO {format, data_ptr, data_len, rate, bits, channels,
   // samples, block_size, initial_ptr}
   Wr32(info + 0x00, w.format);

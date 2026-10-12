@@ -1,12 +1,13 @@
 #pragma once
 // Software mixer on an SDL3 audio stream: the host side of Miles' digital
 // driver. Voices are linear-interpolated, gain-ramped and summed into
-// stereo float. Positional voices get the "Miles Fast 2D Positional Audio"
-// treatment (distance attenuation and stereo panning), which Miles' EAX
-// providers also get here. Voices may also feed the EAX reverb bus, with
-// two-band levels on the direct path and the send (see Voice::direct_lf),
-// and the Miles-compatible digital master reverb (Voice::wet,
-// DigitalReverb).
+// stereo float. Gains follow the mixer of the game's Miles generation
+// (Voice::miles), and positional voices get the "Miles Fast 2D Positional
+// Audio" treatment (distance attenuation and stereo panning), which Miles'
+// EAX providers also get here (by the 6.1c rule). Voices may also feed the
+// EAX reverb bus, with two-band levels on the direct path and the send
+// (see Voice::direct_lf), and the Miles-compatible digital master reverb
+// (Voice::wet, DigitalReverb).
 //
 // Locking: Voice fields are shared with the audio thread and may only be
 // touched with Mixer::mu() held. The mixer never calls into guest code;
@@ -18,24 +19,33 @@
 #include <vector>
 
 #include "runtime/audio/digital_reverb.h"
+#include "runtime/audio/miles65.h"
 #include "runtime/audio/reverb.h"
 #include "runtime/audio/source.h"
+#include "runtime/audio/vec3.h"
 
 struct SDL_AudioStream;
 
 namespace recomp::audio {
 
-struct Vec3 {
-  float x = 0, y = 0, z = 0;
-};
-
 struct Voice {
   enum class State { Idle, Playing, Paused, Done };
 
+  // Whose mixer the gains follow: Miles 6.1c's (balance table; Mssfast.m3d
+  // for positional voices) or Miles 6.5's (levels, miles65.h; msssoft.m3d
+  // for positional voices).
+  enum class Miles : uint8_t { k61, k65 };
+
   std::unique_ptr<Source> src;
   State state = State::Idle;
-  float volume = 1.0f;  // linear amplitude
-  float pan = 0.5f;     // non-positional voices: 0 left, 0.5 centre, 1 right
+  Miles miles = Miles::k61;
+  // 6.1c: linear amplitude. 6.5: AIL_set_sample_volume_pan's volume, or a
+  // positional voice's AIL_set_3D_sample_volume.
+  float volume = 1.0f;
+  float pan = 0.5f;  // non-positional voices: 0 left, 0.5 centre, 1 right
+  // 6.5: the sample's dry level (the driver's is the digital reverb's);
+  // 6.1c voices take theirs in direct_lf/hf.
+  float dry = 1.0f;
   float rate = 0;       // source frames per second; 0 = the source's own
   int loops = 1;        // total passes; 0 = forever
   int passes = 0;       // completed passes
@@ -109,7 +119,9 @@ class Mixer {
   void Init(int rate);
   void MixVoice(Voice& v, float* out, int frames, bool reverb);
   static void SettleLevels(Voice& v);
-  void TargetGains(const Voice& v, float* l, float* r) const;
+  // Channel gains of `v` now, and the volume its digital reverb send
+  // scales by.
+  void TargetGains(const Voice& v, float* l, float* r, float* send_volume) const;
 
   std::mutex mu_;
   SDL_AudioStream* stream_ = nullptr;
@@ -122,7 +134,8 @@ class Mixer {
   std::vector<float> wet_;  // mono sends to digital_
   std::vector<int32_t> wet_int_, reverb_out_;
   uint64_t mixed_ = 0;  // frames
-  Vec3 lpos_, lface_{0, 0, 1}, lup_{0, 1, 0};
+  Vec3 lpos_, lface_{0, 0, 1}, lup_{0, 1, 0};  // face and up normalised
+  miles65::Listener listener65_;
   std::vector<Voice*> voices_;
 };
 

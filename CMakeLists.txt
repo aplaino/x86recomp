@@ -83,6 +83,7 @@ if(FFMPEG_FOUND)
     src/runtime/audio/mixer.cpp
     src/runtime/audio/reverb.cpp
     src/runtime/audio/digital_reverb.cpp
+    src/runtime/audio/miles65.cpp
     src/runtime/audio/eax.cpp)
   target_include_directories(recomp_audio PUBLIC src)
   target_compile_features(recomp_audio PUBLIC cxx_std_20)
@@ -91,10 +92,10 @@ if(FFMPEG_FOUND)
   set_source_files_properties(src/runtime/audio/mixer.cpp
     src/runtime/audio/source.cpp TARGET_DIRECTORY recomp_audio
     PROPERTIES COMPILE_OPTIONS "-O2")
-  # The digital reverb rounds like the original only without contraction
-  # into FMA.
+  # The digital reverb and Miles 6.5's levels round like the original
+  # only without contraction into FMA.
   set_source_files_properties(src/runtime/audio/digital_reverb.cpp
-    TARGET_DIRECTORY recomp_audio
+    src/runtime/audio/miles65.cpp TARGET_DIRECTORY recomp_audio
     PROPERTIES COMPILE_OPTIONS "-O2;-ffp-contract=off")
 
   # Miles Sound System (mss32) on the software mixer.
@@ -232,6 +233,56 @@ function(recomp_add_digital_reverb_test)
                          -fno-strict-aliasing)
   add_test(NAME digital_reverb_oracle COMMAND digital_reverb_oracle_test "${A_DLL}")
   set_tests_properties(digital_reverb_oracle PROPERTIES TIMEOUT 600)
+endfunction()
+
+# recomp_add_fast2d_test(MSS32 <mss32.dll> FAST2D <msssoft.m3d>): checks
+# Miles 6.5's sample levels and Fast 2D (runtime/audio/miles65) bit for bit
+# against the original routines, lifted from the user's installed Miles
+# 6.5e at build time (tests/fast2d_test.cpp). Nothing from the DLLs is
+# stored in the source tree; skipped unless both files are given and are
+# the builds the addresses come from.
+function(recomp_add_fast2d_test)
+  cmake_parse_arguments(A "" "MSS32;FAST2D" "" ${ARGN})
+  if(NOT EXISTS "${A_MSS32}" OR NOT EXISTS "${A_FAST2D}")
+    return()
+  endif()
+  # mss32.dll 6.5e and miles/msssoft.m3d as Call of Duty ships them.
+  set(_known_mss32 7855b8fbae917cb8449f2d4361ab61b5ecec4df0a11130d797cb0aa99b4260ea)
+  set(_known_fast2d 62233bebccb6aeb97370a8499c577e2982f46924e3a1bc55c53fa1f8a2404252)
+  foreach(_f MSS32 FAST2D)
+    file(SHA256 "${A_${_f}}" _hash)
+    string(TOLOWER "${_f}" _name)
+    if(NOT _hash STREQUAL _known_${_name})
+      message(STATUS "fast2d_oracle: ${A_${_f}} is not the Miles 6.5e build "
+                     "its addresses come from (SHA-256 ${_hash}); test skipped")
+      return()
+    endif()
+  endforeach()
+  set(_dir "${CMAKE_CURRENT_BINARY_DIR}/fast2d_oracle")
+  foreach(_tsv functions exports jumptables)
+    file(WRITE "${_dir}/symbols/${_tsv}.tsv" "header\n")
+  endforeach()
+  file(WRITE "${_dir}/empty.manifest" "")
+  set(_gen "${_dir}/gen/gen_000.cpp" "${_dir}/gen/gen_msssoft_000.cpp" "${_dir}/gen/table.cpp")
+  add_custom_command(OUTPUT ${_gen}
+    COMMAND recomp_lift --exe "${A_MSS32}" --symbols "${_dir}/symbols"
+            --manifest "${_dir}/empty.manifest"
+            --module "${A_FAST2D}" --symbols "${_dir}/symbols"
+            --manifest "${_dir}/empty.manifest"
+            --only 2112A810,2112A930,21136D30,22401000,22401870,224019B0
+            --out "${_dir}/gen"
+    DEPENDS recomp_lift "${A_MSS32}" "${A_FAST2D}"
+    COMMENT "Lifting Miles 6.5e's level and Fast 2D routines for fast2d_oracle_test")
+  add_executable(fast2d_oracle_test "${RECOMP_ROOT}/tests/fast2d_test.cpp"
+                 "${RECOMP_ROOT}/src/runtime/audio/miles65.cpp" ${_gen})
+  target_compile_definitions(fast2d_oracle_test PRIVATE FAST2D_ORACLE)
+  target_include_directories(fast2d_oracle_test PRIVATE "${RECOMP_ROOT}/src")
+  target_compile_features(fast2d_oracle_test PRIVATE cxx_std_20)
+  target_link_libraries(fast2d_oracle_test PRIVATE recomp_x87 recomp_image)
+  target_compile_options(fast2d_oracle_test PRIVATE -O2 -ffp-contract=off
+                         -fno-strict-aliasing)
+  add_test(NAME fast2d_oracle COMMAND fast2d_oracle_test "${A_MSS32}" "${A_FAST2D}")
+  set_tests_properties(fast2d_oracle PROPERTIES TIMEOUT 600)
 endfunction()
 
 if(PROJECT_IS_TOP_LEVEL)
