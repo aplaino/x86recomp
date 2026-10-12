@@ -108,6 +108,8 @@ bool Mixer::Open(int rate) {
     return false;
   }
   rate_ = rate;
+  split_ = 1.0f - std::exp(-2.0f * 3.14159265f * 5000.0f / float(rate));
+  reverb_.Open(rate);  // the device starts paused: no Mix runs yet
   SDL_ResumeAudioStreamDevice(stream_);
   WarnF("audio: %d Hz stereo on SDL driver '%s'\n", rate,
         SDL_GetCurrentAudioDriver());
@@ -118,6 +120,7 @@ void Mixer::Close() {
   if (!stream_) return;
   SDL_DestroyAudioStream(stream_);  // stops the callback first
   stream_ = nullptr;
+  reverb_.Close();
   SDL_QuitSubSystem(SDL_INIT_AUDIO);
 }
 
@@ -207,12 +210,45 @@ void Mixer::MixVoice(Voice& v, float* out, int frames) {
   float dl = (tl - v.cur_l_) / frames, dr = (tr - v.cur_r_) / frames;
   double rate = v.rate > 0 ? v.rate : v.src->rate();
   double step = rate / rate_;
+  // Two-band levels and reverb sends, ramped the same way.
+  constexpr int kB = Reverb::kBuses;
+  bool banded = v.direct_lf != 1 || v.direct_hf != 1 || v.cur_dlf_ != 1 || v.cur_dhf_ != 1;
+  bool sending[kB];
+  for (int b = 0; b < kB; b++) {
+    sending[b] = has_reverb() && (v.send_lf[b] > 0 || v.send_hf[b] > 0 ||
+                                  v.cur_slf_[b] > 0 || v.cur_shf_[b] > 0);
+    banded |= sending[b];
+  }
+  float ddlf = (v.direct_lf - v.cur_dlf_) / frames, ddhf = (v.direct_hf - v.cur_dhf_) / frames;
+  float dslf[kB], dshf[kB];
+  for (int b = 0; b < kB; b++) {
+    dslf[b] = (v.send_lf[b] - v.cur_slf_[b]) / frames;
+    dshf[b] = (v.send_hf[b] - v.cur_shf_[b]) / frames;
+  }
+  const float send_gain = v.volume * master_;
   for (int i = 0; i < frames; i++) {
     float f = float(v.frac_);
     float sl = v.a_[0] + (v.b_[0] - v.a_[0]) * f;
     float sr = v.a_[1] + (v.b_[1] - v.a_[1]) * f;
     v.cur_l_ += dl;
     v.cur_r_ += dr;
+    if (banded) {
+      v.low_[0] += split_ * (sl - v.low_[0]);
+      v.low_[1] += split_ * (sr - v.low_[1]);
+      float hl = sl - v.low_[0], hr = sr - v.low_[1];
+      for (int b = 0; b < kB; b++) {
+        if (!sending[b]) continue;
+        v.cur_slf_[b] += dslf[b];
+        v.cur_shf_[b] += dshf[b];
+        float* s = &sends_[b][2 * i];
+        s[0] += (v.cur_slf_[b] * v.low_[0] + v.cur_shf_[b] * hl) * send_gain;
+        s[1] += (v.cur_slf_[b] * v.low_[1] + v.cur_shf_[b] * hr) * send_gain;
+      }
+      v.cur_dlf_ += ddlf;
+      v.cur_dhf_ += ddhf;
+      sl = v.cur_dlf_ * v.low_[0] + v.cur_dhf_ * hl;
+      sr = v.cur_dlf_ * v.low_[1] + v.cur_dhf_ * hr;
+    }
     out[2 * i] += sl * v.cur_l_;
     out[2 * i + 1] += sr * v.cur_r_;
     v.frac_ += step;
@@ -229,6 +265,7 @@ void Mixer::MixVoice(Voice& v, float* out, int frames) {
         v.eos = true;
         v.cur_l_ = tl;
         v.cur_r_ = tr;
+        SettleLevels(v);
         return;
       }
       v.a_[0] = v.b_[0];
@@ -243,13 +280,30 @@ void Mixer::MixVoice(Voice& v, float* out, int frames) {
   }
   v.cur_l_ = tl;
   v.cur_r_ = tr;
+  SettleLevels(v);
+}
+
+void Mixer::SettleLevels(Voice& v) {
+  v.cur_dlf_ = v.direct_lf;
+  v.cur_dhf_ = v.direct_hf;
+  for (int b = 0; b < Reverb::kBuses; b++) {
+    v.cur_slf_[b] = v.send_lf[b];
+    v.cur_shf_[b] = v.send_hf[b];
+  }
 }
 
 void Mixer::Mix(float* out, int frames) {
   std::memset(out, 0, sizeof(float) * 2 * frames);
   std::lock_guard<std::mutex> l(mu_);
+  if (has_reverb())
+    for (auto& s : sends_) s.assign(size_t(frames) * 2, 0.0f);
   for (Voice* v : voices_)
     if (v->state == Voice::State::Playing) MixVoice(*v, out, frames);
+  if (has_reverb()) {
+    const float* sends[Reverb::kBuses];
+    for (int b = 0; b < Reverb::kBuses; b++) sends[b] = sends_[b].data();
+    reverb_.Render(sends, out, frames);
+  }
   for (int i = 0; i < 2 * frames; i++) out[i] = std::clamp(out[i], -1.0f, 1.0f);
 }
 

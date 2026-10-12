@@ -13,6 +13,9 @@ include(FetchContent)
 find_package(SDL3 REQUIRED CONFIG)
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
+# OpenAL Soft (LGPL, linked dynamically): EFX reverb for EAX and Miles'
+# digital master reverb, rendered on a loopback device (no output).
+find_package(OpenAL CONFIG REQUIRED)
 # ffmpeg (LGPL, linked dynamically): MP3 for Miles streams, Bink movies.
 pkg_check_modules(FFMPEG IMPORTED_TARGET
   libavformat libavcodec libavutil libswscale)
@@ -77,8 +80,11 @@ if(FFMPEG_FOUND)
   add_library(recomp_mss32 OBJECT
     src/runtime/hle/mss32.cpp
     src/runtime/audio/source.cpp
-    src/runtime/audio/mixer.cpp)
-  target_link_libraries(recomp_mss32 PUBLIC recomp_runtime PkgConfig::FFMPEG)
+    src/runtime/audio/mixer.cpp
+    src/runtime/audio/reverb.cpp
+    src/runtime/audio/eax.cpp)
+  target_link_libraries(recomp_mss32 PUBLIC recomp_runtime PkgConfig::FFMPEG
+                        OpenAL::OpenAL)
   # Per-sample host paths: optimised in every build type.
   set_source_files_properties(src/runtime/audio/mixer.cpp
     src/runtime/audio/source.cpp TARGET_DIRECTORY recomp_mss32

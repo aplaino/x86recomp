@@ -2,8 +2,10 @@
 // Software mixer on an SDL3 audio stream: the host side of Miles' digital
 // driver. Voices are linear-interpolated, gain-ramped and summed into
 // stereo float. Positional voices get the "Miles Fast 2D Positional Audio"
-// treatment (distance attenuation and stereo panning), which is the
-// provider the game selects when EAX is off.
+// treatment (distance attenuation and stereo panning), which Miles' EAX
+// providers also get here. Voices may also feed the reverb buses (EAX
+// environments, Miles' digital master reverb), with two-band levels on
+// the direct path and each send (see Voice::direct_lf).
 //
 // Locking: Voice fields are shared with the audio thread and may only be
 // touched with Mixer::mu() held. The mixer never calls into guest code;
@@ -14,6 +16,7 @@
 #include <mutex>
 #include <vector>
 
+#include "runtime/audio/reverb.h"
 #include "runtime/audio/source.h"
 
 struct SDL_AudioStream;
@@ -41,6 +44,13 @@ struct Voice {
   Vec3 pos;
   float min_dist = 1.0f, max_dist = 1e30f;
 
+  // Linear levels below and above a 5 kHz split (EAX's HF reference) for
+  // the direct path and the send to each reverb bus. Sends are not panned
+  // or distance-attenuated; they scale with volume and the master. A voice
+  // with flat direct levels and no sends takes the plain path.
+  float direct_lf = 1.0f, direct_hf = 1.0f;
+  float send_lf[Reverb::kBuses] = {}, send_hf[Reverb::kBuses] = {};
+
   // Set by the mixer when the last pass ends (state becomes Done). The
   // owner clears it after delivering its end-of-sample callback.
   bool eos = false;
@@ -60,6 +70,9 @@ struct Voice {
   size_t buf_head_ = 0;     // in frames
   float cur_l_ = 0, cur_r_ = 0;
   bool gains_valid_ = false;
+  float low_[2] = {};  // one-pole low band of each channel
+  float cur_dlf_ = 1, cur_dhf_ = 1;
+  float cur_slf_[Reverb::kBuses] = {}, cur_shf_[Reverb::kBuses] = {};
 };
 
 class Mixer {
@@ -74,6 +87,9 @@ class Mixer {
   void Add(Voice* v);
   void Remove(Voice* v);
   void set_master(float g) { master_ = g; }
+  // False when OpenAL Soft is unavailable: sends are then silent.
+  bool has_reverb() const { return reverb_.open(); }
+  void SetReverb(int bus, const ReverbParams& p) { reverb_.Set(bus, p); }
   void SetListener(const Vec3& pos, const Vec3& face, const Vec3& up);
 
   // Called by the audio thread.
@@ -81,12 +97,16 @@ class Mixer {
 
  private:
   void MixVoice(Voice& v, float* out, int frames);
+  static void SettleLevels(Voice& v);
   void TargetGains(const Voice& v, float* l, float* r) const;
 
   std::mutex mu_;
   SDL_AudioStream* stream_ = nullptr;
   int rate_ = 0;
   float master_ = 1.0f;
+  float split_ = 0;  // one-pole coefficient of the 5 kHz band split
+  Reverb reverb_;
+  std::vector<float> sends_[Reverb::kBuses];
   Vec3 lpos_, lface_{0, 0, 1}, lup_{0, 1, 0};
   std::vector<Voice*> voices_;
 };

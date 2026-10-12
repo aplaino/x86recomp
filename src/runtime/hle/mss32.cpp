@@ -1,9 +1,13 @@
 // mss32 (Miles Sound System 6.x): the entry points games import,
 // implemented on the host mixer (runtime/audio). 2D samples (from WAV
 // files or headerless PCM / IMA ADPCM in memory, and double-buffered
-// streaming), 3D samples (the "Miles Fast 2D Positional Audio" provider:
-// distance attenuation and panning), MP3/WAV streams, timers and format
-// conversion.
+// streaming), 3D samples, MP3/WAV streams, timers and format conversion.
+// 3D providers: "Miles Fast 2D Positional Audio" (distance attenuation and
+// panning) and Miles' EAX providers (Msseax.m3d: EAX 1.0, 2.0 and 3.0, with
+// its attribute names and struct layouts), which position sounds the same
+// way and add the listener's environment and per-sample EAX levels
+// (runtime/audio/eax.h). Miles 6.5's digital master reverb (room type and
+// per-sample/stream wet levels) runs on a second reverb bus.
 //
 // Miles 6.5 changed some exports under the same names (3D sample volume
 // from S32 0-127 to F32 0-1, returned in st(0)); the API generation is
@@ -26,6 +30,7 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -35,6 +40,7 @@
 #include <thread>
 #include <vector>
 
+#include "runtime/audio/eax.h"
 #include "runtime/audio/mixer.h"
 #include "runtime/audio/source.h"
 #include "runtime/hle/hle.h"
@@ -50,9 +56,24 @@ using Clock = std::chrono::steady_clock;
 // Sample/stream status values (mss.h).
 constexpr uint32_t kSmpFree = 1, kSmpDone = 2, kSmpPlaying = 4, kSmpStopped = 8;
 constexpr uint32_t kM3dNoErr = 0, kM3dNotEnabled = 1;
-// The one 3D provider we offer. HPROVIDER is an opaque U32.
-constexpr uint32_t kProvider = 0x3D0001;
-constexpr const char* kProviderName = "Miles Fast 2D Positional Audio";
+// 3D providers; HPROVIDER is an opaque U32. The EAX ones are offered only
+// when the mixer has reverb (as they exist only with an EAX sound card).
+enum class Prov { kFast2D, kEax1, kEax2, kEax3 };
+struct ProviderDef {
+  uint32_t handle;
+  const char* name;
+  Prov kind;
+};
+constexpr ProviderDef kProviders[] = {
+    {0x3D0001, "Miles Fast 2D Positional Audio", Prov::kFast2D},
+    {0x3D0002, "Creative Labs EAX (TM)", Prov::kEax1},
+    {0x3D0003, "Creative Labs EAX 2 (TM)", Prov::kEax2},
+    {0x3D0004, "Creative Labs EAX 3 (TM)", Prov::kEax3},
+};
+constexpr int kProviderCount = int(std::size(kProviders));
+// Reverb buses: the open EAX provider's environment, and Miles 6.5's
+// digital master reverb.
+constexpr int kBusEax = 0, kBusMaster = 1;
 
 struct Sample {
   uint32_t handle = 0;
@@ -63,7 +84,9 @@ struct Sample {
   uint32_t eos_cb = 0;
   uint32_t seq = 0;   // bumped whenever an old end-of-sample event goes stale
   float vol = 1.0f, pan = 0.5f;  // Miles 6.5 levels (S32 APIs map to them)
-  float dry = 1.0f;              // reverb dry level (no reverb engine)
+  float dry = 1.0f, wet = 0.0f;  // reverb levels (master reverb bus)
+  Prov prov = Prov::kFast2D;     // 3D samples: the allocating provider
+  audio::eax::Source eax;        // 3D samples on EAX providers
   bool start_pos_set = false;  // set_sample_position before start
   int64_t start_pos = 0;
   // Headerless data (set_sample_type/address/adpcm_block_size), decoded
@@ -85,7 +108,7 @@ struct Stream {
   Voice v;
   uint32_t cb = 0;
   uint32_t seq = 0;
-  float vol = 1.0f, pan = 0.5f, dry = 1.0f;
+  float vol = 1.0f, pan = 0.5f, dry = 1.0f, wet = 0.0f;
 };
 
 struct Timer {
@@ -112,7 +135,10 @@ struct State {
   std::map<uint32_t, Timer> timers;   // by HTIMER
   uint32_t next_timer = 1;  // 0 reads as "no timer" to the game
   bool service_started = false;
-  uint32_t provider_name = 0;
+  uint32_t provider_names[kProviderCount] = {};
+  // EAX listener per EAX provider; the open one drives kBusEax.
+  audio::eax::Listener eax[kProviderCount];
+  Prov active = Prov::kFast2D;
   uint32_t seq = 0;  // source of Sample/Stream::seq, unique across reuse
   bool float_api = false;  // Miles 6.5 or later (see the file comment)
   float distance_factor = 1.0f;
@@ -175,13 +201,71 @@ uint32_t StatusOf(const Voice& v) {
   }
 }
 
+bool IsEax(Prov p) { return p != Prov::kFast2D; }
+
+// The provider behind an HPROVIDER, if we offer it.
+const ProviderDef* ProviderOf(uint32_t h) {
+  for (const ProviderDef& d : kProviders)
+    if (d.handle == h && (!IsEax(d.kind) || audio::GetMixer().has_reverb())) return &d;
+  return nullptr;
+}
+
+// Reverb levels on the direct path and the master reverb send.
+void SetReverbLevels(Voice& v, float dry, float wet) {
+  v.direct_lf = v.direct_hf = dry;
+  v.send_lf[kBusMaster] = v.send_hf[kBusMaster] = wet;
+}
+
+// Volume and pan; 2D sounds also take their reverb levels here, 3D samples
+// in ApplyEax.
 void ApplyVolume(Sample& s) {
-  s.v.volume = s.vol * s.dry;
+  s.v.volume = s.vol;
   s.v.pan = s.pan;
+  if (!s.is3d) SetReverbLevels(s.v, s.dry, s.wet);
 }
 void ApplyVolume(Stream& s) {
-  s.v.volume = s.vol * s.dry;
+  s.v.volume = s.vol;
   s.v.pan = s.pan;
+  SetReverbLevels(s.v, s.dry, s.wet);
+}
+
+// A 3D sample's direct and reverb-send levels. On an EAX provider they
+// come from its EAX properties, the listener's environment and the
+// distance (so they are redone when either moves); on Fast 2D the effects
+// level goes to the master reverb, as Miles 6.5's digital reverb takes
+// every sample of the driver (earlier Miles has no such reverb).
+void ApplyEax(Sample& s) {
+  State& st = S();
+  Voice& v = s.v;
+  if (!IsEax(s.prov)) {
+    SetReverbLevels(v, 1.0f, st.float_api ? s.wet : 0.0f);
+    return;
+  }
+  audio::eax::Listener l = st.eax[int(s.prov)];
+  if (s.prov == Prov::kEax1) l.air_absorption_hf = 0;  // EAX 1.0 has none
+  float dx = v.pos.x - st.lpos.x, dy = v.pos.y - st.lpos.y, dz = v.pos.z - st.lpos.z;
+  float d = std::sqrt(dx * dx + dy * dy + dz * dz) * st.distance_factor;
+  audio::eax::Levels lv =
+      audio::eax::SourceLevels(s.eax, l, d, v.min_dist * st.distance_factor);
+  bool on = s.prov == st.active;
+  v.direct_lf = lv.direct_lf;
+  v.direct_hf = lv.direct_hf;
+  v.send_lf[kBusEax] = on ? lv.room_lf : 0.0f;
+  v.send_hf[kBusEax] = on ? lv.room_hf : 0.0f;
+  v.send_lf[kBusMaster] = v.send_hf[kBusMaster] = 0.0f;
+}
+
+void ApplyEaxAll() {
+  for (auto& [h, s] : S().samples)
+    if (s->is3d) ApplyEax(*s);
+}
+
+// The open EAX provider's listener on its reverb bus.
+void ApplyEaxListener() {
+  State& st = S();
+  if (IsEax(st.active))
+    audio::GetMixer().SetReverb(kBusEax, audio::eax::ToReverb(st.eax[int(st.active)]));
+  ApplyEaxAll();
 }
 
 // Puts a sample back to its just-initialised state.
@@ -193,6 +277,7 @@ void ResetSample(Sample& s) {
   s.vol = 1.0f;
   s.pan = 0.5f;
   s.dry = 1.0f;
+  s.wet = 0.0f;
   ApplyVolume(s);
   s.raw = {};
   s.raw_data.clear();
@@ -211,6 +296,7 @@ void ResetSample(Sample& s) {
     s.v.pos = {};
     s.v.min_dist = 1.0f;
     s.v.max_dist = 1e30f;
+    ApplyEax(s);
   }
 }
 
@@ -567,11 +653,13 @@ HLE_NAMED("mss32.dll", "_AIL_sample_volume_pan@12", AIL_sample_volume_pan, 3) {
   return 0;
 }
 
-// Reverb needs an EAX provider; the dry level still scales the sample.
+// AIL_set_sample_reverb_levels(S, F32 dry, F32 wet): the direct level and
+// the send to the digital master reverb.
 HLE_NAMED("mss32.dll", "_AIL_set_sample_reverb_levels@12", AIL_set_sample_reverb_levels, 3) {
   std::lock_guard<std::mutex> l(Mu());
   if (Sample* s = FindSample(Arg(c, 0), false, "AIL_set_sample_reverb_levels")) {
     s->dry = std::clamp(F(Arg(c, 1)), 0.0f, 1.0f);
+    s->wet = std::clamp(F(Arg(c, 2)), 0.0f, 1.0f);
     ApplyVolume(*s);
   }
   return 0;
@@ -842,33 +930,52 @@ HLE_NAMED("mss32.dll", "_AIL_sample_status@4", AIL_sample_status, 1) {
 
 // ---- 3D provider, listener and samples ---------------------------------------------
 
-// AIL_enumerate_3D_providers(HPROENUM* next, HPROVIDER* dest, char** name).
+// AIL_enumerate_3D_providers(HPROENUM* next, HPROVIDER* dest, char** name):
+// *next is the index of the next provider to report.
 HLE_NAMED("mss32.dll", "_AIL_enumerate_3D_providers@12", AIL_enumerate_3D_providers, 3) {
   std::lock_guard<std::mutex> l(Mu());
   State& st = S();
-  if (Rd32(Arg(c, 0)) != 0) return 0;
-  if (!st.provider_name) {
-    st.provider_name = HeapAllocProcess(64, true);
-    PutStr(st.provider_name, kProviderName);
+  for (uint32_t i = Rd32(Arg(c, 0)); i < uint32_t(kProviderCount); i++) {
+    const ProviderDef& d = kProviders[i];
+    if (!ProviderOf(d.handle)) continue;
+    if (!st.provider_names[i]) {
+      st.provider_names[i] = HeapAllocProcess(64, true);
+      PutStr(st.provider_names[i], d.name);
+    }
+    Wr32(Arg(c, 0), i + 1);
+    Wr32(Arg(c, 1), d.handle);
+    Wr32(Arg(c, 2), st.provider_names[i]);
+    return 1;
   }
-  Wr32(Arg(c, 0), 1);
-  Wr32(Arg(c, 1), kProvider);
-  Wr32(Arg(c, 2), st.provider_name);
-  return 1;
+  return 0;
 }
 
+// Opening an EAX provider puts its environment on the EAX reverb bus.
 HLE_NAMED("mss32.dll", "_AIL_open_3D_provider@4", AIL_open_3D_provider, 1) {
-  return Arg(c, 0) == kProvider ? kM3dNoErr : kM3dNotEnabled;
+  std::lock_guard<std::mutex> l(Mu());
+  const ProviderDef* d = ProviderOf(Arg(c, 0));
+  if (!d) return kM3dNotEnabled;
+  if (IsEax(d->kind)) {
+    S().active = d->kind;
+    ApplyEaxListener();
+  }
+  return kM3dNoErr;
 }
 
 HLE_NAMED("mss32.dll", "_AIL_close_3D_provider@4", AIL_close_3D_provider, 1) {
+  std::lock_guard<std::mutex> l(Mu());
+  const ProviderDef* d = ProviderOf(Arg(c, 0));
+  if (d && d->kind == S().active) {
+    S().active = Prov::kFast2D;
+    ApplyEaxAll();
+  }
   return 0;
 }
 
 HLE_NAMED("mss32.dll", "_AIL_open_3D_listener@4", AIL_open_3D_listener, 1) {
   std::lock_guard<std::mutex> l(Mu());
   State& st = S();
-  if (Arg(c, 0) != kProvider || !st.driver) return 0;
+  if (!ProviderOf(Arg(c, 0)) || !st.driver) return 0;
   if (!st.listener) st.listener = NewBlock(st);
   return st.listener;
 }
@@ -883,16 +990,28 @@ HLE_NAMED("mss32.dll", "_AIL_close_3D_listener@4", AIL_close_3D_listener, 1) {
   return 0;
 }
 
-// Room types only matter to EAX providers.
-HLE_NAMED("mss32.dll", "_AIL_set_3D_room_type@8", AIL_set_3D_room_type, 2) { return 0; }
+// AIL_set_3D_room_type(lib, room): an EAX provider's environment preset
+// (EAX environment numbers). Fast 2D has no environment.
+HLE_NAMED("mss32.dll", "_AIL_set_3D_room_type@8", AIL_set_3D_room_type, 2) {
+  std::lock_guard<std::mutex> l(Mu());
+  const ProviderDef* d = ProviderOf(Arg(c, 0));
+  if (d && IsEax(d->kind)) {
+    S().eax[int(d->kind)] = audio::eax::Preset(Arg(c, 1));
+    ApplyEaxListener();
+  }
+  return 0;
+}
 
 HLE_NAMED("mss32.dll", "_AIL_allocate_3D_sample_handle@4", AIL_allocate_3D_sample_handle, 1) {
   std::lock_guard<std::mutex> l(Mu());
   State& st = S();
-  if (Arg(c, 0) != kProvider || !st.driver) return 0;
+  const ProviderDef* d = ProviderOf(Arg(c, 0));
+  if (!d || !st.driver) return 0;
   auto s = std::make_unique<Sample>();
   s->handle = NewBlock(st);
   s->is3d = true;
+  s->prov = d->kind;
+  if (d->kind == Prov::kEax2) s->eax.occlusion_room_ratio = audio::eax::kOcclusionRoomRatio2;
   ResetSample(*s);
   uint32_t h = s->handle;
   st.samples[h] = std::move(s);
@@ -972,8 +1091,16 @@ HLE_NAMED("mss32.dll", "_AIL_register_3D_EOS_callback@8", AIL_register_3D_EOS_ca
   return old;
 }
 
-// Reverb send level: only EAX providers have reverb.
+// AIL_set_3D_sample_effects_level(S, F32 level): the reverb send, 0..1;
+// negative is the provider's default (full on EAX, none on Fast 2D).
 HLE_NAMED("mss32.dll", "_AIL_set_3D_sample_effects_level@8", AIL_set_3D_sample_effects_level, 2) {
+  std::lock_guard<std::mutex> l(Mu());
+  if (Sample* s = FindSample(Arg(c, 0), true, "AIL_set_3D_sample_effects_level")) {
+    float level = F(Arg(c, 1));
+    s->eax.reverb_mix = level < 0 ? -1.0f : std::min(level, 1.0f);
+    s->wet = std::clamp(level, 0.0f, 1.0f);
+    ApplyEax(*s);
+  }
   return 0;
 }
 
@@ -998,6 +1125,7 @@ HLE_NAMED("mss32.dll", "_AIL_set_3D_sample_distances@12", AIL_set_3D_sample_dist
     float a = F(Arg(c, 1)), b = F(Arg(c, 2));
     s->v.max_dist = std::max(a, b);
     s->v.min_dist = std::min(a, b);
+    ApplyEax(*s);
   }
   return 0;
 }
@@ -1078,35 +1206,221 @@ HLE_NAMED("mss32.dll", "_AIL_3D_position@16", AIL_3D_position, 4) {
   return 0;
 }
 
-// Distances are in game units; the factor (units to metres) only matters
-// for Doppler, which the Fast 2D provider does not model.
+// Distances are in game units; the factor converts them to metres for
+// EAX (air absorption, room rolloff). Doppler is not modelled.
 HLE_NAMED("mss32.dll", "_AIL_set_3D_distance_factor@8", AIL_set_3D_distance_factor, 2) {
   std::lock_guard<std::mutex> l(Mu());
   S().distance_factor = F(Arg(c, 1));
+  ApplyEaxAll();
   return 0;
 }
 
-// Provider attributes: only the sample count is defined for the Fast 2D
-// provider; queries for anything else (EAX) leave *value unchanged, which
-// is how games detect a missing feature.
+// ---- EAX attributes ---------------------------------------------------------------------
+//
+// Msseax.m3d's attribute names. Each applies to some EAX versions (bit 0
+// EAX 1.0, bit 1 2.0, bit 2 3.0); mB levels are S32, the rest F32.
+// "EAX all parameters" and "EAX sample all parameters" take the whole
+// property set in the provider's EAX version's layout (CoD passes the
+// 3.0 listener to the EAX 3 provider).
+
+constexpr uint8_t kE1 = 1, kE2 = 2, kE3 = 4, kE23 = kE2 | kE3;
+
+int VersionBit(Prov p) { return p == Prov::kEax1 ? kE1 : p == Prov::kEax2 ? kE2 : kE3; }
+
+struct Field {
+  const char* name;
+  uint8_t versions;
+  char type;  // 'i' S32, 'u' U32, 'f' F32, 'v' 3 x F32
+  size_t offset;
+};
+
+#define LF(name, v, t, m) {name, v, t, offsetof(audio::eax::Listener, m)}
+constexpr Field kListenerFields[] = {
+    LF("EAX decay time", kE1 | kE23, 'f', decay_time),
+    LF("EAX damping", kE1, 'f', decay_hf_ratio),
+    LF("EAX2 room", kE23, 'i', room),
+    LF("EAX2 room HF", kE23, 'i', room_hf),
+    LF("EAX2 room rolloff", kE23, 'f', room_rolloff_factor),
+    LF("EAX2 decay HF ratio", kE23, 'f', decay_hf_ratio),
+    LF("EAX2 reflections", kE23, 'i', reflections),
+    LF("EAX2 reflections delay", kE23, 'f', reflections_delay),
+    LF("EAX2 reverb", kE23, 'i', reverb),
+    LF("EAX2 reverb delay", kE23, 'f', reverb_delay),
+    LF("EAX2 environment size", kE23, 'f', environment_size),
+    LF("EAX2 environment diffusion", kE23, 'f', environment_diffusion),
+    LF("EAX2 air absorption", kE23, 'f', air_absorption_hf),
+    LF("EAX2 flags", kE23, 'u', flags),
+    LF("EAX3 room LF", kE3, 'i', room_lf),
+    LF("EAX3 decay LF ratio", kE3, 'f', decay_lf_ratio),
+    LF("EAX3 reflections pan", kE3, 'v', reflections_pan),
+    LF("EAX3 reverb pan", kE3, 'v', reverb_pan),
+    LF("EAX3 echo time", kE3, 'f', echo_time),
+    LF("EAX3 echo depth", kE3, 'f', echo_depth),
+    LF("EAX3 modulation time", kE3, 'f', modulation_time),
+    LF("EAX3 modulation depth", kE3, 'f', modulation_depth),
+    LF("EAX3 HF reference", kE3, 'f', hf_reference),
+    LF("EAX3 LF reference", kE3, 'f', lf_reference),
+};
+#undef LF
+
+#define SF(name, v, t, m) {name, v, t, offsetof(audio::eax::Source, m)}
+constexpr Field kSourceFields[] = {
+    SF("EAX sample reverb mix", kE1 | kE23, 'f', reverb_mix),
+    SF("EAX2 sample direct", kE23, 'i', direct),
+    SF("EAX2 sample direct HF", kE23, 'i', direct_hf),
+    SF("EAX2 sample room", kE23, 'i', room),
+    SF("EAX2 sample room HF", kE23, 'i', room_hf),
+    SF("EAX2 sample room rolloff", kE23, 'f', room_rolloff_factor),
+    SF("EAX2 sample obstruction", kE23, 'i', obstruction),
+    SF("EAX2 sample obstruction LF ratio", kE23, 'f', obstruction_lf_ratio),
+    SF("EAX2 sample occlusion", kE23, 'i', occlusion),
+    SF("EAX2 sample occlusion LF ratio", kE23, 'f', occlusion_lf_ratio),
+    SF("EAX2 sample occlusion room ratio", kE23, 'f', occlusion_room_ratio),
+    SF("EAX2 sample outside volume HF", kE23, 'i', outside_volume_hf),
+    SF("EAX2 sample air absorption", kE23, 'f', air_absorption_factor),
+    SF("EAX2 sample flags", kE23, 'u', flags),
+    SF("EAX3 sample exclusion", kE3, 'i', exclusion),
+    SF("EAX3 sample exclusion LF ratio", kE3, 'f', exclusion_lf_ratio),
+    SF("EAX3 sample occlusion direct ratio", kE3, 'f', occlusion_direct_ratio),
+    SF("EAX3 sample doppler factor", kE3, 'f', doppler_factor),
+};
+#undef SF
+
+// Copies field f between the property set at `obj` and guest memory.
+template <typename T>
+bool AccessField(const Field* fields, size_t n, const std::string& name, Prov p,
+                 T* obj, uint32_t guest, bool set) {
+  for (size_t i = 0; i < n; i++) {
+    const Field& f = fields[i];
+    if (name != f.name || !(f.versions & VersionBit(p))) continue;
+    uint8_t* field = reinterpret_cast<uint8_t*>(obj) + f.offset;
+    size_t size = f.type == 'v' ? 12 : 4;
+    if (set)
+      std::memcpy(field, GPtr(guest), size);
+    else
+      std::memcpy(GPtr(guest), field, size);
+    return true;
+  }
+  return false;
+}
+
+// Listener attribute `name` of EAX provider p: reads it into, or sets it
+// from, guest memory at `guest`. False if p has no such attribute.
+bool ListenerAttribute(Prov p, const std::string& name, uint32_t guest, bool set) {
+  audio::eax::Listener& l = S().eax[int(p)];
+  if (name == "EAX environment selection") {
+    if (set)
+      l = audio::eax::Preset(Rd32(guest));
+    else
+      Wr32(guest, l.environment);
+    return true;
+  }
+  if (name == "EAX effect volume" && p == Prov::kEax1) {
+    // EAX 1.0's reverb volume (linear) is the room level here.
+    if (set)
+      l.room = audio::eax::GainToMb(F(Rd32(guest)));
+    else
+      Wr32(guest, std::bit_cast<uint32_t>(audio::eax::MbToGain(float(l.room))));
+    return true;
+  }
+  if (name == "EAX all parameters") {
+    uint8_t* q = GPtr(guest);
+    if (p == Prov::kEax1) {
+      // EAX_REVERBPROPERTIES: environment, volume, decay time, damping.
+      if (set) {
+        l = audio::eax::Preset(Rd32(guest));
+        l.room = audio::eax::GainToMb(F(Rd32(guest + 4)));
+        l.decay_time = F(Rd32(guest + 8));
+        l.decay_hf_ratio = F(Rd32(guest + 12));
+      } else {
+        Wr32(guest, l.environment);
+        Wr32(guest + 4, std::bit_cast<uint32_t>(audio::eax::MbToGain(float(l.room))));
+        Wr32(guest + 8, std::bit_cast<uint32_t>(l.decay_time));
+        Wr32(guest + 12, std::bit_cast<uint32_t>(l.decay_hf_ratio));
+      }
+    } else if (p == Prov::kEax2) {
+      set ? audio::eax::ReadListener2(q, &l) : audio::eax::WriteListener2(l, q);
+    } else {
+      set ? audio::eax::ReadListener3(q, &l) : audio::eax::WriteListener3(l, q);
+    }
+    return true;
+  }
+  return AccessField(kListenerFields, std::size(kListenerFields), name, p, &l, guest, set);
+}
+
+// The same for a sample's EAX source properties.
+bool SampleAttribute(Sample& s, const std::string& name, uint32_t guest, bool set) {
+  if (name == "EAX sample all parameters") {
+    uint8_t* q = GPtr(guest);
+    if (s.prov == Prov::kEax1) {
+      // EAXBUFFER_REVERBPROPERTIES: the reverb mix.
+      if (set)
+        s.eax.reverb_mix = F(Rd32(guest));
+      else
+        Wr32(guest, std::bit_cast<uint32_t>(s.eax.reverb_mix));
+    } else if (s.prov == Prov::kEax2) {
+      set ? audio::eax::ReadSource2(q, &s.eax) : audio::eax::WriteSource2(s.eax, q);
+    } else {
+      set ? audio::eax::ReadSource3(q, &s.eax) : audio::eax::WriteSource3(s.eax, q);
+    }
+    return true;
+  }
+  return AccessField(kSourceFields, std::size(kSourceFields), name, s.prov, &s.eax, guest,
+                     set);
+}
+
+uint32_t ListenerSize(Prov p, const std::string& name) {
+  if (name != "EAX all parameters") return 12;  // at most a pan vector
+  return p == Prov::kEax1 ? 16 : p == Prov::kEax2 ? audio::eax::kListener2Size
+                                                  : audio::eax::kListener3Size;
+}
+
+// AIL_3D_provider_attribute(lib, name, void* value). Names a provider
+// lacks leave *value unchanged, which is how games detect a missing
+// feature (Call of Duty probes "EAX3 room LF" to enable EAX).
 HLE_NAMED("mss32.dll", "_AIL_3D_provider_attribute@12", AIL_3D_provider_attribute, 3) {
   std::string name = GStr(Arg(c, 1));
-  if (Arg(c, 0) == kProvider && name == "Maximum supported samples" && Arg(c, 2)) {
-    std::lock_guard<std::mutex> l(Mu());
-    Wr32(Arg(c, 2), S().prefs[1]);  // DIG_MIXER_CHANNELS
+  uint32_t out = Arg(c, 2);
+  const ProviderDef* d = ProviderOf(Arg(c, 0));
+  if (!d || !out || !EnsureReadable(c, out, ListenerSize(d->kind, name))) return 0;
+  std::lock_guard<std::mutex> l(Mu());
+  if (name == "Maximum supported samples") {
+    Wr32(out, S().prefs[1]);  // DIG_MIXER_CHANNELS
     return 0;
   }
-  RECOMP_TRACE("  AIL_3D_provider_attribute(%s): not provided\n", name.c_str());
+  if (IsEax(d->kind) && ListenerAttribute(d->kind, name, out, false)) return 0;
+  RECOMP_TRACE("  AIL_3D_provider_attribute(%s, %s): not provided\n", d->name, name.c_str());
   return 0;
 }
 
+// AIL_set_3D_provider_preference(lib, name, void const* value).
 HLE_NAMED("mss32.dll", "_AIL_set_3D_provider_preference@12", AIL_set_3D_provider_preference, 3) {
-  RECOMP_TRACE("  AIL_set_3D_provider_preference(%s): not provided\n", GStr(Arg(c, 1)).c_str());
+  std::string name = GStr(Arg(c, 1));
+  uint32_t in = Arg(c, 2);
+  const ProviderDef* d = ProviderOf(Arg(c, 0));
+  if (!d || !in || !EnsureReadable(c, in, ListenerSize(d->kind, name))) return kM3dNotEnabled;
+  std::lock_guard<std::mutex> l(Mu());
+  if (IsEax(d->kind) && ListenerAttribute(d->kind, name, in, true)) {
+    if (d->kind == S().active) ApplyEaxListener();
+    return kM3dNoErr;
+  }
+  RECOMP_TRACE("  AIL_set_3D_provider_preference(%s): not provided\n", name.c_str());
   return kM3dNotEnabled;
 }
 
+// AIL_set_3D_sample_preference(S, name, void const* value).
 HLE_NAMED("mss32.dll", "_AIL_set_3D_sample_preference@12", AIL_set_3D_sample_preference, 3) {
-  RECOMP_TRACE("  AIL_set_3D_sample_preference(%s): not provided\n", GStr(Arg(c, 1)).c_str());
+  std::string name = GStr(Arg(c, 1));
+  uint32_t in = Arg(c, 2);
+  uint32_t size = name == "EAX sample all parameters" ? audio::eax::kSource3Size : 4;
+  if (!in || !EnsureReadable(c, in, size)) return kM3dNotEnabled;
+  std::lock_guard<std::mutex> l(Mu());
+  Sample* s = FindSample(Arg(c, 0), true, "AIL_set_3D_sample_preference");
+  if (s && IsEax(s->prov) && SampleAttribute(*s, name, in, true)) {
+    ApplyEax(*s);
+    return kM3dNoErr;
+  }
+  RECOMP_TRACE("  AIL_set_3D_sample_preference(%s): not provided\n", name.c_str());
   return kM3dNotEnabled;
 }
 
@@ -1134,8 +1448,10 @@ HLE_NAMED("mss32.dll", "_AIL_set_3D_position@16", AIL_set_3D_position, 4) {
   if (obj && obj == st.listener) {
     st.lpos = p;
     audio::GetMixer().SetListener(st.lpos, st.lface, st.lup);
+    ApplyEaxAll();
   } else if (Sample* s = FindSample(obj, true, "AIL_set_3D_position")) {
     s->v.pos = p;
+    ApplyEax(*s);
   }
   return 0;
 }
@@ -1292,6 +1608,7 @@ HLE_NAMED("mss32.dll", "_AIL_set_stream_reverb_levels@12", AIL_set_stream_reverb
   std::lock_guard<std::mutex> l(Mu());
   if (Stream* s = FindStream(Arg(c, 0), "AIL_set_stream_reverb_levels")) {
     s->dry = std::clamp(F(Arg(c, 1)), 0.0f, 1.0f);
+    s->wet = std::clamp(F(Arg(c, 2)), 0.0f, 1.0f);
     ApplyVolume(*s);
   }
   return 0;
@@ -1407,10 +1724,13 @@ HLE_NAMED("mss32.dll", "_AIL_release_timer_handle@4", AIL_release_timer_handle, 
 
 // ---- misc ----------------------------------------------------------------------------------
 
-// Room types (reverb presets) need an EAX provider.
+// AIL_set_digital_master_room_type(dig, room): the master reverb's
+// environment (EAX environment numbers, rendered with EAX's presets).
 HLE_NAMED("mss32.dll", "_AIL_set_digital_master_room_type@8", AIL_set_digital_master_room_type, 2) {
   std::lock_guard<std::mutex> l(Mu());
   S().room_type = Arg(c, 1);
+  audio::GetMixer().SetReverb(kBusMaster,
+                              audio::eax::ToReverb(audio::eax::Preset(Arg(c, 1))));
   return 0;
 }
 

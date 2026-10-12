@@ -336,7 +336,13 @@ so Wine is not a reference for this point. d3d7.cpp models it.
 - ole32: CoCreateInstance for what games need (fails cleanly otherwise).
 - mss32 (Miles): our own mixer on an SDL3 audio stream (runtime/audio):
   resampling, loop counts, gain ramps, the "Miles Fast 2D Positional
-  Audio" model, MP3 through libavcodec.
+  Audio" model, MP3 through libavcodec. Miles' EAX providers (EAX 1.0,
+  2.0, 3.0, with Msseax.m3d's attribute names and struct layouts) and
+  Miles 6.5's digital master reverb: voices get two-band (5 kHz) direct
+  and send levels from the EAX source model (runtime/audio/eax), and the
+  sends go to reverb buses rendered by OpenAL Soft's EFX EAX reverb on a
+  loopback device; direct sound never leaves our mixer, so the Fast 2D
+  path is unchanged.
 - binkw32: ffmpeg (Bink demuxer from memory, binkvideo/binkaudio,
   swscale), audio into the Miles mixer.
 - dbghelp: UnDecorateSymbolName (LLVM's Microsoft demangler, normalised
@@ -373,12 +379,8 @@ the macOS port.
 
 ## Roadmap
 - opengl32/wgl HLE on gfx::Device (Call of Duty).
-- EAX for the audio HLE, shared by every game: Dungeon Siege and Call
-  of Duty both have EAX paths and fall back to "Miles Fast 2D
-  Positional Audio" today. Offer EAX-capable Miles 3D providers (and the
-  EAX property sets games query; DirectSound3D games later) rendered
-  through OpenAL Soft (EFX reverb and filters; it also implements the
-  EAX 1-5 API), which runs on macOS too.
+- EAX for games on DirectSound3D (IDirectSound3DBuffer property sets),
+  on the same EAX model and reverb buses as the Miles providers.
 - SDL_GPU backend (Vulkan) with the fixed-function generator, matched
   against the d3d9 backend.
 - macOS arm64: Metal via SDL_GPU, platform layer (signals, ucontext,
