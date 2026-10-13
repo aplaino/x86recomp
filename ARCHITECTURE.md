@@ -176,7 +176,8 @@ lifter is tractable (rexglue-style: one C++ function per guest function).
   manifest (lifter.manifest) for overrides: extra entries, names, entry
   probes, resume sites (SEH, longjmp), setjmp functions.
 - Output is plain C++20: no x86 intrinsics, no inline asm, no
-  `long double`, no reliance on host FPU state.
+  `long double`, no reliance on host FPU state other than the default
+  environment (x87 runs on host doubles).
 - Context: `struct Ctx { u32 eax..edi, esp, flags; X87 fpu; fs base }`,
   one per guest thread. Registers are cached in locals per function and
   flags computed eagerly into locals (clang drops dead ones).
@@ -248,8 +249,9 @@ separate game, client-game and UI modules) have every module lifted:
 ### x87: full 80-bit model
 Games depend on x87 state (some run all their float maths under
 PC=24/RC=chop; MSVC CRT helpers switch precision around their own work;
-D3D changes the control word), so the FPU is modelled exactly, not
-mapped to double.
+D3D changes the control word), so the FPU is modelled exactly. Host
+doubles are used only where they provably give the same results (x87
+runs on host doubles, below).
 
 Model per thread: 8 registers of 80 bits (sign, 15-bit exponent,
 64-bit explicit-integer mantissa), TOP, an empty bit per register,
@@ -331,16 +333,141 @@ particles). The lifter therefore turns straight-line x87 code into runs:
   stores the status word, the next run's guard loads the control word,
   and a load widened over both missed store forwarding (5% of a hot
   function).
-- What a run costs now is the latency of its dependent operations
-  (about 5 ns each through the integer paths, against ~1 ns for host
-  doubles), not the guard and write-back (~2.5 ns per run), so keeping
-  values in locals across branches would gain little.
-- <ID>_X87_RUNS=0 disables runs at run time (A/B checks).
+- What a run costs is the latency of its dependent operations (about
+  5 ns each through the integer paths, about 1 ns on host doubles), not
+  the guard and write-back (~2.5 ns per run), so keeping values in
+  locals across branches would gain little.
+- <ID>_X87_RUNS=0 disables runs at run time (A/B checks);
+  <ID>_X87_DOUBLE=0 only their host-double form.
 - Known difference from hardware, the same one lifted integer registers
   already have: while a run is in flight its state is in locals, so a
   guest exception raised inside it sees the FPU state from the start of
   the run in its CONTEXT, and an __except unwind out of the run drops
   the run's changes.
+
+### x87 runs on host doubles
+Most float code runs under Windows' default control word 0x027F (PC=53,
+RC=nearest, exceptions masked); a game that never sets the CW does all
+its float maths there. Under it a run with arithmetic first runs on host
+doubles (x87.h, "host doubles"; lifter: EmitX87Double):
+- After the guard, if PC=53 and RC=nearest (run::DoubleMode), the
+  registers the run reads are converted to doubles d<k> (run::ToD). The
+  same instructions then run on the doubles, with PE, C1 and C3/C2/C0 in
+  the run's usual locals.
+- Each instruction checks before it has any effect. Its operands must be
+  held exactly (see "Range"), and its result must stay in range. If a
+  check fails, the run saves the instruction's index (rk) and jumps to
+  XS. There the doubles become registers again (exact), and the run
+  continues on the exact path at that instruction (label XR), which
+  redoes it. If a register cannot be converted at entry, the whole run
+  takes the exact path.
+- At the end the doubles are converted back and the normal write-back
+  stores them.
+- Stores of a double do not exit: an m32 store outside float's normal
+  range uses the exact store. FIST and the 64-bit constants (fldpi...)
+  go through the exact model; FLD1 and FLDZ are 1.0 and 0.0.
+
+Range. Every value a double holds is zero, or has a magnitude in
+[2^-511, 2^512). Such a value has at most 53 significand bits and is a
+normal binary64, so the double and the 80-bit register hold the same
+number. Values enter only as:
+- registers that are already like that (ToD);
+- m32 operands (zero or normal floats are in range);
+- m64 operands in range;
+- FILD with |v| <= 2^53, FLD1 and FLDZ.
+NaN, infinity, denormal and out-of-range operands exit.
+
+Proof that a result in range is exact. Take a and b in range, and the
+operation fadd, fsub, fmul, fdiv or fsqrt (and their reverse, pop and
+integer-operand forms). Let x be the exact result.
+1. Zero results. If x = 0, both give the same signed zero: IEEE 754 and
+   the x87 use the same rules at RC=nearest (x - x = +0, -0 + -0 = -0,
+   products and quotients take the xor of the signs).
+   A nonzero x is never that small:
+   - products are at least 2^-1022;
+   - quotients are greater than 2^-511 / 2^512 = 2^-1023;
+   - square roots are at least 2^-256;
+   - a nonzero sum is a multiple of the smaller operand's quantum,
+     2^-563 or more.
+   So binary64 never rounds a nonzero x to zero, and a zero double
+   result means x = 0.
+2. Nonzero results. The x87 at PC=53 rounds x once to 53 bits, and its
+   15-bit exponent cannot overflow or underflow here. Binary64 rounds x
+   the same way when x is in its normal range; below 2^-1022 it gives a
+   denormal, at 2^1024 and above infinity. The run keeps a result r only
+   if |r| is in [2^-511, 2^512).
+   - Rounding is monotonic and powers of two are representable. So
+     x below 2^-1022 gives |r| <= 2^-1022, and overflow gives infinity.
+     Both are rejected.
+   - An accepted r therefore comes from a normal-range x and equals the
+     x87 result.
+   - Conversely, an x87 result in range is accepted.
+   - A run exits exactly when the x87 result leaves the range. No other
+     exception can occur: operands are normal or zero, and division by
+     zero gives infinity or NaN, which are rejected.
+3. PE and C1. Let e = x - r. PE is e != 0, and C1 ("rounded up" in
+   magnitude) is e != 0 with sign(e) != sign(r). With operands and r in
+   range, e is computed exactly:
+   - Add/sub: TwoSum (Knuth) gives r + e = a + b exactly when no
+     operation overflows. Operands below 2^512 keep every intermediate
+     below 2^514.
+   - Mul: e = a*b - r is a multiple of 2^(ea+eb-104), with
+     ea + eb >= er - 1 >= -512. It fits in 53 bits (|e| <= ulp(r)/2), so
+     fma(a, b, -r) computes it exactly.
+   - Div: the remainder p = a - r*b is representable when r is the
+     correctly rounded quotient and nothing underflows (Markstein;
+     Boldo and Daumas). Its quantum is 2^(er+eb-104) with
+     er + eb >= ea - 1. fma(-r, b, a) computes it exactly.
+     x - r = p/b, so PE is p != 0. Since sign(r) = sign(a) xor sign(b),
+     C1 is p != 0 with sign(p) != sign(a). Comparing with sign(r)
+     instead would be wrong for negative divisors.
+   - Sqrt: p = a - r^2 is a multiple of 2^(2er-104) with er >= -256.
+     fma(-r, r, a) computes it exactly; C1 is p < 0.
+   No error term is smaller than 2^-616 unless it is zero.
+4. Stores and compares.
+   - FST m64 of a value in range is exact: no PE, C1 = 0.
+   - FST m32 rounds the 53-bit value once to 24 bits, as (float)r does
+     at RC=nearest. That holds while |r| >= 2^-126 (the x87 checks
+     tininess before rounding) and the float is finite; otherwise the
+     exact store runs. PE is (double)f != r, and C1 is |f| > |r|.
+   - Compares see no NaN, so host compares give C3/C2/C0; +0 and -0
+     compare equal on both. FCOM m64 accepts any zero or normal value.
+   - FCHS, FABS, FXCH and register copies are exact.
+
+Host requirements:
+- binary64 evaluated as written: FLT_EVAL_METHOD 0 and no fast-math
+  (x87.h refuses to compile otherwise);
+- no contraction into FMA: everything that runs these paths is built
+  with RECOMP_X87_FP_FLAGS;
+- round-to-nearest-even, the host default, never changed;
+- masked traps (a division by zero computes infinity before the check
+  rejects it).
+No denormal is ever an operand or a result, so FTZ and DAZ could not
+change anything, but platform::HostFpProblem rejects them anyway. Every
+thread that runs guest code checks it at start: the rounding mode, the
+control register (MXCSR on x86-64, FPCR on arm64), and the behaviour.
+std::fma is a single instruction on arm64. On x86-64 without -mfma it is
+glibc's fma, which is correctly rounded too.
+
+Tests and measurements:
+- tests/x87_fast_test fuzzes every function against the SoftFloat path
+  at 0x027F. A function must succeed exactly when the exact result can
+  be held, and then match value, flags and C1 bit for bit. The cases
+  include range edges, ties, cancellation, signed zeros, results just
+  over and under the range, float range edges for m32 stores, and any
+  m64/m32/register bits for the loaders.
+- Two counterexamples to weaker conditions are kept as cases:
+  - "normal operands, result >= 2^-1022" is not enough:
+    6361 * 2^-600 times 1416003655831 * 2^-475 is (2^53 - 1) * 2^-1075.
+    Binary64 rounds it to 2^-1022 (its denormal quantum); the x87 holds
+    it exactly.
+  - a zero result is not exact without the range: 2^-512 * 2^-791
+    gives 0.
+- Mutations of each check, error term, flag and conversion make the
+  test fail.
+- lift_x87_test runs the lifted forms and sequences from 0x027F states
+  that are often double-exact, against the CPU.
+- Lifter output grows by 7-16%: the run is emitted twice, plus the exits.
 
 ### SSE/SSE2
 Every PC these games still run on has SSE2, so their SSE paths (MSVC's

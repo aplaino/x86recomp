@@ -57,8 +57,11 @@ target_link_libraries(recomp_x87 PRIVATE softfloat)
 # Every x87 instruction of the game runs through these: always optimise
 # (an -O0 debug build made float-heavy scenes several times slower).
 # No stack protector: its canary check sat in every hot x87 helper.
+# Code that runs the x87 model's host-double paths (x87.h) is built with
+# RECOMP_X87_FP_FLAGS: binary64 as written, never contracted into FMA.
+set(RECOMP_X87_FP_FLAGS -ffp-contract=off -fno-fast-math CACHE INTERNAL "")
 target_compile_options(recomp_x87 PRIVATE -O2 -fno-stack-protector
-                       ${RECOMP_FAULT_FRAME_FLAGS})
+                       ${RECOMP_X87_FP_FLAGS} ${RECOMP_FAULT_FRAME_FLAGS})
 target_compile_options(softfloat PRIVATE -O2)
 # ----------------------------------------------------------------------
 
@@ -224,7 +227,8 @@ function(recomp_add_lifted target dir)
   # -fnon-call-exceptions: guest access violations are raised from the
   # SIGSEGV handler and may unwind (GuestResume) out of the faulting frame.
   target_compile_options(${target} PRIVATE -O2 -g0 -fno-strict-aliasing
-                         -fnon-call-exceptions ${RECOMP_FAULT_FRAME_FLAGS})
+                         -fnon-call-exceptions ${RECOMP_X87_FP_FLAGS}
+                         ${RECOMP_FAULT_FRAME_FLAGS})
 endfunction()
 
 # recomp_add_lift_tests(EXE <exe> SYMBOLS <dir> MANIFEST <file>): oracle
@@ -247,7 +251,8 @@ function(recomp_add_lift_tests)
     add_executable(lift_${_kind}_test "${_tests}/lift_${_kind}_test.cpp" "${_forms}")
     target_include_directories(lift_${_kind}_test PRIVATE "${RECOMP_ROOT}/src" "${_tests}")
     target_link_libraries(lift_${_kind}_test PRIVATE recomp_x87 recomp_image)
-    target_compile_options(lift_${_kind}_test PRIVATE -O1 -fno-strict-aliasing)
+    target_compile_options(lift_${_kind}_test PRIVATE -O1 -fno-strict-aliasing
+                           ${RECOMP_X87_FP_FLAGS})
     add_test(NAME lift_${_kind} COMMAND lift_${_kind}_test)
   endforeach()
   set_tests_properties(lift_x87 PROPERTIES TIMEOUT 600)

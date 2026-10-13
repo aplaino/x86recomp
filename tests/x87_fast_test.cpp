@@ -3,19 +3,22 @@
 // they bypass (x87::g_softfloat_only), then the inline forms lifted runs
 // call (x87::run::*Fast: arithmetic with register, m32 and m64 operands,
 // m32/m64 loads and stores, compares) against the out-of-line run
-// functions on the SoftFloat path.
-// Portable (no host FPU), so it also runs on arm64. Every case runs one
+// functions on the SoftFloat path, and last the host-double forms
+// (x87::run::*D, control word 0x027F) the same way.
+// Portable, so it also runs on arm64. Every case runs one
 // instruction on identical states both ways and compares the registers,
 // the status word (flags, C1) and the tag word bit for bit. The SoftFloat
 // path itself is checked against the hardware by x87_test.
 //
 // Usage: x87_fast_test [cases] [seed]
 
+#include <bit>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <random>
 
+#include "runtime/platform.h"
 #include "runtime/x87.h"
 
 namespace {
@@ -258,6 +261,234 @@ long RunForms(long n) {
   return fails;
 }
 
+// ---- host doubles ---------------------------------------------------------
+//
+// Every *D function against the SoftFloat path at 0x027F. A *D function
+// must succeed exactly when its result can be held (zero, or 53 bits with
+// a magnitude in [2^-511, 2^512): InRangeV, written independently of
+// x87.h), and then give the same value, flags and C1; on failure it must
+// leave its outputs alone.
+
+constexpr uint32_t kCw = 0x027F;
+
+bool InRangeV(run::V v) {
+  int e = int(v.se & 0x7FFF);
+  if (!e && !v.sig) return true;
+  return (v.sig >> 63) && !(v.sig & 0x7FF) && e - 0x3FFF >= -511 && e - 0x3FFF <= 511;
+}
+bool SameV(run::V x, run::V y) { return x.sig == y.sig && x.se == y.se; }
+double D(uint64_t bits) { return std::bit_cast<double>(bits); }
+uint64_t Bits(double x) { return std::bit_cast<uint64_t>(x); }
+
+// A 52-bit fraction: random, sparse (exact results and ties), power of
+// two, all ones, leading ones then sparse, or 24 bits (float-exact).
+uint64_t Frac() {
+  const uint64_t m = (1ull << 52) - 1;
+  switch (Rand() % 8) {
+    case 0: return Rand() & Rand() & Rand() & m;
+    case 1: return 0;
+    case 2: return m;
+    case 3: return ((~0ull << (Rand() % 52)) | (Rand() & Rand() & Rand())) & m;
+    case 4: return Rand() & m & ~((1ull << 29) - 1);
+    case 5: return (Rand() & m & ~((1ull << 29) - 1)) | (1ull << 28);  // 24-bit tie
+    default: return Rand() & m;
+  }
+}
+// An unbiased exponent in range ([-511, 511]): at the edges, anywhere,
+// everyday, or near `near`.
+int ExpIn(int near) {
+  int e;
+  switch (Rand() % 6) {
+    case 0: e = -511 + int(Rand() % 4); break;
+    case 1: e = 511 - int(Rand() % 4); break;
+    case 2: e = -511 + int(Rand() % 1023); break;
+    case 3: e = int(Rand() % 61) - 30; break;
+    default: e = near + int(Rand() % 121) - 60; break;
+  }
+  return e < -511 ? -511 : e > 511 ? 511 : e;
+}
+double Make(int e, uint64_t frac, bool neg) {
+  return D(uint64_t(neg) << 63 | uint64_t(e + 1023) << 52 | frac);
+}
+double RandIn(int near) {
+  if (Rand() % 12 == 0) return (Rand() & 1) ? -0.0 : 0.0;
+  return Make(ExpIn(near), Frac(), Rand() & 1);
+}
+int ExpOf(double x) { return int((Bits(x) >> 52) & 0x7FF) - 1023; }
+// A second operand: like the first, or built for cancellation and exact
+// zeros, add/sub ties (52-55 binades below), or products and quotients at
+// the range edges (just inside, at, or just outside).
+double RandOther(double a) {
+  int ea = Bits(a) << 1 ? ExpOf(a) : 0;
+  bool neg = Rand() & 1;
+  auto clamp = [](int e) { return e < -511 ? -511 : e > 511 ? 511 : e; };
+  switch (Rand() % 10) {
+    case 0: {
+      double b = Rand() & 1 ? a : -a;
+      if (Rand() & 1 && (Bits(b) << 1)) b = D(Bits(b) ^ (Rand() % 4));
+      return b;
+    }
+    case 1: return Make(clamp(ea - 52 - int(Rand() % 4)), Frac(), neg);
+    case 2: return Make(clamp(511 - ea + int(Rand() % 5) - 2), Frac(), neg);    // a*b ~ 2^512
+    case 3: return Make(clamp(-511 - ea + int(Rand() % 5) - 2), Frac(), neg);   // a*b ~ 2^-511
+    case 4: return Make(clamp(ea - 511 + int(Rand() % 5) - 2), Frac(), neg);    // a/b ~ 2^511
+    case 5: return Make(clamp(ea + 511 + int(Rand() % 5) - 2), Frac(), neg);    // a/b ~ 2^-511
+    default: return RandIn(ea);
+  }
+}
+
+// Any m32/m64 bits: in range, at float's and double's edges, out of
+// range, zero, denormal, inf, NaN, raw.
+uint32_t AnyF32() {
+  uint32_t sign = uint32_t(Rand() & 1) << 31;
+  switch (Rand() % 6) {
+    case 0: return sign | uint32_t(Rand() % 3) << 23 | uint32_t(Rand() & 0x7FFFFF);
+    case 1: return sign | uint32_t(253 + Rand() % 3) << 23 | uint32_t(Rand() & 0x7FFFFF);
+    default: return RandF32(0x3FFF);
+  }
+}
+uint64_t AnyF64() {
+  if (Rand() % 3) return RandF64(0x3FFF + int(Rand() % 1101) - 550);
+  int e = Rand() & 1 ? 511 : -511;
+  return Bits(Make(e, Frac(), Rand() & 1)) + (Rand() & 1 ? 1ull << 52 : 0) -
+         (Rand() & 1 ? 1ull << 52 : 0);
+}
+
+// A double result: true for success with value/flags/C1, compared with the
+// reference RV; failure only when the reference cannot be held.
+template <class F>
+long CheckD(const char* what, run::RV ref, F&& fn, double a, double b) {
+  const double kSentinel = 12345.0;
+  double out = kSentinel;
+  uint32_t fl = 0x40;  // untouched bits must stay
+  bool up = true;
+  bool ok = fn(&out, &fl, &up);
+  bool want = InRangeV(run::Val(ref));
+  bool good = ok == want &&
+              (ok ? SameV(run::FromD(out), run::Val(ref)) &&
+                        fl == (0x40 | run::Flags(ref)) && up == run::Up(ref)
+                  : Bits(out) == Bits(kSentinel) && fl == 0x40 && up);
+  if (good) return 0;
+  std::printf("FAIL %s a=%a b=%a ok=%d out=%a fl=%X up=%d\n  soft %04X:%016" PRIX64
+              " fl=%X up=%d\n",
+              what, a, b, ok, out, fl, up, unsigned(run::Val(ref).se), run::Val(ref).sig,
+              run::Flags(ref), run::Up(ref));
+  return 1;
+}
+
+long DoubleForms() {
+  static const Op kOps[] = {Op::Add, Op::Mul, Op::Sub, Op::SubR, Op::Div, Op::DivR};
+  static const char* kOpNames[] = {"ArithD add", "ArithD mul", "ArithD sub",
+                                   "ArithD subr", "ArithD div", "ArithD divr"};
+  long fails = 0;
+  recomp::x87::g_softfloat_only = true;
+  double a = RandIn(int(Rand() % 61) - 30), b = RandOther(a);
+  int k = int(Rand() % 6);
+  run::RV ref = run::Arith(kCw, kOps[k], run::FromD(a), run::FromD(b));
+  fails += CheckD(kOpNames[k], ref, [&](double* o, uint32_t* f, bool* u) {
+    return run::ArithD(kOps[k], a, b, o, f, u);
+  }, a, b);
+  // sqrt: in range, and negative operands (NaN, IE: never held).
+  ref = run::Sqrt(kCw, run::FromD(a));
+  fails += CheckD("SqrtD", ref, [&](double* o, uint32_t* f, bool* u) {
+    return run::SqrtD(a, o, f, u);
+  }, a, 0);
+  // m32/m64 operands: held exactly when the load is flag-free and in range.
+  uint32_t m32 = AnyF32();
+  uint64_t m64 = AnyF64();
+  auto load = [&](const char* what, run::RV r, bool ok, double v, uint64_t raw) {
+    bool want = run::Flags(r) == 0 && InRangeV(run::Val(r));
+    if (ok == want && (!ok || SameV(run::FromD(v), run::Val(r)))) return 0;
+    std::printf("FAIL %s %016" PRIX64 " ok=%d\n", what, raw, ok);
+    return 1;
+  };
+  double v = 7.0;
+  fails += load("OperandF32", run::LoadF32(m32), run::OperandF32(m32, &v), v, m32);
+  v = 7.0;
+  fails += load("OperandF64", run::LoadF64(m64), run::OperandF64(m64, &v), v, m64);
+  // As a run does it: two m64 loads and an operation, from any bits.
+  uint64_t n64 = Rand() % 64 ? AnyF64() : Bits(-D(m64));
+  double x0, x1;
+  if (Rand() % 64 == 0) {
+    // (2^53 - 1) * 2^-1075: binary64 rounds it to 2^-1022 (its subnormal
+    // quantum), the x87 at PC=53 holds it exactly. Normal operands and a
+    // result >= 2^-1022 are not enough.
+    m64 = Bits(6361 * 0x1p-600);
+    n64 = Bits(1416003655831 * 0x1p-475);
+    k = 1;
+  }
+  if (run::OperandF64(m64, &x0) && run::OperandF64(n64, &x1)) {
+    run::RV r = run::ArithF64(kCw, kOps[k], run::Val(run::LoadF64(m64)), n64);
+    fails += CheckD(kOpNames[k], r, [&](double* o, uint32_t* f, bool* u) {
+      return run::ArithD(kOps[k], x0, x1, o, f, u);
+    }, x0, x1);
+  }
+  // FCOM m64 takes any zero or normal value.
+  v = 7.0;
+  run::RV l64 = run::LoadF64(m64);
+  bool ok = run::CompareOperandF64(m64, &v);
+  if (ok != (run::Flags(l64) == 0 && run::Ordinary(run::Val(l64)) &&
+             (run::Val(l64).se & 0x7FFF) != 0x7FFF) ||
+      (ok && Bits(v) != m64) || (!ok && v != 7.0)) {
+    std::printf("FAIL CompareOperandF64 %016" PRIX64 " ok=%d\n", m64, ok);
+    ++fails;
+  }
+  // FILD m64: held when |v| <= 2^53 (larger ones held exactly by a double
+  // go to the exact path too).
+  int64_t iv = int64_t(Rand()) >> (Rand() % 64);
+  if (Rand() % 4 == 0) iv = (Rand() & 1 ? 1 : -1) * ((1ll << 53) + int64_t(Rand() % 5) - 2);
+  v = 7.0;
+  ok = run::OperandI64(iv, &v);
+  run::V fi = run::FromInt(iv);
+  bool small = iv >= -(1ll << 53) && iv <= (1ll << 53);
+  if (ok != small || (ok && !SameV(run::FromD(v), fi)) || (!ok && v != 7.0)) {
+    std::printf("FAIL OperandI64 %" PRId64 " ok=%d\n", iv, ok);
+    ++fails;
+  }
+  // Registers to doubles and back: any value, held exactly when in range.
+  run::V rv = Rand() & 1 ? run::FromD(RandIn(0)) : RunValue(0x3FFF + int(Rand() % 1101) - 550);
+  v = 7.0;
+  ok = run::ToD(rv, &v);
+  if (ok != InRangeV(rv) || (ok && !SameV(run::FromD(v), rv)) || (!ok && v != 7.0)) {
+    std::printf("FAIL ToD %04X:%016" PRIX64 " ok=%d\n", unsigned(rv.se), rv.sig, ok);
+    ++fails;
+  }
+  // Stores of a held value: m32 near float's range edges and ties, m64.
+  double x = a;
+  switch (Rand() % 4) {
+    case 0: x = Make(-126 - int(Rand() % 3) + int(Rand() % 2), Frac(), Rand() & 1); break;
+    case 1: x = Make(127 + int(Rand() % 2), Frac() | (Rand() & 1 ? (1ull << 52) - 1 : 0), Rand() & 1); break;
+    case 2: x = Make(int(Rand() % 253) - 126, Frac(), Rand() & 1); break;
+    default: break;
+  }
+  run::SV s32 = run::StoreF32D(kCw, x), r32 = run::StoreF32(kCw, run::FromD(x));
+  if (!SameSV(s32, r32)) {
+    std::printf("FAIL StoreF32D %a: %08" PRIX64 " %" PRIX64 " soft %08" PRIX64 " %" PRIX64 "\n",
+                x, s32.bits, s32.meta, r32.bits, r32.meta);
+    ++fails;
+  }
+  run::SV r64 = run::StoreF64(kCw, run::FromD(x));
+  if (run::StoreF64D(x) != r64.bits || r64.meta) {
+    std::printf("FAIL StoreF64D %a\n", x);
+    ++fails;
+  }
+  // Compares, fchs and fabs.
+  uint32_t c = run::Compare(run::FromD(a), run::FromD(b), Rand() & 1);
+  if (run::CompareD(a, b) != c) {
+    std::printf("FAIL CompareD %a %a: %X soft %X\n", a, b, run::CompareD(a, b), c);
+    ++fails;
+  }
+  run::V na = run::FromD(a), aa = na;
+  na.se ^= 0x8000;
+  aa.se &= 0x7FFF;
+  if (!SameV(run::FromD(-a), na) || !SameV(run::FromD(run::AbsD(a)), aa)) {
+    std::printf("FAIL fchs/fabs %a\n", a);
+    ++fails;
+  }
+  recomp::x87::g_softfloat_only = false;
+  return fails;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -303,5 +534,18 @@ int main(int argc, char** argv) {
   long run_fails = 0;
   for (long n = 0; n < cases; n++) run_fails += RunForms(run_fails);
   std::printf("%ld cases of the inline run forms, %ld mismatches\n", cases, run_fails);
-  return fails || run_fails ? 1 : 0;
+  // The host-double forms rely on the default environment.
+  if (const char* why = recomp::platform::HostFpProblem()) {
+    std::printf("FAIL host floating-point environment: %s\n", why);
+    return 1;
+  }
+  long dbl_fails = 0;
+  for (long n = 0; n < cases && dbl_fails < 20; n++) dbl_fails += DoubleForms();
+  std::printf("%ld cases of the host-double forms, %ld mismatches\n", cases, dbl_fails);
+  for (uint16_t cw : {0x027F, 0x067F, 0x0A7F, 0x0E7F, 0x007F, 0x037F, 0x127F})
+    if (run::DoubleMode(cw) != (cw == 0x027F || cw == 0x127F)) {
+      std::printf("FAIL DoubleMode %04X\n", cw);
+      ++dbl_fails;
+    }
+  return fails || run_fails || dbl_fails ? 1 : 0;
 }

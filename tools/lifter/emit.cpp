@@ -202,10 +202,14 @@ const char* X87ConstName(ZydisMnemonic m) {
 // per entry-relative slot k (st(i) at entry is slot i; pushes go to -1, -2,
 // ...), the stack positions are resolved here, and the state is written
 // back at the end. X87Sim tracks the slots symbolically; the same pass
-// sizes the run (dry) and emits it.
+// sizes the run (dry) and emits it. Under the control word 0x027F a run
+// first tries the same instructions on host doubles d<k> (x87.h, "host
+// doubles"); see EmitX87Run.
 class X87Sim {
  public:
   enum class Slot : uint8_t { Untouched, Valid, Empty };
+
+  explicit X87Sim(char prefix = 'x') : prefix_(prefix) {}
 
   bool ok = true;
   int off = 0;               // st(i) is slot off + i
@@ -218,7 +222,7 @@ class X87Sim {
   std::set<int> touched;     // slots whose tag may change
   int lo = 0, hi = 0;        // slot range seen (at most 8 physical regs)
 
-  static std::string Var(int k) { return Fmt("x%d", k + 16); }
+  std::string Var(int k) const { return Fmt("%c%d", prefix_, k + 16); }
 
   // st(i) as an operand that must hold a value.
   std::string Read(int i) {
@@ -275,6 +279,7 @@ class X87Sim {
     hi = std::max(hi, k);
     if (hi - lo > 7) ok = false;  // two slots on one physical register
   }
+  char prefix_;
 };
 
 // Emits the code for one instruction. Each instruction gets its own { }
@@ -290,9 +295,15 @@ class InsnEmitter {
   // The instruction inside an x87 run (see X87Sim); false if it cannot be
   // part of one. Non-x87 instructions are emitted as usual.
   bool EmitInRun(X87Sim& sim);
+  // The same on the run's host doubles: `fail` is the statement that
+  // leaves for the exact path when a value cannot be held or an operation
+  // cannot be done exactly in doubles; *can_fail is set if it was emitted.
+  // False if the instruction has no double form.
+  bool EmitInRunDouble(X87Sim& sim, const std::string& fail, bool* can_fail);
 
  private:
   bool EmitX87Fast(X87Sim& sim);
+  bool EmitX87Double(X87Sim& sim, const std::string& fail, bool* can_fail);
 
   // ---- output -----------------------------------------------------------
   void L(const std::string& s) { out_ += "    " + s + "\n"; }
@@ -818,6 +829,16 @@ bool InsnEmitter::EmitInRun(X87Sim& sim) {
   return EmitX87Fast(sim);
 }
 
+bool InsnEmitter::EmitInRunDouble(X87Sim& sim, const std::string& fail, bool* can_fail) {
+  *can_fail = false;
+  if (!IsX87(d_)) {
+    Emit();
+    return true;
+  }
+  if (!PrepareMem()) return false;
+  return EmitX87Double(sim, fail, can_fail);
+}
+
 // Fast forms: the same operations as EmitX87 on the run's locals, through
 // the value-level recomp::x87::run functions. C1 and C3/C2/C0 follow the
 // State-based operations (see x87.h): loads, register copies, fxch, fchs
@@ -1017,6 +1038,212 @@ bool InsnEmitter::EmitX87Fast(X87Sim& sim) {
     case ZYDIS_MNEMONIC_FNOP:
     case ZYDIS_MNEMONIC_FWAIT:
       return sim.ok;
+    default:
+      return false;
+  }
+}
+
+// Double forms: the operations of EmitX87Fast on the run's doubles,
+// through the recomp::x87::run "host doubles" functions, with the same C1
+// and C3/C2/C0 updates. Every check comes before the instruction's side
+// effects, so `fail` leaves with the instruction not yet done.
+bool InsnEmitter::EmitX87Double(X87Sim& sim, const std::string& fail, bool* can_fail) {
+  const auto m = d_.mnemonic;
+  const int mem = MemIndex();
+  auto rd_mem = [&](int bytes) { return RdMem(mem, bytes); };
+  const char* R = "::recomp::x87::run";
+  auto c1 = [&](const std::string& v) {
+    L("rc1 = " + v + ";");
+    sim.c1_written = true;
+  };
+  auto check = [&](const std::string& cond) {
+    L(Fmt("if (!%s) [[unlikely]] %s", cond.c_str(), fail.c_str()));
+    *can_fail = true;
+  };
+  // An arithmetic result into x, with PE and C1.
+  auto arith = [&](const std::string& o, const std::string& x, const std::string& src) {
+    check(Fmt("%s::ArithD(%s, %s, %s, &%s, &rfl, &rc1)", R, o.c_str(), x.c_str(), src.c_str(),
+              x.c_str()));
+    sim.c1_written = true;
+  };
+
+  if (const char* op = X87OpName(m)) {
+    std::string o = Fmt("::recomp::x87::Op::%s", op);
+    if (mem >= 0) {
+      int b = Bytes(mem);
+      std::string x = sim.Read(0);
+      if (X87Integer(m)) {
+        if (b != 2 && b != 4) return false;
+        L(Fmt("const double v = double(int%d_t(%s));", b * 8, rd_mem(b).c_str()));
+      } else {
+        if (b != 4 && b != 8) return false;
+        L("double v;");
+        check(Fmt("%s::OperandF%d(%s, &v)", R, b * 8, rd_mem(b).c_str()));
+      }
+      arith(o, x, "v");
+      sim.Write(0);
+      return sim.ok;
+    }
+    int dst = Nvis() >= 2 ? St(0) : 1;
+    int src = Nvis() >= 2 ? St(1) : 0;
+    std::string a = sim.Read(dst), b = sim.Read(src);
+    arith(o, a, b);
+    sim.Write(dst);
+    if (X87Pops(m)) sim.Pop();
+    return sim.ok;
+  }
+
+  switch (m) {
+    case ZYDIS_MNEMONIC_FLD: {
+      if (mem < 0) {
+        std::string src = sim.Read(St(0));
+        std::string dst = sim.Push();
+        L(dst + " = " + src + ";");
+        c1("false");
+        return sim.ok;
+      }
+      int b = Bytes(mem);
+      if (b == 10) {
+        std::string dst = sim.Push();
+        check(Fmt("%s::ToD(%s::ToV(::recomp::lift::RdF80(B, m%d)), &%s)", R, R, mem,
+                  dst.c_str()));
+      } else if (b == 4 || b == 8) {
+        std::string dst = sim.Push();
+        check(Fmt("%s::OperandF%d(%s, &%s)", R, b * 8, rd_mem(b).c_str(), dst.c_str()));
+      } else {
+        return false;
+      }
+      c1("false");
+      return sim.ok;
+    }
+    case ZYDIS_MNEMONIC_FILD: {
+      int b = Bytes(mem);
+      if (b != 2 && b != 4 && b != 8) return false;
+      std::string dst = sim.Push();
+      if (b == 8)
+        check(Fmt("%s::OperandI64(int64_t(%s), &%s)", R, rd_mem(8).c_str(), dst.c_str()));
+      else
+        L(Fmt("%s = double(int%d_t(%s));", dst.c_str(), b * 8, rd_mem(b).c_str()));
+      c1("false");
+      return sim.ok;
+    }
+    case ZYDIS_MNEMONIC_FLD1: case ZYDIS_MNEMONIC_FLDZ: case ZYDIS_MNEMONIC_FLDPI:
+    case ZYDIS_MNEMONIC_FLDL2E: case ZYDIS_MNEMONIC_FLDL2T: case ZYDIS_MNEMONIC_FLDLG2:
+    case ZYDIS_MNEMONIC_FLDLN2: {
+      std::string dst = sim.Push();
+      if (m == ZYDIS_MNEMONIC_FLD1 || m == ZYDIS_MNEMONIC_FLDZ)
+        L(dst + (m == ZYDIS_MNEMONIC_FLD1 ? " = 1.0;" : " = 0.0;"));
+      else  // the others have 64 significand bits: always the exact path
+        check(Fmt("%s::ToD(%s::ConstValue(rcw, ::recomp::x87::Const::%s), &%s)", R, R,
+                  X87ConstName(m), dst.c_str()));
+      c1("false");
+      return sim.ok;
+    }
+    case ZYDIS_MNEMONIC_FST:
+    case ZYDIS_MNEMONIC_FSTP: {
+      std::string x = sim.Read(0);
+      if (mem < 0) {
+        std::string dst = sim.Write(St(0));
+        L(dst + " = " + x + ";");
+        c1("false");
+      } else {
+        switch (Bytes(mem)) {
+          case 4:
+            L(Fmt("const auto r = %s::StoreF32D(rcw, %s);", R, x.c_str()));
+            L(Fmt("::recomp::lift::Wr<uint32_t>(B, m%d, uint32_t(r.bits));", mem));
+            L(Fmt("rfl |= %s::Flags(r);", R));
+            c1(Fmt("%s::Up(r)", R));
+            break;
+          case 8:
+            L(Fmt("::recomp::lift::Wr<uint64_t>(B, m%d, %s::StoreF64D(%s));", mem, R,
+                  x.c_str()));
+            c1("false");
+            break;
+          case 10:
+            L(Fmt("::recomp::lift::WrF80(B, m%d, %s::ToF80(%s::FromD(%s)));", mem, R, R,
+                  x.c_str()));
+            c1("false");
+            break;
+          default:
+            return false;
+        }
+      }
+      if (m == ZYDIS_MNEMONIC_FSTP) sim.Pop();
+      return sim.ok;
+    }
+    case ZYDIS_MNEMONIC_FIST:
+    case ZYDIS_MNEMONIC_FISTP: {
+      int b = Bytes(mem);
+      if (b != 2 && b != 4 && b != 8) return false;
+      std::string x = sim.Read(0);
+      L(Fmt("const auto r = %s::StoreI%d(rcw, %s::FromD(%s));", R, b * 8, R, x.c_str()));
+      L(Fmt("::recomp::lift::Wr<uint%d_t>(B, m%d, uint%d_t(r.bits));", b * 8, mem, b * 8));
+      L(Fmt("rfl |= %s::Flags(r);", R));
+      c1(Fmt("%s::Up(r)", R));
+      if (m == ZYDIS_MNEMONIC_FISTP) sim.Pop();
+      return sim.ok;
+    }
+    case ZYDIS_MNEMONIC_FXCH: {
+      int i = Nvis() ? St(Nvis() - 1) : 1;
+      std::string a = sim.Read(0), b = sim.Read(i);
+      sim.Write(0);
+      sim.Write(i);
+      if (i != 0)
+        L(Fmt("const double t = %s; %s = %s; %s = t;", a.c_str(), a.c_str(), b.c_str(),
+              b.c_str()));
+      c1("false");
+      return sim.ok;
+    }
+    case ZYDIS_MNEMONIC_FCHS:
+    case ZYDIS_MNEMONIC_FABS: {
+      std::string x = sim.Read(0);
+      sim.Write(0);
+      L(m == ZYDIS_MNEMONIC_FCHS ? Fmt("%s = -%s;", x.c_str(), x.c_str())
+                                 : Fmt("%s = %s::AbsD(%s);", x.c_str(), R, x.c_str()));
+      c1("false");
+      return sim.ok;
+    }
+    case ZYDIS_MNEMONIC_FSQRT: {
+      std::string x = sim.Read(0);
+      check(Fmt("%s::SqrtD(%s, &%s, &rfl, &rc1)", R, x.c_str(), x.c_str()));
+      sim.c1_written = true;
+      sim.Write(0);
+      return sim.ok;
+    }
+    case ZYDIS_MNEMONIC_FCOM: case ZYDIS_MNEMONIC_FCOMP:
+    case ZYDIS_MNEMONIC_FUCOM: case ZYDIS_MNEMONIC_FUCOMP:
+    case ZYDIS_MNEMONIC_FCOMPP: case ZYDIS_MNEMONIC_FUCOMPP:
+    case ZYDIS_MNEMONIC_FTST: {
+      std::string a = sim.Read(0);
+      if (m == ZYDIS_MNEMONIC_FTST) {
+        L(Fmt("rcc = %s::CompareD(%s, 0.0);", R, a.c_str()));
+      } else if (mem >= 0) {
+        int b = Bytes(mem);
+        if (b != 4 && b != 8) return false;
+        // Any zero or normal operand compares exactly (no range needed).
+        L("double v;");
+        check(Fmt("%s::%s(%s, &v)", R, b == 4 ? "OperandF32" : "CompareOperandF64",
+                  rd_mem(b).c_str()));
+        L(Fmt("rcc = %s::CompareD(%s, v);", R, a.c_str()));
+      } else {
+        int i = (m == ZYDIS_MNEMONIC_FCOMPP || m == ZYDIS_MNEMONIC_FUCOMPP)
+                    ? 1 : (Nvis() ? St(Nvis() - 1) : 1);
+        std::string b = sim.Read(i);
+        L(Fmt("rcc = %s::CompareD(%s, %s);", R, a.c_str(), b.c_str()));
+      }
+      sim.cc_written = true;
+      c1("false");
+      if (m == ZYDIS_MNEMONIC_FCOMP || m == ZYDIS_MNEMONIC_FUCOMP) sim.Pop();
+      if (m == ZYDIS_MNEMONIC_FCOMPP || m == ZYDIS_MNEMONIC_FUCOMPP) {
+        sim.Pop();
+        sim.Pop();
+      }
+      return sim.ok;
+    }
+    case ZYDIS_MNEMONIC_FNSTSW:
+    case ZYDIS_MNEMONIC_FNOP:
+    case ZYDIS_MNEMONIC_FWAIT:
+      return EmitX87Fast(sim);  // no register values involved
     default:
       return false;
   }
@@ -1770,11 +1997,39 @@ void Emitter::EmitX87Run(const Function& f, std::map<uint32_t, Insn>::const_iter
                          std::set<uint32_t>* refs, EmitStats* stats) const {
   std::string& o = *out;
   auto end = std::next(last);
+  const uint32_t id = first->first;
+  EmitStats fast_stats;  // the slow branch below counts the instructions
+
+  // The run on host doubles, for runs with arithmetic: an instruction that
+  // cannot be done exactly in doubles saves rk, the index of the
+  // instruction in `resume`, and jumps to XS, which converts the doubles
+  // to the x<k> locals and continues at that instruction (label XR) on the
+  // exact path. The instructions before it are done by then.
+  X87Sim dsim('d');
+  std::string dbody;
+  std::vector<uint32_t> resume;
+  bool doubles = false;
+  for (auto j = first; j != end; ++j)
+    if (IsX87(j->second.d) && (X87OpName(j->second.d.mnemonic) ||
+                               j->second.d.mnemonic == ZYDIS_MNEMONIC_FSQRT))
+      doubles = true;
+  for (auto j = first; doubles && j != end; ++j) {
+    const Insn& in = j->second;
+    dbody += Fmt("  { // %08X %s\n", in.va, dec_.Format(in).c_str());
+    std::string fail = Fmt("{ rk = %zu; goto XS_%08X; }", resume.size(), id);
+    bool can_fail;
+    if (!InsnEmitter(p_, f, in, &dbody, refs, &fast_stats).EmitInRunDouble(dsim, fail, &can_fail))
+      doubles = false;
+    if (can_fail) resume.push_back(in.va);
+    dbody += "  }\n";
+  }
+
   X87Sim sim;
   std::string body;
-  EmitStats fast_stats;  // the slow branch below counts the instructions
   for (auto j = first; j != end; ++j) {
     const Insn& in = j->second;
+    if (doubles && std::find(resume.begin(), resume.end(), in.va) != resume.end())
+      body += Fmt("  XR_%08X:;\n", in.va);
     body += Fmt("  { // %08X %s\n", in.va, dec_.Format(in).c_str());
     InsnEmitter(p_, f, in, &body, refs, &fast_stats).EmitInRun(sim);
     body += "  }\n";
@@ -1786,12 +2041,49 @@ void Emitter::EmitX87Run(const Function& f, std::map<uint32_t, Insn>::const_iter
   o += "  uint32_t rfl = 0, rcc = 0; bool rc1 = false;\n";
   for (int k = sim.lo; k <= sim.hi; ++k) {
     if (sim.loaded.count(k))
-      o += Fmt("  ::recomp::x87::run::V %s = ::recomp::x87::run::ToV(c.fpu.r[(rtop + %du) & 7u]);\n", X87Sim::Var(k).c_str(),
+      o += Fmt("  ::recomp::x87::run::V %s = ::recomp::x87::run::ToV(c.fpu.r[(rtop + %du) & 7u]);\n", sim.Var(k).c_str(),
                unsigned(k & 7));
     else if (sim.written.count(k))
-      o += Fmt("  ::recomp::x87::run::V %s{};\n", X87Sim::Var(k).c_str());
+      o += Fmt("  ::recomp::x87::run::V %s{};\n", sim.Var(k).c_str());
+  }
+  if (doubles) {
+    std::string decl, to;
+    for (int k = sim.lo; k <= sim.hi; ++k) {
+      if (sim.loaded.count(k)) {
+        decl += (decl.empty() ? "" : ", ") + dsim.Var(k);
+        to += Fmt("%s::recomp::x87::run::ToD(%s, &%s)", to.empty() ? "" : " && ",
+                  sim.Var(k).c_str(), dsim.Var(k).c_str());
+      } else if (sim.written.count(k)) {
+        decl += (decl.empty() ? "" : ", ") + dsim.Var(k) + " = 0";
+      }
+    }
+    // The doubles the run writes, as registers (a register it only reads
+    // never changes).
+    std::string back;
+    for (int k = sim.lo; k <= sim.hi; ++k)
+      if (sim.written.count(k))
+        back += Fmt("  %s = ::recomp::x87::run::FromD(%s);\n", sim.Var(k).c_str(),
+                    dsim.Var(k).c_str());
+    o += "  if (::recomp::x87::run::DoubleMode(rcw)) {\n";
+    o += "  double " + decl + ";\n";
+    o += to.empty() ? "  {\n" : "  if (" + to + ") {\n";
+    if (!resume.empty()) o += "  int rk;\n";
+    o += dbody;
+    o += back;
+    o += Fmt("  goto XE_%08X;\n", id);
+    if (!resume.empty()) {
+      o += Fmt("  XS_%08X:\n", id);
+      o += back;
+      o += "  switch (rk) {\n";
+      for (size_t i = 0; i < resume.size(); ++i)
+        o += i + 1 < resume.size() ? Fmt("    case %zu: goto XR_%08X;\n", i, resume[i])
+                                   : Fmt("    default: goto XR_%08X;\n", resume[i]);
+      o += "  }\n";
+    }
+    o += "  }\n  }\n";
   }
   o += body;
+  if (doubles) o += Fmt("  XE_%08X:\n", id);
   // Write back: registers assigned in the run, the empty bits of the
   // slots it touched, TOP, and the status word (sticky flags, C1,
   // C3/C2/C0).
@@ -1799,7 +2091,7 @@ void Emitter::EmitX87Run(const Function& f, std::map<uint32_t, Insn>::const_iter
   for (int k : sim.touched) {
     if (sim.written.count(k))
       o += Fmt("  c.fpu.r[(rtop + %du) & 7u] = ::recomp::x87::run::ToF80(%s);\n",
-               unsigned(k & 7), X87Sim::Var(k).c_str());
+               unsigned(k & 7), sim.Var(k).c_str());
     (sim.slots[k] == X87Sim::Slot::Empty ? set : clear) |= 1u << (k & 7);
   }
   if (set | clear)

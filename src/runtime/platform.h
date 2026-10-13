@@ -6,6 +6,7 @@
 
 #include <sys/stat.h>
 
+#include <cfenv>
 #include <cstddef>
 #include <cstdint>
 #include <ctime>
@@ -34,6 +35,31 @@ inline constexpr const char* kUserDataDir = "/Library/Application Support/";
 #else
 inline constexpr const char* kUserDataDir = "/.local/share/";
 #endif
+
+// ---- floating point
+// Why this thread's floating-point environment is not the default one the
+// x87 model's host-double paths rely on (round to nearest, no flush-to-
+// zero or denormals-are-zero, no traps), or nullptr. Checks the control
+// register (MXCSR on x86-64, FPCR on arm64) and the behaviour itself.
+inline const char* HostFpProblem() {
+  if (std::fegetround() != FE_TONEAREST) return "rounding mode is not to nearest";
+  std::fenv_t env;
+  if (std::fegetenv(&env)) return "fegetenv failed";
+#if defined(__x86_64__)
+  // FTZ (15), RC (13-14), the exception masks (7-12, all set), DAZ (6).
+  if ((env.__mxcsr & 0xFFC0u) != 0x1F80u) return "MXCSR is not the default";
+#elif defined(__aarch64__)
+  // FZ (24), RMode (22-23), the trap enables IDE (15) and IXE..IOE
+  // (8-12), and FEAT_AFP's NEP, AH and FIZ (0-2).
+  if (env.__fpcr & 0x01C09F07u) return "FPCR is not the default";
+#endif
+  volatile double one = 1.0, tiny = 0x1p-1022, denormal = 0x1p-1060;
+  if (one + 0x1p-53 != 1.0 || one + 0x1.8p-53 == 1.0 || -one - 0x1.8p-53 == -1.0)
+    return "rounding is not to nearest even";
+  if (tiny / 4 == 0) return "denormal results are flushed to zero";
+  if (denormal * 0x1p100 == 0) return "denormal operands are treated as zero";
+  return nullptr;
+}
 
 // ---- stacks
 // Runs fn() on [stack, stack + size) on the calling thread and returns

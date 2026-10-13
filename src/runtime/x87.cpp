@@ -2490,6 +2490,7 @@ void Restore(State& s, const uint8_t in[108]) {
 namespace run {
 
 bool g_enabled = true;
+bool g_doubles = true;
 
 namespace {
 RV Pack(const Result& r) {

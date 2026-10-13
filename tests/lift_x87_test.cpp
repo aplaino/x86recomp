@@ -112,8 +112,16 @@ void RandomState(std::mt19937_64& g, uint8_t img[108]) {
   if (depth > 8) depth = 8 - int(g() % 3);  // bias towards some free slots
   uint16_t sw = uint16_t(top << 11) | uint16_t(g() & 0x4700);  // C3,C2,C1,C0
   uint16_t tw = 0xFFFF;
+  // Under 0x027F, often registers a double holds exactly, so runs take
+  // their host-double form (x87.h) and not only its exits.
+  bool doubles = cw == 0x027F && (g() & 1);
   for (int i = 0; i < 8; i++) {  // i = ST(i)
     F80 v = RandomValue(g);
+    if (doubles && (v.sig >> 63) && (v.se & 0x7FFF) != 0x7FFF && g() % 8) {
+      v.sig &= ~0x7FFull;
+      int e = int(v.se & 0x7FFF) - 0x3FFF;
+      if (e < -300 || e > 300) v.se = uint16_t((v.se & 0x8000) | (0x3FFF + int(g() % 81) - 40));
+    }
     std::memcpy(img + 28 + i * 10, &v.sig, 8);
     std::memcpy(img + 28 + i * 10 + 8, &v.se, 2);
     int phys = (top + i) & 7;

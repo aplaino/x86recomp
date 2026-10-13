@@ -31,14 +31,23 @@ a game is where it came up.
 - 64-bit host only; no i386/multilib dependencies.
 - macOS arm64 + Metal is a requirement: in lifted code and the runtime,
   no x86 intrinsics, no inline asm, no `long double`, no host FPU/x87
-  state, no assumption of 4 KiB host pages, no Linux-only
-  syscalls/flags outside the platform layer (guard with #ifdef). New
-  graphics front ends (OpenGL, ...) go through gfx::Device, never
-  straight to a host graphics API.
+  state (beyond checking that it is the default one), no assumption of
+  4 KiB host pages, no Linux-only syscalls/flags outside the platform
+  layer (guard with #ifdef). New graphics front ends (OpenGL, ...) go
+  through gfx::Device, never straight to a host graphics API.
 - The x87 FPU is modelled exactly (80-bit registers, CW precision and
-  rounding, SW condition codes, per-thread state). Never map x87 to
-  host double.
-- SSE/SSE2 likewise: lanes through runtime/sse.cpp (SoftFloat + x86 NaN
+  rounding, SW condition codes, per-thread state); the 80-bit model is
+  the definition of correct. Host double only inside proven-exact fast
+  paths, each with:
+  - its proof next to the code or in ARCHITECTURE.md;
+  - a fallback to the exact model for everything outside the proof's
+    conditions;
+  - fuzz tests against the SoftFloat model (tests/x87_fast_test) that
+    mutations of the path make fail.
+  Only in the host's default floating-point environment (never change
+  the rounding mode), and code that runs such a path is built with
+  RECOMP_X87_FP_FLAGS (-ffp-contract=off, no fast-math).
+- SSE/SSE2: lanes through runtime/sse.cpp (SoftFloat + x86 NaN
   rules + exact MXCSR flags), never host float/double arithmetic.
   Changes must keep tests/lift_sse_test passing.
 - CPUID is a fixed SSE2-class CPU, never the host's. Claim a feature only

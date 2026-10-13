@@ -189,6 +189,14 @@ Thread* CreateGuestThread(uint32_t stack_size) {
   return raw_t;
 }
 
+// The x87 model's host-double paths need the default floating-point
+// environment on every thread that runs guest code. Nothing here changes
+// it; this catches a host library that does.
+static void CheckHostFp() {
+  if (const char* why = platform::HostFpProblem())
+    FatalF("host floating-point environment: %s", why);
+}
+
 // Runs guest function `entry` (with no argument, as the process entry
 // point, or with `param`) on the calling host thread as guest thread t.
 // Returns its exit code.
@@ -200,6 +208,7 @@ static uint32_t RunGuestThread(Thread* t, uint32_t entry,
   // (kernel32_state.h). The exit side fences in OnGuestThreadFinished.
   GuestSyncFence();
   t_current = t;
+  CheckHostFp();
   InstallSignalStack();
   RegisterGuestHostThread("guest", t->tid);
   uint32_t r;
@@ -250,6 +259,7 @@ struct ServiceStart {
 static void* ServiceThreadMain(void* arg) {
   std::unique_ptr<ServiceStart> s(static_cast<ServiceStart*>(arg));
   t_current = s->t;
+  CheckHostFp();
   InstallSignalStack();
   RegisterGuestHostThread("service", s->t->tid);
   hle::t_hle_depth = 1;
@@ -313,6 +323,8 @@ int RunProcess(const GameConfig& game, const std::string& exe_path,
   p.game_dir = game_dir;
   const char* runs = Env("X87_RUNS");
   x87::run::g_enabled = !(runs && runs[0] == '0');
+  const char* doubles = Env("X87_DOUBLE");
+  x87::run::g_doubles = !(doubles && doubles[0] == '0');
   p.game_args = game_args;
   StartWatchdog();
   if (!p.mem.Reserve()) FatalF("cannot reserve the guest arena");
