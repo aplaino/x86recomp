@@ -6,6 +6,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 #include "runtime/hle/user32_window.h"
@@ -63,6 +64,47 @@ void PresentFrame(gfx::Device& dev, int w, int h) {
             (now - start) / 1e9);
     last = now;
   }
+}
+
+gfx::Backend GfxBackend() {
+  static const gfx::Backend b = [] {
+    const char* e = Env("GFX");
+    if (e && !std::strcmp(e, "gpu")) return gfx::Backend::Gpu;
+    if (e && !std::strcmp(e, "d3d9")) {
+#ifdef RECOMP_HAVE_D3D9
+      return gfx::Backend::D3D9;
+#else
+      FatalF("graphics backend d3d9 is not in this build (no dxvk-native)");
+#endif
+    }
+    if (e && *e) FatalF("unknown graphics backend '%s' (d3d9 or gpu)", e);
+#ifdef RECOMP_HAVE_D3D9
+    return gfx::Backend::D3D9;
+#else
+    return gfx::Backend::Gpu;
+#endif
+  }();
+  return b;
+}
+
+uint64_t GfxWindowFlags() {
+  switch (GfxBackend()) {
+    case gfx::Backend::D3D9:
+      return SDL_WINDOW_VULKAN;  // dxvk's SDL3 WSI makes a Vulkan surface
+    case gfx::Backend::Gpu:
+#if defined(__APPLE__)
+      return SDL_WINDOW_METAL;
+#else
+      return SDL_WINDOW_VULKAN;
+#endif
+  }
+  return 0;
+}
+
+std::unique_ptr<gfx::Device> CreateGfxDevice(SDL_Window* w) {
+  std::unique_ptr<gfx::Device> d = gfx::CreateDevice(GfxBackend(), w);
+  if (!d) FatalF("cannot create the graphics device");
+  return d;
 }
 
 }  // namespace recomp::hle

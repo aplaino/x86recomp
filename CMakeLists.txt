@@ -117,37 +117,46 @@ if(FFMPEG_FOUND)
   target_link_libraries(recomp_bink PUBLIC recomp_mss32)
 endif()
 
-# gfx::Device and its d3d9 (dxvk-native) backend; no HLE in it, so a
-# plain static library shared by the graphics API modules below.
+# gfx::Device and its backends; no HLE in it, so a plain static library
+# shared by the graphics API modules below. Backends:
+# - SDL_GPU (gfx/gpu_device.cpp): always; Metal on macOS (MSL shaders);
+# - d3d9 through dxvk-native (gfx/d3d9_device.cpp): when DXVK_NATIVE_DIR
+#   is set (Linux), with RECOMP_HAVE_D3D9 defined for the runtime too.
+add_library(recomp_gfx STATIC
+  src/runtime/gfx/format.cpp
+  src/runtime/gfx/device.cpp
+  src/runtime/gfx/gpu_device.cpp)
+target_include_directories(recomp_gfx PUBLIC src)
+target_compile_features(recomp_gfx PUBLIC cxx_std_20)
+target_link_libraries(recomp_gfx PUBLIC SDL3::SDL3)
+# Per-pixel host paths: optimised in every build type.
+set_source_files_properties(src/runtime/gfx/format.cpp
+  TARGET_DIRECTORY recomp_gfx PROPERTIES COMPILE_OPTIONS "-O2")
 if(DXVK_NATIVE_DIR)
-  add_library(recomp_gfx STATIC
-    src/runtime/gfx/format.cpp
-    src/runtime/gfx/d3d9_device.cpp)
-  target_include_directories(recomp_gfx PUBLIC src)
-  target_compile_features(recomp_gfx PUBLIC cxx_std_20)
-  target_link_libraries(recomp_gfx PUBLIC SDL3::SDL3
-                        "${DXVK_NATIVE_DIR}/lib64/libdxvk_d3d9.so")
-  # Per-pixel host paths: optimised in every build type.
-  set_source_files_properties(src/runtime/gfx/format.cpp
-    TARGET_DIRECTORY recomp_gfx PROPERTIES COMPILE_OPTIONS "-O2")
+  find_library(RECOMP_DXVK_D3D9 dxvk_d3d9
+    PATHS "${DXVK_NATIVE_DIR}/lib64" "${DXVK_NATIVE_DIR}/lib" NO_DEFAULT_PATH REQUIRED)
+  target_sources(recomp_gfx PRIVATE src/runtime/gfx/d3d9_device.cpp)
+  target_link_libraries(recomp_gfx PUBLIC "${RECOMP_DXVK_D3D9}")
+  target_compile_definitions(recomp_gfx PUBLIC RECOMP_HAVE_D3D9)
+  target_compile_definitions(recomp_runtime PUBLIC RECOMP_HAVE_D3D9)
   # Only the d3d9 backend sees dxvk's Windows/D3D9 headers.
   set_source_files_properties(src/runtime/gfx/d3d9_device.cpp
     TARGET_DIRECTORY recomp_gfx PROPERTIES
     INCLUDE_DIRECTORIES "${DXVK_NATIVE_DIR}/include/dxvk"
     COMPILE_DEFINITIONS "DXVK_WSI_SDL3")
-
-  # DirectDraw 7 / Direct3D 7 over gfx::Device.
-  add_library(recomp_d3d7 OBJECT
-    src/runtime/hle/ddraw.cpp
-    src/runtime/hle/d3d7.cpp)
-  target_link_libraries(recomp_d3d7 PUBLIC recomp_runtime recomp_gfx)
-
-  # OpenGL 1.x (opengl32, wgl, gdi32 pixel formats) over gfx::Device.
-  add_library(recomp_opengl OBJECT
-    src/runtime/gl/context.cpp
-    src/runtime/hle/opengl32.cpp)
-  target_link_libraries(recomp_opengl PUBLIC recomp_runtime recomp_gfx)
 endif()
+
+# DirectDraw 7 / Direct3D 7 over gfx::Device.
+add_library(recomp_d3d7 OBJECT
+  src/runtime/hle/ddraw.cpp
+  src/runtime/hle/d3d7.cpp)
+target_link_libraries(recomp_d3d7 PUBLIC recomp_runtime recomp_gfx)
+
+# OpenGL 1.x (opengl32, wgl, gdi32 pixel formats) over gfx::Device.
+add_library(recomp_opengl OBJECT
+  src/runtime/gl/context.cpp
+  src/runtime/hle/opengl32.cpp)
+target_link_libraries(recomp_opengl PUBLIC recomp_runtime recomp_gfx)
 
 # dbghelp (UnDecorateSymbolName) on LLVM's Microsoft demangler.
 add_library(recomp_dbghelp OBJECT src/runtime/hle/dbghelp.cpp)

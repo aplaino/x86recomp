@@ -232,7 +232,7 @@ HLE("opengl32.dll", wglMakeCurrent, 2) {
   if (!ctx->gl) {
     SDL_Window* w = SdlWindowFor(ctx->hwnd);
     if (!w) return 0;
-    ctx->dev = gfx::CreateD3D9Device(w);
+    ctx->dev = CreateGfxDevice(w);
     int pw = PixelsW(w), ph = PixelsH(w);
     ctx->dev->ResetSwapChain(pw, ph, false);
     ctx->gl = std::make_unique<gl::Context>(ctx->dev.get(), pw, ph);

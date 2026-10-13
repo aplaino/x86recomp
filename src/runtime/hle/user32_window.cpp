@@ -27,6 +27,7 @@
 #include "runtime/hle/hle.h"
 #include "runtime/hle/input_state.h"
 #include "runtime/hle/kernel32_state.h"
+#include "runtime/hle/present.h"
 #include "runtime/hle/user32_window.h"
 #include "runtime/hle/win32.h"
 #include "runtime/log.h"
@@ -956,7 +957,7 @@ HLE("user32.dll", CreateWindowExA, 12) {
     int cw, ch;
     ClientSize(win, &cw, &ch);
     win.sdl = SDL_CreateWindow(win.title.c_str(), std::max(cw, 1), std::max(ch, 1),
-                               SDL_WINDOW_HIDDEN | SDL_WINDOW_VULKAN);
+                               SDL_WINDOW_HIDDEN | GfxWindowFlags());
     if (!win.sdl) FatalF("SDL_CreateWindow: %s", SDL_GetError());
   }
   uint32_t hwnd = win.hwnd;

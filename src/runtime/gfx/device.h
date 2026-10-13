@@ -1,10 +1,11 @@
 #pragma once
 // Backend-neutral rendering device with Direct3D 7 fixed-function
-// semantics. The ddraw/d3d7 HLE talks only to this; backends translate:
+// semantics. The ddraw/d3d7 and OpenGL HLE talk only to this; backends
+// translate:
 //   - d3d9 via dxvk-native (gfx/d3d9_device.cpp): Linux bring-up and the
 //     reference image;
-//   - SDL_GPU with a fixed-function shader generator (later): Vulkan on
-//     Linux, Metal on macOS.
+//   - SDL_GPU with fixed-function uber-shaders (gfx/gpu_device.cpp):
+//     Metal on macOS; Vulkan on Linux once its shaders exist.
 // Numeric enums (render states, texture stage states, transform types,
 // primitive types, FVF codes) are D3D7's; render states D3D7 lacks use
 // D3D9's numbers (COLORWRITEENABLE 168, SCISSORTESTENABLE 174,
@@ -155,6 +156,14 @@ class Device {
 uint32_t FvfStride(uint32_t fvf);
 uint32_t PrimitiveCountFromVertices(uint32_t prim_type, uint32_t verts);
 
+enum class Backend {
+  D3D9,  // dxvk-native; only in builds with RECOMP_HAVE_D3D9
+  Gpu,   // SDL_GPU
+};
+// Null if `b` is not in this build or cannot start on this host.
+std::unique_ptr<Device> CreateDevice(Backend b, SDL_Window* window);
+
 std::unique_ptr<Device> CreateD3D9Device(SDL_Window* window);
+std::unique_ptr<Device> CreateGpuDevice(SDL_Window* window);
 
 }  // namespace recomp::gfx
