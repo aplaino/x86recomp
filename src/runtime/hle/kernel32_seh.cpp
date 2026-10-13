@@ -157,6 +157,38 @@ HLE("kernel32.dll", UnhandledExceptionFilter, 1) {
          Rd32(rec + 0x0C));
 }
 
+// Host pages larger than the guest's 4 KiB (16 KiB on Apple Silicon) are
+// accessible as a whole once any guest page in them is committed, so a
+// game that demand-pages reserved memory from an exception filter (commit
+// and fill one page per access violation) would never see the faults for
+// the other guest pages sharing that host page: they read as zeros. After
+// a handler has continued from a fault, the uncommitted pages of the same
+// reservation in that host page are therefore faulted in as well (read
+// faults at their first byte), as if the game had touched them next.
+void CompleteHostPage(Ctx& c, uint32_t addr) {
+  GuestMemory& mem = g_proc->mem;
+  const uint32_t host = uint32_t(mem.host_page_size());
+  if (host <= GuestMemory::kPageSize) return;
+  GuestAllocator::Region region;
+  if (!g_proc->vm.Find(addr, &region)) return;
+  const uint32_t first = std::max(addr & ~(host - 1), region.base);
+  const uint64_t end = std::min<uint64_t>(uint64_t(addr & ~(host - 1)) + host,
+                                          uint64_t(region.base) + region.size);
+  for (uint64_t p = first; p < end; p += GuestMemory::kPageSize) {
+    uint32_t va = uint32_t(p);
+    if (mem.IsCommitted(va)) continue;
+    uint32_t params[2] = {0, va};
+    if (!DispatchException(c, 0xC0000005, 0, 2, params, 0) || !mem.IsCommitted(va)) {
+      static bool warned = false;
+      if (!warned) {
+        warned = true;
+        WarnF("guest page %08X shares a host page with demand-paged %08X but was "
+              "not paged in; it reads as zeros\n", va, addr);
+      }
+    }
+  }
+}
+
 }  // namespace
 
 // A host fault in guest memory, delivered as EXCEPTION_ACCESS_VIOLATION.
@@ -178,6 +210,7 @@ bool RaiseAccessViolation(Ctx& c, bool write, uint32_t addr) {
   c.esp -= kGap;
   uint32_t params[2] = {write ? 1u : 0u, addr};
   bool cont = DispatchException(c, 0xC0000005, 0, 2, params, 0);
+  if (cont) CompleteHostPage(c, addr);
   c.esp = saved_esp;
   return cont;
 }

@@ -38,6 +38,7 @@ class GuestMemory {
   Prot QueryProt(gaddr va) const;
 
   uint8_t* base() const { return base_; }
+  size_t host_page_size() const { return host_page_; }
 
   template <typename T = uint8_t>
   T* ptr(gaddr va) const {
