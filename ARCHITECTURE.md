@@ -383,8 +383,8 @@ draws). Backends:
    - D3D9's integer pixel centres become SDL_GPU's half-integer ones
      with a half-pixel shift in the vertex shader. SDL_GPU flips Vulkan's
      viewport, so clip space is y-up on both APIs.
-   <ID>_GFX=d3d9|gpu selects the backend; the default is d3d9 where the
-   build has it, else SDL_GPU.
+   <ID>_GFX=d3d9|gpu selects the backend; the default is SDL_GPU, with
+   d3d9 kept (where the build has it) as the reference image.
 
 API front ends:
 - DirectDraw 7 / Direct3D 7 (recomp_d3d7): guest-visible COM objects;

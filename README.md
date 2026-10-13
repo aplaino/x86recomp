@@ -31,8 +31,8 @@ Used by:
   shfolder, ...) on POSIX and SDL3; optional modules for Miles Sound
   System (with EAX 1-3 on our own reverb, modelled on Creative
   hardware), Bink, DirectDraw 7/Direct3D 7 and OpenGL 1.x (on a
-  fixed-function device: dxvk-native's Direct3D 9, or SDL_GPU on Vulkan
-  or native Metal) and dbghelp.
+  fixed-function device: SDL_GPU on Vulkan or native Metal, or
+  dxvk-native's Direct3D 9 as a reference) and dbghelp.
 - **Tools**: Ghidra export scripts (`tools/ghidra`), a PE symbol dumper
   (`tools/pe_symbols.py`), dev-time reference checks (`tools/layout`,
   `tools/undname`), and EAX reference measurement (`tools/eax_capture`:
@@ -76,8 +76,8 @@ SDL_GPU); ffmpeg for Miles/Bink; glslang (`glslangValidator`) for the
 shaders, and on macOS SPIRV-Cross (`spirv-cross`) too. Graphics (D3D7
 and OpenGL) use SDL_GPU: Vulkan on Linux, native Metal on macOS. On
 Linux a dxvk-native build (Direct3D 9 only, SDL3 window system) is
-optional; where present it is the default backend until SDL_GPU matches
-it image for image.
+optional: it adds the d3d9 backend (`<ID>_GFX=d3d9`), the reference
+image for SDL_GPU.
 
 On macOS with Homebrew
 (`brew install cmake ninja sdl3 ffmpeg llvm@22 glslang spirv-cross`):

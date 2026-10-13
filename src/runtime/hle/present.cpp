@@ -78,11 +78,7 @@ gfx::Backend GfxBackend() {
 #endif
     }
     if (e && *e) FatalF("unknown graphics backend '%s' (d3d9 or gpu)", e);
-#ifdef RECOMP_HAVE_D3D9
-    return gfx::Backend::D3D9;
-#else
     return gfx::Backend::Gpu;
-#endif
   }();
   return b;
 }
