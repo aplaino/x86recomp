@@ -360,6 +360,36 @@ void ModeScale(uint32_t hwnd, float* sx, float* sy) {
   *sy = float(mh) / wh;
 }
 
+// The window whose client area holds the clip rectangle, or 0.
+uint32_t ClipWindow() {
+  std::lock_guard<std::recursive_mutex> l(g_mu);
+  for (auto& [h, w] : g_windows) {
+    if (w.destroyed || !w.sdl) continue;
+    int ox, oy, cw, ch;
+    WindowOrigin(h, &ox, &oy);
+    ClientSize(w, &cw, &ch);
+    if (g_clip.l >= ox && g_clip.t >= oy && g_clip.r <= ox + cw + 1 &&
+        g_clip.b <= oy + ch + 1)
+      return h;
+  }
+  return 0;
+}
+
+// A clip is a screen rectangle and outlives the window it was set for, as
+// on Windows: a game that recreates its window (e.g. to restart its
+// renderer) without clipping again stays confined. Once a window covers
+// the rectangle again, its cursor is virtual and the host pointer grabbed.
+void AttachClip() {
+  SDL_Window* grab = nullptr;
+  {
+    std::lock_guard<std::recursive_mutex> l(g_mu);
+    if (!g_clip.on || g_clip.hwnd) return;
+    g_clip.hwnd = ClipWindow();
+    if (Window* w = Win(g_clip.hwnd)) grab = w->sdl;
+  }
+  if (grab && !Background()) SDL_SetWindowRelativeMouseMode(grab, true);
+}
+
 void ActivateApp(uint32_t hwnd, bool active) {
   {
     std::lock_guard<std::recursive_mutex> l(g_mu);
@@ -389,6 +419,7 @@ void HandleSdlEvent(const SDL_Event& e) {
       if (uint32_t h = HwndForSdl(e.window.windowID)) Post(h, WM_CLOSE, 0, 0);
       break;
     case SDL_EVENT_WINDOW_FOCUS_GAINED:
+      AttachClip();
       if (uint32_t h = HwndForSdl(e.window.windowID)) ActivateApp(h, true);
       break;
     case SDL_EVENT_WINDOW_FOCUS_LOST:
@@ -452,6 +483,7 @@ void HandleSdlEvent(const SDL_Event& e) {
         g_real_y = int(e.motion.y * ky);
         g_pointer_inside = true;
       }
+      AttachClip();
       bool clipped = g_clip.on && g_clip.hwnd == h;
       if (clipped || ExclusiveSize(h, &mw, &mh)) {
         // Virtual cursor: the game recentres it with SetCursorPos every
@@ -980,6 +1012,11 @@ HLE("user32.dll", DestroyWindow, 1) {
   Send(hwnd, WM_NCDESTROY, 0, 0);
   std::lock_guard<std::recursive_mutex> l(g_mu);
   if (Window* w = Win(hwnd)) {
+    if (g_clip.hwnd == hwnd) {
+      // The clip stays; AttachClip gives it to the next window over it.
+      g_clip.hwnd = 0;
+      if (w->sdl) SDL_SetWindowRelativeMouseMode(w->sdl, false);
+    }
     if (w->sdl) SDL_DestroyWindow(w->sdl);
     w->sdl = nullptr;
     w->destroyed = true;
@@ -1855,15 +1892,8 @@ HLE("user32.dll", ClipCursor, 1) {
       g_clip.t = int32_t(Rd32(rc + 4));
       g_clip.r = int32_t(Rd32(rc + 8));
       g_clip.b = int32_t(Rd32(rc + 12));
-      for (auto& [h, w] : g_windows) {
-        if (w.destroyed || !w.sdl) continue;
-        int ox, oy, cw, ch;
-        WindowOrigin(h, &ox, &oy);
-        ClientSize(w, &cw, &ch);
-        if (g_clip.l >= ox && g_clip.t >= oy && g_clip.r <= ox + cw + 1 &&
-            g_clip.b <= oy + ch + 1)
-          g_clip.hwnd = h, grab = w.sdl;
-      }
+      g_clip.hwnd = ClipWindow();
+      if (Window* w = Win(g_clip.hwnd)) grab = w->sdl;
       g_mouse_x = std::clamp(g_mouse_x, g_clip.l, std::max(g_clip.l, g_clip.r - 1));
       g_mouse_y = std::clamp(g_mouse_y, g_clip.t, std::max(g_clip.t, g_clip.b - 1));
     }
