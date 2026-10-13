@@ -414,12 +414,14 @@ class GpuDevice final : public Device {
     }
     bb_w_ = w;
     bb_h_ = h;
+    // Without vsync, mailbox where there is one (no tearing, never
+    // blocks), as the d3d9 backend has DXVK do.
     SDL_GPUPresentMode mode = SDL_GPU_PRESENTMODE_VSYNC;
     if (!vsync) {
-      if (SDL_WindowSupportsGPUPresentMode(dev_, window_, SDL_GPU_PRESENTMODE_IMMEDIATE))
-        mode = SDL_GPU_PRESENTMODE_IMMEDIATE;
-      else if (SDL_WindowSupportsGPUPresentMode(dev_, window_, SDL_GPU_PRESENTMODE_MAILBOX))
+      if (SDL_WindowSupportsGPUPresentMode(dev_, window_, SDL_GPU_PRESENTMODE_MAILBOX))
         mode = SDL_GPU_PRESENTMODE_MAILBOX;
+      else if (SDL_WindowSupportsGPUPresentMode(dev_, window_, SDL_GPU_PRESENTMODE_IMMEDIATE))
+        mode = SDL_GPU_PRESENTMODE_IMMEDIATE;
     }
     SDL_SetGPUSwapchainParameters(dev_, window_, SDL_GPU_SWAPCHAINCOMPOSITION_SDR, mode);
     // Both start black, as a fresh D3D swap chain does.
