@@ -35,8 +35,58 @@ const float kSizes[kEnvironments] = {
     8.3f, 1.7f, 1.8f, 1.9f, 1.8f, 1.0f,
 };
 
-constexpr uint32_t kDecayHfLimit = 0x20;
+// EAX 1.0's effect volume and damping per environment, as the Audigy 2 ZS
+// reports them after "EAX environment selection" (read back through
+// Miles 6.5e's EAX 1 provider; tools/eax_capture). Several differ from
+// the EAX 1.0 SDK's preset table, so the hardware's values are the source.
+struct Eax1Preset {
+  float volume, damping;
+};
+const Eax1Preset kEax1Presets[kEnvironments] = {
+    {0.5000f, 0.5022f}, {0.2500f, 0.4026f}, {0.4173f, 0.6638f}, {0.6531f, 0.1625f},
+    {0.2082f, 0.0967f}, {0.5000f, 0.8880f}, {0.4032f, 0.5038f}, {0.5000f, 0.5032f},
+    {0.5000f, 1.3000f}, {0.3614f, 0.3281f}, {0.5000f, 0.2974f}, {0.1531f, 0.5474f},
+    {0.3614f, 0.5038f}, {0.4441f, 0.6352f}, {0.2500f, 0.5000f}, {0.1110f, 0.5026f},
+    {0.1110f, 0.4965f}, {0.1941f, 0.4957f}, {1.0000f, 0.5022f}, {0.0970f, 0.1712f},
+    {0.2082f, 1.5000f}, {0.6524f, 0.2473f}, {1.0000f, 0.8074f}, {0.8760f, 1.3900f},
+    {0.1392f, 0.6625f}, {0.4864f, 0.8069f},
+};
+
+// How the hardware renders EAX 1.0 (measured against the same presets
+// through the EAX 2 provider, which renders them identically otherwise):
+//  - every environment's reverb is 3 dB louder (+300 mB on the room);
+//  - "EAX effect volume" v sets the room to 2000 log10(v / 0.5) mB from
+//    the preset's -1000 (+-6 dB per doubling around generic's 0.5); a
+//    selected environment renders as volume 0.5 whatever it reports;
+//  - "EAX damping" d sets the decay HF ratio to 0.4 + 0.8 d (fitted to
+//    damping 0.2 and 2.0: their HF decay matches EAX 2.0 ratios of about
+//    0.56 and 2.0);
+//  - "EAX decay time" keeps the reverb's initial level: its energy grows
+//    with the decay time (EAX 2.0+ keeps the energy instead).
+constexpr int32_t kEax1RoomBoost = 300;
+constexpr int32_t kEax1RoomAtHalfVolume = -1000;
+
+// EAX 2.0+ report a source's room level as EAX 1.0's reverb mix (and take
+// a mix that way): mix = 10^(room / 3333), 0 at -10000 mB (read back:
+// room 0 -> 1, -1000 -> 0.501, -10000 -> 0). EAX 1.0's own mix is taken
+// to render through the same relation.
+constexpr float kMixMbPerDecade = 10000.0f / 3.0f;
+
+constexpr uint32_t kDecayTimeScale = 0x1, kReflectionsScale = 0x2,
+                   kReflectionsDelayScale = 0x4, kReverbScale = 0x8,
+                   kReverbDelayScale = 0x10, kDecayHfLimit = 0x20, kEchoTimeScale = 0x40,
+                   kModulationTimeScale = 0x80;
 constexpr uint32_t kDirectHfAuto = 1, kRoomAuto = 2, kRoomHfAuto = 4;
+
+// Air absorption's HF cut grows faster than the distance beyond the
+// minimum distance: measured, it is 0.025 (|air absorption| x (distance -
+// min distance))^1.5 mB (-5 mB/m: 5, 15 and 50 mB at 8, 16 and 32 m;
+// -100 mB/m: none at 1 m, 150 and 1300 mB at 4 and 16 m; 1 m minimum).
+constexpr float kAirScale = 0.025f, kAirPower = 1.5f;
+// Beyond the minimum distance the reverb send also falls by 12 mB per
+// metre, at all frequencies and whatever the air absorption and room
+// rolloff (measured from 4 to 32 m).
+constexpr float kRoomDistanceMbPerMetre = -12.0f;
 
 int32_t I32(const uint8_t* p, int o) {
   int32_t v;
@@ -63,6 +113,44 @@ void FlipZ(const float in[3], float out[3]) {
   out[2] = -in[2];
 }
 
+int32_t ClampMb(float mb, int32_t lo, int32_t hi) {
+  return std::clamp<int32_t>(int32_t(mb), lo, hi);
+}
+
+// Occlusion's cut below the HF reference for a path taking `ratio` of it:
+// the HF cut times the LF ratio, but never less than what the ratio adds
+// on top of the direct path's own LF cut (measured on the room path with
+// ratios 0.5 and 1.5).
+float OcclusionLf(float occlusion, float ratio, float lf_ratio) {
+  return occlusion * std::max(ratio * lf_ratio, ratio + lf_ratio - 1.0f);
+}
+
+// "EAX2 environment size" with the *SCALE flags: the size-dependent
+// properties follow the size (levels truncated to whole mB, as the
+// hardware reports them).
+void ScaleSize(Listener* l, float size) {
+  if (!(size > 0.0f) || !(l->environment_size > 0.0f) || size == l->environment_size) {
+    l->environment_size = size;
+    return;
+  }
+  float scale = size / l->environment_size;
+  l->environment_size = size;
+  uint32_t f = l->flags;
+  if (f & kDecayTimeScale) l->decay_time = std::clamp(l->decay_time * scale, 0.1f, 20.0f);
+  if ((f & kReflectionsScale) && (f & kReflectionsDelayScale))
+    l->reflections = ClampMb(float(l->reflections) - 2000.0f * std::log10(scale), -10000, 1000);
+  if (f & kReflectionsDelayScale)
+    l->reflections_delay = std::clamp(l->reflections_delay * scale, 0.0f, 0.3f);
+  if (f & kReverbScale) {
+    float per_decade = (f & kDecayTimeScale) ? 2000.0f : 3000.0f;
+    l->reverb = ClampMb(float(l->reverb) - per_decade * std::log10(scale), -10000, 2000);
+  }
+  if (f & kReverbDelayScale) l->reverb_delay = std::clamp(l->reverb_delay * scale, 0.0f, 0.1f);
+  if (f & kEchoTimeScale) l->echo_time = std::clamp(l->echo_time * scale, 0.075f, 0.25f);
+  if (f & kModulationTimeScale)
+    l->modulation_time = std::clamp(l->modulation_time * scale, 0.04f, 4.0f);
+}
+
 // Single-property attributes: the EAX versions having each (bit 0 EAX
 // 1.0, bit 1 2.0, bit 2 3.0) and the field's type.
 constexpr uint8_t kE1 = 1, kE2 = 2, kE3 = 4, kE23 = kE2 | kE3;
@@ -76,8 +164,7 @@ struct Field {
 
 #define LF(name, v, t, m) {name, v, t, offsetof(Listener, m)}
 constexpr Field kListenerFields[] = {
-    LF("EAX decay time", kE1 | kE23, 'f', decay_time),
-    LF("EAX damping", kE1, 'f', decay_hf_ratio),
+    LF("EAX decay time", kE23, 'f', decay_time),
     LF("EAX2 room", kE23, 'i', room),
     LF("EAX2 room HF", kE23, 'i', room_hf),
     LF("EAX2 room rolloff", kE23, 'f', room_rolloff_factor),
@@ -105,7 +192,7 @@ constexpr Field kListenerFields[] = {
 
 #define SF(name, v, t, m) {name, v, t, offsetof(Source, m)}
 constexpr Field kSourceFields[] = {
-    SF("EAX sample reverb mix", kE1 | kE23, 'f', reverb_mix),
+    SF("EAX sample reverb mix", kE1, 'f', reverb_mix),
     SF("EAX2 sample direct", kE23, 'i', direct),
     SF("EAX2 sample direct HF", kE23, 'i', direct_hf),
     SF("EAX2 sample room", kE23, 'i', room),
@@ -181,24 +268,64 @@ Listener Preset(uint32_t environment) {
   l.lf_reference = e.flLFReference;
   l.room_rolloff_factor = e.flRoomRolloffFactor;
   l.flags = (0x3F & ~kDecayHfLimit) | (e.iDecayHFLimit ? kDecayHfLimit : 0);
+  l.volume = kEax1Presets[environment].volume;
+  l.damping = kEax1Presets[environment].damping;
   return l;
 }
 
-ReverbParams ToReverb(const Listener& l) {
+namespace {
+
+// OpenAL Soft (1.2x) scales its late reverb's input so the energy stays
+// the same for a decay time weighted by bandwidth up to 20 kHz: LF ref /
+// 20k x the LF decay + (HF ref - LF ref) / 20k x the mid decay + (1 - HF
+// ref / 20k) x the HF decay (after its decay HF limit). A lower HF ratio
+// thus makes its reverb louder. The hardware's level follows the mid
+// decay time only (measured: decay HF ratio 0.2 is 9 dB quieter than
+// 0.83, 2.0 is 3 dB louder), so this undoes the weighting.
+float LateLevelFix(const ReverbParams& r) {
+  float hf_ratio = r.decay_hf_ratio;
+  if (r.decay_hf_limit && r.air_absorption_gain_hf < 1.0f)
+    hf_ratio = std::min(hf_ratio, -3.0f / (343.3f * r.decay_time *
+                                           std::log10(r.air_absorption_gain_hf)));
+  auto decay = [&](float ratio) { return std::clamp(r.decay_time * ratio, 0.1f, 20.0f); };
+  float lf = r.lf_reference / 20000.0f, hf = r.hf_reference / 20000.0f;
+  float weighted = lf * decay(r.decay_lf_ratio) + (hf - lf) * r.decay_time +
+                   (1.0f - hf) * decay(hf_ratio);
+  return std::sqrt(weighted / r.decay_time);
+}
+
+}  // namespace
+
+ReverbParams ToReverb(const Listener& l, int version) {
   ReverbParams r;
-  float size = std::max(l.environment_size, 0.0f);
-  r.density = std::min(size * size * size / 16.0f, 1.0f);
+  // OpenAL Soft's reverb sizes its delay lines max(5, cbrt(density x
+  // 125000)) times an average 1 m room (EFX's presets put an EAX size s
+  // at density s^3 / 16, which is 1 for every size over 2.5 m: lines for
+  // a 50 m room, which build the late reverb up over about 80 ms). The
+  // hardware's late reverb starts at full level after the reverb delay;
+  // lines for a room twice the EAX size come closest. Shorter lines cost
+  // HF decay time (OpenAL loses some HF per pass through a line, about
+  // 0.4 dB at 4 kHz), so they stop at a 15 m room.
+  float lines = std::max(l.environment_size * 2.0f, 15.0f);
+  r.density = std::min(lines * lines * lines / 125000.0f, 1.0f);
   r.diffusion = l.environment_diffusion;
-  r.gain = MbToGain(float(l.room));
-  r.gain_hf = MbToGain(float(l.room_hf));
+  // Air absorption also shortens and lowers the hardware's reverb, at mid
+  // and low frequencies too (OpenAL's decay HF limit only touches the
+  // HF): at -100 mB/m generic decays in 0.53 s instead of 1.43 (relatively
+  // longer below 250 Hz) and its reverb is 13 dB down (3 dB at 125 Hz,
+  // 22 dB at 4 kHz). Scaled like the direct path's cut, (|air| / 100)^1.5,
+  // so the presets' -5 mB/m change little; the level is approximated by
+  // -6.5 dB plus -10 dB above the HF reference.
+  float air = std::pow(std::max(-l.air_absorption_hf, 0.0f) / 100.0f, 1.5f);
+  r.gain = MbToGain(float(l.room + (version == 1 ? kEax1RoomBoost : 0)) - 650.0f * air);
+  r.gain_hf = MbToGain(float(l.room_hf) - 1000.0f * air);
   r.gain_lf = MbToGain(float(l.room_lf));
-  r.decay_time = l.decay_time;
+  r.decay_time = l.decay_time * std::pow(0.37f, air);
   r.decay_hf_ratio = l.decay_hf_ratio;
-  r.decay_lf_ratio = l.decay_lf_ratio;
+  r.decay_lf_ratio = std::min(l.decay_lf_ratio * std::pow(1.46f, air), 2.0f);
   r.reflections_gain = MbToGain(float(l.reflections));
   r.reflections_delay = l.reflections_delay;
   FlipZ(l.reflections_pan, r.reflections_pan);
-  r.late_reverb_gain = MbToGain(float(l.reverb));
   r.late_reverb_delay = l.reverb_delay;
   FlipZ(l.reverb_pan, r.late_reverb_pan);
   r.echo_time = l.echo_time;
@@ -210,7 +337,24 @@ ReverbParams ToReverb(const Listener& l) {
   r.lf_reference = l.lf_reference;
   r.room_rolloff_factor = l.room_rolloff_factor;
   r.decay_hf_limit = (l.flags & kDecayHfLimit) != 0;
+  r.late_reverb_gain = MbToGain(float(l.reverb)) * LateLevelFix(r);
   return r;
+}
+
+void ReadListener1(const uint8_t* p, Listener* l) {
+  uint32_t env = U32(p, 0);
+  float volume = F32(p, 4), decay = F32(p, 8), damping = F32(p, 12);
+  ListenerAttribute(l, "EAX environment selection", 1, &env, true);
+  ListenerAttribute(l, "EAX effect volume", 1, &volume, true);
+  ListenerAttribute(l, "EAX decay time", 1, &decay, true);
+  ListenerAttribute(l, "EAX damping", 1, &damping, true);
+}
+
+void WriteListener1(const Listener& l, uint8_t* p) {
+  Put(p, 0, l.environment);
+  Put(p, 4, l.volume);
+  Put(p, 8, l.decay_time);
+  Put(p, 12, l.damping);
 }
 
 void ReadListener2(const uint8_t* p, Listener* l) {
@@ -376,22 +520,26 @@ void WriteSource3(const Source& s, uint8_t* p) {
 }
 
 Levels SourceLevels(const Source& s, const Listener& l, float distance,
-                    float min_distance) {
+                    float min_distance, int version) {
   // Obstruction cuts the direct path (its LF ratio scales the cut below
-  // the HF reference); occlusion cuts both paths, the room path by its
-  // room ratio; exclusion cuts only the room path.
-  float occl_direct = float(s.occlusion) * s.occlusion_direct_ratio;
-  float occl_room = float(s.occlusion) * s.occlusion_room_ratio;
-  float d_hf = float(s.direct + s.direct_hf + s.obstruction) + occl_direct;
+  // the HF reference); occlusion cuts both paths, each by its ratio;
+  // exclusion cuts only the room path.
+  float room_ratio = s.occlusion_room_ratio + (version == 2 ? 1.0f : 0.0f);
+  float occ = float(s.occlusion);
+  float d_hf = float(s.direct + s.direct_hf + s.obstruction) + occ * s.occlusion_direct_ratio;
   float d_lf = float(s.direct) + float(s.obstruction) * s.obstruction_lf_ratio +
-               occl_direct * s.occlusion_lf_ratio;
-  float r_hf = float(s.room + s.room_hf + s.exclusion) + occl_room;
+               OcclusionLf(occ, s.occlusion_direct_ratio, s.occlusion_lf_ratio);
+  float r_hf = float(s.room + s.room_hf + s.exclusion) + occ * room_ratio;
   float r_lf = float(s.room) + float(s.exclusion) * s.exclusion_lf_ratio +
-               occl_room * s.occlusion_lf_ratio;
-  // Air absorption: an HF cut per metre of distance.
-  float air = l.air_absorption_hf * s.air_absorption_factor * std::max(distance, 0.0f);
+               OcclusionLf(occ, room_ratio, s.occlusion_lf_ratio);
+  // Air absorption: an HF cut growing with the distance.
+  float far = std::max(distance - min_distance, 0.0f);
+  float air_mb = -l.air_absorption_hf * s.air_absorption_factor * far;
+  float air = air_mb > 0 ? -kAirScale * std::pow(air_mb, kAirPower) : 0.0f;
   if (s.flags & kDirectHfAuto) d_hf += air;
   if (s.flags & kRoomHfAuto) r_hf += air;
+  r_hf += kRoomDistanceMbPerMetre * far;
+  r_lf += kRoomDistanceMbPerMetre * far;
   // Room rolloff: the reverb send falls off with distance like DS3D's
   // inverse law, scaled by the listener's and the source's factors.
   float rolloff = l.room_rolloff_factor + s.room_rolloff_factor;
@@ -401,15 +549,16 @@ Levels SourceLevels(const Source& s, const Listener& l, float distance,
     r_hf += mb;
     r_lf += mb;
   }
+  if (s.reverb_mix >= 0) {
+    float mb = s.reverb_mix > 0 ? kMixMbPerDecade * std::log10(s.reverb_mix) : -10000.0f;
+    r_hf += mb;
+    r_lf += mb;
+  }
   Levels v;
   v.direct_lf = MbToGain(std::min(d_lf, 0.0f));
   v.direct_hf = MbToGain(std::min(d_hf, 0.0f));
   v.room_lf = MbToGain(std::min(r_lf, 0.0f));
   v.room_hf = MbToGain(std::min(r_hf, 0.0f));
-  if (s.reverb_mix >= 0) {
-    v.room_lf *= s.reverb_mix;
-    v.room_hf *= s.reverb_mix;
-  }
   return v;
 }
 
@@ -425,23 +574,59 @@ bool ListenerAttribute(Listener* l, const std::string& name, int version, void* 
     }
     return true;
   }
-  if (name == "EAX effect volume" && version == 1) {
-    // EAX 1.0's reverb volume (linear) is the room level here.
+  if (version == 1 && (name == "EAX effect volume" || name == "EAX damping" ||
+                       name == "EAX decay time")) {
+    float* field = name == "EAX effect volume" ? &l->volume
+                   : name == "EAX damping"     ? &l->damping
+                                               : &l->decay_time;
+    if (!set) {
+      std::memcpy(value, field, 4);
+      return true;
+    }
     float v;
-    if (set) {
-      std::memcpy(&v, value, 4);
-      l->room = GainToMb(v);
+    std::memcpy(&v, value, 4);
+    if (field == &l->volume) {
+      l->volume = std::clamp(v, 0.0f, 1.0f);
+      l->room = l->volume > 0 ? ClampMb(kEax1RoomAtHalfVolume +
+                                            2000.0f * std::log10(l->volume / 0.5f),
+                                        -10000, 0)
+                              : -10000;
+    } else if (field == &l->damping) {
+      l->damping = std::clamp(v, 0.0f, 2.0f);
+      l->decay_hf_ratio = std::clamp(0.4f + 0.8f * l->damping, 0.1f, 2.0f);
     } else {
-      v = MbToGain(float(l->room));
-      std::memcpy(value, &v, 4);
+      float decay = std::clamp(v, 0.1f, 20.0f);
+      l->reverb = ClampMb(float(l->reverb) + 1000.0f * std::log10(decay / l->decay_time),
+                          -10000, 2000);
+      l->decay_time = decay;
     }
     return true;
   }
-  return AccessField(kListenerFields, name, version, l, value, set);
+  if (set && name == "EAX2 environment size" && version >= 2) {
+    float size;
+    std::memcpy(&size, value, 4);
+    ScaleSize(l, std::clamp(size, 1.0f, 100.0f));
+  } else if (!AccessField(kListenerFields, name, version, l, value, set)) {
+    return false;
+  }
+  if (set && version == 3) l->environment = kEnvironmentUndefined;
+  return true;
 }
 
 bool SourceAttribute(Source* s, const std::string& name, int version, void* value,
                      bool set) {
+  if (name == "EAX sample reverb mix" && version >= 2) {
+    // The room level, as a mix.
+    float mix;
+    if (set) {
+      std::memcpy(&mix, value, 4);
+      s->room = mix > 0 ? ClampMb(kMixMbPerDecade * std::log10(mix), -10000, 1000) : -10000;
+    } else {
+      mix = s->room > -10000 ? std::pow(10.0f, float(s->room) / kMixMbPerDecade) : 0.0f;
+      std::memcpy(value, &mix, 4);
+    }
+    return true;
+  }
   return AccessField(kSourceFields, name, version, s, value, set);
 }
 

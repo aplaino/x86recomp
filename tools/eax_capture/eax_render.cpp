@@ -4,10 +4,13 @@
 // the mixer -> OpenAL Soft's reverb. Writes what eaxcap.exe records from
 // real hardware (a WAV and a JSON manifest per case and stimulus, plus the
 // stimuli) so analyze.py can compare the two. Offline: the mixer is pulled
-// directly and no audio device is opened.
+// directly and no audio device is opened. "DirectSound3D Hardware Support"
+// (ds3dhw), which mss32.cpp does not offer, is the mixer's DS3D pan and
+// distance law alone, for comparison with that provider's recordings.
 //
-//   eax_render --out DIR [--provider fast2d,eax1,eax2,eax3] [--rate 48000]
-//              [--cases LIST] [--stim LIST] [--miles-version 6.5|6.1] [--quiet]
+//   eax_render --out DIR [--provider fast2d,ds3dhw,eax1,eax2,eax3]
+//              [--rate 48000] [--cases LIST] [--stim LIST]
+//              [--miles-version 6.5|6.1] [--quiet]
 //
 // --miles-version picks whose Fast 2D the fast2d set renders: Miles 6.5's
 // (msssoft.m3d, the default: eaxcap.exe records the Miles a game ships,
@@ -58,16 +61,17 @@ namespace eax = audio::eax;
 constexpr int kChunk = 1024;  // frames per Mix call, as the audio callback
 constexpr int kBusEax = 0;    // mss32.cpp's EAX reverb bus
 
-// The providers mss32.cpp offers.
+// The providers mss32.cpp offers, and DS3D hardware.
 const char* const kProviders[] = {
     "Miles Fast 2D Positional Audio",
+    "DirectSound3D Hardware Support",
     "Creative Labs EAX (TM)",
     "Creative Labs EAX 2 (TM)",
     "Creative Labs EAX 3 (TM)",
 };
 
 struct Options {
-  std::string out = "render", providers = "fast2d,eax1,eax2,eax3", cases;
+  std::string out = "render", providers = "fast2d,ds3dhw,eax1,eax2,eax3", cases;
   unsigned stimuli = 0;
   int rate = 48000;
   bool miles65 = true;
@@ -257,6 +261,7 @@ void ReadBack(Json& j, const char* key, int ver, const EcAttrName* names, T* obj
 // sets them (the listener at the origin, distance factor 1).
 void ApplyLevels(audio::Mixer& m, audio::Voice& v, const eax::Source& s,
                  const eax::Listener& listener, int ver) {
+  if (!ver && v.ds3d) return;  // DS3D hardware: the direct path alone
   if (!ver) {
     // Fast 2D: the driver's dry level (a Miles 6.5 voice gets it in the
     // mixer); no master reverb wet level is set.
@@ -267,7 +272,7 @@ void ApplyLevels(audio::Mixer& m, audio::Voice& v, const eax::Source& s,
   eax::Listener l = listener;
   if (ver == 1) l.air_absorption_hf = 0;  // EAX 1.0 has none
   float d = std::sqrt(v.pos.x * v.pos.x + v.pos.y * v.pos.y + v.pos.z * v.pos.z);
-  eax::Levels lv = eax::SourceLevels(s, l, d, v.min_dist);
+  eax::Levels lv = eax::SourceLevels(s, l, d, v.min_dist, ver);
   v.direct_lf = lv.direct_lf;
   v.direct_hf = lv.direct_hf;
   v.send_lf[kBusEax] = lv.room_lf;
@@ -275,7 +280,7 @@ void ApplyLevels(audio::Mixer& m, audio::Voice& v, const eax::Source& s,
 }
 
 void InitVoice(audio::Voice& v, const audio::Bytes& image, const float* pos, const EcCase& c,
-               audio::Voice::Miles miles) {
+               audio::Voice::Miles miles, bool ds3d) {
   std::string err;
   v.src = audio::MakeWavSource(image, &err);
   if (!v.src) {
@@ -284,6 +289,7 @@ void InitVoice(audio::Voice& v, const audio::Bytes& image, const float* pos, con
   }
   v.miles = miles;
   v.positional = true;
+  v.ds3d = ds3d;
   v.pos = {pos[0], pos[1], pos[2]};
   v.min_dist = c.min_dist;
   v.max_dist = c.max_dist;
@@ -360,14 +366,17 @@ void Render(const Options& o, const char* provider, const std::string& tag, int 
   }
   m.set_master(1.0f);
   m.SetListener({0, 0, 0}, {0, 0, 1}, {0, 1, 0});
-  if (ver) m.SetReverb(kBusEax, eax::ToReverb(l));
+  if (ver) m.SetReverb(kBusEax, eax::ToReverb(l, ver));
   if (g_al_version.empty() && ver) g_al_version = alGetString(AL_VERSION);
 
-  // EAX voices position by the 6.1c rule, as mss32.cpp does.
-  auto miles = !ver && o.miles65 ? audio::Voice::Miles::k65 : audio::Voice::Miles::k61;
+  // EAX voices take the 6.1c gains (DS3D positioning), as mss32.cpp does;
+  // so does ds3dhw.
+  auto miles = !ver && o.miles65 && tag != "ds3dhw" ? audio::Voice::Miles::k65
+                                                     : audio::Voice::Miles::k61;
   audio::Voice stim, sync;
-  InitVoice(stim, st.image, c.pos, c, miles);
-  InitVoice(sync, sync_image, EC_SYNC_POS, c, miles);
+  bool ds3d = ver > 0 || tag == "ds3dhw";
+  InitVoice(stim, st.image, c.pos, c, miles, ds3d);
+  InitVoice(sync, sync_image, EC_SYNC_POS, c, miles, ds3d);
   ApplyLevels(m, stim, src, l, ver);
   ApplyLevels(m, sync, sync_src, l, ver);
 
@@ -435,7 +444,7 @@ bool Selected(const std::string& list, const std::string& tag, const std::string
 
 int Usage() {
   std::fprintf(stderr,
-               "usage: eax_render [--out DIR] [--provider fast2d,eax1,eax2,eax3|all]\n"
+               "usage: eax_render [--out DIR] [--provider fast2d,ds3dhw,eax1,eax2,eax3|all]\n"
                "                  [--rate 44100|48000] [--cases LIST] [--stim LIST]\n"
                "                  [--miles-version 6.5|6.1] [--quiet]\n");
   return 2;

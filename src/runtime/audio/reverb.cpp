@@ -136,13 +136,19 @@ void Reverb::Apply(Bus& b) {
     AL_EAXREVERB_MAX_DECAY_LFRATIO);
   f(AL_EAXREVERB_REFLECTIONS_GAIN, p.reflections_gain,
     AL_EAXREVERB_MIN_REFLECTIONS_GAIN, AL_EAXREVERB_MAX_REFLECTIONS_GAIN);
-  f(AL_EAXREVERB_REFLECTIONS_DELAY, p.reflections_delay,
-    AL_EAXREVERB_MIN_REFLECTIONS_DELAY, AL_EAXREVERB_MAX_REFLECTIONS_DELAY);
+  // The send reaches OpenAL kLead frames late (the silence queued ahead of
+  // it): take that off the reflections delay, and off the late reverb's
+  // (which counts from the reflections) where the reflections delay is
+  // shorter.
+  float refl = p.reflections_delay - float(kLead) / float(rate_);
+  float late = p.late_reverb_delay + std::min(refl, 0.0f);
+  f(AL_EAXREVERB_REFLECTIONS_DELAY, refl, AL_EAXREVERB_MIN_REFLECTIONS_DELAY,
+    AL_EAXREVERB_MAX_REFLECTIONS_DELAY);
   pan(AL_EAXREVERB_REFLECTIONS_PAN, p.reflections_pan);
   f(AL_EAXREVERB_LATE_REVERB_GAIN, p.late_reverb_gain,
     AL_EAXREVERB_MIN_LATE_REVERB_GAIN, AL_EAXREVERB_MAX_LATE_REVERB_GAIN);
-  f(AL_EAXREVERB_LATE_REVERB_DELAY, p.late_reverb_delay,
-    AL_EAXREVERB_MIN_LATE_REVERB_DELAY, AL_EAXREVERB_MAX_LATE_REVERB_DELAY);
+  f(AL_EAXREVERB_LATE_REVERB_DELAY, late, AL_EAXREVERB_MIN_LATE_REVERB_DELAY,
+    AL_EAXREVERB_MAX_LATE_REVERB_DELAY);
   pan(AL_EAXREVERB_LATE_REVERB_PAN, p.late_reverb_pan);
   f(AL_EAXREVERB_ECHO_TIME, p.echo_time, AL_EAXREVERB_MIN_ECHO_TIME,
     AL_EAXREVERB_MAX_ECHO_TIME);

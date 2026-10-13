@@ -4,9 +4,9 @@
 // streaming), 3D samples, MP3/WAV streams, timers and format conversion.
 // 3D providers: "Miles Fast 2D Positional Audio" (distance attenuation and
 // panning) and Miles' EAX providers (Msseax.m3d: EAX 1.0, 2.0 and 3.0, with
-// its attribute names and struct layouts), which position sounds the same
-// way and add the listener's environment and per-sample EAX levels
-// (runtime/audio/eax.h). Miles 6.5's digital master reverb (room type,
+// its attribute names and struct layouts), which position sounds as
+// DirectSound3D hardware does and add the listener's environment and
+// per-sample EAX levels (runtime/audio/eax.h). Miles 6.5's digital master reverb (room type,
 // reverb and levels, per-sample/stream wet levels) is our compatible
 // implementation (runtime/audio/digital_reverb.h).
 //
@@ -268,7 +268,7 @@ void ApplyEax(Sample& s) {
   float dx = v.pos.x - st.lpos.x, dy = v.pos.y - st.lpos.y, dz = v.pos.z - st.lpos.z;
   float d = std::sqrt(dx * dx + dy * dy + dz * dz) * st.distance_factor;
   audio::eax::Levels lv =
-      audio::eax::SourceLevels(s.eax, l, d, v.min_dist * st.distance_factor);
+      audio::eax::SourceLevels(s.eax, l, d, v.min_dist * st.distance_factor, int(s.prov));
   bool on = s.prov == st.active;
   v.direct_lf = lv.direct_lf;
   v.direct_hf = lv.direct_hf;
@@ -286,7 +286,8 @@ void ApplyEaxAll() {
 void ApplyEaxListener() {
   State& st = S();
   if (IsEax(st.active))
-    audio::GetMixer().SetReverb(kBusEax, audio::eax::ToReverb(st.eax[int(st.active)]));
+    audio::GetMixer().SetReverb(kBusEax,
+                                audio::eax::ToReverb(st.eax[int(st.active)], int(st.active)));
   ApplyEaxAll();
 }
 
@@ -316,6 +317,7 @@ void ResetSample(Sample& s) {
   s.start_pos = 0;
   if (s.is3d) {
     s.v.positional = true;
+    s.v.ds3d = IsEax(s.prov);  // the EAX providers are DirectSound3D ones
     s.v.min_dist = 1.0f;
     if (s.v.miles == Voice::Miles::k65) {
       s.v.max_dist = 200.0f;  // msssoft.m3d's; it keeps the position
@@ -1293,18 +1295,7 @@ bool ListenerAttribute(Prov p, const std::string& name, uint32_t guest, bool set
   if (name == "EAX all parameters") {
     uint8_t* q = GPtr(guest);
     if (p == Prov::kEax1) {
-      // EAX_REVERBPROPERTIES: environment, volume, decay time, damping.
-      if (set) {
-        l = audio::eax::Preset(Rd32(guest));
-        l.room = audio::eax::GainToMb(F(Rd32(guest + 4)));
-        l.decay_time = F(Rd32(guest + 8));
-        l.decay_hf_ratio = F(Rd32(guest + 12));
-      } else {
-        Wr32(guest, l.environment);
-        Wr32(guest + 4, std::bit_cast<uint32_t>(audio::eax::MbToGain(float(l.room))));
-        Wr32(guest + 8, std::bit_cast<uint32_t>(l.decay_time));
-        Wr32(guest + 12, std::bit_cast<uint32_t>(l.decay_hf_ratio));
-      }
+      set ? audio::eax::ReadListener1(q, &l) : audio::eax::WriteListener1(l, q);
     } else if (p == Prov::kEax2) {
       set ? audio::eax::ReadListener2(q, &l) : audio::eax::WriteListener2(l, q);
     } else {
@@ -1337,8 +1328,9 @@ bool SampleAttribute(Sample& s, const std::string& name, uint32_t guest, bool se
 
 uint32_t ListenerSize(Prov p, const std::string& name) {
   if (name != "EAX all parameters") return 12;  // at most a pan vector
-  return p == Prov::kEax1 ? 16 : p == Prov::kEax2 ? audio::eax::kListener2Size
-                                                  : audio::eax::kListener3Size;
+  return p == Prov::kEax1   ? audio::eax::kListener1Size
+         : p == Prov::kEax2 ? audio::eax::kListener2Size
+                            : audio::eax::kListener3Size;
 }
 
 // AIL_3D_provider_attribute(lib, name, void* value). Miles 6.5 first

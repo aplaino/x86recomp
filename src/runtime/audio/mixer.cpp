@@ -14,6 +14,54 @@ namespace recomp::audio {
 namespace {
 
 constexpr int kChunk = 1024;  // frames decoded / mixed at a time
+constexpr double kPi = 3.14159265358979323846;
+
+// The low-pass EAX hardware puts on a path whose 5 kHz level is below its
+// LF level, fitted to the Audigy 2 ZS's responses to obstruction,
+// occlusion, exclusion and air absorption (within about 0.5 dB from
+// 250 Hz to 16 kHz): two poles placed like an analog low-pass's (radius
+// e^(-w/2Q), angle w sqrt(1 - 1/4Q^2) for a cutoff of w radians per
+// sample), no zeros, unity at DC. Its Q rises as the cutoff falls, 0.6
+// (3 kHz / fc)^0.39 below 3 kHz, and the cutoff stops at 124 Hz (so
+// -10000 mB sounds like about -6800). For an HF level of G dB the
+// response at 5 kHz is 0.94 G.
+constexpr double kLowPassMinCutoff = 124.0, kLowPassAt5k = 0.94;
+constexpr int kLowPassSteps = 1000;  // of 10 mB
+
+std::array<float, 2> PolePair(double fc, double rate) {
+  double q = 0.6 * std::pow(std::max(1.0, 3000.0 / fc), 0.39);
+  double w = 2 * kPi * fc / rate;
+  double r = std::exp(-w / (2 * q));
+  return {float(-2 * r * std::cos(w * std::sqrt(1 - 1 / (4 * q * q)))), float(r * r)};
+}
+
+double GainAt(const std::array<float, 2>& a, double f, double rate) {
+  double w = 2 * kPi * f / rate;
+  double re = 1 + a[0] * std::cos(w) + a[1] * std::cos(2 * w);
+  double im = a[0] * std::sin(w) + a[1] * std::sin(2 * w);
+  return (1 + a[0] + a[1]) / std::sqrt(re * re + im * im);
+}
+
+// The pole pair for each 10 mB step of HF cut (step 0: none). The cutoff
+// is searched up to 0.4 x the rate, where the response at 5 kHz has
+// risen to within 0.1 dB of flat.
+std::vector<std::array<float, 2>> LowPassTable(int rate) {
+  std::vector<std::array<float, 2>> t(kLowPassSteps + 1, {0.0f, 0.0f});
+  for (int i = 1; i <= kLowPassSteps; i++) {
+    double want = std::pow(10.0, kLowPassAt5k * (-10.0 * i / 100.0) / 20.0);
+    double lo = std::log2(kLowPassMinCutoff), hi = std::log2(0.4 * rate);
+    if (GainAt(PolePair(kLowPassMinCutoff, rate), 5000, rate) >= want) {
+      t[i] = PolePair(kLowPassMinCutoff, rate);
+      continue;
+    }
+    for (int k = 0; k < 50; k++) {
+      double mid = (lo + hi) / 2;
+      (GainAt(PolePair(std::exp2(mid), rate), 5000, rate) < want ? lo : hi) = mid;
+    }
+    t[i] = PolePair(std::exp2((lo + hi) / 2), rate);
+  }
+  return t;
+}
 
 Vec3 Sub(const Vec3& a, const Vec3& b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
 float Dot(const Vec3& a, const Vec3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
@@ -120,7 +168,7 @@ void Mixer::OpenOffline(int rate) {
 
 void Mixer::Init(int rate) {
   rate_ = rate;
-  split_ = 1.0f - std::exp(-2.0f * 3.14159265f * 5000.0f / float(rate));
+  low_pass_ = LowPassTable(rate);
   reverb_.Open(rate);
   // The reverb's ring is whole mixer fragments; ours are chunks.
   digital_.Open(rate, kChunk);
@@ -167,6 +215,16 @@ void Mixer::SetListener(const Vec3& pos, const Vec3& face, const Vec3& up) {
 //    2049-entry table; 64 when the source is at the listener.
 //  - Mss32: v = vol * master / 127; the far channel scales by a linear
 //    balance table, the near one stays full; gains are out of 2048.
+// DS3D voices follow DirectSound3D hardware as measured on an Audigy 2 ZS
+// (Miles' DS3D and EAX providers, stereo output):
+//  - distance: min_dist / d, continuous; DirectSound stops attenuating at
+//    max_dist rather than muting; no cut behind the listener;
+//  - pan: the azimuth folded to the front half (135 degrees pans like 45)
+//    is panned between virtual speakers at +-45 degrees with gains
+//    summing to sqrt(2) (tangent law): 0.707 per channel ahead, 1.414 on
+//    one channel at 45; beyond 45 the near gain falls as cos(az - 45) to
+//    1.0 at 90 while the far channel stays silent (-55 dB measured). The
+//    scale makes a side source as loud as Fast 2D's on the same card.
 void Mixer::TargetGains(const Voice& v, float* l, float* r, float* send_volume) const {
   *send_volume = v.volume;
   if (v.miles == Voice::Miles::k65) {
@@ -180,6 +238,28 @@ void Mixer::TargetGains(const Voice& v, float* l, float* r, float* send_volume) 
     return;
   }
   float g = v.volume * master_;
+  if (v.positional && v.ds3d) {
+    Vec3 rel = Sub(v.pos, lpos_);
+    float d = std::sqrt(Dot(rel, rel));
+    float min = std::max(v.min_dist, 1e-4f);
+    d = std::min(d, std::max(v.max_dist, min));
+    if (d > min) g *= min / d;
+    float x = Dot(rel, Cross(lup_, lface_)), z = std::fabs(Dot(rel, lface_));
+    float az = x == 0 && z == 0 ? 0.0f : std::atan2(std::fabs(x), z);
+    float near, far = 0;
+    if (az <= float(kPi / 4)) {
+      float t = std::tan(az);
+      near = 0.5f * (1 + t);
+      far = 0.5f * (1 - t);
+    } else {
+      near = std::cos(az - float(kPi / 4));
+    }
+    near *= g * float(std::sqrt(2.0));
+    far *= g * float(std::sqrt(2.0));
+    *l = x < 0 ? near : far;
+    *r = x < 0 ? far : near;
+    return;
+  }
   // Mss32's balance table: 2 * pan up to 62, then full (128).
   auto bal = [](int p) { return p < 63 ? 2 * p : 128; };
   if (!v.positional) {
@@ -228,9 +308,26 @@ void Mixer::MixVoice(Voice& v, float* out, int frames, bool reverb) {
   }
   float tl, tr, send_volume;
   TargetGains(v, &tl, &tr, &send_volume);
-  if (!v.gains_valid_) {
+  constexpr int kB = Reverb::kBuses;
+  // Low-pass targets; levels and coefficients ramp across the chunk like
+  // the gains (a straight line between two stable pole pairs stays stable).
+  float da[2], sa[kB][2];
+  LowPass(v.direct_lf, v.direct_hf, da);
+  for (int b = 0; b < kB; b++) LowPass(v.send_lf[b], v.send_hf[b], sa[b]);
+  auto settle = [&] {
     v.cur_l_ = tl;
     v.cur_r_ = tr;
+    v.cur_dlf_ = v.direct_lf;
+    v.cur_da_[0] = da[0];
+    v.cur_da_[1] = da[1];
+    for (int b = 0; b < kB; b++) {
+      v.cur_slf_[b] = v.send_lf[b];
+      v.cur_sa_[b][0] = sa[b][0];
+      v.cur_sa_[b][1] = sa[b][1];
+    }
+  };
+  if (!v.gains_valid_) {
+    settle();
     v.gains_valid_ = true;
   }
   // Ramp gain changes across the chunk so volume and pan updates do not
@@ -238,21 +335,33 @@ void Mixer::MixVoice(Voice& v, float* out, int frames, bool reverb) {
   float dl = (tl - v.cur_l_) / frames, dr = (tr - v.cur_r_) / frames;
   double rate = v.rate > 0 ? v.rate : v.src->rate();
   double step = rate / rate_;
-  // Two-band levels and reverb sends, ramped the same way.
-  constexpr int kB = Reverb::kBuses;
-  bool banded = v.direct_lf != 1 || v.direct_hf != 1 || v.cur_dlf_ != 1 || v.cur_dhf_ != 1;
+  bool banded = v.direct_lf != 1 || v.direct_hf != 1 || v.cur_dlf_ != 1 ||
+                v.cur_da_[0] != 0 || v.cur_da_[1] != 0;
   bool sending[kB];
   for (int b = 0; b < kB; b++) {
-    sending[b] = has_reverb() && (v.send_lf[b] > 0 || v.send_hf[b] > 0 ||
-                                  v.cur_slf_[b] > 0 || v.cur_shf_[b] > 0);
+    sending[b] = has_reverb() && (v.send_lf[b] > 0 || v.cur_slf_[b] > 0);
     banded |= sending[b];
   }
-  float ddlf = (v.direct_lf - v.cur_dlf_) / frames, ddhf = (v.direct_hf - v.cur_dhf_) / frames;
-  float dslf[kB], dshf[kB];
+  float ddlf = (v.direct_lf - v.cur_dlf_) / frames;
+  float dda[2] = {(da[0] - v.cur_da_[0]) / frames, (da[1] - v.cur_da_[1]) / frames};
+  float dslf[kB], dsa[kB][2];
   for (int b = 0; b < kB; b++) {
     dslf[b] = (v.send_lf[b] - v.cur_slf_[b]) / frames;
-    dshf[b] = (v.send_hf[b] - v.cur_shf_[b]) / frames;
+    dsa[b][0] = (sa[b][0] - v.cur_sa_[b][0]) / frames;
+    dsa[b][1] = (sa[b][1] - v.cur_sa_[b][1]) / frames;
   }
+  // One sample of a path's low-pass, both channels.
+  auto filter = [](const float* a, float (*y)[2], float& l, float& r) {
+    float g = 1 + a[0] + a[1];
+    float yl = g * l - a[0] * y[0][0] - a[1] * y[0][1];
+    float yr = g * r - a[0] * y[1][0] - a[1] * y[1][1];
+    y[0][1] = y[0][0];
+    y[0][0] = yl;
+    y[1][1] = y[1][0];
+    y[1][0] = yr;
+    l = yl;
+    r = yr;
+  };
   const float send_gain = v.volume * master_;
   // The digital reverb's wet scale, out of 2048 like Miles' other mixer
   // gains; a sample mixed with a non-zero one keeps the tail alive.
@@ -272,21 +381,23 @@ void Mixer::MixVoice(Voice& v, float* out, int frames, bool reverb) {
     v.cur_l_ += dl;
     v.cur_r_ += dr;
     if (banded) {
-      v.low_[0] += split_ * (sl - v.low_[0]);
-      v.low_[1] += split_ * (sr - v.low_[1]);
-      float hl = sl - v.low_[0], hr = sr - v.low_[1];
       for (int b = 0; b < kB; b++) {
         if (!sending[b]) continue;
         v.cur_slf_[b] += dslf[b];
-        v.cur_shf_[b] += dshf[b];
+        v.cur_sa_[b][0] += dsa[b][0];
+        v.cur_sa_[b][1] += dsa[b][1];
+        float xl = sl, xr = sr;
+        filter(v.cur_sa_[b], v.sy_[b], xl, xr);
         float* s = &sends_[b][2 * i];
-        s[0] += (v.cur_slf_[b] * v.low_[0] + v.cur_shf_[b] * hl) * send_gain;
-        s[1] += (v.cur_slf_[b] * v.low_[1] + v.cur_shf_[b] * hr) * send_gain;
+        s[0] += v.cur_slf_[b] * xl * send_gain;
+        s[1] += v.cur_slf_[b] * xr * send_gain;
       }
       v.cur_dlf_ += ddlf;
-      v.cur_dhf_ += ddhf;
-      sl = v.cur_dlf_ * v.low_[0] + v.cur_dhf_ * hl;
-      sr = v.cur_dlf_ * v.low_[1] + v.cur_dhf_ * hr;
+      v.cur_da_[0] += dda[0];
+      v.cur_da_[1] += dda[1];
+      filter(v.cur_da_, v.dy_, sl, sr);
+      sl *= v.cur_dlf_;
+      sr *= v.cur_dlf_;
     }
     out[2 * i] += sl * v.cur_l_;
     out[2 * i + 1] += sr * v.cur_r_;
@@ -302,9 +413,7 @@ void Mixer::MixVoice(Voice& v, float* out, int frames, bool reverb) {
         }
         v.state = Voice::State::Done;
         v.eos = true;
-        v.cur_l_ = tl;
-        v.cur_r_ = tr;
-        SettleLevels(v);
+        settle();
         return;
       }
       v.a_[0] = v.b_[0];
@@ -317,18 +426,18 @@ void Mixer::MixVoice(Voice& v, float* out, int frames, bool reverb) {
       }
     }
   }
-  v.cur_l_ = tl;
-  v.cur_r_ = tr;
-  SettleLevels(v);
+  settle();
 }
 
-void Mixer::SettleLevels(Voice& v) {
-  v.cur_dlf_ = v.direct_lf;
-  v.cur_dhf_ = v.direct_hf;
-  for (int b = 0; b < Reverb::kBuses; b++) {
-    v.cur_slf_[b] = v.send_lf[b];
-    v.cur_shf_[b] = v.send_hf[b];
-  }
+void Mixer::LowPass(float lf, float hf, float* a) const {
+  a[0] = a[1] = 0;
+  if (!(lf > 0) || !(hf < lf) || low_pass_.empty()) return;
+  float steps = hf > 0 ? -200.0f * std::log10(hf / lf) : float(kLowPassSteps);
+  steps = std::min(steps, float(kLowPassSteps));
+  int i = std::min(int(steps), kLowPassSteps - 1);
+  float t = steps - float(i);
+  a[0] = low_pass_[i][0] + (low_pass_[i + 1][0] - low_pass_[i][0]) * t;
+  a[1] = low_pass_[i][1] + (low_pass_[i + 1][1] - low_pass_[i][1]) * t;
 }
 
 void Mixer::Mix(float* out, int frames) {

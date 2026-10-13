@@ -3,16 +3,17 @@
 // driver. Voices are linear-interpolated, gain-ramped and summed into
 // stereo float. Gains follow the mixer of the game's Miles generation
 // (Voice::miles), and positional voices get the "Miles Fast 2D Positional
-// Audio" treatment (distance attenuation and stereo panning), which Miles'
-// EAX providers also get here (by the 6.1c rule). Voices may also feed the
-// EAX reverb bus, with two-band levels on the direct path and the send
-// (see Voice::direct_lf), and the Miles-compatible digital master reverb
-// (Voice::wet, DigitalReverb).
+// Audio" treatment (distance attenuation and stereo panning), or with
+// Voice::ds3d that of DirectSound3D hardware, which Miles' EAX providers
+// use. Voices may also feed the EAX reverb bus, with an LF level and a
+// low-pass on the direct path and the send (see Voice::direct_lf), and the
+// Miles-compatible digital master reverb (Voice::wet, DigitalReverb).
 //
 // Locking: Voice fields are shared with the audio thread and may only be
 // touched with Mixer::mu() held. The mixer never calls into guest code;
 // it only raises Voice::eos for the owner to act on.
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -53,13 +54,18 @@ struct Voice {
   // Positional voices (Miles 3D samples). Coordinates are Miles' (left-
   // handed: x right, y up, z forward).
   bool positional = false;
+  // Pan and distance as DirectSound3D hardware does them (measured on an
+  // Audigy 2 ZS; Mixer::TargetGains) instead of Miles Fast 2D's.
+  bool ds3d = false;
   Vec3 pos;
   float min_dist = 1.0f, max_dist = 1e30f;
 
-  // Linear levels below and above a 5 kHz split (EAX's HF reference) for
-  // the direct path and the send to each reverb bus. Sends are not panned
-  // or distance-attenuated; they scale with volume and the master. A voice
-  // with flat direct levels and no sends takes the plain path.
+  // Linear levels at low frequencies and at 5 kHz (EAX's HF reference)
+  // for the direct path and the send to each reverb bus: the LF level is
+  // a gain, a lower 5 kHz level a two-pole low-pass (the one EAX hardware
+  // uses for obstruction, occlusion and air absorption). Sends are not
+  // panned or distance-attenuated; they scale with volume and the master.
+  // A voice with flat direct levels and no sends takes the plain path.
   float direct_lf = 1.0f, direct_hf = 1.0f;
   float send_lf[Reverb::kBuses] = {}, send_hf[Reverb::kBuses] = {};
   // Send to the digital master reverb (the sample's wet level): mono,
@@ -85,9 +91,12 @@ struct Voice {
   size_t buf_head_ = 0;     // in frames
   float cur_l_ = 0, cur_r_ = 0;
   bool gains_valid_ = false;
-  float low_[2] = {};  // one-pole low band of each channel
-  float cur_dlf_ = 1, cur_dhf_ = 1;
-  float cur_slf_[Reverb::kBuses] = {}, cur_shf_[Reverb::kBuses] = {};
+  float cur_dlf_ = 1;
+  float cur_slf_[Reverb::kBuses] = {};
+  // Low-pass coefficients (a1, a2) and per-channel state (y[n-1], y[n-2])
+  // of the direct path and each send.
+  float cur_da_[2] = {}, dy_[2][2] = {};
+  float cur_sa_[Reverb::kBuses][2] = {}, sy_[Reverb::kBuses][2][2] = {};
 };
 
 class Mixer {
@@ -118,16 +127,18 @@ class Mixer {
  private:
   void Init(int rate);
   void MixVoice(Voice& v, float* out, int frames, bool reverb);
-  static void SettleLevels(Voice& v);
   // Channel gains of `v` now, and the volume its digital reverb send
   // scales by.
   void TargetGains(const Voice& v, float* l, float* r, float* send_volume) const;
+  // The low-pass taking a path from level `lf` to `hf` at 5 kHz.
+  void LowPass(float lf, float hf, float* a) const;
 
   std::mutex mu_;
   SDL_AudioStream* stream_ = nullptr;
   int rate_ = 0;
   float master_ = 1.0f;
-  float split_ = 0;  // one-pole coefficient of the 5 kHz band split
+  // LowPass coefficients (a1, a2) per 10 mB of HF cut, 0 to -10000.
+  std::vector<std::array<float, 2>> low_pass_;
   Reverb reverb_;
   std::vector<float> sends_[Reverb::kBuses];
   DigitalReverb digital_;

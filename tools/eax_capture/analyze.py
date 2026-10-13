@@ -31,6 +31,7 @@ BANDS = [125, 250, 500, 1000, 2000, 4000, 8000]
 PRE_S = 0.005        # IR samples kept before the stimulus start
 DIRECT_S = (0.0005, 0.0015)  # direct sound window around its peak
 EARLY_S = 0.05       # early reverb: this long from the reverb onset
+PAN_LIMIT_DB = 50.0  # balance beyond this counts as one channel only
 
 # Reference case of each case family (same provider and set).
 REFS = [
@@ -294,7 +295,11 @@ def analyze(rec):
         er = float(np.mean(ref ** 2))
         m["level_L"] = db(float(np.mean(seg[:, 0] ** 2)), er)
         m["level_R"] = db(float(np.mean(seg[:, 1] ** 2)), er)
-        m["pan_db"] = m["level_R"] - m["level_L"]
+        # Beyond PAN_LIMIT_DB a channel is as good as silent (the hardware's
+        # far channel sits at its crosstalk, the render's at nothing).
+        # A silent channel (no energy at all) is as far as it goes.
+        r, l = (-math.inf if math.isnan(v) else v for v in (m["level_R"], m["level_L"]))
+        m["pan_db"] = max(-PAN_LIMIT_DB, min(PAN_LIMIT_DB, r - l)) if r != l else 0.0
         m["level"] = db(float(np.mean(seg ** 2)), er)
         if rec.stim == "noise":
             bs, br = band_filter(seg, rate), band_filter(ref[:, None], rate)
@@ -408,8 +413,7 @@ def normalise(results):
             continue
         off = refs[tag][1]
         for k in list(m):
-            if (k in LEVEL_KEYS or k.startswith("band_") and stim != "noise") and \
-                    isinstance(m[k], float):
+            if (k in LEVEL_KEYS or k.startswith("band_")) and isinstance(m[k], float):
                 m["raw_" + k] = m[k]
                 m[k] = m[k] - off
     return refs
@@ -426,35 +430,96 @@ def close(name, a, b):
         return all(x is None or y is None or abs(x - y) <= 0.05 for x, y in zip(a, b))
     if name in ("EAX environment selection",):
         return a == b
-    if isinstance(a, int) and isinstance(b, int) and not name.endswith(("ratio", "factor")):
+    if isinstance(a, int) and isinstance(b, int) and not name.endswith(("ratio", "factor", "mix")):
         return abs(a - b) <= 50
     return abs(a - b) <= max(0.02, 0.1 * abs(b))
 
 
 SIZE_SCALED = {"EAX decay time", "EAX2 reflections", "EAX2 reflections delay", "EAX2 reverb",
                "EAX2 reverb delay", "EAX3 echo time", "EAX3 modulation time"}
+# EAX_ENVIRONMENT_UNDEFINED: EAX 3.0 reports it once a listener property
+# has been set on top of the selected environment.
+ENV_UNDEFINED = 26
+
+
+def readable(v):
+    """A read-back value, or None where the provider returned nothing:
+    eaxcap fills the buffer with 0x7F bytes first (3.4e38 as a float), and
+    Miles stores -1 in the first word only (the EAX 3 pan vectors read
+    [-1, 3.4e38, 3.4e38])."""
+    if isinstance(v, list):
+        return None if any(not isinstance(x, (int, float)) or abs(x) >= 3e38 for x in v) else v
+    if isinstance(v, float) and abs(v) >= 3e38:
+        return None
+    return v
+
+
+def env_undefined_ok(meta, name, value, want):
+    """EAX 3.0's environment reads 26 after the case's listener properties
+    (or eaxcap's "EAX all parameters" write) went on top of the preset."""
+    return name == "EAX environment selection" and value == ENV_UNDEFINED and want != value and \
+        (meta.get("listener_set") or meta.get("all_parameters_result") is not None)
+
+
+def intended_state(meta, presets):
+    """{part: {name: value}} a recording should read back: the provider's
+    own read-back of the case's environment (from the env_* recording of
+    it, which sets nothing on top) with the case's properties applied, and
+    the source properties eaxcap set. Names it cannot predict are left out
+    (the size-scaled ones after a size change). A property counts as set
+    unless eaxcap skipped it (Miles' result codes differ between versions;
+    one that did not take shows in the read-back)."""
+    out = {"listener_readback": {}, "source_readback": {}}
+    lset = [x for x in meta.get("listener_set") or [] if x.get("result") != "skipped"]
+    env = meta.get("environment")
+    out["listener_readback"].update(presets.get(env, {}))
+    if any(x.get("name") == "EAX2 environment size" for x in lset):
+        for name in SIZE_SCALED:
+            out["listener_readback"].pop(name, None)
+    for x in lset:
+        out["listener_readback"][x["name"]] = x.get("value")
+    for part in ("source_defaults_set", "source_set"):
+        for x in meta.get(part) or []:
+            if x.get("result") != "skipped":
+                out["source_readback"][x["name"]] = x.get("value")
+    return out
 
 
 def state_check(hw_metas, sim_metas, hw_results, out):
-    """Finds hardware recordings made in the wrong EAX state: eaxcap.exe's
-    own mismatches, and read-backs that differ from the render's (which
-    starts every case fresh), split into those equal to the previous
-    recording's (carried over: record again) and others. Prints a --cases
-    list per provider."""
+    """Finds hardware recordings made in the wrong EAX state: eaxcap's own
+    mismatches, focus losses, overruns, missing sync clicks, and read-backs
+    that differ from what the case intended (the provider's own preset
+    read-back plus the case's properties). Those equal to the previous
+    recording's read-back were carried over: the --cases list per provider
+    is the cases to record again. Read-backs that differ from the render's
+    are listed separately: they are the model's reported state, not the
+    recording's."""
     by_tag = {}
     for key, meta in hw_metas.items():
         by_tag.setdefault(key[0], []).append((meta.get("start_tick_ms", 0), key))
     found = False
     for tag in sorted(by_tag):
         order = [k for _, k in sorted(by_tag[tag])]
-        again, notes = [], []
+        # The provider's own read-back of each environment preset.
+        presets = {}
+        for key in order:
+            meta = hw_metas[key]
+            if key[1].startswith("env_") and not meta.get("listener_set"):
+                rb = meta.get("listener_readback") or {}
+                presets.setdefault(meta.get("environment"), {
+                    n: v for n, v in rb.items() if readable(v) is not None})
+        again, notes, model = [], [], []
         prev = None
         for key in order:
             meta, sim = hw_metas[key], sim_metas.get(key)
             issues, carried = [], []
+            want = intended_state(meta, presets)
             for x in meta.get("state_mismatch") or []:
+                name, got = x.get("name"), readable(x.get("readback"))
+                if got is None or env_undefined_ok(meta, name, got, x.get("intended")):
+                    continue
                 issues.append("eaxcap: %s %s intended %s, read %s" % (
-                    x.get("what"), x.get("name"), x.get("intended"), x.get("readback")))
+                    x.get("what"), name, x.get("intended"), got))
             if meta.get("focus_lost"):
                 issues.append("focus lost")
                 carried.append("focus")
@@ -465,39 +530,28 @@ def state_check(hw_metas, sim_metas, hw_results, out):
             if r.get("error"):
                 issues.append(r["error"])
                 carried.append("error")
-            set_names = {a.get("name") for a in meta.get("listener_set") or []}
             for part in ("listener_readback", "source_readback"):
                 got = meta.get(part) or {}
-                want = (sim or {}).get(part)
                 before = (hw_metas[prev].get(part) or {}) if prev else {}
-                prev_set = {a.get("name"): a.get("value") for a in
-                            (hw_metas[prev].get("listener_set" if part[0] == "l" else "source_set")
-                             or [])} if prev else {}
-                case_set = set_names if part[0] == "l" else \
-                    {a.get("name") for a in meta.get("source_set") or []}
                 for name, v in got.items():
+                    v = readable(v)
                     if v is None or name in ("EAX2 flags", "EAX2 sample flags"):
                         continue
-                    if "EAX2 environment size" in set_names and name in SIZE_SCALED:
-                        continue
-                    if want is not None:
-                        if name not in want or close(name, v, want[name]):
-                            continue
-                        is_carry = name in before and close(name, v, before[name])
-                        what = "%s %s %s, render %s" % (part.split("_")[0], name, v, want[name])
-                    else:
-                        # No render: only a property the previous case set
-                        # and this one does not, still at that value.
-                        if name in case_set or name not in prev_set or \
-                                not close(name, v, prev_set[name]):
-                            continue
-                        is_carry = True
-                        what = "%s %s %s" % (part.split("_")[0], name, v)
-                    if is_carry:
-                        carried.append(name)
-                        issues.append("carried over from %s.%s: %s" % (prev[1], prev[2], what))
-                    else:
-                        issues.append("differs: " + what)
+                    w = want[part].get(name)
+                    if w is not None and not close(name, v, w) and \
+                            not env_undefined_ok(meta, name, v, w):
+                        what = "%s %s %s, intended %s" % (part.split("_")[0], name, v, w)
+                        if name in before and close(name, v, readable(before[name])):
+                            carried.append(name)
+                            issues.append("carried over from %s.%s: %s" % (prev[1], prev[2], what))
+                        else:
+                            issues.append("differs: " + what)
+                    s = readable((sim or {}).get(part, {}).get(name))
+                    if s is not None and not close(name, v, s) and \
+                            not (name == "EAX environment selection" and
+                                 ENV_UNDEFINED in (v, s)):
+                        model.append("  %s.%s: %s %s %s, render %s" % (
+                            key[1], key[2], part.split("_")[0], name, v, s))
             if issues:
                 found = True
                 r.setdefault("_flags", []).append("state")
@@ -511,9 +565,11 @@ def state_check(hw_metas, sim_metas, hw_results, out):
         if again:
             out.write("Record these again (wrong state carried over, focus, overrun or no "
                       "sync):\n  eaxcap --provider %s --cases %s\n" % (tag, ",".join(again)))
+        if model:
+            out.write("\n[%s] read-backs that differ from the render's (the model's state)\n" %
+                      tag + "\n".join(model) + "\n")
     if not found:
-        out.write("\nState check: no hardware recording shows a wrong EAX state%s.\n" % (
-            "" if sim_metas else " (give --sim too for the full check)"))
+        out.write("\nState check: no hardware recording shows a wrong EAX state.\n")
 
 
 # ---- report -------------------------------------------------------------------------

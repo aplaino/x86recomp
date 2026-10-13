@@ -196,14 +196,16 @@ python3 -I tools/eax_capture/analyze.py --hw capture --sim render --tsv report.t
 ```
 
 eax_render takes the same `--provider`, `--rate`, `--cases` and `--stim`
-options (default: fast2d, eax1, eax2 and eax3, every case). It opens no
-audio device: it pulls the mixer offline (`Mixer::OpenOffline`), with the
-OpenAL Soft reverb on its loopback device as in the game, and sets each
-voice's levels the way `mss32.cpp`'s `ApplyEax` does. Render at the rate
-the hardware was recorded at. Renders are 32-bit float WAVs.
-`--miles-version 6.5|6.1` picks whose Fast 2D the fast2d set follows
-(default 6.5, msssoft.m3d; 6.1 is Mssfast.m3d's); the EAX sets always
-position by the 6.1c rule, as `mss32.cpp` does.
+options (default: fast2d, ds3dhw, eax1, eax2 and eax3, every case). It
+opens no audio device: it pulls the mixer offline (`Mixer::OpenOffline`),
+with the OpenAL Soft reverb on its loopback device as in the game, and
+sets each voice's levels the way `mss32.cpp`'s `ApplyEax` does. `ds3dhw`
+("DirectSound3D Hardware Support", which mss32.cpp does not offer) is the
+mixer's DirectSound3D pan and distance law alone, the one the EAX
+providers use. Render at the rate the hardware was recorded at. Renders
+are 32-bit float WAVs. `--miles-version 6.5|6.1` picks whose Fast 2D the
+fast2d set follows (default 6.5, msssoft.m3d; 6.1 is Mssfast.m3d's); the
+EAX and ds3dhw sets take the 6.1c gains, as `mss32.cpp` does for EAX.
 
 analyze.py needs numpy (scipy and matplotlib are not used). Either set
 can be analyzed alone (`--sim render` works before any hardware data
@@ -211,13 +213,20 @@ exists).
 
 It first checks the hardware recordings' EAX state: eaxcap's own
 mismatches, focus losses, input overruns and missing sync clicks, and
-(with `--sim`) every property read back from the hardware against the
-render's, which starts every case fresh. A property that differs and has
-the previous recording's value was carried over; those cases are listed
-as an `eaxcap --provider ... --cases ...` line to record again. This also
-works on manifests from the first eaxcap.exe, which did not reset the EAX
-state between cases (without `--sim` it can only catch a property the
-previous case set).
+every property read back against what the case intended: the provider's
+own read-back of the case's environment (its `env_*` recording, which
+sets nothing on top) with the case's properties applied. A property that
+differs and has the previous recording's value was carried over; those
+cases are listed as an `eaxcap --provider ... --cases ...` line to record
+again. This also works on manifests from the first eaxcap.exe, which did
+not reset the EAX state between cases. Read-backs that are no state
+problem are accepted: vectors Miles does not return (the EAX 3 pans read
+`[-1, 3.4e38, 3.4e38]`: Miles' -1 in the first word, eaxcap's 0x7F fill
+after it) count as unreadable, and EAX 3.0's environment reads 26
+(`EAX_ENVIRONMENT_UNDEFINED`) once a listener property was set on top of
+it. With `--sim`, read-backs that differ from the render's are listed
+separately: they show where the model reports a different state than
+the hardware, not a bad recording.
 
 For each recording it then finds the sync click (the first sound after
 the samples were started), places the stimulus 0.25 s after it,
@@ -246,9 +255,12 @@ A summary of hardware-minus-render differences of the relative metrics
 every metric (per octave band too) in long format; `--plot` writes SVG
 energy decay curves and magnitude responses per case.
 
-Known property of the renderer, visible in the onset column: the reverb
-starts 256 frames (5.3 ms at 48 kHz) late, the silence `reverb.cpp`
-queues ahead of each bus.
+Balance (R-L) is capped at +-50 dB: beyond that a channel is silent for
+the comparison (the hardware's far channel sits at its crosstalk, about
+-55 dB, the render's at nothing).
+
+What the renderer still does differently from an Audigy 2 ZS is listed in
+ARCHITECTURE.md (audio, "Measured against hardware").
 
 ## Running eaxcap.exe through x86recomp (later)
 
