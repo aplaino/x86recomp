@@ -853,8 +853,8 @@ bool InsnEmitter::EmitX87Fast(X87Sim& sim) {
               o.c_str(), x.c_str(), b * 8, rd_mem(b).c_str()));
       } else {
         if (b != 4 && b != 8) return false;
-        L(Fmt("const auto r = %s::ArithF%d%s(rcw, %s, %s, %s);", R, b * 8,
-              b == 4 ? "Fast" : "", o.c_str(), x.c_str(), rd_mem(b).c_str()));
+        L(Fmt("const auto r = %s::ArithF%dFast(rcw, %s, %s, %s);", R, b * 8, o.c_str(),
+              x.c_str(), rd_mem(b).c_str()));
       }
       sim.Write(0);
       take(x);
@@ -884,8 +884,7 @@ bool InsnEmitter::EmitX87Fast(X87Sim& sim) {
         std::string dst = sim.Push();
         L(Fmt("%s = %s::ToV(::recomp::lift::RdF80(B, m%d));", dst.c_str(), R, mem));
       } else if (b == 4 || b == 8) {
-        L(Fmt("const auto r = %s::LoadF%d%s(%s);", R, b * 8, b == 4 ? "Fast" : "",
-              rd_mem(b).c_str()));
+        L(Fmt("const auto r = %s::LoadF%dFast(%s);", R, b * 8, rd_mem(b).c_str()));
         std::string dst = sim.Push();
         L(Fmt("%s = %s::Val(r); rfl |= %s::Flags(r);", dst.c_str(), R, R));
       } else {
@@ -922,8 +921,7 @@ bool InsnEmitter::EmitX87Fast(X87Sim& sim) {
         switch (Bytes(mem)) {
           case 4:
           case 8:
-            L(Fmt("const auto r = %s::StoreF%d%s(rcw, %s);", R, Bytes(mem) * 8,
-                  Bytes(mem) == 4 ? "Fast" : "", x.c_str()));
+            L(Fmt("const auto r = %s::StoreF%dFast(rcw, %s);", R, Bytes(mem) * 8, x.c_str()));
             L(Fmt("::recomp::lift::Wr<%s>(B, m%d, %s(r.bits));", MemType(Bytes(mem)), mem,
                   MemType(Bytes(mem))));
             stored();
@@ -984,17 +982,17 @@ bool InsnEmitter::EmitX87Fast(X87Sim& sim) {
                    m == ZYDIS_MNEMONIC_FUCOMPP;
       std::string a = sim.Read(0);
       if (m == ZYDIS_MNEMONIC_FTST) {
-        L(Fmt("const uint32_t r = %s::Compare(%s, %s::V{0, 0}, false);", R, a.c_str(), R));
+        L(Fmt("const uint32_t r = %s::CompareFast(%s, %s::V{0, 0}, false);", R, a.c_str(), R));
       } else if (mem >= 0) {
         int b = Bytes(mem);
         if (b != 4 && b != 8) return false;
-        L(Fmt("const uint32_t r = %s::CompareF%d(%s, %s);", R, b * 8, a.c_str(),
+        L(Fmt("const uint32_t r = %s::CompareF%dFast(%s, %s);", R, b * 8, a.c_str(),
               rd_mem(b).c_str()));
       } else {
         int i = (m == ZYDIS_MNEMONIC_FCOMPP || m == ZYDIS_MNEMONIC_FUCOMPP)
                     ? 1 : (Nvis() ? St(Nvis() - 1) : 1);
         std::string b = sim.Read(i);
-        L(Fmt("const uint32_t r = %s::Compare(%s, %s, %s);", R, a.c_str(), b.c_str(),
+        L(Fmt("const uint32_t r = %s::CompareFast(%s, %s, %s);", R, a.c_str(), b.c_str(),
               quiet ? "true" : "false"));
       }
       L("rcc = r & 0x4500u; rfl |= r >> 16;");
@@ -1759,7 +1757,7 @@ std::map<uint32_t, uint32_t> Emitter::FindX87Runs(const Function& f,
       auto nx = std::next(j);
       if (nx == f.insns.end() || nx->first != in.next() || p_.Splits(in.next())) break;
     }
-    if (count >= 3) {
+    if (count >= 1) {
       runs[first.va] = last->first;
       it = last;
     }
@@ -1794,20 +1792,19 @@ void Emitter::EmitX87Run(const Function& f, std::map<uint32_t, Insn>::const_iter
       o += Fmt("  ::recomp::x87::run::V %s{};\n", X87Sim::Var(k).c_str());
   }
   o += body;
-  // Write back: registers assigned in the run, tags of the slots it
-  // touched, TOP, and the status word (sticky flags, C1, C3/C2/C0).
-  o += "  uint32_t rtw = c.fpu.tw;\n";
+  // Write back: registers assigned in the run, the empty bits of the
+  // slots it touched, TOP, and the status word (sticky flags, C1,
+  // C3/C2/C0).
+  uint32_t set = 0, clear = 0;  // entry-relative (k & 7)
   for (int k : sim.touched) {
-    std::string p = Fmt("((rtop + %du) & 7u)", unsigned(k & 7));
     if (sim.written.count(k))
-      o += Fmt("  c.fpu.r[%s] = ::recomp::x87::run::ToF80(%s);\n", p.c_str(), X87Sim::Var(k).c_str());
-    std::string tag = sim.slots[k] == X87Sim::Slot::Empty
-                          ? std::string("3u")
-                          : Fmt("::recomp::x87::run::Tag(%s)", X87Sim::Var(k).c_str());
-    o += Fmt("  rtw = (rtw & ~(3u << (2u * %s))) | (%s << (2u * %s));\n", p.c_str(),
-             tag.c_str(), p.c_str());
+      o += Fmt("  c.fpu.r[(rtop + %du) & 7u] = ::recomp::x87::run::ToF80(%s);\n",
+               unsigned(k & 7), X87Sim::Var(k).c_str());
+    (sim.slots[k] == X87Sim::Slot::Empty ? set : clear) |= 1u << (k & 7);
   }
-  o += "  c.fpu.tw = rtw;\n";
+  if (set | clear)
+    o += Fmt("  c.fpu.empty = uint8_t((c.fpu.empty & ~::recomp::x87::run::Rotl8(0x%02Xu, rtop)) | "
+             "::recomp::x87::run::Rotl8(0x%02Xu, rtop));\n", set | clear, set);
   o += Fmt("  c.fpu.top = uint8_t((rtop + %du) & 7u);\n", unsigned(sim.off & 7));
   o += Fmt("  c.fpu.sw = uint16_t(%s);\n", sim.StatusExpr().c_str());
   o += "  } else {\n";

@@ -252,9 +252,13 @@ D3D changes the control word), so the FPU is modelled exactly, not
 mapped to double.
 
 Model per thread: 8 registers of 80 bits (sign, 15-bit exponent,
-64-bit explicit-integer mantissa), TOP, tag word, control word (PC, RC,
-exception masks) and status word (C0-C3, sticky exception flags, stack
-fault). Semantics to honour:
+64-bit explicit-integer mantissa), TOP, an empty bit per register,
+control word (PC, RC, exception masks) and status word (C0-C3, sticky
+exception flags, stack fault). The other tags (valid, zero, special) are
+not stored: they always equal the class of the register's contents
+(every write sets it, and FLDENV/FRSTOR keep only "empty" from the
+image), so the tag word is derived when FNSTENV/FNSAVE store it;
+x87_test compares stored tag words with the CPU's. Semantics to honour:
 - PC rounds the significand of fadd/fsub/fmul/fdiv/fsqrt (and their
   pop/reverse/integer-operand forms) to 24/53/64 bits while the exponent
   keeps the full 15-bit range (so PC=24 does not flush to float range).
@@ -281,21 +285,32 @@ SoftFloat path they bypass, which stays the reference
 against the hardware):
 - add/sub/mul/div of normal or zero operands: exact 128-bit result,
   rounded by the model's RoundPack;
-- PC=24 add/sub/mul of two 24-bit significands (any RC): exact in 64
-  bits (`run::Fast24`, shared with lifted runs);
-- FST m32/m64 of values that stay normal;
+- the two modes games run in, with the operands they produce, inline
+  (`run::Fast24` and `run::FastWide`, x87.h, shared by the model and
+  lifted runs): PC=24 (any RC) add/sub/mul/div of 24-bit significands,
+  exact in 64 bits (a quotient keeps its remainder as the sticky bit),
+  and of up to 53-bit ones (m64 operands); PC=53 (any RC, Windows'
+  default) add/sub/mul/div of up to 53-bit significands (m32/m64 loads
+  and PC=53 results), exact in 128 bits. A zero operand is exact. They
+  give up (to the paths above) on specials, denormals, exponents too far
+  apart, results leaving the normal range and division by zero;
+- FLD/FST m32/m64 of zero and normal values (FST rounding with RC, the
+  result staying normal), and FCOM of zero and normal values (an integer
+  compare of exponent and significand), inline;
 - fsin/fcos/fsincos: series in 128-bit fixed point, used only when the
   result is further than 2^-100 from any rounding boundary.
 
 ### x87 runs (lifter)
 Calling the model per instruction made every instruction a serial
-read-modify-write of TOP, the tag word and the status word in memory,
+read-modify-write of TOP, the empty bits and the status word in memory,
 and games run millions of x87 instructions per frame (CPU skinning,
 particles). The lifter therefore turns straight-line x87 code into runs:
 - A run is a stretch of one basic block (no labels inside, no calls or
-  branches; other instructions may be interleaved) with at least three
-  x87 instructions, all of a supported subset (loads, stores, the
-  arithmetic forms, fxch, fchs, fabs, fsqrt, fcom family, ftst, fnstsw).
+  branches; other instructions may be interleaved) of x87 instructions
+  of a supported subset (loads, stores, the arithmetic forms, fxch,
+  fchs, fabs, fsqrt, fcom family, ftst, fnstsw). A single instruction is
+  a run too: its guard and write-back cost less than the State-based
+  call.
 - A symbolic stack (X87Sim) resolves every st(i) to an entry-relative
   slot at lift time; slots become locals (`run::V`, padding-free so they
   stay in registers), fxch and fld st(i) become copies.
@@ -306,11 +321,20 @@ particles). The lifter therefore turns straight-line x87 code into runs:
   operations use) give exactly the per-instruction results; sticky flags,
   C1 and C3/C2/C0 are tracked in locals; fnstsw inside a run builds the
   status word from them.
-- At the end the registers, tags, TOP and status word are written back.
-  If the guard fails the original per-instruction code runs instead
-  (it is emitted in the else branch).
-- Common PC=24 operations, m32 loads and exact m32 stores are inlined
-  into the lifted code; the rest are calls.
+- At the end the registers, empty bits, TOP and status word are written
+  back. If the guard fails the original per-instruction code runs
+  instead (it is emitted in the else branch).
+- The fast paths above (arithmetic in the two common modes, m32/m64
+  loads and stores, compares) are inlined into the lifted code; the
+  rest are calls.
+- The control word has a 32-bit field of its own: a run's write-back
+  stores the status word, the next run's guard loads the control word,
+  and a load widened over both missed store forwarding (5% of a hot
+  function).
+- What a run costs now is the latency of its dependent operations
+  (about 5 ns each through the integer paths, against ~1 ns for host
+  doubles), not the guard and write-back (~2.5 ns per run), so keeping
+  values in locals across branches would gain little.
 - <ID>_X87_RUNS=0 disables runs at run time (A/B checks).
 - Known difference from hardware, the same one lifted integer registers
   already have: while a run is in flight its state is in locals, so a

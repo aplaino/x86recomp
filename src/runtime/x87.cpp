@@ -665,16 +665,16 @@ Q Poly(const QBits (&c)[N], Q z) {
 // --- state helpers ---------------------------------------------------
 
 int Phys(const State& s, int i) { return (s.top + i) & 7; }
-int TagOfPhys(const State& s, int p) { return (s.tw >> (2 * p)) & 3; }
-bool Empty(const State& s, int i) { return TagOfPhys(s, Phys(s, i)) == 3; }
-void SetTag(State& s, int p, int tag) {
-  s.tw = static_cast<uint16_t>((s.tw & ~(3u << (2 * p))) | (tag << (2 * p)));
+bool EmptyPhys(const State& s, int p) { return (s.empty >> p) & 1; }
+bool Empty(const State& s, int i) { return EmptyPhys(s, Phys(s, i)); }
+void SetEmpty(State& s, int p, bool empty) {
+  s.empty = static_cast<uint8_t>((s.empty & ~(1u << p)) | (unsigned(empty) << p));
 }
 F80 Get(const State& s, int i) { return s.r[Phys(s, i)]; }
 void Put(State& s, int i, F80 v) {
   int p = Phys(s, i);
   s.r[p] = v;
-  SetTag(s, p, int(run::Tag(run::ToV(v))));
+  SetEmpty(s, p, false);
 }
 void SetC1(State& s, bool on) {
   s.sw = static_cast<uint16_t>(on ? (s.sw | kC1) : (s.sw & ~kC1));
@@ -707,7 +707,7 @@ void Underflow(State& s) {
 }
 
 bool PushSlotFull(const State& s) {
-  return TagOfPhys(s, (s.top + 7) & 7) != 3;
+  return !EmptyPhys(s, (s.top + 7) & 7);
 }
 
 void PushRaw(State& s, F80 v) {
@@ -766,13 +766,27 @@ constexpr bool IsNormal(F80 v) {
 }
 constexpr bool IsNormalOrZero(F80 v) { return IsNormal(v) || IsZero(v); }
 
-// The PC=24 core is run::Fast24 (x87.h), shared with lifted runs.
+// The PC=24 and PC=53 cores are run::Fast24 and run::FastWide (x87.h),
+// shared with lifted runs.
+X87_INLINE run::FOp CoreOp(MathOp op) {
+  switch (op) {
+    case MathOp::Add: return run::FOp::Add;
+    case MathOp::Sub: return run::FOp::Sub;
+    case MathOp::Mul: return run::FOp::Mul;
+    case MathOp::Div: return run::FOp::Div;
+  }
+  return run::FOp::Add;
+}
 X87_INLINE bool Fast24(int rc, MathOp op, F80 a, F80 b, Result* r) {
-  if (op == MathOp::Div) return false;
   run::RV rv;
-  run::F24Op o = op == MathOp::Add ? run::F24Op::Add
-               : op == MathOp::Sub ? run::F24Op::Sub : run::F24Op::Mul;
-  if (!run::Fast24(o, rc, run::ToV(a), run::ToV(b), &rv)) return false;
+  if (!run::Fast24(CoreOp(op), rc, run::ToV(a), run::ToV(b), &rv)) return false;
+  *r = {run::ToF80(run::Val(rv)), uint16_t(run::Flags(rv)), run::Up(rv)};
+  return true;
+}
+template <int kPrec>
+X87_INLINE bool FastWide(int rc, MathOp op, F80 a, F80 b, Result* r) {
+  run::RV rv;
+  if (!run::FastWide<kPrec>(CoreOp(op), rc, run::ToV(a), run::ToV(b), &rv)) return false;
   *r = {run::ToF80(run::Val(rv)), uint16_t(run::Flags(rv)), run::Up(rv)};
   return true;
 }
@@ -784,7 +798,10 @@ X87_INLINE bool Fast24(int rc, MathOp op, F80 a, F80 b, Result* r) {
 X87_INLINE Result FastArith(uint32_t cw, MathOp op, F80 a, F80 b) {
   if ((cw & 0x0300) == 0) {  // PC=24
     Result r;
-    if (Fast24(RcOf(cw), op, a, b, &r)) return r;
+    if (Fast24(RcOf(cw), op, a, b, &r) || FastWide<24>(RcOf(cw), op, a, b, &r)) return r;
+  } else if ((cw & 0x0300) == 0x0200) {  // PC=53
+    Result r;
+    if (FastWide<53>(RcOf(cw), op, a, b, &r)) return r;
   }
   const int rc = RcOf(cw), prec = PrecBits(cw);
   int32_t ea = ExpOf(a), eb = ExpOf(b);
@@ -1294,7 +1311,7 @@ Result Inexact(F80 v, uint16_t extra) {
 void Init(State& s) {
   s.cw = 0x037F;
   s.sw = 0;
-  s.tw = 0xFFFF;
+  s.empty = 0xFF;
   s.top = 0;
   s.fip = s.fdp = 0;
   s.fop = 0;
@@ -1302,7 +1319,7 @@ void Init(State& s) {
 
 uint16_t StatusWord(const State& s) { return run::StatusWordOf(s.sw, s.top, s.cw); }
 
-uint16_t ControlWord(const State& s) { return s.cw; }
+uint16_t ControlWord(const State& s) { return static_cast<uint16_t>(s.cw); }
 
 void SetControlWord(State& s, uint16_t cw) {
   Wait(s);
@@ -1314,7 +1331,12 @@ void ClearExceptions(State& s) {
   s.sw &= static_cast<uint16_t>(~(kExceptionMask | kSF | kES | kBusy));
 }
 
-uint16_t TagWord(const State& s) { return s.tw; }
+uint16_t TagWord(const State& s) {
+  uint32_t tw = 0;
+  for (int p = 0; p < 8; ++p)
+    tw |= (EmptyPhys(s, p) ? 3u : run::Tag(run::ToV(s.r[p]))) << (2 * p);
+  return static_cast<uint16_t>(tw);
+}
 
 // --- loads -----------------------------------------------------------
 
@@ -1367,7 +1389,7 @@ void LoadSt(State& s, int i) {
   SetC1(s, false);
   if (!CheckPush(s)) {
     // An empty source is also reported (C1 = 0) when the stack overflows.
-    if (TagOfPhys(s, Phys(s, i + 1)) == 3) SetC1(s, false);
+    if (Empty(s, i + 1)) SetC1(s, false);
     return;
   }
   if (Empty(s, i)) {
@@ -1421,31 +1443,14 @@ void LoadConst(State& s, Const k) { LoadExact(s, ConstOf(s.cw, k)); }
 
 // --- stores ----------------------------------------------------------
 
-// FST m32/m64 of zero or of a normal value that rounds to a normal one,
-// in integers: `mant` stored fraction bits, `bias`/`emax` of the format.
-// False sends the value through SoftFloat (overflow, underflow, specials).
+// FST m32/m64 in integers: run::StoreCore (x87.h), shared with lifted
+// runs. False sends the value through SoftFloat (overflow, underflow,
+// specials).
 X87_INLINE bool FastStore(uint32_t cw, F80 v, int mant, int bias, int emax, Stored* out) {
   if (g_softfloat_only) return false;
-  bool sign = SignOf(v);
-  const int width = mant + 1 + (bias == 127 ? 8 : 11);
-  if (IsZero(v)) {
-    *out = {uint64_t(sign) << (width - 1), 0, false};
-    return true;
-  }
-  if (!IsNormal(v)) return false;
-  int32_t e = ExpOf(v) - 0x3FFF + bias;
-  if (e < 1 || e > emax) return false;
-  const int drop = 63 - mant;
-  uint64_t keep = v.sig >> drop, rest = v.sig & ((1ull << drop) - 1);
-  bool inc = RpInc(RcOf(cw), sign, keep, rest << (64 - drop));
-  if (inc && ++keep == (2ull << mant)) {
-    keep >>= 1;
-    if (++e > emax) return false;  // overflow
-  }
-  out->bits = uint64_t(sign) << (width - 1) | uint64_t(e) << mant |
-              (keep & ((1ull << mant) - 1));
-  out->flags = rest ? kPE : 0;
-  out->up = rest && inc;
+  run::SV sv;
+  if (!run::StoreCore(cw, run::ToV(v), mant, bias, emax, &sv)) return false;
+  *out = {sv.bits, uint16_t(run::Flags(sv)), run::Up(sv)};
   return true;
 }
 
@@ -1527,7 +1532,7 @@ int32_t StoreI32(State& s) {
 int64_t StoreI64(State& s) { return StoreInt(s, INT64_MIN, INT64_MAX); }
 
 void Pop(State& s) {
-  SetTag(s, Phys(s, 0), 3);
+  SetEmpty(s, Phys(s, 0), true);
   s.top = (s.top + 1) & 7;
 }
 
@@ -2385,7 +2390,7 @@ void CopySt(State& s, int i) {
 void Free(State& s, int i) {
   Wait(s);
   SetC1(s, false);
-  SetTag(s, Phys(s, i), 3);
+  SetEmpty(s, Phys(s, i), true);
 }
 
 void IncStp(State& s) {
@@ -2440,12 +2445,9 @@ void ReadEnv(State& s, const uint8_t* in) {
   s.fop = static_cast<uint16_t>((Get32(in + 16) >> 16) & 0x7FF);
   s.fdp = Get32(in + 20);
   // Only "empty" survives a load; the processor recomputes the class of
-  // every other register from its contents.
-  s.tw = 0;
-  for (int p = 0; p < 8; ++p) {
-    int tag = ((tw >> (2 * p)) & 3) == 3 ? 3 : int(run::Tag(run::ToV(s.r[p])));
-    SetTag(s, p, tag);
-  }
+  // every other register from its contents (State::empty).
+  s.empty = 0;
+  for (int p = 0; p < 8; ++p) SetEmpty(s, p, ((tw >> (2 * p)) & 3) == 3);
 }
 
 }  // namespace
@@ -2506,7 +2508,7 @@ uint32_t Compared(F80 a, F80 b, bool quiet, bool b_denormal) {
 }
 }  // namespace
 
-// The inline *Fast forms in x87.h have already tried Fast24.
+// The inline *Fast forms in x87.h have already tried the fast cores.
 RV Arith(uint32_t cw, Op op, V dv, V sv) {
   return Pack(DoOp(cw, op, ToF80(dv), ToF80(sv), false));
 }
