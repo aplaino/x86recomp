@@ -63,6 +63,33 @@ std::vector<std::array<float, 2>> LowPassTable(int rate) {
   return t;
 }
 
+// The low-pass EAX hardware puts on a reverb send whose 5 kHz level is
+// below its LF level: broader than the direct path's. Fitted to the
+// Audigy 2 ZS's reverb spectra under room HF, occlusion and exclusion
+// (within about 1 dB from 250 Hz to 8 kHz): one real pole takes the
+// first kSendPoleDb of the cut at 5 kHz, a second the rest.
+constexpr double kSendPoleDb = 15.0;
+
+// The one-pole low-pass pole p (1 - p z^-1) with gain t at 5 kHz.
+double OnePole(double t, double rate) {
+  if (!(t < 1.0)) return 0.0;
+  double w = 2 * kPi * 5000.0 / rate, c = std::cos(w), t2 = t * t;
+  // |(1 - p) / (1 - p e^-jw)|^2 = t^2, the root in [0, 1).
+  double b = 1.0 - t2 * c, q = 1.0 - t2;
+  return (b - std::sqrt(std::max(b * b - q * q, 0.0))) / q;
+}
+
+std::vector<std::array<float, 2>> SendLowPassTable(int rate) {
+  std::vector<std::array<float, 2>> t(kLowPassSteps + 1, {0.0f, 0.0f});
+  for (int i = 1; i <= kLowPassSteps; i++) {
+    double cut = i / 10.0;  // dB at 5 kHz
+    double p1 = OnePole(std::pow(10.0, -std::min(cut, kSendPoleDb) / 20.0), rate);
+    double p2 = OnePole(std::pow(10.0, -std::max(cut - kSendPoleDb, 0.0) / 20.0), rate);
+    t[i] = {float(-(p1 + p2)), float(p1 * p2)};
+  }
+  return t;
+}
+
 Vec3 Sub(const Vec3& a, const Vec3& b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
 float Dot(const Vec3& a, const Vec3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 Vec3 Cross(const Vec3& a, const Vec3& b) {
@@ -169,6 +196,7 @@ void Mixer::OpenOffline(int rate) {
 void Mixer::Init(int rate) {
   rate_ = rate;
   low_pass_ = LowPassTable(rate);
+  send_low_pass_ = SendLowPassTable(rate);
   reverb_.Open(rate);
   // The reverb's ring is whole mixer fragments; ours are chunks.
   digital_.Open(rate, kChunk);
@@ -312,8 +340,8 @@ void Mixer::MixVoice(Voice& v, float* out, int frames, bool reverb) {
   // Low-pass targets; levels and coefficients ramp across the chunk like
   // the gains (a straight line between two stable pole pairs stays stable).
   float da[2], sa[kB][2];
-  LowPass(v.direct_lf, v.direct_hf, da);
-  for (int b = 0; b < kB; b++) LowPass(v.send_lf[b], v.send_hf[b], sa[b]);
+  LowPass(low_pass_, v.direct_lf, v.direct_hf, da);
+  for (int b = 0; b < kB; b++) LowPass(send_low_pass_, v.send_lf[b], v.send_hf[b], sa[b]);
   auto settle = [&] {
     v.cur_l_ = tl;
     v.cur_r_ = tr;
@@ -339,7 +367,7 @@ void Mixer::MixVoice(Voice& v, float* out, int frames, bool reverb) {
                 v.cur_da_[0] != 0 || v.cur_da_[1] != 0;
   bool sending[kB];
   for (int b = 0; b < kB; b++) {
-    sending[b] = has_reverb() && (v.send_lf[b] > 0 || v.cur_slf_[b] > 0);
+    sending[b] = v.send_lf[b] > 0 || v.cur_slf_[b] > 0;
     banded |= sending[b];
   }
   float ddlf = (v.direct_lf - v.cur_dlf_) / frames;
@@ -429,31 +457,29 @@ void Mixer::MixVoice(Voice& v, float* out, int frames, bool reverb) {
   settle();
 }
 
-void Mixer::LowPass(float lf, float hf, float* a) const {
+void Mixer::LowPass(const std::vector<std::array<float, 2>>& table, float lf, float hf,
+                    float* a) const {
   a[0] = a[1] = 0;
-  if (!(lf > 0) || !(hf < lf) || low_pass_.empty()) return;
+  if (!(lf > 0) || !(hf < lf) || table.empty()) return;
   float steps = hf > 0 ? -200.0f * std::log10(hf / lf) : float(kLowPassSteps);
   steps = std::min(steps, float(kLowPassSteps));
   int i = std::min(int(steps), kLowPassSteps - 1);
   float t = steps - float(i);
-  a[0] = low_pass_[i][0] + (low_pass_[i + 1][0] - low_pass_[i][0]) * t;
-  a[1] = low_pass_[i][1] + (low_pass_[i + 1][1] - low_pass_[i][1]) * t;
+  a[0] = table[i][0] + (table[i + 1][0] - table[i][0]) * t;
+  a[1] = table[i][1] + (table[i + 1][1] - table[i][1]) * t;
 }
 
 void Mixer::Mix(float* out, int frames) {
   std::memset(out, 0, sizeof(float) * 2 * frames);
   std::lock_guard<std::mutex> l(mu_);
-  if (has_reverb())
-    for (auto& s : sends_) s.assign(size_t(frames) * 2, 0.0f);
+  for (auto& s : sends_) s.assign(size_t(frames) * 2, 0.0f);
   bool reverb = digital_.Begin(now_ms());
   if (reverb) wet_.assign(size_t(frames), 0.0f);
   for (Voice* v : voices_)
     if (v->state == Voice::State::Playing) MixVoice(*v, out, frames, reverb);
-  if (has_reverb()) {
-    const float* sends[Reverb::kBuses];
-    for (int b = 0; b < Reverb::kBuses; b++) sends[b] = sends_[b].data();
-    reverb_.Render(sends, out, frames);
-  }
+  const float* sends[Reverb::kBuses];
+  for (int b = 0; b < Reverb::kBuses; b++) sends[b] = sends_[b].data();
+  reverb_.Render(sends, out, frames);
   // The digital reverb works on Miles' 32-bit mix scale.
   if (reverb) {
     wet_int_.resize(size_t(frames));

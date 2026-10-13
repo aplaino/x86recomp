@@ -1,6 +1,6 @@
 # EAX capture: real Creative hardware vs x86recomp
 
-x86recomp renders Miles' EAX providers with OpenAL Soft's EFX reverb
+x86recomp renders Miles' EAX providers with its own environmental reverb
 (`src/runtime/audio`). There is no exact reference for what Creative's
 cards did with the same EAX properties, so this directory measures it:
 
@@ -198,7 +198,7 @@ python3 -I tools/eax_capture/analyze.py --hw capture --sim render --tsv report.t
 eax_render takes the same `--provider`, `--rate`, `--cases` and `--stim`
 options (default: fast2d, ds3dhw, eax1, eax2 and eax3, every case). It
 opens no audio device: it pulls the mixer offline (`Mixer::OpenOffline`),
-with the OpenAL Soft reverb on its loopback device as in the game, and
+with the reverb as in the game, and
 sets each voice's levels the way `mss32.cpp`'s `ApplyEax` does. `ds3dhw`
 ("DirectSound3D Hardware Support", which mss32.cpp does not offer) is the
 mixer's DirectSound3D pan and distance law alone, the one the EAX

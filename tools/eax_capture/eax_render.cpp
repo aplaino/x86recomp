@@ -1,7 +1,7 @@
 // eax_render: renders the capture cases (cases.c) with x86recomp's own
 // audio path, driven the way mss32.cpp drives it for Miles' Fast 2D and EAX
 // providers: EAX properties -> per-voice direct and reverb-send levels ->
-// the mixer -> OpenAL Soft's reverb. Writes what eaxcap.exe records from
+// the mixer and its reverb. Writes what eaxcap.exe records from
 // real hardware (a WAV and a JSON manifest per case and stimulus, plus the
 // stimuli) so analyze.py can compare the two. Offline: the mixer is pulled
 // directly and no audio device is opened. "DirectSound3D Hardware Support"
@@ -15,8 +15,6 @@
 // --miles-version picks whose Fast 2D the fast2d set renders: Miles 6.5's
 // (msssoft.m3d, the default: eaxcap.exe records the Miles a game ships,
 // e.g. 6.5e) or 6.1c's (Mssfast.m3d).
-
-#include <AL/al.h>
 
 #include <algorithm>
 #include <cmath>
@@ -299,8 +297,6 @@ void InitVoice(audio::Voice& v, const audio::Bytes& image, const float* pos, con
   v.state = audio::Voice::State::Playing;
 }
 
-std::string g_al_version;
-
 void Render(const Options& o, const char* provider, const std::string& tag, int ver,
             const EcCase& c, const Stim& st, const audio::Bytes& sync_image,
             const fs::path& dir) {
@@ -360,14 +356,9 @@ void Render(const Options& o, const char* provider, const std::string& tag, int 
   // A fresh mixer per recording: nothing carries over between cases.
   audio::Mixer m;
   m.OpenOffline(rate);
-  if (ver && !m.has_reverb()) {
-    std::fprintf(stderr, "error: no OpenAL Soft reverb; cannot render EAX\n");
-    std::exit(1);
-  }
   m.set_master(1.0f);
   m.SetListener({0, 0, 0}, {0, 0, 1}, {0, 1, 0});
   if (ver) m.SetReverb(kBusEax, eax::ToReverb(l, ver));
-  if (g_al_version.empty() && ver) g_al_version = alGetString(AL_VERSION);
 
   // EAX voices take the 6.1c gains (DS3D positioning), as mss32.cpp does;
   // so does ds3dhw.
@@ -417,7 +408,7 @@ void Render(const Options& o, const char* provider, const std::string& tag, int 
   j.Num("record_frames", double(total));
   j.Num("started_at_frame", double(preroll));
   j.Num("peak_dbfs", peak_db);
-  j.Str("renderer", "x86recomp recomp_audio, OpenAL Soft " + g_al_version);
+  j.Str("renderer", "x86recomp recomp_audio");
   j.Close('}');
   j.Text("\n");
 

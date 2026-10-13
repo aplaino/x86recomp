@@ -1,7 +1,5 @@
 #include "runtime/audio/eax.h"
 
-#include <AL/efx-presets.h>
-
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -11,28 +9,54 @@ namespace recomp::audio::eax {
 
 namespace {
 
-// OpenAL Soft's EFX versions of the EAX environment presets, in
-// environment order. EFX keeps density instead of EAX's environment size
-// (density = size^3 / 16, capped at 1), so the sizes are listed too.
-const EFXEAXREVERBPROPERTIES kPresets[kEnvironments] = {
-    EFX_REVERB_PRESET_GENERIC,         EFX_REVERB_PRESET_PADDEDCELL,
-    EFX_REVERB_PRESET_ROOM,            EFX_REVERB_PRESET_BATHROOM,
-    EFX_REVERB_PRESET_LIVINGROOM,      EFX_REVERB_PRESET_STONEROOM,
-    EFX_REVERB_PRESET_AUDITORIUM,      EFX_REVERB_PRESET_CONCERTHALL,
-    EFX_REVERB_PRESET_CAVE,            EFX_REVERB_PRESET_ARENA,
-    EFX_REVERB_PRESET_HANGAR,          EFX_REVERB_PRESET_CARPETEDHALLWAY,
-    EFX_REVERB_PRESET_HALLWAY,         EFX_REVERB_PRESET_STONECORRIDOR,
-    EFX_REVERB_PRESET_ALLEY,           EFX_REVERB_PRESET_FOREST,
-    EFX_REVERB_PRESET_CITY,            EFX_REVERB_PRESET_MOUNTAINS,
-    EFX_REVERB_PRESET_QUARRY,          EFX_REVERB_PRESET_PLAIN,
-    EFX_REVERB_PRESET_PARKINGLOT,      EFX_REVERB_PRESET_SEWERPIPE,
-    EFX_REVERB_PRESET_UNDERWATER,      EFX_REVERB_PRESET_DRUGGED,
-    EFX_REVERB_PRESET_DIZZY,           EFX_REVERB_PRESET_PSYCHOTIC,
+// The EAX environment presets as the Audigy 2 ZS reports them: each
+// environment's listener read back through Miles 6.5e's EAX 3 provider
+// right after "EAX environment selection" (eaxcap, capture
+// audigy2zs_win98se, eax3/env_NN_*.json "listener_readback"; the EAX 2
+// provider reads back the same). Every environment also reads room
+// -1000 mB, room LF 0 mB, decay LF ratio 1, air absorption -5 mB/m, HF
+// and LF references 5000 and 250 Hz and room rolloff 0. The pans are
+// not readable through Miles (it fills in -1 and nothing else) and are
+// taken as centred.
+struct PresetValues {
+  float size, diffusion;
+  int32_t room_hf;
+  float decay, hf_ratio;
+  int32_t reflections;
+  float reflections_delay;
+  int32_t reverb;
+  float reverb_delay, echo_time, echo_depth, modulation_time, modulation_depth;
+  uint32_t flags;
 };
-const float kSizes[kEnvironments] = {
-    7.5f, 1.4f, 1.9f, 1.4f, 2.5f, 11.6f, 21.6f, 19.6f, 14.6f, 36.2f,
-    50.3f, 1.9f, 1.8f, 13.5f, 7.5f, 38.0f, 7.5f, 100.0f, 17.5f, 42.5f,
-    8.3f, 1.7f, 1.8f, 1.9f, 1.8f, 1.0f,
+const PresetValues kPresets[kEnvironments] = {
+    {7.5f, 1.0f, -100, 1.49f, 0.83f, -2602, 0.007f, 200, 0.011f, 0.25f, 0.0f, 0.25f, 0.0f, 0x3F},
+    {1.4f, 1.0f, -6000, 0.17f, 0.1f, -1204, 0.001f, 207, 0.002f, 0.25f, 0.0f, 0.25f, 0.0f, 0x3F},
+    {1.9f, 1.0f, -454, 0.4f, 0.83f, -1646, 0.002f, 53, 0.003f, 0.25f, 0.0f, 0.25f, 0.0f, 0x3F},
+    {1.4f, 1.0f, -1200, 1.49f, 0.54f, -370, 0.007f, 1030, 0.011f, 0.25f, 0.0f, 0.25f, 0.0f, 0x3F},
+    {2.5f, 1.0f, -6000, 0.5f, 0.1f, -1376, 0.003f, -1104, 0.004f, 0.25f, 0.0f, 0.25f, 0.0f, 0x3F},
+    {11.6f, 1.0f, -300, 2.31f, 0.64f, -711, 0.012f, 83, 0.017f, 0.25f, 0.0f, 0.25f, 0.0f, 0x3F},
+    {21.6f, 1.0f, -476, 4.32f, 0.59f, -789, 0.02f, -289, 0.03f, 0.25f, 0.0f, 0.25f, 0.0f, 0x3F},
+    {19.6f, 1.0f, -500, 3.92f, 0.7f, -1230, 0.02f, -2, 0.029f, 0.25f, 0.0f, 0.25f, 0.0f, 0x3F},
+    {14.6f, 1.0f, 0, 2.91f, 1.3f, -602, 0.015f, -302, 0.022f, 0.25f, 0.0f, 0.25f, 0.0f, 0x1F},
+    {36.2f, 1.0f, -698, 7.24f, 0.33f, -1166, 0.02f, 16, 0.03f, 0.25f, 0.0f, 0.25f, 0.0f, 0x3F},
+    {50.3f, 1.0f, -1000, 10.05f, 0.23f, -602, 0.02f, 198, 0.03f, 0.25f, 0.0f, 0.25f, 0.0f, 0x3F},
+    {1.9f, 1.0f, -4000, 0.3f, 0.1f, -1831, 0.002f, -1630, 0.03f, 0.25f, 0.0f, 0.25f, 0.0f, 0x3F},
+    {1.8f, 1.0f, -300, 1.49f, 0.59f, -1219, 0.007f, 441, 0.011f, 0.25f, 0.0f, 0.25f, 0.0f, 0x3F},
+    {13.5f, 1.0f, -237, 2.7f, 0.79f, -1214, 0.013f, 395, 0.02f, 0.25f, 0.0f, 0.25f, 0.0f, 0x3F},
+    {7.5f, 0.3f, -270, 1.49f, 0.86f, -1204, 0.007f, -4, 0.011f, 0.125f, 0.95f, 0.25f, 0.0f, 0x3F},
+    {38.0f, 0.3f, -3300, 1.49f, 0.54f, -2560, 0.162f, -229, 0.088f, 0.125f, 1.0f, 0.25f, 0.0f,
+     0x3F},
+    {7.5f, 0.5f, -800, 1.49f, 0.67f, -2273, 0.007f, -1691, 0.011f, 0.25f, 0.0f, 0.25f, 0.0f, 0x3F},
+    {100.0f, 0.27f, -2500, 1.49f, 0.21f, -2780, 0.3f, -1434, 0.1f, 0.25f, 1.0f, 0.25f, 0.0f, 0x1F},
+    {17.5f, 1.0f, -1000, 1.49f, 0.83f, -10000, 0.061f, 500, 0.025f, 0.125f, 0.7f, 0.25f, 0.0f,
+     0x3F},
+    {42.5f, 0.21f, -2000, 1.49f, 0.5f, -2466, 0.179f, -1926, 0.1f, 0.25f, 1.0f, 0.25f, 0.0f, 0x3F},
+    {8.3f, 1.0f, 0, 1.65f, 1.5f, -1363, 0.008f, -1153, 0.012f, 0.25f, 0.0f, 0.25f, 0.0f, 0x1F},
+    {1.7f, 0.8f, -1000, 2.81f, 0.14f, 429, 0.014f, 1023, 0.021f, 0.25f, 0.0f, 0.25f, 0.0f, 0x3F},
+    {1.8f, 1.0f, -4000, 1.49f, 0.1f, -449, 0.007f, 1700, 0.011f, 0.25f, 0.0f, 1.18f, 0.348f, 0x3F},
+    {1.9f, 0.5f, 0, 8.39f, 1.39f, -115, 0.002f, 985, 0.03f, 0.25f, 0.0f, 0.25f, 1.0f, 0x1F},
+    {1.8f, 0.6f, -400, 17.23f, 0.56f, -1713, 0.02f, -613, 0.03f, 0.25f, 1.0f, 0.81f, 0.31f, 0x1F},
+    {1.0f, 0.5f, -151, 7.56f, 0.91f, -626, 0.02f, 774, 0.03f, 0.25f, 0.0f, 4.0f, 1.0f, 0x1F},
 };
 
 // EAX 1.0's effect volume and damping per environment, as the Audigy 2 ZS
@@ -105,16 +129,14 @@ void Put(uint8_t* p, int o, T v) {
   std::memcpy(p + o, &v, 4);
 }
 
-// EAX vectors are left-handed (DirectSound's), EFX's right-handed; the
-// conversion is its own inverse.
-void FlipZ(const float in[3], float out[3]) {
-  out[0] = in[0];
-  out[1] = in[1];
-  out[2] = -in[2];
-}
-
 int32_t ClampMb(float mb, int32_t lo, int32_t hi) {
   return std::clamp<int32_t>(int32_t(mb), lo, hi);
+}
+
+// How strongly the listener's air absorption acts on the reverb:
+// (|air| / 100 mB/m)^1.5 (see ToReverb).
+float AirOnReverb(const Listener& l) {
+  return std::pow(std::max(-l.air_absorption_hf, 0.0f) / 100.0f, 1.5f);
 }
 
 // Occlusion's cut below the HF reference for a path taking `ratio` of it:
@@ -242,92 +264,54 @@ int32_t GainToMb(float gain) {
 
 Listener Preset(uint32_t environment) {
   if (environment >= kEnvironments) environment = 0;
-  const EFXEAXREVERBPROPERTIES& e = kPresets[environment];
+  const PresetValues& e = kPresets[environment];
   Listener l;
   l.environment = environment;
-  l.environment_size = kSizes[environment];
-  l.environment_diffusion = e.flDiffusion;
-  l.room = GainToMb(e.flGain);
-  l.room_hf = GainToMb(e.flGainHF);
-  l.room_lf = GainToMb(e.flGainLF);
-  l.decay_time = e.flDecayTime;
-  l.decay_hf_ratio = e.flDecayHFRatio;
-  l.decay_lf_ratio = e.flDecayLFRatio;
-  l.reflections = GainToMb(e.flReflectionsGain);
-  l.reflections_delay = e.flReflectionsDelay;
-  FlipZ(e.flReflectionsPan, l.reflections_pan);
-  l.reverb = GainToMb(e.flLateReverbGain);
-  l.reverb_delay = e.flLateReverbDelay;
-  FlipZ(e.flLateReverbPan, l.reverb_pan);
-  l.echo_time = e.flEchoTime;
-  l.echo_depth = e.flEchoDepth;
-  l.modulation_time = e.flModulationTime;
-  l.modulation_depth = e.flModulationDepth;
-  l.air_absorption_hf = 2000.0f * std::log10(e.flAirAbsorptionGainHF);
-  l.hf_reference = e.flHFReference;
-  l.lf_reference = e.flLFReference;
-  l.room_rolloff_factor = e.flRoomRolloffFactor;
-  l.flags = (0x3F & ~kDecayHfLimit) | (e.iDecayHFLimit ? kDecayHfLimit : 0);
+  l.environment_size = e.size;
+  l.environment_diffusion = e.diffusion;
+  l.room_hf = e.room_hf;
+  l.decay_time = e.decay;
+  l.decay_hf_ratio = e.hf_ratio;
+  l.reflections = e.reflections;
+  l.reflections_delay = e.reflections_delay;
+  l.reverb = e.reverb;
+  l.reverb_delay = e.reverb_delay;
+  l.echo_time = e.echo_time;
+  l.echo_depth = e.echo_depth;
+  l.modulation_time = e.modulation_time;
+  l.modulation_depth = e.modulation_depth;
+  l.flags = e.flags;
   l.volume = kEax1Presets[environment].volume;
   l.damping = kEax1Presets[environment].damping;
   return l;
 }
 
-namespace {
-
-// OpenAL Soft (1.2x) scales its late reverb's input so the energy stays
-// the same for a decay time weighted by bandwidth up to 20 kHz: LF ref /
-// 20k x the LF decay + (HF ref - LF ref) / 20k x the mid decay + (1 - HF
-// ref / 20k) x the HF decay (after its decay HF limit). A lower HF ratio
-// thus makes its reverb louder. The hardware's level follows the mid
-// decay time only (measured: decay HF ratio 0.2 is 9 dB quieter than
-// 0.83, 2.0 is 3 dB louder), so this undoes the weighting.
-float LateLevelFix(const ReverbParams& r) {
-  float hf_ratio = r.decay_hf_ratio;
-  if (r.decay_hf_limit && r.air_absorption_gain_hf < 1.0f)
-    hf_ratio = std::min(hf_ratio, -3.0f / (343.3f * r.decay_time *
-                                           std::log10(r.air_absorption_gain_hf)));
-  auto decay = [&](float ratio) { return std::clamp(r.decay_time * ratio, 0.1f, 20.0f); };
-  float lf = r.lf_reference / 20000.0f, hf = r.hf_reference / 20000.0f;
-  float weighted = lf * decay(r.decay_lf_ratio) + (hf - lf) * r.decay_time +
-                   (1.0f - hf) * decay(hf_ratio);
-  return std::sqrt(weighted / r.decay_time);
-}
-
-}  // namespace
-
 ReverbParams ToReverb(const Listener& l, int version) {
   ReverbParams r;
-  // OpenAL Soft's reverb sizes its delay lines max(5, cbrt(density x
-  // 125000)) times an average 1 m room (EFX's presets put an EAX size s
-  // at density s^3 / 16, which is 1 for every size over 2.5 m: lines for
-  // a 50 m room, which build the late reverb up over about 80 ms). The
-  // hardware's late reverb starts at full level after the reverb delay;
-  // lines for a room twice the EAX size come closest. Shorter lines cost
-  // HF decay time (OpenAL loses some HF per pass through a line, about
-  // 0.4 dB at 4 kHz), so they stop at a 15 m room.
-  float lines = std::max(l.environment_size * 2.0f, 15.0f);
-  r.density = std::min(lines * lines * lines / 125000.0f, 1.0f);
-  r.diffusion = l.environment_diffusion;
+  r.size = l.environment_size;
   // Air absorption also shortens and lowers the hardware's reverb, at mid
-  // and low frequencies too (OpenAL's decay HF limit only touches the
-  // HF): at -100 mB/m generic decays in 0.53 s instead of 1.43 (relatively
-  // longer below 250 Hz) and its reverb is 13 dB down (3 dB at 125 Hz,
-  // 22 dB at 4 kHz). Scaled like the direct path's cut, (|air| / 100)^1.5,
-  // so the presets' -5 mB/m change little; the level is approximated by
-  // -6.5 dB plus -10 dB above the HF reference.
-  float air = std::pow(std::max(-l.air_absorption_hf, 0.0f) / 100.0f, 1.5f);
-  r.gain = MbToGain(float(l.room + (version == 1 ? kEax1RoomBoost : 0)) - 650.0f * air);
-  r.gain_hf = MbToGain(float(l.room_hf) - 1000.0f * air);
+  // and low frequencies too: at -100 mB/m generic decays in 0.53 s
+  // instead of 1.43 (relatively longer below 250 Hz) and its reverb is
+  // 13 dB down (3 dB at 125 Hz, 22 dB at 4 kHz). Scaled like the direct
+  // path's cut, (|air| / 100)^1.5, so the presets' -5 mB/m change little;
+  // fitted as -3 dB on the reverb, -5 dB at the HF reference on the send
+  // (SourceLevels), the decay time x 0.6 (with the decay HF limit taking
+  // the HF) and the LF ratio x 1.3.
+  float air = AirOnReverb(l);
+  r.gain = MbToGain(float(l.room + (version == 1 ? kEax1RoomBoost : 0)) - 300.0f * air);
   r.gain_lf = MbToGain(float(l.room_lf));
-  r.decay_time = l.decay_time * std::pow(0.37f, air);
+  r.decay_time = l.decay_time * std::pow(0.6f, air);
   r.decay_hf_ratio = l.decay_hf_ratio;
-  r.decay_lf_ratio = std::min(l.decay_lf_ratio * std::pow(1.46f, air), 2.0f);
+  r.decay_lf_ratio = std::min(l.decay_lf_ratio * std::pow(1.3f, air), 2.0f);
   r.reflections_gain = MbToGain(float(l.reflections));
   r.reflections_delay = l.reflections_delay;
-  FlipZ(l.reflections_pan, r.reflections_pan);
+  r.late_reverb_gain = MbToGain(float(l.reverb));
   r.late_reverb_delay = l.reverb_delay;
-  FlipZ(l.reverb_pan, r.late_reverb_pan);
+  for (int i = 0; i < 3; i++) {
+    r.reflections_pan[i] = l.reflections_pan[i];
+    r.late_reverb_pan[i] = l.reverb_pan[i];
+  }
+  r.diffusion = l.environment_diffusion;
   r.echo_time = l.echo_time;
   r.echo_depth = l.echo_depth;
   r.modulation_time = l.modulation_time;
@@ -335,9 +319,7 @@ ReverbParams ToReverb(const Listener& l, int version) {
   r.air_absorption_gain_hf = MbToGain(l.air_absorption_hf);
   r.hf_reference = l.hf_reference;
   r.lf_reference = l.lf_reference;
-  r.room_rolloff_factor = l.room_rolloff_factor;
   r.decay_hf_limit = (l.flags & kDecayHfLimit) != 0;
-  r.late_reverb_gain = MbToGain(float(l.reverb)) * LateLevelFix(r);
   return r;
 }
 
@@ -529,7 +511,11 @@ Levels SourceLevels(const Source& s, const Listener& l, float distance,
   float d_hf = float(s.direct + s.direct_hf + s.obstruction) + occ * s.occlusion_direct_ratio;
   float d_lf = float(s.direct) + float(s.obstruction) * s.obstruction_lf_ratio +
                OcclusionLf(occ, s.occlusion_direct_ratio, s.occlusion_lf_ratio);
-  float r_hf = float(s.room + s.room_hf + s.exclusion) + occ * room_ratio;
+  // The listener's room HF takes the same low-pass as the source's (the
+  // hardware's response to either matches), with air absorption's cut on
+  // the reverb.
+  float r_hf = float(s.room + s.room_hf + s.exclusion + l.room_hf) + occ * room_ratio -
+               500.0f * AirOnReverb(l);
   float r_lf = float(s.room) + float(s.exclusion) * s.exclusion_lf_ratio +
                OcclusionLf(occ, room_ratio, s.occlusion_lf_ratio);
   // Air absorption: an HF cut growing with the distance.

@@ -29,9 +29,9 @@ Used by:
   loading, threads, SEH, crash and hang reports.
 - **HLE** (`src/runtime/hle`): Win32 (kernel32, user32, gdi32, advapi32,
   shfolder, ...) on POSIX and SDL3; optional modules for Miles Sound
-  System (with EAX 1-3 rendered through OpenAL Soft's EFX reverb), Bink,
-  DirectDraw 7/Direct3D 7 and OpenGL 1.x (on dxvk-native's Direct3D 9)
-  and dbghelp.
+  System (with EAX 1-3 on our own reverb, modelled on Creative
+  hardware), Bink, DirectDraw 7/Direct3D 7 and OpenGL 1.x (on
+  dxvk-native's Direct3D 9) and dbghelp.
 - **Tools**: Ghidra export scripts (`tools/ghidra`), a PE symbol dumper
   (`tools/pe_symbols.py`), dev-time reference checks (`tools/layout`,
   `tools/undname`), and EAX reference measurement (`tools/eax_capture`:
@@ -71,14 +71,13 @@ game.dll --symbols dir [--manifest file]`, repeated) and listed in
 
 Linux x86-64 for now (macOS arm64 with Metal is planned; the code is
 kept portable). Clang and LLVM (the static `libLLVMDemangle.a` for
-dbghelp), CMake 3.25+, Ninja, SDL3; ffmpeg and OpenAL Soft for
-Miles/Bink; a dxvk-native build (Direct3D 9 only, SDL3 window system)
+dbghelp), CMake 3.25+, Ninja, SDL3; ffmpeg for Miles/Bink; a dxvk-native build (Direct3D 9 only, SDL3 window system)
 for D3D7 and OpenGL.
 
 ## Licence
 
 MIT (see [LICENSE](LICENSE)). Dependencies keep their own licences:
 Berkeley SoftFloat 3e (BSD-3-Clause) and Zydis (MIT) are fetched at
-build time; SDL3 (zlib), DXVK (zlib), ffmpeg and OpenAL Soft (LGPL,
-linked dynamically) and LLVM's demangler (Apache-2.0 with LLVM
+build time; SDL3 (zlib), DXVK (zlib), ffmpeg (LGPL, linked
+dynamically) and LLVM's demangler (Apache-2.0 with LLVM
 exception) come from your system.

@@ -340,9 +340,13 @@ so Wine is not a reference for this point. d3d7.cpp models it.
   Msseax.m3d's attribute names and struct layouts): voices pan like
   DirectSound3D hardware and get an LF level and a 5 kHz level
   (a two-pole low-pass) on the direct path and the send from the EAX
-  source model (runtime/audio/eax), and the send goes to a reverb bus
-  rendered by OpenAL Soft's EFX EAX reverb on a loopback device; direct
-  sound never leaves our mixer, so the Fast 2D path is unchanged. Miles 6.5's digital
+  source model (runtime/audio/eax), and the send goes to a reverb bus:
+  our environmental reverb (runtime/audio/reverb), rebuilt from the
+  card's measured impulse responses with textbook parts (tapped delay
+  lines for the reflections and the start of the late reverb, a
+  feedback delay network with Jot-style absorption filters for the
+  rest, an echo comb). The EAX presets are the card's own read-backs.
+  The Fast 2D path is unchanged. Miles 6.5's digital
   master reverb (room types, reverb time/predelay/damping, driver and
   sample/stream wet levels) is our Miles-compatible Schroeder reverb
   (runtime/audio/digital_reverb), written from a behavioural description
@@ -357,16 +361,21 @@ so Wine is not a reference for this point. d3d7.cpp models it.
   Miles 6.5e's Msseax.m3d; tools/eax_capture): where EAX leaves behaviour
   to the card, the model follows that card (details next to the code):
   the HF low-pass, occlusion on the room path, size scaling, EAX 1.0's
-  table and controls, read-backs, DS3D panning, air absorption. Still
-  different (hardware minus render over the capture): OpenAL's late
-  reverb builds up over 20-30 ms where the card's starts at full level
-  (early -1.5 dB, late +1 dB, onset found at the reflections); RT at
-  4 kHz is 0.4 s off on average and long bright presets (drugged, dizzy)
-  get half the card's, as OpenAL loses HF per pass through its lines;
-  the card's HF damping also shortens the mid band (decay HF ratio 0.2:
-  0.85 s against 1.45); air absorption's reverb level matches in total,
-  not per band; reverb delays over 50 ms come out shorter on the card;
-  EAX 1.0's damping and decay-time effects rest on two settings each.
+  table and controls, read-backs, DS3D panning, air absorption, and the
+  reverb's structure: reflection and late-burst tap patterns, the tail's
+  start and level, decay per band, the broader low-pass on the send.
+  Still different (hardware minus render over the capture, mean |d|: RT
+  mid 0.12 s, RT 4 kHz 0.11 s, EDT 0.37 s, onset 1 ms, early 0.9 dB,
+  late 1.3 dB, occlusion and air on the reverb 0.3-0.4 dB): very damped
+  small rooms (carpeted hallway, living room, the 1 m environment size)
+  have 7-10 dB less late reverb than the card; padded cell's early
+  reverb is 7 dB low and psychotic's 5-7 dB high; echo depth is a comb
+  at the echo time, where the card shortens the burst and makes the
+  tail periodic (alley, echo depth cases); reverb +2000 mB is 2 dB
+  louder than the card's (it seems to limit there); modulation's pitch
+  deviation is a guess; the outdoor presets with long delays (forest,
+  mountains, plain) are barely measurable; EAX 1.0's damping and
+  decay-time effects rest on two settings each.
 - binkw32: ffmpeg (Bink demuxer from memory, binkvideo/binkaudio,
   swscale), audio into the Miles mixer.
 - dbghelp: UnDecorateSymbolName (LLVM's Microsoft demangler, normalised

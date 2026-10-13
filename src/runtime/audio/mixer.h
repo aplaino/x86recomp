@@ -62,8 +62,9 @@ struct Voice {
 
   // Linear levels at low frequencies and at 5 kHz (EAX's HF reference)
   // for the direct path and the send to each reverb bus: the LF level is
-  // a gain, a lower 5 kHz level a two-pole low-pass (the one EAX hardware
-  // uses for obstruction, occlusion and air absorption). Sends are not
+  // a gain, a lower 5 kHz level a two-pole low-pass (the ones EAX
+  // hardware uses for obstruction, occlusion, exclusion, room HF and air
+  // absorption; the send's is broader). Sends are not
   // panned or distance-attenuated; they scale with volume and the master.
   // A voice with flat direct levels and no sends takes the plain path.
   float direct_lf = 1.0f, direct_hf = 1.0f;
@@ -113,8 +114,6 @@ class Mixer {
   void Add(Voice* v);
   void Remove(Voice* v);
   void set_master(float g) { master_ = g; }
-  // False when OpenAL Soft is unavailable: sends are then silent.
-  bool has_reverb() const { return reverb_.open(); }
   void SetReverb(int bus, const ReverbParams& p) { reverb_.Set(bus, p); }
   void SetListener(const Vec3& pos, const Vec3& face, const Vec3& up);
   DigitalReverb& digital_reverb() { return digital_; }
@@ -130,8 +129,10 @@ class Mixer {
   // Channel gains of `v` now, and the volume its digital reverb send
   // scales by.
   void TargetGains(const Voice& v, float* l, float* r, float* send_volume) const;
-  // The low-pass taking a path from level `lf` to `hf` at 5 kHz.
-  void LowPass(float lf, float hf, float* a) const;
+  // The low-pass from `table` taking a path from level `lf` to `hf` at
+  // 5 kHz.
+  void LowPass(const std::vector<std::array<float, 2>>& table, float lf, float hf,
+               float* a) const;
 
   std::mutex mu_;
   SDL_AudioStream* stream_ = nullptr;
@@ -139,6 +140,8 @@ class Mixer {
   float master_ = 1.0f;
   // LowPass coefficients (a1, a2) per 10 mB of HF cut, 0 to -10000.
   std::vector<std::array<float, 2>> low_pass_;
+  // The same for reverb sends (a broader low-pass).
+  std::vector<std::array<float, 2>> send_low_pass_;
   Reverb reverb_;
   std::vector<float> sends_[Reverb::kBuses];
   DigitalReverb digital_;

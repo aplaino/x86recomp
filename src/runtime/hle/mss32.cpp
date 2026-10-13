@@ -59,8 +59,7 @@ using Clock = std::chrono::steady_clock;
 // Sample/stream status values (mss.h).
 constexpr uint32_t kSmpFree = 1, kSmpDone = 2, kSmpPlaying = 4, kSmpStopped = 8;
 constexpr uint32_t kM3dNoErr = 0, kM3dNotEnabled = 1;
-// 3D providers; HPROVIDER is an opaque U32. The EAX ones are offered only
-// when the mixer has reverb (as they exist only with an EAX sound card).
+// 3D providers; HPROVIDER is an opaque U32.
 enum class Prov { kFast2D, kEax1, kEax2, kEax3 };
 struct ProviderDef {
   uint32_t handle;
@@ -74,7 +73,7 @@ constexpr ProviderDef kProviders[] = {
     {0x3D0004, "Creative Labs EAX 3 (TM)", Prov::kEax3},
 };
 constexpr int kProviderCount = int(std::size(kProviders));
-// The OpenAL reverb bus of the open EAX provider's environment.
+// The reverb bus of the open EAX provider's environment.
 constexpr int kBusEax = 0;
 
 struct Sample {
@@ -207,7 +206,7 @@ bool IsEax(Prov p) { return p != Prov::kFast2D; }
 // The provider behind an HPROVIDER, if we offer it.
 const ProviderDef* ProviderOf(uint32_t h) {
   for (const ProviderDef& d : kProviders)
-    if (d.handle == h && (!IsEax(d.kind) || audio::GetMixer().has_reverb())) return &d;
+    if (d.handle == h) return &d;
   return nullptr;
 }
 
