@@ -29,6 +29,8 @@
 #include <cmath>
 #include <cstring>
 #include <numbers>
+#include <numeric>
+#include <type_traits>
 
 #include "runtime/log.h"
 
@@ -155,20 +157,136 @@ int TypeSize(Enum t) {
   }
 }
 
-float ReadComponent(const uint8_t* p, Enum t, bool normalize) {
+// One array component as GL reads it (normalize: colours and normals).
+struct NoType {};
+
+template <class T>
+float Load(const uint8_t* p, bool normalize) {
+  if constexpr (std::is_same_v<T, NoType>) {
+    return 0;
+  } else {
+    T v;
+    std::memcpy(&v, p, sizeof v);
+    if constexpr (std::is_same_v<T, uint8_t>) return normalize ? v / 255.0f : float(v);
+    if constexpr (std::is_same_v<T, int8_t>) return normalize ? (2 * v + 1) / 255.0f : float(v);
+    if constexpr (std::is_same_v<T, int16_t>) return normalize ? (2 * v + 1) / 65535.0f : float(v);
+    if constexpr (std::is_same_v<T, uint16_t>) return normalize ? v / 65535.0f : float(v);
+    return float(v);
+  }
+}
+
+// Calls f(T()) with T the C type of array type t (NoType: other values,
+// whose components read as 0).
+template <class F>
+void ForType(Enum t, F&& f) {
   switch (t) {
-    case FLOAT: { float v; std::memcpy(&v, p, 4); return v; }
-    case DOUBLE: { double v; std::memcpy(&v, p, 8); return float(v); }
-    case UNSIGNED_BYTE: return normalize ? p[0] / 255.0f : float(p[0]);
-    case BYTE: return normalize ? (2 * int8_t(p[0]) + 1) / 255.0f : float(int8_t(p[0]));
-    case SHORT: { int16_t v; std::memcpy(&v, p, 2);
-                  return normalize ? (2 * v + 1) / 65535.0f : float(v); }
-    case UNSIGNED_SHORT: { uint16_t v; std::memcpy(&v, p, 2);
-                           return normalize ? v / 65535.0f : float(v); }
-    case INT: { int32_t v; std::memcpy(&v, p, 4); return float(v); }
-    case UNSIGNED_INT: { uint32_t v; std::memcpy(&v, p, 4); return float(v); }
+    case BYTE: return f(int8_t());
+    case UNSIGNED_BYTE: return f(uint8_t());
+    case SHORT: return f(int16_t());
+    case UNSIGNED_SHORT: return f(uint16_t());
+    case INT: return f(int32_t());
+    case UNSIGNED_INT: return f(uint32_t());
+    case FLOAT: return f(float());
+    case DOUBLE: return f(double());
+    default: return f(NoType());
+  }
+}
+
+float ReadComponent(const uint8_t* p, Enum t, bool normalize) {
+  float r = 0;
+  ForType(t, [&](auto x) { r = Load<decltype(x)>(p, normalize); });
+  return r;
+}
+
+// Writes one attribute of each device vertex (`dstride` apart from `dst`)
+// from source element vs[k] of an array: fn(element, out).
+template <class Fn>
+void Gather(const uint8_t* base, size_t stride, const std::vector<uint32_t>& vs,
+            uint8_t* dst, uint32_t dstride, Fn fn) {
+  for (uint32_t v : vs) {
+    fn(base + size_t(v) * stride, dst);
+    dst += dstride;
+  }
+}
+
+void Fill(const void* value, uint32_t bytes, size_t n, uint8_t* dst, uint32_t dstride) {
+  for (size_t k = 0; k < n; k++, dst += dstride) std::memcpy(dst, value, bytes);
+}
+
+// Device primitive for a GL one (0: not supported) and the number of
+// device indices for n GL vertices.
+uint32_t DevicePrim(Enum mode) {
+  switch (mode) {
+    case POINTS: return PT_POINTLIST;
+    case LINES: return PT_LINELIST;
+    case LINE_STRIP: case LINE_LOOP: return PT_LINESTRIP;
+    case TRIANGLES: case QUADS: return PT_TRIANGLELIST;
+    case TRIANGLE_STRIP: case QUAD_STRIP: return PT_TRIANGLESTRIP;
+    case TRIANGLE_FAN: case POLYGON: return PT_TRIANGLEFAN;
     default: return 0;
   }
+}
+
+size_t DeviceIndexCount(Enum mode, size_t n) {
+  if (mode == QUADS) return n / 4 * 6;
+  if (mode == LINE_LOOP && n) return n + 1;
+  return n;
+}
+
+void ExpandIndices(Enum mode, const std::vector<uint16_t>& seq, uint16_t* out) {
+  if (mode == QUADS) {
+    for (size_t q = 0; q + 3 < seq.size(); q += 4)
+      for (size_t k : {0, 1, 2, 0, 2, 3}) *out++ = seq[q + k];
+    return;
+  }
+  std::copy(seq.begin(), seq.end(), out);
+  if (mode == LINE_LOOP && !seq.empty()) out[seq.size()] = seq[0];
+}
+
+// The elements glDrawElements' indices refer to, each once in first-use
+// order (verts), and each index as a position in that list (seq): only
+// the vertices a draw uses are converted, however far apart they lie.
+// remap holds epoch << 16 | position per element - lo. false: more than
+// 65536 vertices.
+template <class T>
+bool Compact(const uint8_t* indices, size_t count, std::vector<uint32_t>& remap,
+             uint32_t& epoch, std::vector<uint32_t>& verts, std::vector<uint16_t>& seq) {
+  auto at = [indices](size_t i) {
+    T v;
+    std::memcpy(&v, indices + i * sizeof(T), sizeof v);
+    return uint32_t(v);
+  };
+  uint32_t lo = UINT32_MAX, hi = 0;
+  for (size_t i = 0; i < count; i++) {
+    lo = std::min(lo, at(i));
+    hi = std::max(hi, at(i));
+  }
+  size_t range = size_t(hi - lo) + 1;
+  if (range > (size_t(1) << 24)) return false;
+  if (range > remap.size()) remap.resize(range);
+  if (++epoch == 0x10000) {
+    std::fill(remap.begin(), remap.end(), 0);
+    epoch = 1;
+  }
+  // Locals, so the loop does not reload what its stores might alias.
+  uint32_t* rm = remap.data();
+  verts.resize(std::min(count, size_t(65536)));
+  uint32_t* out = verts.data();
+  seq.resize(count);
+  uint16_t* sq = seq.data();
+  uint32_t e = epoch << 16, n = 0;
+  for (size_t i = 0; i < count; i++) {
+    uint32_t v = at(i);
+    uint32_t& r = rm[v - lo];
+    if ((r & 0xFFFF0000u) != e) {
+      if (n == 65536) return false;
+      r = e | n;
+      out[n++] = v;
+    }
+    sq[i] = uint16_t(r);
+  }
+  verts.resize(n);
+  return true;
 }
 
 int MaxLevels(int w, int h) {
@@ -1306,31 +1424,38 @@ void Context::FetchVertex(int i, Vtx* v) const {
   }
 }
 
+Context::Sources Context::ClientSources() const {
+  return {vertex_, normal_, color_, {texcoord_[0], texcoord_[1], texcoord_[2], texcoord_[3]}};
+}
+
 void Context::DrawArrays(Enum mode, int first, int count) {
   if (count <= 0) return;
-  std::vector<Vtx> v(static_cast<size_t>(count));
-  for (int i = 0; i < count; i++) FetchVertex(first + i, &v[size_t(i)]);
-  DrawVertices(mode, v, nullptr);
+  if (count > 65536) return Unsupported("draw with more than 65536 vertices", mode);
+  draw_verts_.resize(size_t(count));
+  std::iota(draw_verts_.begin(), draw_verts_.end(), uint32_t(first));
+  draw_seq_.resize(size_t(count));
+  std::iota(draw_seq_.begin(), draw_seq_.end(), uint16_t(0));
+  DrawVertices(mode, ClientSources());
 }
 
 void Context::DrawElements(Enum mode, int count, Enum type, const void* indices) {
   if (count <= 0) return;
-  std::vector<uint32_t> idx(static_cast<size_t>(count));
   const uint8_t* p = static_cast<const uint8_t*>(indices);
-  for (int i = 0; i < count; i++) {
-    switch (type) {
-      case UNSIGNED_BYTE: idx[size_t(i)] = p[i]; break;
-      case UNSIGNED_SHORT: { uint16_t s; std::memcpy(&s, p + 2 * i, 2); idx[size_t(i)] = s; break; }
-      case UNSIGNED_INT: std::memcpy(&idx[size_t(i)], p + 4 * i, 4); break;
-      default: return Unsupported("glDrawElements type", type);
-    }
+  bool ok;
+  switch (type) {
+    case UNSIGNED_BYTE:
+      ok = Compact<uint8_t>(p, size_t(count), remap_, remap_epoch_, draw_verts_, draw_seq_);
+      break;
+    case UNSIGNED_SHORT:
+      ok = Compact<uint16_t>(p, size_t(count), remap_, remap_epoch_, draw_verts_, draw_seq_);
+      break;
+    case UNSIGNED_INT:
+      ok = Compact<uint32_t>(p, size_t(count), remap_, remap_epoch_, draw_verts_, draw_seq_);
+      break;
+    default: return Unsupported("glDrawElements type", type);
   }
-  uint32_t lo = *std::min_element(idx.begin(), idx.end());
-  uint32_t hi = *std::max_element(idx.begin(), idx.end());
-  std::vector<Vtx> v(size_t(hi - lo + 1));
-  for (uint32_t i = lo; i <= hi; i++) FetchVertex(int(i), &v[i - lo]);
-  for (uint32_t& i : idx) i -= lo;
-  DrawVertices(mode, v, &idx);
+  if (!ok) return Unsupported("draw with more than 65536 vertices", mode);
+  DrawVertices(mode, ClientSources());
 }
 
 void Context::ArrayElement(int i) {
@@ -1351,7 +1476,23 @@ void Context::Begin(Enum mode) {
 void Context::End() {
   if (!in_begin_) return Error(INVALID_OPERATION, "glEnd");
   in_begin_ = false;
-  if (!immediate_.empty()) DrawVertices(begin_mode_, immediate_, nullptr);
+  size_t n = immediate_.size();
+  if (n > 65536) {
+    Unsupported("draw with more than 65536 vertices", begin_mode_);
+  } else if (n) {
+    draw_verts_.resize(n);
+    std::iota(draw_verts_.begin(), draw_verts_.end(), 0u);
+    draw_seq_.resize(n);
+    std::iota(draw_seq_.begin(), draw_seq_.end(), uint16_t(0));
+    auto at = [&](const void* field, int size) {
+      return Array{true, size, FLOAT, int(sizeof(Vtx)), static_cast<const uint8_t*>(field)};
+    };
+    const Vtx& v = immediate_[0];
+    Sources src{at(v.pos, 4), at(v.normal, 3), at(&v.color, 4), {}};
+    for (int u = 0; u < kUnits; u++) src.tc[u] = at(v.tc[u], 2);
+    src.d3d_color = true;
+    DrawVertices(begin_mode_, src);
+  }
   immediate_.clear();
 }
 
@@ -1382,40 +1523,11 @@ void Context::Normal(float x, float y, float z) {
 
 // ---- drawing -------------------------------------------------------------------------
 
-void Context::DrawVertices(Enum mode, const std::vector<Vtx>& verts,
-                           const std::vector<uint32_t>* in_idx) {
-  // GL primitive -> device primitive and index list.
-  std::vector<uint32_t> seq;
-  if (in_idx) {
-    seq = *in_idx;
-  } else {
-    seq.resize(verts.size());
-    for (size_t i = 0; i < seq.size(); i++) seq[i] = uint32_t(i);
-  }
-  uint32_t prim;
-  std::vector<uint32_t> idx;
-  switch (mode) {
-    case POINTS: prim = PT_POINTLIST; idx = seq; break;
-    case LINES: prim = PT_LINELIST; idx = seq; break;
-    case LINE_STRIP: prim = PT_LINESTRIP; idx = seq; break;
-    case LINE_LOOP:
-      prim = PT_LINESTRIP;
-      idx = seq;
-      if (!seq.empty()) idx.push_back(seq[0]);
-      break;
-    case TRIANGLES: prim = PT_TRIANGLELIST; idx = seq; break;
-    case TRIANGLE_STRIP: case QUAD_STRIP: prim = PT_TRIANGLESTRIP; idx = seq; break;
-    case TRIANGLE_FAN: case POLYGON: prim = PT_TRIANGLEFAN; idx = seq; break;
-    case QUADS:
-      prim = PT_TRIANGLELIST;
-      for (size_t q = 0; q + 3 < seq.size(); q += 4)
-        for (size_t k : {0, 1, 2, 0, 2, 3}) idx.push_back(seq[q + k]);
-      break;
-    default:
-      return Unsupported("primitive mode", mode);
-  }
-  if (verts.size() > 65536) return Unsupported("draw with more than 65536 vertices", mode);
-  if (idx.empty()) return;
+void Context::DrawVertices(Enum mode, const Sources& src) {
+  uint32_t prim = DevicePrim(mode);
+  if (!prim) return Unsupported("primitive mode", mode);
+  size_t nidx = DeviceIndexCount(mode, draw_seq_.size());
+  if (!nidx) return;
 
   if (!scene_) {
     dev_->BeginScene();
@@ -1425,28 +1537,130 @@ void Context::DrawVertices(Enum mode, const std::vector<Vtx>& verts,
   int ntex = ApplyTextures();
   ApplyMatrices();
 
-  bool normals = enabled_.count(LIGHTING);
+  // The device layout: position, normal (lighting only), colour, the
+  // texture coordinates ApplyTextures' stages read. Each attribute is
+  // written for all vertices at once, with its array's type and size
+  // resolved first.
+  const std::vector<uint32_t>& vs = draw_verts_;
+  auto on = [](const Array& a) { return a.enabled && a.ptr; };
+  auto stride_of = [](const Array& a) {
+    return size_t(a.stride ? a.stride : a.size * TypeSize(a.type));
+  };
   // Homogeneous positions (w != 1, e.g. w = 0 for points at infinity)
   // go to the device as they are.
-  bool xyzw = std::any_of(verts.begin(), verts.end(),
-                          [](const Vtx& v) { return v.pos[3] != 1; });
+  bool xyzw = !on(src.pos) && current_.pos[3] != 1;
+  if (on(src.pos) && src.pos.size > 3)
+    ForType(src.pos.type, [&](auto x) {
+      using T = decltype(x);
+      const uint8_t* w = src.pos.ptr + 3 * TypeSize(src.pos.type);
+      size_t st = stride_of(src.pos);
+      xyzw = std::any_of(vs.begin(), vs.end(),
+                         [&](uint32_t v) { return Load<T>(w + v * st, false) != 1; });
+    });
+  bool normals = enabled_.count(LIGHTING);
   uint32_t fvf = (xyzw ? FVF_XYZW : FVF_XYZ) | (normals ? FVF_NORMAL : 0) |
                  FVF_DIFFUSE | (uint32_t(ntex) << 8);
   uint32_t pofs = xyzw ? 16 : 12;
   uint32_t nofs = pofs + (normals ? 12 : 0);
   uint32_t stride = nofs + 4 + 8 * uint32_t(ntex);
-  std::vector<uint8_t> buf(verts.size() * stride);
-  for (size_t i = 0; i < verts.size(); i++) {
-    const Vtx& v = verts[i];
-    uint8_t* d = buf.data() + i * stride;
-    std::memcpy(d, v.pos, pofs);
-    if (normals) std::memcpy(d + pofs, v.normal, 12);
-    std::memcpy(d + nofs, &v.color, 4);
-    for (int u = 0; u < ntex; u++) std::memcpy(d + nofs + 4 + 8 * u, v.tc[u], 8);
+  size_t nv = vs.size();
+  gfx::Device::Mapped m = dev_->MapDraw(uint32_t(nv), stride, uint32_t(nidx));
+  uint8_t* d = m.vertices;
+
+  const Array& pos = src.pos;
+  if (!on(pos)) {
+    Fill(current_.pos, pofs, nv, d, stride);
+  } else if (pos.type == FLOAT && pos.size >= 3 && !xyzw) {
+    Gather(pos.ptr, stride_of(pos), vs, d, stride,
+           [](const uint8_t* p, uint8_t* o) { std::memcpy(o, p, 12); });
+  } else if (pos.type == FLOAT && pos.size >= 4) {
+    Gather(pos.ptr, stride_of(pos), vs, d, stride,
+           [](const uint8_t* p, uint8_t* o) { std::memcpy(o, p, 16); });
+  } else {
+    ForType(pos.type, [&](auto x) {
+      using T = decltype(x);
+      int n = std::min(pos.size, 4), cs = TypeSize(pos.type);
+      Gather(pos.ptr, stride_of(pos), vs, d, stride, [&](const uint8_t* p, uint8_t* o) {
+        float f[4] = {0, 0, 0, 1};
+        for (int k = 0; k < n; k++) f[k] = Load<T>(p + k * cs, false);
+        std::memcpy(o, f, pofs);
+      });
+    });
   }
-  std::vector<uint16_t> i16(idx.begin(), idx.end());
-  dev_->Draw(prim, fvf, buf.data(), uint32_t(verts.size()), stride, i16.data(),
-             uint32_t(i16.size()));
+
+  if (normals) {
+    const Array& nrm = src.normal;
+    if (!on(nrm)) {
+      Fill(current_.normal, 12, nv, d + pofs, stride);
+    } else if (nrm.type == FLOAT) {
+      Gather(nrm.ptr, stride_of(nrm), vs, d + pofs, stride,
+             [](const uint8_t* p, uint8_t* o) { std::memcpy(o, p, 12); });
+    } else {
+      ForType(nrm.type, [&](auto x) {
+        using T = decltype(x);
+        int cs = TypeSize(nrm.type);
+        Gather(nrm.ptr, stride_of(nrm), vs, d + pofs, stride, [&](const uint8_t* p, uint8_t* o) {
+          float f[3];
+          for (int k = 0; k < 3; k++) f[k] = Load<T>(p + k * cs, true);
+          std::memcpy(o, f, 12);
+        });
+      });
+    }
+  }
+
+  // Colours: D3DCOLOR is A8R8G8B8, bytes B, G, R, A in memory. A byte
+  // goes through /255 and back to the same byte, so bytes are swizzled.
+  const Array& col = src.color;
+  if (!on(col)) {
+    Fill(&current_.color, 4, nv, d + nofs, stride);
+  } else if (src.d3d_color) {
+    Gather(col.ptr, stride_of(col), vs, d + nofs, stride,
+           [](const uint8_t* p, uint8_t* o) { std::memcpy(o, p, 4); });
+  } else if (col.type == UNSIGNED_BYTE && col.size >= 4) {
+    Gather(col.ptr, stride_of(col), vs, d + nofs, stride, [](const uint8_t* p, uint8_t* o) {
+      uint8_t c[4] = {p[2], p[1], p[0], p[3]};
+      std::memcpy(o, c, 4);
+    });
+  } else if (col.type == UNSIGNED_BYTE && col.size == 3) {
+    Gather(col.ptr, stride_of(col), vs, d + nofs, stride, [](const uint8_t* p, uint8_t* o) {
+      uint8_t c[4] = {p[2], p[1], p[0], 0xFF};
+      std::memcpy(o, c, 4);
+    });
+  } else {
+    ForType(col.type, [&](auto x) {
+      using T = decltype(x);
+      int n = std::min(col.size, 4), cs = TypeSize(col.type);
+      Gather(col.ptr, stride_of(col), vs, d + nofs, stride, [&](const uint8_t* p, uint8_t* o) {
+        float c[4] = {0, 0, 0, 1};
+        for (int k = 0; k < n; k++) c[k] = Load<T>(p + k * cs, true);
+        uint32_t argb = Argb(c);
+        std::memcpy(o, &argb, 4);
+      });
+    });
+  }
+
+  for (int u = 0; u < ntex; u++) {
+    const Array& tc = src.tc[u];
+    uint8_t* dt = d + nofs + 4 + 8 * u;
+    if (!on(tc)) {
+      Fill(current_.tc[u], 8, nv, dt, stride);
+    } else if (tc.type == FLOAT && tc.size >= 2) {
+      Gather(tc.ptr, stride_of(tc), vs, dt, stride,
+             [](const uint8_t* p, uint8_t* o) { std::memcpy(o, p, 8); });
+    } else {
+      ForType(tc.type, [&](auto x) {
+        using T = decltype(x);
+        int size = tc.size, cs = TypeSize(tc.type);
+        Gather(tc.ptr, stride_of(tc), vs, dt, stride, [&](const uint8_t* p, uint8_t* o) {
+          float f[2] = {Load<T>(p, false), size > 1 ? Load<T>(p + cs, false) : 0};
+          std::memcpy(o, f, 8);
+        });
+      });
+    }
+  }
+
+  ExpandIndices(mode, draw_seq_, m.indices);
+  dev_->DrawMapped(prim, fvf);
 }
 
 // ---- readback ------------------------------------------------------------------------

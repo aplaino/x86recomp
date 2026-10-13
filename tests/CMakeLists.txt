@@ -37,6 +37,17 @@ target_compile_features(fast2d_test PRIVATE cxx_std_20)
 target_compile_options(fast2d_test PRIVATE -O2 -ffp-contract=off)
 add_test(NAME fast2d COMMAND fast2d_test)
 
+# gl_draw_test: the GL context's vertex arrays and immediate mode against
+# a reference model of GL's conversions, through a recording device;
+# portable.
+add_executable(gl_draw_test gl_draw_test.cpp
+               ${PROJECT_SOURCE_DIR}/src/runtime/gl/context.cpp
+               ${PROJECT_SOURCE_DIR}/src/runtime/gfx/format.cpp)
+target_include_directories(gl_draw_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_features(gl_draw_test PRIVATE cxx_std_20)
+target_compile_options(gl_draw_test PRIVATE -O2)
+add_test(NAME gl_draw COMMAND gl_draw_test)
+
 # lift_semantics_test checks the integer/flag helpers in lifted.h against
 # the host CPU the same way.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")

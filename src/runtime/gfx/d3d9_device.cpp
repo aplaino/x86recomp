@@ -12,6 +12,7 @@
 #include <windows.h>
 #include <d3d9.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -83,6 +84,7 @@ class D3D9Device final : public Device {
     for (auto& [id, d] : depths_) d.surf->Release();
     if (staging_) staging_->Release();
     if (readback_) readback_->Release();
+    ReleaseRings();
     ReleaseTargets();
     if (dev_) dev_->Release();
     if (d3d_) d3d_->Release();
@@ -128,6 +130,7 @@ class D3D9Device final : public Device {
         readback_->Release();
         readback_ = nullptr;
       }
+      ReleaseRings();
       Check(dev_->Reset(&pp), "Reset");
       reset = true;
       for (auto& [id, d] : depths_)
@@ -438,6 +441,29 @@ class D3D9Device final : public Device {
     }
   }
 
+  Mapped MapDraw(uint32_t nv, uint32_t stride, uint32_t ni) override {
+    mapped_ = {nv, stride, ni};
+    // Vertices start at a multiple of the stride: the draw finds them by
+    // base vertex index.
+    auto* v = static_cast<uint8_t*>(LockRing(vb_, stride, nv * stride, &mapped_.vofs));
+    auto* i = static_cast<uint16_t*>(LockRing(ib_, 2, ni * 2, &mapped_.iofs));
+    return {v, i};
+  }
+
+  void DrawMapped(uint32_t prim, uint32_t fvf) override {
+    vb_.buf->Unlock();
+    ib_.buf->Unlock();
+    const MappedDraw& m = mapped_;
+    dev_->SetFVF(fvf);
+    // Set every time: the UP draws (DrawImage) unbind both.
+    dev_->SetStreamSource(0, vb_.buf, 0, m.stride);
+    dev_->SetIndices(ib_.buf);
+    UINT prims = PrimitiveCountFromVertices(prim, m.ni);
+    if (prims)
+      dev_->DrawIndexedPrimitive(D3DPRIMITIVETYPE(prim), INT(m.vofs / m.stride), 0, m.nv,
+                                 m.iofs / 2, prims);
+  }
+
   void Present() override {
     if (in_scene_) EndScene();
     dev_->StretchRect(backbuffer_, nullptr, front_, nullptr, D3DTEXF_POINT);
@@ -591,6 +617,55 @@ class D3D9Device final : public Device {
       }
   }
 
+  // A dynamic buffer that draws take consecutive ranges of (NOOVERWRITE:
+  // earlier draws may still read what came before), starting over in
+  // fresh memory (DISCARD) when it is full. Not WRITEONLY: dxvk then keeps
+  // it in cached host memory, which the CPU writes quickly, instead of
+  // write-combined device memory.
+  template <class B>
+  struct Ring {
+    B* buf = nullptr;
+    uint32_t size = 0, pos = 0;
+  };
+
+  void Create(uint32_t size, IDirect3DVertexBuffer9** b) {
+    Check(dev_->CreateVertexBuffer(size, D3DUSAGE_DYNAMIC, 0, D3DPOOL_DEFAULT, b, nullptr),
+          "CreateVertexBuffer(ring)");
+  }
+  void Create(uint32_t size, IDirect3DIndexBuffer9** b) {
+    Check(dev_->CreateIndexBuffer(size, D3DUSAGE_DYNAMIC, D3DFMT_INDEX16, D3DPOOL_DEFAULT, b,
+                                  nullptr),
+          "CreateIndexBuffer(ring)");
+  }
+
+  template <class B>
+  void* LockRing(Ring<B>& r, uint32_t align, uint32_t bytes, uint32_t* offset) {
+    uint32_t ofs = (r.pos + align - 1) / align * align;
+    DWORD flags = D3DLOCK_NOOVERWRITE;
+    if (!r.buf || ofs + bytes > r.size) {
+      if (bytes > r.size) {
+        if (r.buf) r.buf->Release();
+        r.size = std::max(r.size, 1u << 22);
+        while (r.size < bytes) r.size *= 2;
+        Create(r.size, &r.buf);
+      }
+      ofs = 0;
+      flags = D3DLOCK_DISCARD;
+    }
+    void* p = nullptr;
+    Check(r.buf->Lock(ofs, bytes, &p, flags), "Lock(ring)");
+    r.pos = ofs + bytes;
+    *offset = ofs;
+    return p;
+  }
+
+  void ReleaseRings() {
+    if (vb_.buf) vb_.buf->Release();
+    if (ib_.buf) ib_.buf->Release();
+    vb_ = {};
+    ib_ = {};
+  }
+
   void EnsureStaging(int w, int h) {
     if (staging_) {
       D3DSURFACE_DESC d;
@@ -616,6 +691,11 @@ class D3D9Device final : public Device {
   IDirect3DSurface9* front_ = nullptr;       // the DirectDraw primary
   IDirect3DTexture9* staging_ = nullptr;
   IDirect3DSurface9* readback_ = nullptr;  // system-memory copy of the RT
+  Ring<IDirect3DVertexBuffer9> vb_;
+  Ring<IDirect3DIndexBuffer9> ib_;
+  struct MappedDraw {
+    uint32_t nv, stride, ni, vofs = 0, iofs = 0;
+  } mapped_{};
   std::map<uint32_t, IDirect3DTexture9*> textures_;
   std::map<uint32_t, Target> targets_;  // render-target textures (default pool)
   std::map<uint32_t, Depth> depths_;

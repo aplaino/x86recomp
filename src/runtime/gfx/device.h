@@ -136,6 +136,18 @@ class Device {
   virtual void Draw(uint32_t prim, uint32_t fvf, const void* vertices,
                     uint32_t vertex_count, uint32_t stride,
                     const uint16_t* indices, uint32_t index_count) = 0;
+  // Indexed draw built in place: MapDraw returns room for `vertex_count`
+  // vertices (`stride` bytes each) and `index_count` indices in memory the
+  // device reads them from, for the caller to fill and then draw with
+  // DrawMapped before the next MapDraw. Saves Draw's copy for vertices
+  // made per draw.
+  struct Mapped {
+    uint8_t* vertices;
+    uint16_t* indices;
+  };
+  virtual Mapped MapDraw(uint32_t vertex_count, uint32_t stride,
+                         uint32_t index_count) = 0;
+  virtual void DrawMapped(uint32_t prim, uint32_t fvf) = 0;
   virtual void Present() = 0;
 };
 

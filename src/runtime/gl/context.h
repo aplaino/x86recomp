@@ -250,8 +250,16 @@ class Context {
   void RS(uint32_t state, uint32_t value);
   void TSS(uint32_t stage, uint32_t type, uint32_t value);
   void FetchVertex(int i, Vtx* v) const;
-  void DrawVertices(Enum mode, const std::vector<Vtx>& v,
-                    const std::vector<uint32_t>* idx);
+  // What a draw reads for each attribute; an array that is not enabled
+  // (or has no pointer) stands for the current value.
+  struct Sources {
+    Array pos, normal, color, tc[kUnits];
+    bool d3d_color = false;  // colours are D3DCOLORs (immediate mode)
+  };
+  Sources ClientSources() const;
+  // Draws draw_verts_ (the source element of each device vertex) as
+  // primitive `mode` over draw_seq_ (the device vertex of each GL vertex).
+  void DrawVertices(Enum mode, const Sources& src);
 
   gfx::Device* dev_;
   int fb_w_, fb_h_;
@@ -318,6 +326,11 @@ class Context {
   Enum begin_mode_ = POINTS;
   std::vector<Vtx> immediate_;
   Vtx current_{};
+  // per-draw scratch, kept between draws
+  std::vector<uint32_t> draw_verts_;
+  std::vector<uint16_t> draw_seq_;
+  std::vector<uint32_t> remap_;  // DrawElements: epoch << 16 | device vertex
+  uint32_t remap_epoch_ = 0;
 
   // applied device state (to skip redundant calls)
   uint32_t rs_cache_[256];
