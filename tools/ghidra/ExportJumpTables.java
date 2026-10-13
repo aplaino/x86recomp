@@ -1,8 +1,8 @@
 // Dump every computed jump Ghidra resolved (switch tables): one row per
 // indirect jmp with its target list. The lifter turns these into
 // `switch` dispatch inside the owning function. Unresolved computed jumps
-// are listed with no targets; the lifter skips them (FINDINGS.md, "Lifter
-// notes": they are IAT thunks and tail jumps).
+// are listed with no targets; the lifter skips them (they are IAT thunks
+// and tail jumps).
 //
 // Headless:
 //   bash /usr/share/ghidra/support/analyzeHeadless <projdir> <project> \
