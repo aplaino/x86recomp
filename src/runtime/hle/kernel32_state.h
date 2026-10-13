@@ -2,6 +2,7 @@
 // Process-level state owned by the kernel32 HLE: heaps, handles, the
 // command line and environment, and guest <-> host path mapping.
 
+#include <atomic>
 #include <cstdint>
 #include <ctime>
 #include <memory>
@@ -77,5 +78,29 @@ struct Thread;
 // Runs guest function entry(param) on a new detached host thread bound to
 // guest thread t.
 void StartHostThread(Thread* t, uint32_t entry, uint32_t param);
+
+// Memory ordering of guest synchronisation calls. On Windows every one of
+// them (critical sections, waits, events, mutexes, Interlocked*, thread
+// start and exit, TlsAlloc/TlsFree, Sleep) is a full barrier: a locked
+// instruction or a kernel entry. x86 is TSO, but arm64 hosts are weakly
+// ordered and lifted code reaches guest memory with plain loads and
+// stores, so a guest that hands data over through one of these calls
+// relies on more than the host primitive behind it gives. A host mutex is
+// acquire on lock and release on unlock: enough for data written inside a
+// critical section to be seen by the next owner, but accesses outside it
+// may move into it and pass each other there, so lock + unlock is not a
+// full barrier. Each such handler therefore opens a GuestSyncPoint, a
+// seq_cst fence on entry and on exit (also when it returns early or
+// throws): every guest access before the call is ordered before the call's
+// own effects, and those before every guest access after it.
+inline void GuestSyncFence() {
+  std::atomic_thread_fence(std::memory_order_seq_cst);
+}
+struct GuestSyncPoint {
+  GuestSyncPoint() { GuestSyncFence(); }
+  ~GuestSyncPoint() { GuestSyncFence(); }
+  GuestSyncPoint(const GuestSyncPoint&) = delete;
+  GuestSyncPoint& operator=(const GuestSyncPoint&) = delete;
+};
 
 }  // namespace recomp

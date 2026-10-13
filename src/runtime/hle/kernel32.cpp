@@ -679,11 +679,15 @@ HLE("kernel32.dll", IsBadCodePtr, 1) {
 }
 
 // ---- TLS (TlsAlloc slots live in the TEB at +0xE10, as on Windows) -------
+// TlsGetValue/TlsSetValue touch only the calling thread's TEB and are plain
+// accesses on Windows too; TlsAlloc/TlsFree take a process lock there, so
+// they are sync points here.
 
 std::mutex g_tls_mu;
 uint64_t g_tls_used = 0;
 
 HLE("kernel32.dll", TlsAlloc, 0) {
+  GuestSyncPoint sync;
   std::lock_guard<std::mutex> l(g_tls_mu);
   for (uint32_t i = 0; i < 64; i++)
     if (!(g_tls_used & (1ull << i))) {
@@ -694,6 +698,7 @@ HLE("kernel32.dll", TlsAlloc, 0) {
 }
 
 HLE("kernel32.dll", TlsFree, 1) {
+  GuestSyncPoint sync;
   std::lock_guard<std::mutex> l(g_tls_mu);
   g_tls_used &= ~(1ull << (Arg(c, 0) & 63));
   return 1;
@@ -825,16 +830,23 @@ HLE("kernel32.dll", LeaveCriticalSection, 1) {
 }
 
 // ---- interlocked ---------------------------------------------------------
+// seq_cst read-modify-writes, as lifted lock-prefixed instructions are.
+// C++ orders those only against other seq_cst atomics, not against the
+// plain accesses lifted code makes, so the GuestSyncPoint fences make each
+// call a full barrier like `lock xadd`/`xchg`.
 
 HLE("kernel32.dll", InterlockedIncrement, 1) {
+  GuestSyncPoint sync;
   return __atomic_add_fetch(reinterpret_cast<uint32_t*>(GPtr(Arg(c, 0))), 1,
                             __ATOMIC_SEQ_CST);
 }
 HLE("kernel32.dll", InterlockedDecrement, 1) {
+  GuestSyncPoint sync;
   return __atomic_sub_fetch(reinterpret_cast<uint32_t*>(GPtr(Arg(c, 0))), 1,
                             __ATOMIC_SEQ_CST);
 }
 HLE("kernel32.dll", InterlockedExchange, 2) {
+  GuestSyncPoint sync;
   return __atomic_exchange_n(reinterpret_cast<uint32_t*>(GPtr(Arg(c, 0))),
                              Arg(c, 1), __ATOMIC_SEQ_CST);
 }
@@ -916,7 +928,10 @@ HLE("winmm.dll", midiInStart, 1) { return 5; }  // MMSYSERR_INVALHANDLE
 HLE("winmm.dll", midiInStop, 1) { return 5; }
 HLE("winmm.dll", midiInClose, 1) { return 5; }
 
+// A kernel entry on Windows, so a barrier for guests that poll a flag
+// with Sleep in the loop.
 HLE("kernel32.dll", Sleep, 1) {
+  GuestSyncPoint sync;
   std::this_thread::sleep_for(std::chrono::milliseconds(Arg(c, 0)));
   return 0;
 }

@@ -5,11 +5,18 @@
 // variable: any signal wakes every waiter, which re-checks its objects.
 // Simple and obviously correct for a game with a handful of threads; it
 // also makes WaitForMultipleObjects(wait-all) atomic for free.
+//
+// Memory ordering: g_wait_mu gives signal -> wait acquire/release (what a
+// thread wrote before SetEvent/ReleaseMutex/exiting is visible to the
+// thread whose wait that satisfies), and every handler here that
+// synchronises opens a GuestSyncPoint, which makes the call a full
+// barrier as on Windows (see kernel32_state.h).
 
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <map>
@@ -67,8 +74,8 @@ struct ThreadObject : Waitable {
   bool Signalled(uint32_t) const override { return finished; }
   Thread* thread = nullptr;
   uint32_t entry = 0, param = 0;
-  bool started = false;
-  bool finished = false;
+  std::atomic<bool> started{false};  // CreateThread vs ResumeThread races
+  bool finished = false;  // under g_wait_mu
 };
 
 std::map<std::string, std::shared_ptr<KObject>> g_named;  // under g_wait_mu
@@ -163,6 +170,7 @@ HLE("kernel32.dll", CreateEventA, 4) {
 }
 
 HLE("kernel32.dll", SetEvent, 1) {
+  GuestSyncPoint sync;
   auto e = std::dynamic_pointer_cast<EventObject>(GetHandle(Arg(c, 0)));
   if (!e) return 0;
   {
@@ -174,6 +182,7 @@ HLE("kernel32.dll", SetEvent, 1) {
 }
 
 HLE("kernel32.dll", ResetEvent, 1) {
+  GuestSyncPoint sync;
   auto e = std::dynamic_pointer_cast<EventObject>(GetHandle(Arg(c, 0)));
   if (!e) return 0;
   std::lock_guard<std::mutex> l(g_wait_mu);
@@ -184,6 +193,7 @@ HLE("kernel32.dll", ResetEvent, 1) {
 // ---- mutexes ----------------------------------------------------------------
 
 HLE("kernel32.dll", CreateMutexA, 3) {
+  GuestSyncPoint sync;
   bool own = Arg(c, 1);
   uint32_t tid = CurrentThread()->tid;
   uint32_t h = CreateNamed(Arg(c, 2), [] {
@@ -213,6 +223,7 @@ uint32_t OpenNamed(uint32_t name_va, KObject::Type type) {
 HLE("kernel32.dll", OpenMutexA, 3) { return OpenNamed(Arg(c, 2), KObject::Type::Mutex); }
 
 HLE("kernel32.dll", ReleaseMutex, 1) {
+  GuestSyncPoint sync;
   auto m = std::dynamic_pointer_cast<MutexObject>(GetHandle(Arg(c, 0)));
   if (!m) return 0;
   {
@@ -227,6 +238,7 @@ HLE("kernel32.dll", ReleaseMutex, 1) {
 // ---- waits ------------------------------------------------------------------
 
 HLE("kernel32.dll", WaitForSingleObject, 2) {
+  GuestSyncPoint sync;
   auto w = AsWaitable(Arg(c, 0));
   if (!w) {
     SetLastError(kErrorInvalidHandle);
@@ -236,6 +248,7 @@ HLE("kernel32.dll", WaitForSingleObject, 2) {
 }
 
 HLE("kernel32.dll", WaitForMultipleObjects, 4) {
+  GuestSyncPoint sync;
   uint32_t n = Arg(c, 0), arr = Arg(c, 1);
   std::vector<std::shared_ptr<Waitable>> objs;
   for (uint32_t i = 0; i < n; i++) {
@@ -251,12 +264,16 @@ HLE("kernel32.dll", WaitForMultipleObjects, 4) {
 
 // ---- threads ----------------------------------------------------------------
 
-void RunThreadObject(std::shared_ptr<ThreadObject> to) {
-  to->started = true;
+// Starts the thread once. pthread_create synchronises memory: what the
+// creator wrote before it is visible to the new thread.
+bool RunThreadObject(const std::shared_ptr<ThreadObject>& to) {
+  if (to->started.exchange(true)) return false;
   StartHostThread(to->thread, to->entry, to->param);
+  return true;
 }
 
 HLE("kernel32.dll", CreateThread, 6) {
+  GuestSyncPoint sync;
   uint32_t stack = Arg(c, 1), entry = Arg(c, 2), param = Arg(c, 3),
            flags = Arg(c, 4), tid_out = Arg(c, 5);
   auto to = std::make_shared<ThreadObject>();
@@ -276,13 +293,10 @@ HLE("kernel32.dll", CreateThread, 6) {
 }
 
 HLE("kernel32.dll", ResumeThread, 1) {
+  GuestSyncPoint sync;
   auto to = std::dynamic_pointer_cast<ThreadObject>(GetHandle(Arg(c, 0)));
   if (!to) return 0xFFFFFFFF;
-  if (!to->started) {
-    RunThreadObject(to);
-    return 1;
-  }
-  return 0;
+  return RunThreadObject(to) ? 1 : 0;
 }
 
 HLE("kernel32.dll", SuspendThread, 1) {
@@ -295,7 +309,10 @@ HLE("kernel32.dll", TerminateThread, 2) {
   return 0;
 }
 
-HLE("kernel32.dll", ExitThread, 1) { throw GuestThreadExit{Arg(c, 0)}; }
+HLE("kernel32.dll", ExitThread, 1) {
+  GuestSyncFence();  // OnGuestThreadFinished fences again after unwinding
+  throw GuestThreadExit{Arg(c, 0)};
+}
 
 HLE("kernel32.dll", GetThreadPriority, 1) { return 0; }
 HLE("kernel32.dll", GetPriorityClass, 1) { return 0x20; }  // NORMAL
@@ -433,6 +450,7 @@ HLE("kernel32.dll", UnmapViewOfFile, 1) {
 }  // namespace hle
 
 void OnGuestThreadFinished(uint32_t tid) {
+  GuestSyncPoint sync;
   {
     std::lock_guard<std::mutex> l(g_wait_mu);
     auto it = g_thread_objs.find(tid);

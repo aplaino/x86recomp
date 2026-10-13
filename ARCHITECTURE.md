@@ -475,14 +475,47 @@ parts): link dynamically. Wine and Bochs (LGPL) and GPL engine source
 releases are references only: read them to learn behaviour, do not copy
 code from them.
 
-### Known macOS risk: memory ordering
-x86 is TSO; ARM64 is weakly ordered. Lifted code that shares data
-between threads without a lock would be correct on x86-64 hosts and
-racy on Apple Silicon. `lock`-prefixed instructions and xchg are
-already seq_cst atomics in lifted code. Still to do: make every HLE
-synchronisation call (critical sections, events, Interlocked*, waits) a
-full barrier, and give any lock-free hand-off found in a game's threads
-explicit barriers via the manifest.
+### Memory ordering on weakly ordered hosts (macOS arm64)
+x86 is TSO; ARM64 is weakly ordered. Lifted code reaches guest memory
+with plain loads and stores, so data shared between threads without a
+lock would be correct on x86-64 hosts and racy on Apple Silicon.
+
+- Lifted `lock`-prefixed instructions and xchg are seq_cst atomics. On
+  Apple targets (LSE always present) they compile to `casal`, `ldaddal`,
+  `swpal`, which are fully ordered, like the x86 instructions. Built
+  for an ARMv8.0 target without LSE they would be LL/SC loops, which are
+  not full barriers for the surrounding plain accesses.
+- HLE synchronisation calls are full barriers, as on Windows (a locked
+  instruction or a kernel entry there). The host mutex or condition
+  variable behind most of them gives acquire/release between threads
+  (what one thread wrote before releasing is visible to the next one
+  that acquires), but lock + unlock is not a full barrier: accesses
+  outside it may move into the critical section and pass each other.
+  So each handler opens a `GuestSyncPoint` (kernel32_state.h): a seq_cst
+  fence on entry and on exit, early returns and ExitThread's unwind
+  included. That covers SetEvent, ResetEvent,
+  CreateMutexA (it may take ownership), ReleaseMutex,
+  WaitForSingleObject, WaitForMultipleObjects (and through it
+  MsgWaitForMultipleObjects), InterlockedIncrement/Decrement/Exchange
+  (seq_cst RMWs, which C++ orders only against other seq_cst atomics),
+  CreateThread, ResumeThread, ExitThread, TlsAlloc, TlsFree and Sleep
+  (polling loops). A thread's start fences before its first guest
+  instruction (pthread_create already publishes the creator's writes)
+  and its exit fences before it is signalled. TlsGetValue/TlsSetValue
+  touch only the caller's TEB and are plain accesses on Windows too.
+- EnterCriticalSection/LeaveCriticalSection run Windows XP's algorithm
+  on the guest structure: each is one seq_cst read-modify-write of
+  LockCount (`ldaddal`/`casal` on Apple targets, a locked instruction
+  on x86-64), fully ordered like the guest's own, so no separate fence;
+  a contended Enter waits on a host semaphore that the releasing Leave
+  signals.
+- Window messages (PostMessageA, PeekMessageA, GetMessageA) go through
+  the user32 queue mutex: acquire/release, so a message's payload
+  written before posting is visible to the receiver.
+
+Still open: a lock-free hand-off in a game's own threads (a plain flag
+polled without any of the calls above) needs explicit barriers via the
+manifest once one is found.
 
 ## Roadmap
 - EAX for games on DirectSound3D (IDirectSound3DBuffer property sets),
@@ -490,4 +523,4 @@ explicit barriers via the manifest.
 - SDL_GPU backend: SPIR-V shaders for Vulkan, then matched image for
   image against the d3d9 backend; bump mapping (BUMPENVMAP) and
   PREMODULATE, which the uber-shader only approximates.
-- macOS arm64: memory-ordering audit of HLE synchronisation; app bundle.
+- macOS arm64: app bundle.

@@ -194,6 +194,11 @@ Thread* CreateGuestThread(uint32_t stack_size) {
 // Returns its exit code.
 static uint32_t RunGuestThread(Thread* t, uint32_t entry,
                                const uint32_t* param) {
+  // Thread start is a full barrier on Windows. pthread_create already
+  // makes the creator's writes visible here; the fence states it for
+  // weakly ordered hosts like every other guest sync point
+  // (kernel32_state.h). The exit side fences in OnGuestThreadFinished.
+  GuestSyncFence();
   t_current = t;
   InstallSignalStack();
   RegisterGuestHostThread("guest", t->tid);
