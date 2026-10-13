@@ -16,7 +16,12 @@ find_package(PkgConfig REQUIRED)
 # ffmpeg (LGPL, linked dynamically): MP3 for Miles streams, Bink movies.
 pkg_check_modules(FFMPEG IMPORTED_TARGET
   libavformat libavcodec libavutil libswscale)
-set(RECOMP_LLVM_ROOT "/usr/lib/llvm/22" CACHE PATH
+if(APPLE)
+  set(_llvm_default "/opt/homebrew/opt/llvm@22")  # Homebrew
+else()
+  set(_llvm_default "/usr/lib/llvm/22")
+endif()
+set(RECOMP_LLVM_ROOT "${_llvm_default}" CACHE PATH
     "LLVM install with include/llvm/Demangle and libLLVMDemangle.a in lib64 or lib")
 # dxvk-native (d3d9 only, SDL3 WSI) for the D3D7 HLE's d3d9 backend. The
 # game project sets the default; recomp_d3d7 exists only when it is set.
