@@ -30,8 +30,9 @@ Used by:
 - **HLE** (`src/runtime/hle`): Win32 (kernel32, user32, gdi32, advapi32,
   shfolder, ...) on POSIX and SDL3; optional modules for Miles Sound
   System (with EAX 1-3 on our own reverb, modelled on Creative
-  hardware), Bink, DirectDraw 7/Direct3D 7 and OpenGL 1.x (on
-  dxvk-native's Direct3D 9) and dbghelp.
+  hardware), Bink, DirectDraw 7/Direct3D 7 and OpenGL 1.x (on a
+  fixed-function device: dxvk-native's Direct3D 9, or SDL_GPU with
+  native Metal) and dbghelp.
 - **Tools**: Ghidra export scripts (`tools/ghidra`), a PE symbol dumper
   (`tools/pe_symbols.py`), dev-time reference checks (`tools/layout`,
   `tools/undname`), and EAX reference measurement (`tools/eax_capture`:
@@ -69,10 +70,18 @@ game.dll --symbols dir [--manifest file]`, repeated) and listed in
 
 ## Requirements
 
-Linux x86-64 for now (macOS arm64 with Metal is planned; the code is
-kept portable). Clang and LLVM (the static `libLLVMDemangle.a` for
-dbghelp), CMake 3.25+, Ninja, SDL3; ffmpeg for Miles/Bink; a dxvk-native build (Direct3D 9 only, SDL3 window system)
-for D3D7 and OpenGL.
+Linux x86-64, or macOS on Apple Silicon. Clang and LLVM (the static
+`libLLVMDemangle.a` for dbghelp), CMake 3.25+, Ninja, SDL3 (3.2+ for
+SDL_GPU); ffmpeg for Miles/Bink. Graphics (D3D7 and OpenGL) use SDL_GPU,
+which on macOS is native Metal; on Linux a dxvk-native build (Direct3D 9
+only, SDL3 window system) is the default backend until SDL_GPU has
+Vulkan shaders.
+
+On macOS with Homebrew (`brew install cmake ninja sdl3 ffmpeg llvm@22`):
+
+```sh
+cmake --preset debug -DRECOMP_LLVM_ROOT=/opt/homebrew/opt/llvm@22
+```
 
 ## Licence
 

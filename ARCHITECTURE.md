@@ -53,7 +53,7 @@ game.exe ──Ghidra──> functions.tsv, jump tables ─┐
    │        │          │                 │                 │           │
    │     POSIX       SDL3            gfx::Device       SDL3 audio,     │
    │                (window,     ├ d3d9 (dxvk-native)  ffmpeg          │
-   │                 input)      └ SDL_GPU: Vulkan / Metal (planned)   │
+   │                 input)      └ SDL_GPU: Metal (Vulkan planned)     │
    └───────────────────────────────────────────────────────────────────┘
 ```
 
@@ -112,13 +112,40 @@ One 4 GiB reservation; guest VA A lives at host `base + A`. The image is
 mapped at its real VAs (0x400000..), so every constant address in the
 code is valid unchanged. `base` is chosen at startup (preferred
 0x10_0000_0000, which is free on Linux and outside macOS's 4 GiB
-__PAGEZERO and main-image range) and read from a global by lifted code.
+__PAGEZERO and main-image range; macOS may place it elsewhere, the hint
+being advisory there) and read from a global by lifted code.
 
 Win32 memory semantics (4 KiB commit granularity, 64 KiB allocation
 granularity, page protections, VirtualQuery) are tracked in a per-guest-
 page table. Host protection is only "accessible or not" at host page
 granularity (4 KiB on x86 Linux, 16 KiB on Apple Silicon and Asahi), so
-nothing depends on host page faults for guest behaviour.
+nothing depends on host page faults for guest behaviour, with one
+exception: games that demand-page reserved memory from an exception
+filter (commit and fill one page per access violation). On a host with
+larger pages, committing one guest page makes its whole host page
+accessible, and the other guest pages in it would never fault. So after a
+handler continues from a fault, the uncommitted guest pages of the same
+reservation in that host page are faulted in too (read faults at their
+first byte), before the faulting instruction is retried.
+
+### Platform layer
+src/runtime/platform.{h,cpp} holds what POSIX does not cover the same way
+on Linux and macOS; the rest of the runtime has no OS #ifdefs:
+- the guest main thread's stack switch (ucontext, deprecated but working
+  on Darwin, where it needs _XOPEN_SOURCE);
+- decoding a fault's signal context (write bit, pc, caller);
+- leaving a fault with a C++ exception. glibc's unwinder steps through
+  the kernel's signal frame, so a guest exception raised while an access
+  violation is delivered (an __except unwind) is thrown straight from
+  the handler. Darwin's unwinder cannot leave _sigtramp: there the
+  handler catches the exception, rewrites the signal context so that the
+  thread "calls" a rethrow function from the faulting instruction, and
+  returns. That makes the faulting function an ordinary caller frame,
+  which needs a frame record even in leaf functions: lifted code and the
+  x87 model are built with -mno-omit-leaf-frame-pointer on Apple hosts
+  (the link register is overwritten);
+- stat's time fields and the per-user data directory
+  (~/Library/Application Support/<id> on macOS).
 
 ### Address-space headroom: 2 GiB -> ~4 GiB (planned, opt-in)
 EXEs that are not large-address-aware never saw an address at or above
@@ -325,12 +352,35 @@ draws). Backends:
    fixed-function pipeline and DXVK implements it, so this backend is
    mostly 1:1 state translation and gets pixels on screen fastest. It
    is also the reference image for backend 2.
-2. SDL_GPU with our own fixed-function shader generator (planned):
-   Vulkan on Linux and native Metal on macOS (shaders compiled from one
-   source to SPIR-V and MSL at build time). This is the long-term
-   backend on both platforms. dxvk-native cannot be it: DXVK on macOS
-   would need MoltenVK, which lacks features DXVK requires, and would
-   not be native Metal anyway.
+2. SDL_GPU (src/runtime/gfx/gpu_device.cpp): native Metal on macOS;
+   Vulkan on Linux once its shaders exist (only MSL is written so far).
+   This is the long-term backend on both platforms. dxvk-native cannot
+   be it: DXVK on macOS would need MoltenVK, which lacks features DXVK
+   requires, and would not be native Metal anyway. Design:
+   - The fixed-function pipeline is one vertex and one fragment
+     uber-shader (gfx/gpu_shaders_msl.h) driven by uniforms holding the
+     D3D state: vertex blending, lighting (directional, point, spot;
+     material sources), texgen and texture transforms (projected too),
+     vertex and table fog, all texture-stage ops and arguments, alpha
+     test, flat shading, user clip planes. Nothing is compiled per state.
+   - Vertices are pulled from a storage buffer with the FVF's offsets in
+     the uniforms, so the vertex layout is not pipeline state. Pipelines
+     (blend, depth/stencil, rasterizer, topology, depth format) are
+     cached by state; triangle fans become lists.
+   - D3D draws arrive one at a time with their data in guest memory, and
+     SDL_GPU uploads only outside render passes. Draws are therefore
+     recorded per render target (vertex/index data and uniforms in CPU
+     arenas) and flushed as one copy pass plus one render pass when the
+     target changes, a texture in use is updated, or on readback and
+     present. A full-target Clear before any draw is the pass's load op.
+   - Colour textures and targets are B8G8R8A8 (the memory layout of D3D's
+     A8R8G8B8); other formats convert on upload and readback, as the d3d9
+     backend does for its X8R8G8B8 back buffer. DXT stays BC1-3. Blends
+     reading destination alpha see 1 on targets without alpha.
+   - D3D9's integer pixel centres become Metal's half-integer ones with a
+     half-pixel shift in the vertex shader.
+   <ID>_GFX=d3d9|gpu selects the backend; the default is d3d9 where the
+   build has it, else SDL_GPU.
 
 API front ends:
 - DirectDraw 7 / Direct3D 7 (recomp_d3d7): guest-visible COM objects;
@@ -428,16 +478,16 @@ code from them.
 ### Known macOS risk: memory ordering
 x86 is TSO; ARM64 is weakly ordered. Lifted code that shares data
 between threads without a lock would be correct on x86-64 hosts and
-racy on Apple Silicon. Plan: every HLE synchronisation call (critical
-sections, events, Interlocked*, waits) is a full barrier, `lock`-prefixed
-instructions become seq_cst atomics, and any lock-free hand-off found in
-a game's threads gets explicit barriers via the manifest. Revisit before
-the macOS port.
+racy on Apple Silicon. `lock`-prefixed instructions and xchg are
+already seq_cst atomics in lifted code. Still to do: make every HLE
+synchronisation call (critical sections, events, Interlocked*, waits) a
+full barrier, and give any lock-free hand-off found in a game's threads
+explicit barriers via the manifest.
 
 ## Roadmap
 - EAX for games on DirectSound3D (IDirectSound3DBuffer property sets),
   on the same EAX model and reverb buses as the Miles providers.
-- SDL_GPU backend (Vulkan) with the fixed-function generator, matched
-  against the d3d9 backend.
-- macOS arm64: Metal via SDL_GPU, platform layer (signals, ucontext,
-  mmap), memory-ordering audit.
+- SDL_GPU backend: SPIR-V shaders for Vulkan, then matched image for
+  image against the d3d9 backend; bump mapping (BUMPENVMAP) and
+  PREMODULATE, which the uber-shader only approximates.
+- macOS arm64: memory-ordering audit of HLE synchronisation; app bundle.
