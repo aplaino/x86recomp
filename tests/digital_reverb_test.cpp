@@ -73,12 +73,16 @@ std::vector<Scenario> Scenarios() {
 
 // The summed sends of fragment `f`: an impulse, noise, silence, then a
 // second burst after the reverb was woken again.
+// The noise comes from raw mt19937 output, which the standard fixes (its
+// distributions it does not): the top 16 bits of a draw, which is what
+// libstdc++'s uniform_int_distribution<int>(-32768, 32767) returned when
+// the hash below was recorded.
 void Send(const Scenario& sc, int f, std::mt19937& g, std::vector<int32_t>* send) {
-  std::uniform_int_distribution<int> noise(-32768, 32767);
   for (int i = 0; i < sc.fragment; i++) {
     int32_t v = 0;
     if (f == 0 && i == 0) v = 32767 * 2048;
-    if ((f >= 3 && f < 9) || (f >= 70 && f < 74)) v = noise(g) * 1024;
+    if ((f >= 3 && f < 9) || (f >= 70 && f < 74))
+      v = (int32_t(g() >> 16) - 32768) * 1024;
     (*send)[i] = v;
   }
 }

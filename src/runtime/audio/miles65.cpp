@@ -27,6 +27,16 @@ int LowHalfOfRound(double x) {
   return int32_t(uint32_t(uint64_t(std::llrint(x))));
 }
 
+// The CRT's pow of a negative base and a non-integer exponent is an x87
+// invalid operation: the "real indefinite" QNaN, sign set. A host libm
+// returns its FPU's default NaN instead, which on arm64 has the sign
+// clear; NaN operands still propagate as they are.
+double Pow(double x, double y) {
+  double r = std::pow(x, y);
+  if (r != r && x == x && y == y) return std::bit_cast<double>(0xFFF8000000000000ull);
+  return r;
+}
+
 // acos(x) x float(1/pi), multiplied as the x87 does. The CRT's acos is
 // atan2(sqrt((1 + x)(1 - x)), x) for |x| < 1, exactly 0 at 1 and NaN (a
 // domain error) beyond 1; at -1 it is the x87's 64-bit pi, whose product
@@ -40,10 +50,10 @@ double AcosOverPi(double x) {
 
 Levels FromVolumePan(float v, float p) {
   Levels l;
-  l.volume = float(std::pow(double(v), kVolumePower));
+  l.volume = float(Pow(double(v), kVolumePower));
   l.pan = p;
-  l.left = float(std::pow(1.0 - double(p), kPanPower) * double(l.volume));
-  l.right = float(std::pow(double(p), kPanPower) * double(l.volume));
+  l.left = float(Pow(1.0 - double(p), kPanPower) * double(l.volume));
+  l.right = float(Pow(double(p), kPanPower) * double(l.volume));
   return l;
 }
 
@@ -52,10 +62,10 @@ Levels FromLevels(float left, float right) {
   l.left = left;
   l.right = right;
   if (left > kFloor) {
-    double q = std::pow(double(right) / double(left), kRatioPower);
+    double q = Pow(double(right) / double(left), kRatioPower);
     l.pan = float(q / (1.0 + q));
     l.volume = l.pan < kFloor ? left
-                              : float(std::pow(double(l.pan), -kPanPower) * double(right));
+                              : float(Pow(double(l.pan), -kPanPower) * double(right));
   } else {
     l.pan = 0.0f;
     l.volume = right;
@@ -64,7 +74,7 @@ Levels FromLevels(float left, float right) {
 }
 
 float ReportedVolume(const Levels& l) {
-  return float(std::pow(double(l.volume), kReportPower));
+  return float(Pow(double(l.volume), kReportPower));
 }
 
 int DirectGain(float level, float master, float driver_dry, float dry) {
@@ -98,7 +108,7 @@ Levels Fast2D(const Source& s, const Listener& l) {
   float dist = float(d);
 
   // Volume and distance falloff.
-  float g = float(std::pow(double(s.volume), kVolumePower));
+  float g = float(Pow(double(s.volume), kVolumePower));
   float m = s.min_dist < kFloor ? kFloor : s.min_dist;
   if (double(kFloor) + double(m) < double(dist))
     g = float(double(m) / ((double(dist) - double(m)) * double(l.rolloff) + double(m)) *

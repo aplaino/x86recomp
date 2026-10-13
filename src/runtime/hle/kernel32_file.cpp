@@ -22,6 +22,7 @@
 #include "runtime/hle/hle.h"
 #include "runtime/hle/kernel32_state.h"
 #include "runtime/hle/win32.h"
+#include "runtime/platform.h"
 #include "runtime/log.h"
 
 namespace recomp {
@@ -433,9 +434,9 @@ HLE("kernel32.dll", GetFileTime, 4) {
     SetLastError(kErrorInvalidHandle);
     return 0;
   }
-  if (Arg(c, 1)) PutFileTime(Arg(c, 1), st.st_mtim);
-  if (Arg(c, 2)) PutFileTime(Arg(c, 2), st.st_atim);
-  if (Arg(c, 3)) PutFileTime(Arg(c, 3), st.st_mtim);
+  if (Arg(c, 1)) PutFileTime(Arg(c, 1), platform::StatModifyTime(st));
+  if (Arg(c, 2)) PutFileTime(Arg(c, 2), platform::StatAccessTime(st));
+  if (Arg(c, 3)) PutFileTime(Arg(c, 3), platform::StatModifyTime(st));
   return 1;
 }
 
@@ -603,9 +604,9 @@ void FillFindData(uint32_t fd, const std::string& host_dir, const std::string& n
   stat((host_dir + "/" + name).c_str(), &st);
   std::memset(GPtr(fd), 0, 320);
   Wr32(fd + 0, AttributesOf(st, name));
-  PutFileTime(fd + 4, st.st_mtim);   // creation
-  PutFileTime(fd + 12, st.st_atim);  // access
-  PutFileTime(fd + 20, st.st_mtim);  // write
+  PutFileTime(fd + 4, platform::StatModifyTime(st));   // creation
+  PutFileTime(fd + 12, platform::StatAccessTime(st));  // access
+  PutFileTime(fd + 20, platform::StatModifyTime(st));  // write
   Wr32(fd + 28, uint32_t(uint64_t(st.st_size) >> 32));
   Wr32(fd + 32, uint32_t(st.st_size));
   PutStr(fd + 44, name.substr(0, 259));  // cFileName

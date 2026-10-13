@@ -17,10 +17,21 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(FFMPEG IMPORTED_TARGET
   libavformat libavcodec libavutil libswscale)
 set(RECOMP_LLVM_ROOT "/usr/lib/llvm/22" CACHE PATH
-    "LLVM install with include/llvm/Demangle and lib64/libLLVMDemangle.a")
+    "LLVM install with include/llvm/Demangle and libLLVMDemangle.a in lib64 or lib")
 # dxvk-native (d3d9 only, SDL3 WSI) for the D3D7 HLE's d3d9 backend. The
 # game project sets the default; recomp_d3d7 exists only when it is set.
 set(DXVK_NATIVE_DIR "" CACHE PATH "dxvk-native install prefix")
+
+# Where the unwinder cannot leave a signal frame (macOS), a guest exception
+# raised by a fault is rethrown as if the faulting instruction had made a
+# call (runtime/platform.h); that needs a frame record in every function
+# that can fault on guest memory, leaf functions included.
+if(APPLE)
+  set(RECOMP_FAULT_FRAME_FLAGS -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer
+      CACHE INTERNAL "")
+else()
+  set(RECOMP_FAULT_FRAME_FLAGS "" CACHE INTERNAL "")
+endif()
 
 # For the helper functions below, which run in the game project's scope.
 set(RECOMP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}" CACHE INTERNAL "")
@@ -41,7 +52,8 @@ target_link_libraries(recomp_x87 PRIVATE softfloat)
 # Every x87 instruction of the game runs through these: always optimise
 # (an -O0 debug build made float-heavy scenes several times slower).
 # No stack protector: its canary check sat in every hot x87 helper.
-target_compile_options(recomp_x87 PRIVATE -O2 -fno-stack-protector)
+target_compile_options(recomp_x87 PRIVATE -O2 -fno-stack-protector
+                       ${RECOMP_FAULT_FRAME_FLAGS})
 target_compile_options(softfloat PRIVATE -O2)
 # ----------------------------------------------------------------------
 
@@ -53,6 +65,7 @@ add_subdirectory(tools/lifter)
 # would drop.
 add_library(recomp_runtime OBJECT
   src/runtime/dispatch.cpp
+  src/runtime/platform.cpp
   src/runtime/process.cpp
   src/runtime/watchdog.cpp
   src/runtime/guest_alloc.cpp
@@ -138,8 +151,9 @@ endif()
 
 # dbghelp (UnDecorateSymbolName) on LLVM's Microsoft demangler.
 add_library(recomp_dbghelp OBJECT src/runtime/hle/dbghelp.cpp)
-target_link_libraries(recomp_dbghelp PUBLIC recomp_runtime
-                      "${RECOMP_LLVM_ROOT}/lib64/libLLVMDemangle.a")
+find_library(RECOMP_LLVM_DEMANGLE libLLVMDemangle.a
+  PATHS "${RECOMP_LLVM_ROOT}/lib64" "${RECOMP_LLVM_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)
+target_link_libraries(recomp_dbghelp PUBLIC recomp_runtime "${RECOMP_LLVM_DEMANGLE}")
 target_include_directories(recomp_dbghelp PRIVATE "${RECOMP_LLVM_ROOT}/include")
 
 # recomp_add_lifted(<target> <dir>): an OBJECT library of the lifter's
@@ -158,7 +172,7 @@ function(recomp_add_lifted target dir)
   # -fnon-call-exceptions: guest access violations are raised from the
   # SIGSEGV handler and may unwind (GuestResume) out of the faulting frame.
   target_compile_options(${target} PRIVATE -O2 -g0 -fno-strict-aliasing
-                         -fnon-call-exceptions)
+                         -fnon-call-exceptions ${RECOMP_FAULT_FRAME_FLAGS})
 endfunction()
 
 # recomp_add_lift_tests(EXE <exe> SYMBOLS <dir> MANIFEST <file>): oracle

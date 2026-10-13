@@ -8,7 +8,6 @@
 #include <execinfo.h>
 #include <pthread.h>
 #include <sys/mman.h>
-#include <ucontext.h>
 #include <signal.h>
 #include <unistd.h>
 
@@ -18,11 +17,13 @@
 #include <string>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <vector>
 
 #include "runtime/hle/hle.h"
 #include "runtime/lifted.h"
 #include "runtime/log.h"
+#include "runtime/platform.h"
 #include "runtime/runtime.h"
 
 namespace recomp {
@@ -151,19 +152,43 @@ namespace {
 thread_local int t_fault_depth = 0;
 constexpr int kMaxFaultDepth = 8;
 
+// Hosts whose unwinder cannot leave a signal frame (platform.h): a guest
+// exception thrown while the fault is delivered (an __except unwind) is
+// caught in the handler and rethrown from the faulting instruction.
+thread_local std::exception_ptr t_fault_exception;
+
+[[noreturn]] void RethrowFaultException() {
+  std::exception_ptr e = std::move(t_fault_exception);
+  t_fault_exception = nullptr;
+  std::rethrow_exception(e);
+}
+
 void FaultHandler(int sig, siginfo_t* si, void* uc) {
   char buf[256];
   uintptr_t a = reinterpret_cast<uintptr_t>(si->si_addr);
   uintptr_t base = reinterpret_cast<uintptr_t>(g_guest_base);
+  platform::FaultContext fc = platform::ReadFaultContext(uc);
   if (a - base < (1ull << 32) && CurrentThread() &&
       t_fault_depth < kMaxFaultDepth && hle::t_hle_depth == 0) {
-    bool write = false;
-#if defined(__linux__) && defined(__x86_64__)
-    write = (static_cast<ucontext_t*>(uc)->uc_mcontext.gregs[REG_ERR] & 2) != 0;
-#endif
     ++t_fault_depth;
-    bool cont = hle::RaiseAccessViolation(CurrentThread()->ctx, write,
-                                          uint32_t(a - base));
+    bool cont;
+    if constexpr (platform::kThrowThroughSignalFrames) {
+      cont = hle::RaiseAccessViolation(CurrentThread()->ctx, fc.write,
+                                       uint32_t(a - base));
+    } else {
+      try {
+        cont = hle::RaiseAccessViolation(CurrentThread()->ctx, fc.write,
+                                         uint32_t(a - base));
+      } catch (...) {
+        --t_fault_depth;
+        t_fault_exception = std::current_exception();
+        if (platform::RedirectToCall(uc, RethrowFaultException)) return;
+        const char m[] = "FATAL: cannot resume after a guest exception "
+                         "from a fault on this host\n";
+        (void)!write(2, m, sizeof m - 1);
+        _exit(4);
+      }
+    }
     --t_fault_depth;
     if (cont) return;  // retry the faulting instruction
   }
@@ -180,19 +205,15 @@ void FaultHandler(int sig, siginfo_t* si, void* uc) {
   (void)!write(2, buf, size_t(n));
   char name[32] = "?";
   pthread_getname_np(pthread_self(), name, sizeof name);
-#if defined(__linux__) && defined(__x86_64__)
-  // A call through a null pointer leaves pc 0: the caller is at [sp].
-  const greg_t* g = static_cast<ucontext_t*>(uc)->uc_mcontext.gregs;
-  void* caller = *reinterpret_cast<void* const*>(g[REG_RSP]);
-  n = std::snprintf(buf, sizeof buf, "  thread '%s', pc %p, [sp]:\n", name,
-                    reinterpret_cast<void*>(g[REG_RIP]));
+  n = std::snprintf(buf, sizeof buf, "  thread '%s', pc %p, caller:\n", name,
+                    reinterpret_cast<void*>(fc.pc));
   (void)!write(2, buf, size_t(n));
-  backtrace_symbols_fd(&caller, 1, 2);
-  n = 0;
-#else
-  n = std::snprintf(buf, sizeof buf, "  thread '%s'\n", name);
-#endif
-  (void)!write(2, buf, size_t(n));
+  // A call through a null pointer leaves pc 0: the caller (the return
+  // address in [sp] or the link register) still shows where it was.
+  if (fc.caller) {
+    void* caller = reinterpret_cast<void*>(fc.caller);
+    backtrace_symbols_fd(&caller, 1, 2);
+  }
   void* frames[48];
   int nf = backtrace(frames, 48);
   backtrace_symbols_fd(frames, nf, 2);

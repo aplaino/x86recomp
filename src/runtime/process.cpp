@@ -5,7 +5,6 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <ucontext.h>
 
 #include <thread>
 #include <algorithm>
@@ -23,6 +22,7 @@
 #include "runtime/hle/kernel32_state.h"
 #include "runtime/lifted.h"
 #include "runtime/log.h"
+#include "runtime/platform.h"
 #include "runtime/runtime.h"
 #include "runtime/sse.h"
 #include "runtime/watchdog.h"
@@ -257,10 +257,8 @@ void StartServiceThread(Thread* t, std::function<void()> fn) {
 }
 
 // The guest main thread runs on the process main thread (SDL, and Cocoa on
-// macOS, require UI calls there) but on a big private stack, switched to
-// with makecontext/swapcontext.
+// macOS, require UI calls there) but on a big private stack.
 namespace {
-ucontext_t g_host_main_ctx, g_guest_main_ctx;
 Thread* g_main_thread = nullptr;
 uint32_t g_main_entry = 0, g_main_exit = 0;
 
@@ -275,12 +273,7 @@ static uint32_t RunOnMainThread(Thread* t, uint32_t entry) {
   if (stack == MAP_FAILED) FatalF("cannot allocate the main guest stack");
   g_main_thread = t;
   g_main_entry = entry;
-  getcontext(&g_guest_main_ctx);
-  g_guest_main_ctx.uc_stack.ss_sp = stack;
-  g_guest_main_ctx.uc_stack.ss_size = kHostStack;
-  g_guest_main_ctx.uc_link = &g_host_main_ctx;  // resume here on return
-  makecontext(&g_guest_main_ctx, GuestMainTrampoline, 0);
-  swapcontext(&g_host_main_ctx, &g_guest_main_ctx);
+  platform::RunOnStack(stack, kHostStack, GuestMainTrampoline);
   munmap(stack, kHostStack);
   return g_main_exit;
 }

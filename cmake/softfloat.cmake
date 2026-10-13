@@ -143,10 +143,13 @@ target_compile_definitions(softfloat
   # softfloat_types.h picks the field order of extFloat80_t/float128_t
   # from LITTLEENDIAN, softfloat.h only declares the by-value extF80/f128
   # API with FAST_INT64, and the state variables must be declared
-  # thread-local everywhere (C++ spells it thread_local).
+  # thread-local everywhere. C++ spells it __thread, not thread_local:
+  # an extern thread_local is reached through a wrapper function that only
+  # a C++ definition emits (Darwin does not fall back to direct access as
+  # ELF does), and these variables are defined in C.
   PUBLIC LITTLEENDIAN=1 SOFTFLOAT_FAST_INT64
          $<$<COMPILE_LANGUAGE:C>:THREAD_LOCAL=_Thread_local>
-         $<$<COMPILE_LANGUAGE:CXX>:THREAD_LOCAL=thread_local>)
+         $<$<COMPILE_LANGUAGE:CXX>:THREAD_LOCAL=__thread>)
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(softfloat PRIVATE
     -Werror=implicit-function-declaration -w)
