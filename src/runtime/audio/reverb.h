@@ -1,11 +1,11 @@
 #pragma once
 // Environmental reverb for the software mixer: the EAX listener
 // environment as a Creative Audigy 2 ZS renders it, rebuilt from its
-// measured impulse responses (tools/eax_capture) with textbook parts:
-// tapped delay lines for the reflections and the start of the late
-// reverb, and a feedback delay network for the rest (Jot and Chaigne
-// 1991: per-line absorption filters set from the decay times; Schroeder
-// and Moorer's echo comb).
+// measured impulse responses (tools/eax_capture, docs/eax.md) with
+// textbook parts: tapped delay lines for the reflections and the start
+// of the late reverb, and a feedback delay network for the rest (Jot
+// and Chaigne 1991: per-line absorption filters set from the decay
+// times; Schroeder and Moorer's echo comb).
 //
 // Bus 0 is the open EAX provider's listener environment (Miles 6.5's
 // digital master reverb is DigitalReverb). The mixer hands each bus's
