@@ -805,6 +805,22 @@ class GpuDevice final : public Device {
     cmds_.push_back(c);
   }
 
+  // Draw records into CPU arenas anyway (uploaded at the next flush), so
+  // mapped draws are built in scratch memory and recorded like any other.
+  Mapped MapDraw(uint32_t nv, uint32_t stride, uint32_t ni) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    mapped_ = {nv, stride, ni};
+    mapped_vertices_.resize(size_t(nv) * stride);
+    mapped_indices_.resize(ni);
+    return {mapped_vertices_.data(), mapped_indices_.data()};
+  }
+
+  void DrawMapped(uint32_t prim, uint32_t fvf) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    Draw(prim, fvf, mapped_vertices_.data(), mapped_.nv, mapped_.stride,
+         mapped_indices_.data(), mapped_.ni);
+  }
+
   void Present() override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     Flush();
@@ -1748,6 +1764,11 @@ class GpuDevice final : public Device {
   std::vector<Upload> uploads_;
   std::vector<uint8_t> upload_bytes_;
   std::vector<BlitTex> blit_pool_;
+  struct {
+    uint32_t nv, stride, ni;
+  } mapped_{};
+  std::vector<uint8_t> mapped_vertices_;
+  std::vector<uint16_t> mapped_indices_;
   size_t blit_used_ = 0;
 
   SDL_GPUBuffer* vbuf_ = nullptr;
