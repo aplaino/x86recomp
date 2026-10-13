@@ -153,7 +153,7 @@ int RunProcess(const GameConfig& game, const std::string& exe_path,
 Thread* CreateGuestThread(uint32_t stack_size);
 
 // Per-user data directory: $XDG_DATA_HOME/<id>, else ~/.local/share/<id>
-// (settings, saves, the guest's C: drive, crash and hang reports).
+// (~/Library/Application Support/<id> on macOS) (settings, saves, the guest's C: drive, crash and hang reports).
 std::string DataDir();
 // Creates `path` and any missing parents (mkdir -p).
 void MakeDirs(const std::string& path);

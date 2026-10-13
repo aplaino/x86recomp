@@ -28,6 +28,13 @@ inline timespec StatModifyTime(const struct stat& st) {
 #endif
 }
 
+// Per-user data under $HOME (without XDG_DATA_HOME), with a trailing '/'.
+#if defined(__APPLE__)
+inline constexpr const char* kUserDataDir = "/Library/Application Support/";
+#else
+inline constexpr const char* kUserDataDir = "/.local/share/";
+#endif
+
 // ---- stacks
 // Runs fn() on [stack, stack + size) on the calling thread and returns
 // when it does (the process main thread must stay the UI thread, but the

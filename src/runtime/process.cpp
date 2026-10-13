@@ -73,7 +73,7 @@ std::string DataDir() {
   if (const char* x = std::getenv("XDG_DATA_HOME"); x && *x)
     return std::string(x) + "/" + id;
   if (const char* h = std::getenv("HOME"); h && *h)
-    return std::string(h) + "/.local/share/" + id;
+    return std::string(h) + platform::kUserDataDir + id;
   return "/tmp/" + id;
 }
 
