@@ -53,7 +53,7 @@ game.exe ──Ghidra──> functions.tsv, jump tables ─┐
    │        │          │                 │                 │           │
    │     POSIX       SDL3            gfx::Device       SDL3 audio,     │
    │                (window,     ├ d3d9 (dxvk-native)  ffmpeg          │
-   │                 input)      └ SDL_GPU: Metal (Vulkan planned)     │
+   │                 input)      └ SDL_GPU: Vulkan, Metal              │
    └───────────────────────────────────────────────────────────────────┘
 ```
 
@@ -352,17 +352,20 @@ draws). Backends:
    fixed-function pipeline and DXVK implements it, so this backend is
    mostly 1:1 state translation and gets pixels on screen fastest. It
    is also the reference image for backend 2.
-2. SDL_GPU (src/runtime/gfx/gpu_device.cpp): native Metal on macOS;
-   Vulkan on Linux once its shaders exist (only MSL is written so far).
-   This is the long-term backend on both platforms. dxvk-native cannot
-   be it: DXVK on macOS would need MoltenVK, which lacks features DXVK
-   requires, and would not be native Metal anyway. Design:
+2. SDL_GPU (src/runtime/gfx/gpu_device.cpp): Vulkan on Linux, native
+   Metal on macOS. This is the long-term backend on both platforms.
+   dxvk-native cannot be it: DXVK on macOS would need MoltenVK, which
+   lacks features DXVK requires, and would not be native Metal anyway.
+   Design:
    - The fixed-function pipeline is one vertex and one fragment
-     uber-shader (gfx/gpu_shaders_msl.h) driven by uniforms holding the
-     D3D state: vertex blending, lighting (directional, point, spot;
+     uber-shader (gfx/shaders/ff.vert, ff.frag) driven by uniforms
+     holding the D3D state: vertex blending, lighting (directional, point, spot;
      material sources), texgen and texture transforms (projected too),
      vertex and table fog, all texture-stage ops and arguments, alpha
      test, flat shading, user clip planes. Nothing is compiled per state.
+     The GLSL is the only source: glslang builds SPIR-V for Vulkan, and
+     for Metal SPIRV-Cross converts a build with Metal's buffer order
+     into MSL; both are embedded at build time.
    - Vertices are pulled from a storage buffer with the FVF's offsets in
      the uniforms, so the vertex layout is not pipeline state. Pipelines
      (blend, depth/stencil, rasterizer, topology, depth format) are
@@ -377,8 +380,9 @@ draws). Backends:
      A8R8G8B8); other formats convert on upload and readback, as the d3d9
      backend does for its X8R8G8B8 back buffer. DXT stays BC1-3. Blends
      reading destination alpha see 1 on targets without alpha.
-   - D3D9's integer pixel centres become Metal's half-integer ones with a
-     half-pixel shift in the vertex shader.
+   - D3D9's integer pixel centres become SDL_GPU's half-integer ones
+     with a half-pixel shift in the vertex shader. SDL_GPU flips Vulkan's
+     viewport, so clip space is y-up on both APIs.
    <ID>_GFX=d3d9|gpu selects the backend; the default is d3d9 where the
    build has it, else SDL_GPU.
 
@@ -520,7 +524,7 @@ manifest once one is found.
 ## Roadmap
 - EAX for games on DirectSound3D (IDirectSound3DBuffer property sets),
   on the same EAX model and reverb buses as the Miles providers.
-- SDL_GPU backend: SPIR-V shaders for Vulkan, then matched image for
-  image against the d3d9 backend; bump mapping (BUMPENVMAP) and
-  PREMODULATE, which the uber-shader only approximates.
+- SDL_GPU backend: matched image for image against the d3d9 backend;
+  bump mapping (BUMPENVMAP) and PREMODULATE, which the uber-shader only
+  approximates.
 - macOS arm64: app bundle.

@@ -1,10 +1,10 @@
-// gfx::Device on SDL_GPU: native Metal on macOS (Vulkan on Linux needs
-// SPIR-V builds of the shaders, not written yet).
+// gfx::Device on SDL_GPU: native Metal on macOS, Vulkan elsewhere.
 //
-// The D3D fixed-function pipeline is two uber-shaders
-// (gpu_shaders_msl.h) driven by uniforms, so nothing is compiled per
-// state. What a pipeline object must fix (blend, depth/stencil,
-// rasterizer, topology, depth format) is cached by state.
+// The D3D fixed-function pipeline is two uber-shaders (shaders/ff.vert
+// and ff.frag; SPIR-V for Vulkan, MSL from SPIRV-Cross for Metal) driven
+// by uniforms, so nothing is compiled per state. What a pipeline object
+// must fix (blend, depth/stencil, rasterizer, topology, depth format) is
+// cached by state.
 //
 // D3D draws arrive one at a time with their data in guest memory; SDL_GPU
 // uploads only in copy passes, outside render passes. So draws are
@@ -33,14 +33,18 @@
 #include <vector>
 
 #include "runtime/gfx/device.h"
-#include "runtime/gfx/gpu_shaders_msl.h"
 #include "runtime/log.h"
+
+// kFfVert and kFfFrag, built from shaders/ff.*: MSL source on macOS,
+// SPIR-V words elsewhere.
+#include "ff_frag.h"
+#include "ff_vert.h"
 
 namespace recomp::gfx {
 
 namespace {
 
-// ---- uniform blocks (layouts mirror gpu_shaders_msl.h)
+// ---- uniform blocks (layouts mirror the shaders')
 
 struct GpuLight {
   float diffuse[4], specular[4], ambient[4], position[4], direction[4], atten[4], spot[4];
@@ -313,7 +317,16 @@ class GpuDevice final : public Device {
   explicit GpuDevice(SDL_Window* w) : window_(w) {}
 
   bool Init() {
-    dev_ = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_MSL, false, nullptr);
+#if defined(__APPLE__)
+    const SDL_GPUShaderFormat format = SDL_GPU_SHADERFORMAT_MSL;
+    const char* entry = "main0";  // SPIRV-Cross's name for main
+    size_t vs_size = sizeof kFfVert - 1, fs_size = sizeof kFfFrag - 1;
+#else
+    const SDL_GPUShaderFormat format = SDL_GPU_SHADERFORMAT_SPIRV;
+    const char* entry = "main";
+    size_t vs_size = sizeof kFfVert, fs_size = sizeof kFfFrag;
+#endif
+    dev_ = SDL_CreateGPUDevice(format, false, nullptr);
     if (!dev_) {
       WarnF("gfx: SDL_CreateGPUDevice: %s\n", SDL_GetError());
       return false;
@@ -323,16 +336,17 @@ class GpuDevice final : public Device {
       return false;
     }
     SDL_GPUShaderCreateInfo vs{};
-    vs.code = reinterpret_cast<const Uint8*>(kGpuShadersMsl);
-    vs.code_size = std::strlen(kGpuShadersMsl);
-    vs.entrypoint = "vs_main";
-    vs.format = SDL_GPU_SHADERFORMAT_MSL;
+    vs.code = reinterpret_cast<const Uint8*>(kFfVert);
+    vs.code_size = vs_size;
+    vs.entrypoint = entry;
+    vs.format = format;
     vs.stage = SDL_GPU_SHADERSTAGE_VERTEX;
     vs.num_uniform_buffers = 1;
     vs.num_storage_buffers = 1;
     vs_ = SDL_CreateGPUShader(dev_, &vs);
     SDL_GPUShaderCreateInfo fs = vs;
-    fs.entrypoint = "fs_main";
+    fs.code = reinterpret_cast<const Uint8*>(kFfFrag);
+    fs.code_size = fs_size;
     fs.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
     fs.num_storage_buffers = 0;
     fs.num_samplers = 8;

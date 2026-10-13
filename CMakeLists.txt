@@ -124,7 +124,7 @@ endif()
 
 # gfx::Device and its backends; no HLE in it, so a plain static library
 # shared by the graphics API modules below. Backends:
-# - SDL_GPU (gfx/gpu_device.cpp): always; Metal on macOS (MSL shaders);
+# - SDL_GPU (gfx/gpu_device.cpp): always; Vulkan, or Metal on macOS;
 # - d3d9 through dxvk-native (gfx/d3d9_device.cpp): when DXVK_NATIVE_DIR
 #   is set (Linux), with RECOMP_HAVE_D3D9 defined for the runtime too.
 add_library(recomp_gfx STATIC
@@ -134,6 +134,44 @@ add_library(recomp_gfx STATIC
 target_include_directories(recomp_gfx PUBLIC src)
 target_compile_features(recomp_gfx PUBLIC cxx_std_20)
 target_link_libraries(recomp_gfx PUBLIC SDL3::SDL3)
+# SDL_GPU's shaders, one GLSL source per stage (gfx/shaders): glslang
+# compiles it to SPIR-V for Vulkan; for Metal, SPIRV-Cross turns a build
+# with Metal's binding order (METAL defined) into MSL source. Either way
+# the result is embedded in a header (ff_<stage>.h, array kFf<Stage>).
+find_program(RECOMP_GLSLANG glslangValidator REQUIRED)
+if(APPLE)
+  find_program(RECOMP_SPIRV_CROSS spirv-cross REQUIRED)
+endif()
+set(_shader_dir "${CMAKE_CURRENT_BINARY_DIR}/gfx_shaders")
+set(_shader_name_vert kFfVert)
+set(_shader_name_frag kFfFrag)
+foreach(_stage vert frag)
+  set(_src "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/gfx/shaders/ff.${_stage}")
+  set(_out "${_shader_dir}/ff_${_stage}.h")
+  if(APPLE)
+    add_custom_command(
+      OUTPUT "${_out}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${_shader_dir}"
+      COMMAND "${RECOMP_GLSLANG}" -V --quiet -DMETAL
+              -o "${_shader_dir}/ff_${_stage}.spv" "${_src}"
+      COMMAND "${RECOMP_SPIRV_CROSS}" --msl --msl-version 20100
+              --msl-decoration-binding --msl-no-clip-distance-user-varying
+              "${_shader_dir}/ff_${_stage}.spv" --output "${_shader_dir}/ff_${_stage}.metal"
+      COMMAND "${CMAKE_COMMAND}" -DIN=${_shader_dir}/ff_${_stage}.metal -DOUT=${_out}
+              -DNAME=${_shader_name_${_stage}}
+              -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_text.cmake"
+      DEPENDS "${_src}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_text.cmake" VERBATIM)
+  else()
+    add_custom_command(
+      OUTPUT "${_out}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${_shader_dir}"
+      COMMAND "${RECOMP_GLSLANG}" -V --target-env vulkan1.0 --quiet
+              --vn ${_shader_name_${_stage}} -o "${_out}" "${_src}"
+      DEPENDS "${_src}" VERBATIM)
+  endif()
+  target_sources(recomp_gfx PRIVATE "${_out}")
+endforeach()
+target_include_directories(recomp_gfx PRIVATE "${_shader_dir}")
 # Per-pixel host paths: optimised in every build type.
 set_source_files_properties(src/runtime/gfx/format.cpp
   TARGET_DIRECTORY recomp_gfx PROPERTIES COMPILE_OPTIONS "-O2")
