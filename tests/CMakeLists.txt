@@ -25,6 +25,7 @@ set_tests_properties(x87_fast PROPERTIES TIMEOUT 300)
 add_executable(digital_reverb_test digital_reverb_test.cpp
                ${PROJECT_SOURCE_DIR}/src/runtime/audio/digital_reverb.cpp)
 target_include_directories(digital_reverb_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_features(digital_reverb_test PRIVATE cxx_std_20)
 target_compile_options(digital_reverb_test PRIVATE -O2 -ffp-contract=off)
 add_test(NAME digital_reverb COMMAND digital_reverb_test)
 
