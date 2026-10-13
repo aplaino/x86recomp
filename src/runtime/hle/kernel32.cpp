@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
@@ -713,25 +714,43 @@ HLE("kernel32.dll", TlsSetValue, 2) {
 }
 
 // ---- critical sections ---------------------------------------------------
-// The guest CRITICAL_SECTION (24 bytes) is only an identity; the lock is a
-// host recursive mutex keyed by its address. Fields the guest might read
-// (LockCount, RecursionCount, OwningThread) are kept roughly in sync.
+// Windows XP's algorithm on the guest CRITICAL_SECTION itself, so the
+// fields games may read hold what they hold there: LockCount (+4) is -1
+// when free and counts the Enters past the first (recursions and
+// waiters), RecursionCount (+8), OwningThread (+12) the owner's thread
+// id. An uncontended Enter or Leave is one atomic on LockCount with no
+// global lock. A thread that finds the section owned by another waits on
+// a host semaphore keyed by the section's address (Windows' LockSemaphore,
+// also created on first contention), signalled by the Leave that sees a
+// waiter in LockCount. Enter and Leave are full barriers (ARCHITECTURE.md,
+// memory ordering) through their seq_cst read-modify-write of LockCount:
+// a lock-prefixed instruction on x86-64, LDADDAL on arm64 (LSE); no
+// separate fence.
+
+struct CsSemaphore {
+  std::mutex m;
+  std::condition_variable cv;
+  uint32_t count = 0;
+};
 
 std::mutex g_cs_mu;
-std::map<uint32_t, std::unique_ptr<std::recursive_mutex>> g_cs;
+std::map<uint32_t, std::shared_ptr<CsSemaphore>> g_cs;  // under g_cs_mu
 
-std::recursive_mutex* CsFor(uint32_t cs) {
+std::shared_ptr<CsSemaphore> CsSemaphoreFor(uint32_t cs) {
   std::lock_guard<std::mutex> l(g_cs_mu);
-  auto& m = g_cs[cs];
-  if (!m) m = std::make_unique<std::recursive_mutex>();
-  return m.get();
+  auto& s = g_cs[cs];
+  if (!s) s = std::make_shared<CsSemaphore>();
+  return s;
+}
+
+uint32_t* CsField(uint32_t cs, uint32_t off) {
+  return reinterpret_cast<uint32_t*>(GPtr(cs + off));
 }
 
 HLE("kernel32.dll", InitializeCriticalSection, 1) {
   uint32_t cs = Arg(c, 0);
   std::memset(GPtr(cs), 0, 24);
   Wr32(cs + 4, 0xFFFFFFFF);  // LockCount: -1 = free
-  CsFor(cs);
   return 0;
 }
 
@@ -740,7 +759,6 @@ HLE("kernel32.dll", InitializeCriticalSectionAndSpinCount, 2) {
   std::memset(GPtr(cs), 0, 24);
   Wr32(cs + 4, 0xFFFFFFFF);
   Wr32(cs + 20, Arg(c, 1));  // SpinCount (no effect here)
-  CsFor(cs);
   return 1;
 }
 
@@ -751,19 +769,58 @@ HLE("kernel32.dll", DeleteCriticalSection, 1) {
 }
 
 HLE("kernel32.dll", EnterCriticalSection, 1) {
-  uint32_t cs = Arg(c, 0);
-  CsFor(cs)->lock();
-  Wr32(cs + 8, Rd32(cs + 8) + 1);  // RecursionCount
-  Wr32(cs + 12, CurrentThread()->tid);
+  uint32_t cs = Arg(c, 0), tid = CurrentThread()->tid;
+  uint32_t* lock_count = CsField(cs, 4);
+  uint32_t* recursion = CsField(cs, 8);
+  uint32_t* owner = CsField(cs, 12);
+  if (__atomic_add_fetch(lock_count, 1, __ATOMIC_SEQ_CST) != 0) {
+    // Only the owner writes OwningThread, so it reads its own tid here
+    // exactly when it already holds the section.
+    if (__atomic_load_n(owner, __ATOMIC_RELAXED) == tid) {
+      __atomic_store_n(recursion, *recursion + 1, __ATOMIC_RELAXED);
+      return 0;
+    }
+    // Owned by another thread: wait for a Leave to hand it over.
+    auto s = CsSemaphoreFor(cs);
+    std::unique_lock<std::mutex> l(s->m);
+    s->cv.wait(l, [&] { return s->count > 0; });
+    s->count--;
+  }
+  __atomic_store_n(owner, tid, __ATOMIC_RELAXED);
+  __atomic_store_n(recursion, 1, __ATOMIC_RELAXED);
   return 0;
 }
 
 HLE("kernel32.dll", LeaveCriticalSection, 1) {
   uint32_t cs = Arg(c, 0);
-  uint32_t rc = Rd32(cs + 8);
-  Wr32(cs + 8, rc ? rc - 1 : 0);
-  if (rc <= 1) Wr32(cs + 12, 0);
-  CsFor(cs)->unlock();
+  uint32_t* lock_count = CsField(cs, 4);
+  uint32_t* recursion = CsField(cs, 8);
+  uint32_t* owner = CsField(cs, 12);
+  if (__atomic_load_n(owner, __ATOMIC_RELAXED) != CurrentThread()->tid) {
+    // Windows would corrupt the section (and usually hang the next
+    // Enter); leave it as it is.
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true))
+      WarnF("LeaveCriticalSection(%08X) by a thread that does not own it; "
+            "ignored\n", cs);
+    return 0;
+  }
+  uint32_t rc = *recursion - 1;
+  __atomic_store_n(recursion, rc, __ATOMIC_RELAXED);
+  if (rc) {
+    __atomic_sub_fetch(lock_count, 1, __ATOMIC_SEQ_CST);
+    return 0;
+  }
+  __atomic_store_n(owner, 0, __ATOMIC_RELAXED);
+  if (int32_t(__atomic_sub_fetch(lock_count, 1, __ATOMIC_SEQ_CST)) >= 0) {
+    // A waiter counted itself in LockCount: hand the section over.
+    auto s = CsSemaphoreFor(cs);
+    {
+      std::lock_guard<std::mutex> l(s->m);
+      s->count++;
+    }
+    s->cv.notify_one();
+  }
   return 0;
 }
 

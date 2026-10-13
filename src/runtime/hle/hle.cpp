@@ -3,6 +3,7 @@
 #include <cstdlib>
 
 #include <algorithm>
+#include <atomic>
 #include <map>
 #include <mutex>
 #include <set>
@@ -38,11 +39,17 @@ struct Slot {
   // like DirectDraw with DDSCL_MULTITHREADED (which the game requests):
   // its worker thread uploads textures while the main thread renders,
   // and neither our ddraw state nor the d3d9 device is reentrant.
-  bool graphics() const { return dll == "ddraw.dll"; }
+  bool graphics;
 };
 
-std::mutex g_slots_mu;
-std::deque<Slot> g_slots;  // stable refs; index = (thunk - kThunkBase) / kThunkStride
+std::mutex g_slots_mu;  // serialises AddSlot
+std::deque<Slot> g_slots;  // under g_slots_mu; stable refs
+
+// CallThunk's view of g_slots, read without a lock (it runs on every
+// import call): index = (thunk - kThunkBase) / kThunkStride. AddSlot
+// stores each pointer with release once its Slot is complete.
+constexpr size_t kMaxSlots = (kReturnToHost - kThunkBase) / kThunkStride;
+std::atomic<const Slot*> g_slot_table[kMaxSlots];
 
 // Pseudo HMODULEs for DLLs we provide. Real modules are guest pointers to
 // a PE header; nothing in the game dereferences these, so a recognisable
@@ -64,7 +71,10 @@ uint32_t AddSlot(const std::string& dll, const std::string& name) {
   uint32_t thunk = kThunkBase + uint32_t(g_slots.size()) * kThunkStride;
   if (thunk >= kReturnToHost) FatalF("thunk region exhausted");
   auto it = Registry().find({dll, name});
-  g_slots.push_back({dll, name, it == Registry().end() ? nullptr : &it->second});
+  g_slots.push_back({dll, name, it == Registry().end() ? nullptr : &it->second,
+                     dll == "ddraw.dll"});
+  g_slot_table[g_slots.size() - 1].store(&g_slots.back(),
+                                         std::memory_order_release);
   return thunk;
 }
 
@@ -97,11 +107,8 @@ uint32_t ImportThunk(const std::string& dll, const std::string& name) {
 void CallThunk(Ctx& c, uint32_t thunk) {
   size_t idx = (thunk - kThunkBase) / kThunkStride;
   const Slot* s = nullptr;
-  {
-    std::lock_guard<std::mutex> l(g_slots_mu);
-    if ((thunk - kThunkBase) % kThunkStride == 0 && idx < g_slots.size())
-      s = &g_slots[idx];
-  }
+  if ((thunk - kThunkBase) % kThunkStride == 0 && idx < kMaxSlots)
+    s = g_slot_table[idx].load(std::memory_order_acquire);
   if (!s)
     FatalF("call to unknown thunk %08X (return address %08X)", thunk,
            Rd32(c.esp));
@@ -131,7 +138,7 @@ void CallThunk(Ctx& c, uint32_t thunk) {
   ++t_hle_depth;
   static std::recursive_mutex graphics_mu;
   std::unique_lock<std::recursive_mutex> gl;
-  if (s->graphics()) gl = std::unique_lock<std::recursive_mutex>(graphics_mu);
+  if (s->graphics) gl = std::unique_lock<std::recursive_mutex>(graphics_mu);
   uint32_t r = d.fn(c);
   if (gl) gl.unlock();
   --t_hle_depth;
