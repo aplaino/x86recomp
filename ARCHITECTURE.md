@@ -147,7 +147,7 @@ lifter is tractable (rexglue-style: one C++ function per guest function).
 - Decoder: Zydis (fetched via CMake FetchContent), build-time only.
 - Function list: Ghidra functions.tsv + exports + a per-game line-based
   manifest (lifter.manifest) for overrides: extra entries, names, entry
-  probes, SEH resume sites.
+  probes, resume sites (SEH, longjmp), setjmp functions.
 - Output is plain C++20: no x86 intrinsics, no inline asm, no
   `long double`, no reliance on host FPU state.
 - Context: `struct Ctx { u32 eax..edi, esp, flags; X87 fpu; fs base }`,
@@ -162,8 +162,32 @@ lifter is tractable (rexglue-style: one C++ function per guest function).
 - SEH: the fs:[0] chain lives in guest memory as on Windows.
   RaiseException walks it and calls the lifted handlers. Resuming at a
   continuation (catch/except target) throws a host exception carrying
-  {target va, esp, ebp}, caught by the lifted function that owns the
+  {target va, ebp, from va}, caught by the lifted function that owns the
   target label.
+- Non-local exits (`resume <va>` in the manifest, on a call or an
+  indirect jmp): the call or jmp throws GuestResume{target, ebp, from}
+  with the guest registers spilled to Ctx, instead of calling. Every
+  function that writes fs:[0] or calls a setjmp wraps its body in
+  try/catch; the activation whose EBP local equals the thrown ebp catches
+  it and runs the target with Resume(): Dispatch to the target entry,
+  repeated for any later GuestResume into the same frame (one thrown
+  from inside the catch handler would otherwise leave the function's try
+  block). The continuation is a separate lifted function; its final
+  `ret` returns through Dispatch and the owning function returns, so the
+  host stack keeps mirroring the guest's.
+  - SEH: the site is __except_handler3's call into the __except block,
+    which starts with `mov esp, [ebp-18h]`; the target is an entry
+    because the handler table holds its address.
+  - setjmp/longjmp: `setjmp <va>` names the CRT's setjmp (e.g. MSVC's
+    __setjmp3). The return address of each direct call to it becomes a
+    strong entry (the caller's body tail-calls it after setjmp returns
+    0) and the caller gets the try/catch. `resume <va>` goes on longjmp's
+    final `jmp [jmp_buf+14h]`, reached after it has unwound the SEH chain
+    and restored ebp/ebx/esi/edi/esp from the jmp_buf, so the thrown ebp
+    is the setjmp caller's. Matching by EBP assumes the setjmp caller has
+    a frame of its own or that no deeper function with the same EBP also
+    catches; an FPO setjmp caller inherits its caller's EBP. Calls to
+    setjmp through a pointer are not recognised.
 - Oracle tests (dev-time only): every x87 and integer instruction form
   found in a game EXE is run lifted and natively from the same random
   state (tests/lift_*_test.cpp, `recomp_add_lift_tests`).

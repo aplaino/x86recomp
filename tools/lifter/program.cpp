@@ -135,6 +135,10 @@ bool Program::LoadManifest(const std::string& path, std::string* err) {
       names[va] = name;
     } else if (kind == "resume") {
       resume_sites.insert(va);
+    } else if (kind == "setjmp") {
+      entries.insert(va);
+      setjmps.insert(va);
+      if (!name.empty()) names[va] = name;
     } else if (kind == "probe") {
       entries.insert(va);
       probes[va] = name.empty() ? "probe" : name;

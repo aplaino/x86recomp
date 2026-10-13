@@ -27,7 +27,8 @@ extern const uint32_t kLiftedFunctionCount;
 
 // Thrown at manifest `resume` sites: the guest abandons the current call
 // chain and continues at `target` in the frame whose EBP is `ebp` (SEH
-// __except blocks). Caught by the lifted function owning that frame.
+// __except blocks, longjmp to a setjmp return point). Caught by the lifted
+// function owning that frame, which continues there with Resume().
 struct GuestResume {
   uint32_t target, ebp, from;
 };
@@ -36,6 +37,9 @@ struct GuestResume {
 // `va` is always the guest address of the instruction doing the call, for
 // diagnostics.
 void Dispatch(Ctx& c, uint32_t target, uint32_t va);
+// Dispatches to r.target, and again for each later GuestResume into the
+// same frame (r.ebp) thrown while that continuation runs.
+void Resume(Ctx& c, GuestResume r);
 [[noreturn]] void Unimplemented(Ctx& c, uint32_t va, const char* what);
 [[noreturn]] void BadJump(Ctx& c, uint32_t va, uint32_t target);
 [[noreturn]] void Unreachable(Ctx& c, uint32_t va);

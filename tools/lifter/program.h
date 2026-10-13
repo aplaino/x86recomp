@@ -48,7 +48,11 @@ struct Program {
                                               // defines f_X; the lifted body
                                               // is emitted as f_X_lifted
   std::set<uint32_t> resume_sites;            // manifest: calls/jmps that
-                                              // abandon the stack (SEH)
+                                              // abandon the stack (SEH,
+                                              // longjmp)
+  std::set<uint32_t> setjmps;                 // manifest: setjmp functions
+                                              // (their callers can be
+                                              // resumed by longjmp)
 
   // Maps an image (at `base`, 0 for its preferred base) and reads its
   // symbols. The first one is the EXE.
@@ -56,7 +60,7 @@ struct Program {
             std::string* err);
 
   // Applies the manifest of the module loaded last (entry/name/probe/
-  // resume lines, VAs at its preferred base).
+  // resume/replace/setjmp lines, VAs at its preferred base).
   bool LoadManifest(const std::string& path, std::string* err);
 
   // The module whose .text contains va, or null.

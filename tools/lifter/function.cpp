@@ -253,6 +253,7 @@ void BuildFunction(const Program& p, const Decoder& dec, uint32_t entry,
             in.ops[0].type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
           uint32_t ct = RelTarget(in);
           if (ct != in.next()) f.direct_calls.insert(ct);
+          if (p.setjmps.count(ct)) f.setjmp_returns.insert(in.next());
         }
         reach(in.next());
         break;

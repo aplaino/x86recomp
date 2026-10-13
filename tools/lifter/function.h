@@ -42,6 +42,8 @@ struct Function {
   std::set<uint32_t> labels;            // addresses needing a goto label
   std::set<uint32_t> direct_calls;      // call targets (for discovery)
   std::set<uint32_t> tail_calls;        // jmp/fallthrough to other entries
+  std::set<uint32_t> setjmp_returns;    // return addresses of setjmp calls:
+                                        // entries longjmp resumes at
   std::vector<std::string> warnings;
 };
 

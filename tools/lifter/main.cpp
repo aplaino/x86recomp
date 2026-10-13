@@ -21,10 +21,11 @@
 // discovery): for oracle tests that run a few original routines lifted.
 //
 // Pass 1 discovers functions to a fixpoint (Ghidra entries + exports +
-// every direct call/tail-call target found while descending). Pass 2
-// rebuilds every function against the final entry set, so jumps to code
-// that turned out to be an entry become tail calls consistently. Then the
-// functions are emitted into generated/gen_NNN.cpp plus a table file.
+// every direct call/tail-call target and setjmp return point found while
+// descending). Pass 2 rebuilds every function against the final entry
+// set, so jumps to code that turned out to be an entry become tail calls
+// consistently. Then the functions are emitted into generated/gen_NNN.cpp
+// plus a table file.
 
 #include <cctype>
 #include <cstdio>
@@ -240,7 +241,7 @@ int main(int argc, char** argv) {
         lifter::BuildFunction(p, dec, e, &f);
       }
     }
-    for (const auto* s : {&f.direct_calls, &f.tail_calls})
+    for (const auto* s : {&f.direct_calls, &f.tail_calls, &f.setjmp_returns})
       for (uint32_t t : *s) {
         if (!p.InText(t)) continue;
         p.weak.erase(t);  // really entered as a function

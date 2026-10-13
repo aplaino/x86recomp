@@ -8,12 +8,13 @@ namespace lifter {
 
 namespace {
 // Set while emitting a function whose body is wrapped in try/catch (SEH
-// frames): a guaranteed tail call cannot leave a try block.
-thread_local bool t_in_seh = false;
+// frames, setjmp callers): a guaranteed tail call cannot leave a try
+// block.
+thread_local bool t_in_try = false;
 // Tail calls between lifted functions must not grow the host stack (a
 // loop that crosses function entries would otherwise recurse per
 // iteration).
-const char* TailAttr() { return t_in_seh ? "" : "LIFT_MUSTTAIL "; }
+const char* TailAttr() { return t_in_try ? "" : "LIFT_MUSTTAIL "; }
 
 std::string Fmt(const char* f, ...) {
   char buf[512];
@@ -1259,19 +1260,22 @@ void InsnEmitter::Emit() {
 
   bool locked = (d_.attributes & ZYDIS_ATTRIB_HAS_LOCK) && Nvis() && IsMem(0);
 
+  if ((m == ZYDIS_MNEMONIC_CALL || m == ZYDIS_MNEMONIC_JMP) &&
+      p_.resume_sites.count(in_.va)) {
+    // The target abandons this call chain (an SEH __except block that
+    // starts with `mov esp, [ebp-18h]`, or longjmp's jump to a setjmp
+    // return point with that caller's registers restored): unwind the host
+    // stack to the lifted function owning the frame instead of calling.
+    if (!PrepareMem()) return Unimpl();
+    L("const uint32_t t = " + Read(0) + ";");
+    L(Fmt("LIFT_SPILL; throw ::recomp::GuestResume{t, ebp, %s};",
+          Hex(in_.va).c_str()));
+    return;
+  }
+
   switch (m) {
     // ---- control flow ---------------------------------------------------
     case ZYDIS_MNEMONIC_CALL: {
-      if (p_.resume_sites.count(in_.va)) {
-        // The callee abandons this call chain (an SEH __except block that
-        // starts with `mov esp, [ebp-18h]`): unwind the host stack to the
-        // lifted function owning the frame instead of calling.
-        if (!PrepareMem()) return Unimpl();
-        L("const uint32_t t = " + Read(0) + ";");
-        L(Fmt("LIFT_SPILL; throw ::recomp::GuestResume{t, ebp, %s};",
-              Hex(in_.va).c_str()));
-        return;
-      }
       if (IsImm(0)) {
         uint32_t t = RelTarget(in_);
         Push32(Hex(next));
@@ -1627,8 +1631,9 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
   o += "void " + FnName(f.entry) + (p_.replaced.count(f.entry) ? "_lifted" : "") +
        "(::recomp::Ctx& c) {\n  LIFT_ENTER\n";
   // Functions that register an SEH frame (write fs:[0]) can be resumed into
-  // by their __except blocks; see GuestResume.
-  bool seh = false;
+  // by their __except blocks, and setjmp callers by longjmp; see
+  // GuestResume.
+  bool resumable = !f.setjmp_returns.empty();
   for (const auto& [va, in] : f.insns) {
     if (!in.ok || in.d.mnemonic != ZYDIS_MNEMONIC_MOV) continue;
     const auto& o0 = in.ops[0];
@@ -1636,10 +1641,10 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
         o0.mem.segment == ZYDIS_REGISTER_FS &&
         o0.mem.base == ZYDIS_REGISTER_NONE &&
         o0.mem.index == ZYDIS_REGISTER_NONE && o0.mem.disp.value == 0)
-      seh = true;
+      resumable = true;
   }
-  t_in_seh = seh;
-  if (seh) o += "  try {\n";
+  t_in_try = resumable;
+  if (resumable) o += "  try {\n";
   // Instructions are emitted in address order, so if the function also
   // reaches code below its entry (shared tails, e.g. strstr jumping into
   // strchr), execution must start with a jump to the entry.
@@ -1703,10 +1708,10 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
       }
     }
   }
-  if (seh)
+  if (resumable)
     o += "  } catch (const ::recomp::GuestResume& r) {\n"
          "    if (r.ebp != ebp) throw;  // another activation's frame\n"
-         "    ::recomp::Dispatch(c, r.target, r.from);\n"
+         "    ::recomp::Resume(c, r);\n"
          "    return;\n"
          "  }\n";
   o += "}\n\n";

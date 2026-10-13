@@ -258,6 +258,20 @@ void Dispatch(Ctx& c, uint32_t target, uint32_t va) {
          "(add it to the manifest as a function entry)", target, va);
 }
 
+// The continuation runs in the owning function's catch handler, where a
+// second throw would leave that function's try block: catch it here.
+void Resume(Ctx& c, GuestResume r) {
+  for (;;) {
+    try {
+      Dispatch(c, r.target, r.from);
+      return;
+    } catch (const GuestResume& again) {
+      if (again.ebp != r.ebp) throw;
+      r = again;
+    }
+  }
+}
+
 void Unimplemented(Ctx& c, uint32_t va, const char* what) {
   (void)c;
   FatalF("unimplemented instruction at %08X: %s", va, what);
