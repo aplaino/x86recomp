@@ -3,9 +3,8 @@
 // games get from AIL_set_digital_master_reverb, _room_type and
 // _reverb_levels and the per-sample/stream wet levels (Miles 6.1 and
 // earlier have none). Written from a behavioural description of mss32.dll
-// 6.5e's reverb (Call of Duty's FINDINGS.md, "Miles 6.5e digital reverb:
-// behaviour", with the addresses it was observed at) so that it produces
-// the same output.
+// 6.5e's reverb (docs/miles.md, "Miles 6.5e digital reverb", with the
+// addresses it was observed at) so that it produces the same output.
 //
 // Wet sends (driver wet x sample wet x volume x master, mono, not panned)
 // collect in a ring of 32-bit samples long enough for the maximum

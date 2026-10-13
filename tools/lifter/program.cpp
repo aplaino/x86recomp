@@ -76,8 +76,8 @@ bool Program::Load(const std::string& path, const std::string& symdir,
       }, err))
     return false;
 
-  // Exports: every exported function is a call target (Dungeon Siege's
-  // FuBi calls through addresses), and its demangled name beats Ghidra's.
+  // Exports: every exported function is a call target (a game may call
+  // its own exports by address), and its demangled name beats Ghidra's.
   if (!ReadTsv(symdir + "/exports.tsv", [&](const auto& c) {
         if (c.size() < 4 || c[1] != "func") return;
         uint32_t va = Hex(c[0]) + delta;

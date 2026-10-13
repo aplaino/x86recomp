@@ -14,7 +14,7 @@
 //
 // --miles-version picks whose Fast 2D the fast2d set renders: Miles 6.5's
 // (msssoft.m3d, the default: eaxcap.exe records the Miles a game ships,
-// e.g. Call of Duty's 6.5e) or 6.1c's (Mssfast.m3d).
+// e.g. 6.5e) or 6.1c's (Mssfast.m3d).
 
 #include <AL/al.h>
 

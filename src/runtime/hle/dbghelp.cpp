@@ -1,9 +1,9 @@
-// dbghelp: UnDecorateSymbolName for Dungeon Siege's FuBi, plus the
-// symbol-engine entry points the crash reporter resolves (all of which
-// must exist, or the game's dbghelp loader gives up and FuBi aborts the
-// app).
+// dbghelp: UnDecorateSymbolName, for games that bind script calls by the
+// demangled names of their own EXE's exports, plus the symbol-engine
+// entry points a crash reporter resolves (a game's dbghelp loader may
+// insist on all of them and abort otherwise).
 //
-// FuBi undecorates every exported C++ symbol with flags 0x800
+// Such a game undecorates every exported C++ symbol with flags 0x800
 // (UNDNAME_32_BIT_DECODE: the full declaration) and parses the text, so
 // the output must match MSVC's undname formatting. LLVM's Microsoft
 // demangler produces the same declarations with a few cosmetic
@@ -30,7 +30,7 @@ std::string UndnameMsvc(const std::string& mangled, uint32_t flags) {
   if (flags & 0x0004) flags_llvm |= llvm::MSDF_NoReturnType;  // NO_FUNCTION_RETURNS
   if (flags & 0x0080) flags_llvm |= llvm::MSDF_NoAccessSpecifier;
   if (flags & 0x0200) flags_llvm |= llvm::MSDF_NoMemberType;
-  bool name_only = flags & 0x1000;  // UNDNAME_NAME_ONLY (unused by FuBi)
+  bool name_only = flags & 0x1000;  // UNDNAME_NAME_ONLY
   if (name_only)
     flags_llvm |= llvm::MSDF_NoAccessSpecifier | llvm::MSDF_NoCallingConvention |
                   llvm::MSDF_NoReturnType | llvm::MSDF_NoMemberType |

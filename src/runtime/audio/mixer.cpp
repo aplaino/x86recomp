@@ -200,13 +200,13 @@ void Mixer::SetListener(const Vec3& pos, const Vec3& face, const Vec3& up) {
   listener65_ = miles65::MakeListener(pos, face, up);
 }
 
-// Miles 6.5 voices: runtime/audio/miles65.h.
+// Miles 6.5 voices: runtime/audio/miles65.h, docs/miles.md.
 //
 // Miles 6.1c: positional voices follow its Fast 2D provider (Mssfast.m3d)
 // exactly: it reduces each 3D sample to a 2D volume and pan, which Mss32
 // turns into channel gains. (The asymmetry at +-90 degrees is the
 // original's: hard left leaves 2/128 on the right, hard right nothing on
-// the left; Call of Duty's FINDINGS.md.)
+// the left; docs/miles.md.)
 //  - volume: 127 / 10^((A + B) / 20) with A = -20 log10(vol / 127) and B =
 //    6 dB per doubling of distance beyond min_dist (so vol * min_dist / d),
 //    rounded and clamped to 0..127; 0 past max_dist; then * 71 / 100 when

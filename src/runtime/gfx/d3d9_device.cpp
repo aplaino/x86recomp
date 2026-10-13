@@ -66,9 +66,8 @@ class D3D9Device final : public Device {
   explicit D3D9Device(SDL_Window* w) : window_(w) {
     // dxvk-native refuses to start without a WSI backend name.
     setenv("DXVK_WSI_DRIVER", "SDL3", 0);
-    // Without vsync, present in mailbox mode (no tearing) rather than
-    // immediate (DS1 FINDINGS.md "Freeze on a quick focus flip"). A tearFree
-    // setting the user made wins.
+    // Without vsync, present in mailbox mode (no tearing, never blocks)
+    // rather than immediate. A tearFree setting the user made wins.
     const char* conf = std::getenv("DXVK_CONFIG");
     if (!conf || !std::strstr(conf, "tearFree")) {
       std::string v = conf && *conf ? std::string(conf) + ";" : std::string();

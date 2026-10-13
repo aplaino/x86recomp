@@ -135,8 +135,8 @@ void TraceF(const char* fmt, ...) {
 }
 
 // Host faults (SIGSEGV/SIGBUS) in guest memory are guest access
-// violations: they go to the guest SEH chain (Dungeon Siege demand-pages Tank
-// data from an exception filter). Anything unhandled, or a fault outside
+// violations: they go to the guest SEH chain (games may demand-page data
+// from an exception filter). Anything unhandled, or a fault outside
 // the arena (a runtime bug), is reported with the host call chain (lifted
 // functions are named f_<guest va>) and exits.
 namespace hle {
@@ -146,7 +146,7 @@ extern thread_local int t_hle_depth;
 
 namespace {
 // Faults can nest: an exception filter may itself touch a not-yet-paged
-// page (the Tank decompressor does). Windows dispatches a nested
+// page (an archive decompressor may). Windows dispatches a nested
 // exception; so do we, up to a sanity limit.
 thread_local int t_fault_depth = 0;
 constexpr int kMaxFaultDepth = 8;
@@ -313,9 +313,8 @@ void Cpuid(Ctx& c) {
 }
 
 // A 3 GHz TSC. Games time it against QueryPerformanceCounter to measure
-// the CPU and pick detail settings (Call of Duty's configure.csv wants
-// 2000 MHz for its best row), so it must not read slower than the
-// machines they were tuned for.
+// the CPU and pick detail settings from tables of the era's machines, so
+// it must not read slower than the fastest of those.
 uint64_t Rdtsc(Ctx& c) {
   (void)c;
   using namespace std::chrono;

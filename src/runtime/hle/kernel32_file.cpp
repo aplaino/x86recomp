@@ -1,6 +1,6 @@
 // kernel32: handles, guest<->host paths, files, directories, find.
 //
-// Guest paths are Windows paths. GuestGameDir() ("C:\Dungeon Siege\...")
+// Guest paths are Windows paths. GuestGameDir() (GameConfig::guest_dir)
 // maps onto the game install, read-only, with writes going to an overlay
 // (see HostPath); any other path maps below the per-user data directory
 // ($XDG_DATA_HOME/<id>/drive_c/...), where saves and

@@ -1,8 +1,10 @@
 # x86recomp: shared lifter + runtime for the PC recomps
 
-Rules only. Design in ARCHITECTURE.md. Game projects keep their own
-CLAUDE.md/FINDINGS.md; findings about this library go in the FINDINGS.md
-of the game project where they came up.
+Rules only. Design in ARCHITECTURE.md; observed behaviour of the APIs
+and middleware reimplemented here in docs/ (e.g. docs/miles.md). Game
+projects keep their own CLAUDE.md/FINDINGS.md for what is specific to
+that game; behaviour of a Windows or middleware API goes here, even when
+a game is where it came up.
 
 ## Layout
 - Library: ~/Documents/Programming/Recomp/x86recomp
@@ -13,9 +15,10 @@ of the game project where they came up.
 ## Build and test
 - Standalone (library tests only):
   `cmake --preset debug -DDXVK_NATIVE_DIR=... && cmake --build --preset debug && ctest --test-dir out/build/debug`
-- Real validation happens in a game project: after a change here, rebuild
-  DS1 (and CoD1 once it runs), re-lift if the lifter changed, and run its
-  ctest (with DS1_GAME_EXE set, the EXE-derived oracle tests run too).
+- Real validation happens in the game projects: after a change here,
+  rebuild each one listed under Layout, re-lift if the lifter changed, and
+  run its ctest (with <ID>_GAME_EXE set, the EXE-derived oracle tests run
+  too).
 - Lifter output must not change unintentionally: when touching
   tools/lifter, diff a game's generated/ before and after.
 
@@ -47,8 +50,16 @@ of the game project where they came up.
 ## Rules
 - Nothing game-specific in this repo: game paths, names, registry
   contents, struct offsets inside a game and game patches belong in the
-  game project (GameConfig fields, hooks, replacements). A game example
-  in a comment is fine when it explains why behaviour exists.
+  game project (GameConfig fields, hooks, replacements). Code never
+  checks for a particular game (EXE or file names, addresses, hashes of
+  game files); per-game differences go through GameConfig or a hook.
+- No game references in code, comments, docs or tests: no game or
+  engine names, no game install paths, no pointers into a game
+  project's files (FINDINGS.md, ...). Explain why behaviour exists in
+  generic terms ("games that ..."). Middleware is not a game: Miles,
+  Bink, EAX builds may be named and identified by version and SHA-256.
+  The only places game projects are named are README.md ("Used by") and
+  Layout above.
 - Dev/test switches are read with Env("NAME") (the game's <ID>_NAME),
   never getenv with a hard-coded prefix, and never at static-init time.
 - Every import needs an explicit HLE handler; an unhandled one is fatal
@@ -70,6 +81,7 @@ of the game project where they came up.
 - dxvk-native throws in Direct3DCreate9 unless DXVK_WSI_DRIVER is set;
   host code sets `setenv("DXVK_WSI_DRIVER", "SDL3", 0)` before any D3D9
   call. Keep it that way.
-- Wine, Bochs, ioquake3, iortcw: references only, never copy code.
+- Wine, Bochs, GPL engine source releases: references only, never copy
+  code.
 - Commits: GPG-signed (global config), no Claude co-author trailers or
   generated-by markers.

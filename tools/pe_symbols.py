@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Dump PE facts and the export symbol map of a game EXE or DLL.
 
-Exports become lifter entry points with demangled names. Dungeon Siege's
-EXE, for one, exports ~3200 MSVC-mangled C++ symbols (FuBi, the game's
-function binder, binds Skrit script calls through the EXE's own export table).
+Exports become lifter entry points with demangled names. Some game EXEs
+export thousands of MSVC-mangled C++ symbols (script bindings that go
+through the EXE's own export table).
 This script turns them into a TSV symbol map for the lifter.
 
 Pure Python PE parsing (no pefile dependency); demangling uses llvm-undname.

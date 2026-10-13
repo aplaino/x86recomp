@@ -311,8 +311,9 @@ bool FindVersionResource(uint32_t* va, uint32_t* size) {
 }
 
 bool IsOwnExe(const std::string& path) {
-  std::string l = Lower(path);
-  return l.size() >= 16 && l.substr(l.size() - 16) == "dungeonsiege.exe";
+  std::string l = Lower(path), exe = Lower(Game().exe_name);
+  size_t slash = l.find_last_of("\\/");
+  return l.substr(slash == std::string::npos ? 0 : slash + 1) == exe;
 }
 
 HLE("version.dll", GetFileVersionInfoSizeA, 2) {

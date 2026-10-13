@@ -47,8 +47,8 @@ int FileFd(KObject* o);  // host fd of a File/StdIo object, or -1
 std::shared_ptr<KObject> GetHandle(uint32_t h);
 bool CloseHandleValue(uint32_t h);
 
-// Guest path ("C:\Dungeon Siege\Resources\Logic.dsres", or relative to the
-// guest current directory) to a host path, resolving case-insensitively
+// Guest path (absolute, e.g. below GameConfig::guest_dir, or relative to
+// the guest current directory) to a host path, resolving case-insensitively
 // against what exists on disk. Paths outside known roots map below the
 // per-user data directory.
 //

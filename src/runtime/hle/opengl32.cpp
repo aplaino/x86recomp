@@ -3,7 +3,7 @@
 // serves the planned Metal backend). Handlers only marshal guest
 // arguments; the GL semantics live in runtime/gl/context.cpp.
 //
-// Quake 3-style engines GetProcAddress all 336 GL 1.1 exports up front,
+// Engines may GetProcAddress all 336 GL 1.1 exports up front,
 // so the full export table is declared: an entry point without a handler
 // is a fatal error naming it when it is first called. Extensions come
 // from wglGetProcAddress and exist only for what GL_EXTENSIONS lists.

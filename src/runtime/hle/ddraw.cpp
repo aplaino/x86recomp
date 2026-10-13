@@ -68,8 +68,9 @@ State& St() { return g_state; }
 gfx::Device* Gfx() {
   State& s = g_state;
   if (!s.gfx) {
-    // No vsync unless <ID>_VSYNC=1: see DS1 FINDINGS.md "Freeze on a quick
-    // focus flip".
+    // No vsync unless <ID>_VSYNC=1: a FIFO present that the compositor
+    // stops releasing (no frame callbacks) can hang a back-buffer readback
+    // indefinitely.
     const char* vs = Env("VSYNC");
     s.vsync = vs && *vs && *vs != '0';
     SDL_Window* w = SdlWindowFor(s.hwnd);

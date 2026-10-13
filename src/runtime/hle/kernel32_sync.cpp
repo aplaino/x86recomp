@@ -321,7 +321,7 @@ HLE("kernel32.dll", Thread32Next, 2) { return 0; }
 
 // ---- file mappings ------------------------------------------------------------
 // Views are mapped straight into the guest arena with mmap(MAP_FIXED), so a
-// 300 MB Dungeon Siege Tank file costs address space, not memory.
+// view of a large archive costs address space, not memory.
 
 struct MappingObject : KObject {
   MappingObject() : KObject(Type::Mapping) {}

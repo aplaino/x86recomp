@@ -13,8 +13,8 @@
 // Miles 6.5 changed some exports under the same names (3D sample volume
 // from S32 0-127 to F32 0-1, returned in st(0)), and how volume, pan and
 // a 3D position become channel gains (Voice::miles; runtime/audio/
-// miles65.h); the generation is read from the mss32.dll that ships with
-// the game (Dungeon Siege 6.1c, Call of Duty 6.5e).
+// miles65.h; docs/miles.md); the generation is read from the mss32.dll
+// that ships with the game (6.1c or 6.5e).
 //
 // Callbacks (end of sample/stream, timers) run on a Miles service thread,
 // as with the real library: a guest thread created at driver open that
@@ -1286,7 +1286,7 @@ HLE_NAMED("mss32.dll", "_AIL_set_3D_distance_factor@8", AIL_set_3D_distance_fact
 // Msseax.m3d's attribute names; the single properties are in
 // runtime/audio/eax.h. "EAX all parameters" and "EAX sample all
 // parameters" take the whole property set in the provider's EAX version's
-// layout (CoD passes the 3.0 listener to the EAX 3 provider).
+// layout (a 3.0 listener for the EAX 3 provider).
 
 // Listener attribute `name` of EAX provider p: reads it into, or sets it
 // from, guest memory at `guest`. False if p has no such attribute.
@@ -1335,8 +1335,8 @@ uint32_t ListenerSize(Prov p, const std::string& name) {
 
 // AIL_3D_provider_attribute(lib, name, void* value). Miles 6.5 first
 // stores -1, which is what a name the provider lacks leaves; games detect
-// missing features that way (Call of Duty enables EAX unless "EAX3 room
-// LF" reads -1).
+// missing features that way (e.g. EAX 3 by whether "EAX3 room LF" reads
+// -1).
 HLE_NAMED("mss32.dll", "_AIL_3D_provider_attribute@12", AIL_3D_provider_attribute, 3) {
   std::string name = GStr(Arg(c, 1));
   uint32_t out = Arg(c, 2);

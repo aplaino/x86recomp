@@ -18,11 +18,11 @@ namespace recomp {
 // What the runtime needs to know about the game it runs. Filled in by the
 // game's main() and passed to RunProcess.
 struct GameConfig {
-  // Short id, e.g. "ds1": the per-user data directory is
+  // Short id, e.g. "game": the per-user data directory is
   // $XDG_DATA_HOME/<id>, and dev/test switches are read from environment
-  // variables named <ID>_<SWITCH> (DS1_TRACE, ...).
+  // variables named <ID>_<SWITCH> (GAME_TRACE, ...).
   std::string id;
-  // Where the game believes it is installed, e.g. "C:\Dungeon Siege";
+  // Where the game believes it is installed, e.g. "C:\Games\Game";
   // guest paths below it map onto the host game directory.
   std::string guest_dir;
   // The EXE's file name in guest_dir (GetModuleFileName, command line).
@@ -45,15 +45,14 @@ struct GameConfig {
                       float* ky) = nullptr;
 
   // Video memory DirectDraw reports, in MB. Games pick detail settings
-  // from it (Dungeon Siege's best profile is a 64 MB GeForce3; Call of
-  // Duty's configure.csv tops out at 256).
+  // from it; a game's best profile may need more than the default.
   uint32_t video_memory_mb = 64;
 
   // DLLs the game loads itself (LoadLibrary) whose code is lifted with
-  // the EXE (recomp_lift --module), e.g. Call of Duty's gamex86.dll. They
+  // the EXE (recomp_lift --module), e.g. a game logic DLL. They
   // are read from guest_dir (the host game directory) by file name.
   struct LiftedDll {
-    std::string name;   // file name, e.g. "gamex86.dll"
+    std::string name;   // file name, e.g. "game.dll"
     uint32_t base = 0;  // the lifter's --base for it; 0 = preferred base
   };
   std::vector<LiftedDll> lifted_dlls;
@@ -63,12 +62,12 @@ struct GameConfig {
 const GameConfig& Game();
 
 // Dev/test switch `name` from the environment: getenv("<ID>_<name>"),
-// e.g. Env("TRACE") reads DS1_TRACE for id "ds1". Null if unset.
+// e.g. Env("TRACE") reads GAME_TRACE for id "game". Null if unset.
 const char* Env(const char* name);
 
-// Processors reported to the game (PEB, GetSystemInfo): never 1; Dungeon
-// Siege froze on a new game with a single processor (DS1 FINDINGS.md
-// "New-game freeze").
+// Processors reported to the game (PEB, GetSystemInfo): never 1. Games
+// that see one CPU may install uniprocessor lock functions (plain inc/dec),
+// which corrupt their data once their threads really run in parallel.
 uint32_t GuestProcessorCount();
 
 // Fixed guest layout (see ARCHITECTURE.md). TEBs grow down from kTebTop.
@@ -83,7 +82,7 @@ inline constexpr uint32_t kReturnToHost = kThunkBase + kThunkRegionSize - 0x10;
 // startup, so their address ranges stay free; LoadLibrary makes one
 // visible and runs its DllMain.
 struct Module {
-  std::string name;  // lower case, e.g. "gamex86.dll"
+  std::string name;  // lower case, e.g. "game.dll"
   std::string host_path;
   gaddr base = 0;    // where the lifter put it; 0 = preferred base
   PeImage img;

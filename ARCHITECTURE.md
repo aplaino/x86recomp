@@ -3,9 +3,9 @@
 x86recomp turns a 32-bit x86 Windows game into a native 64-bit program:
 the game's machine code is lifted to C++ ahead of time and linked with a
 runtime that reimplements the Windows, DirectX and middleware APIs it
-calls (HLE). It was built for Dungeon Siege (DS1-Rebuilt) and is shared
-with the Call of Duty port; the game projects hold everything specific
-to one game (entry point config, manifest, symbols, game hooks).
+calls (HLE). Nothing here is specific to one game: game projects hold
+that (entry point config, manifest, symbols, game hooks) and use this
+tree as a library.
 
 ## Scaffold, not the destination
 Recompilation is how a game first runs natively, not how it stays. The
@@ -169,8 +169,8 @@ lifter is tractable (rexglue-style: one C++ function per guest function).
   state (tests/lift_*_test.cpp, `recomp_add_lift_tests`).
 
 ### Multiple modules
-Games that ship their logic in DLLs they LoadLibrary themselves (Call of
-Duty: gamex86/cgamex86/uix86.dll) have every module lifted:
+Games that ship their logic in DLLs they LoadLibrary themselves (e.g.
+separate game, client-game and UI modules) have every module lifted:
 - One lifter run takes the EXE plus each DLL (`--module`, with its own
   symbols and manifest). The images are mapped side by side as at run
   time, so a VA, and the f_<va> name of its lifted function, identifies
@@ -195,7 +195,7 @@ Duty: gamex86/cgamex86/uix86.dll) have every module lifted:
   DLL_THREAD_ATTACH/DETACH are not sent (not needed so far).
 
 ### x87: full 80-bit model
-Games depend on x87 state (Dungeon Siege runs all its float maths under
+Games depend on x87 state (some run all their float maths under
 PC=24/RC=chop; MSVC CRT helpers switch precision around their own work;
 D3D changes the control word), so the FPU is modelled exactly, not
 mapped to double.
@@ -285,8 +285,8 @@ live in Ctx and are used in place (never cached in locals).
   FTZ/DAZ actually changing a result.
 - Integer and data-movement forms are plain portable C++.
 - tests/lift_sse_test runs every SSE form in a game EXE lifted and
-  natively from random states rich in special values (2.44M checks over
-  Call of Duty's 244 forms, all bit-exact).
+  natively from random states rich in special values (for a game whose
+  EXE has 244 forms: 2.44M checks, all bit-exact).
 - In the native port these sites go away: CRT maths becomes the host
   libm, engine SIMD becomes portable C++ (or SIMDe/sse2neon where speed
   matters), validated against the lifted reference.
@@ -312,10 +312,9 @@ API front ends:
 - DirectDraw 7 / Direct3D 7 (recomp_d3d7): guest-visible COM objects;
   DirectDraw (surfaces, flipping chain, Lock/Blt, colour keys, display
   modes) implemented in the HLE itself.
-- OpenGL 1.x (planned, for Call of Duty): opengl32/wgl HLE as a GL
-  state machine on gfx::Device, not a pass-through to host OpenGL, so
-  the same Metal path serves it (macOS OpenGL is deprecated and capped
-  at 2.1 for legacy contexts).
+- OpenGL 1.x: opengl32/wgl HLE as a GL state machine on gfx::Device,
+  not a pass-through to host OpenGL, so the same Metal path serves it
+  (macOS OpenGL is deprecated and capped at 2.1 for legacy contexts).
 
 D3D7 FPU side effect: the HLE must reproduce whatever the real runtime
 does to the guest thread's CW, because the game's own float maths runs
@@ -336,9 +335,10 @@ so Wine is not a reference for this point. d3d7.cpp models it.
 - ole32: CoCreateInstance for what games need (fails cleanly otherwise).
 - mss32 (Miles): our own mixer on an SDL3 audio stream (runtime/audio):
   resampling, loop counts, gain ramps, the "Miles Fast 2D Positional
-  Audio" model, MP3 through libavcodec. Miles' EAX providers (EAX 1.0,
-  2.0, 3.0, with Msseax.m3d's attribute names and struct layouts): voices
-  pan like DirectSound3D hardware and get an LF level and a 5 kHz level
+  Audio" model of the game's Miles version (6.1c or 6.5; docs/miles.md),
+  MP3 through libavcodec. Miles' EAX providers (EAX 1.0, 2.0, 3.0, with
+  Msseax.m3d's attribute names and struct layouts): voices pan like
+  DirectSound3D hardware and get an LF level and a 5 kHz level
   (a two-pole low-pass) on the direct path and the send from the EAX
   source model (runtime/audio/eax), and the send goes to a reverb bus
   rendered by OpenAL Soft's EFX EAX reverb on a loopback device; direct
@@ -346,7 +346,7 @@ so Wine is not a reference for this point. d3d7.cpp models it.
   master reverb (room types, reverb time/predelay/damping, driver and
   sample/stream wet levels) is our Miles-compatible Schroeder reverb
   (runtime/audio/digital_reverb), written from a behavioural description
-  of mss32 6.5e's (Call of Duty's FINDINGS.md) and bit-exact with it:
+  of mss32 6.5e's (docs/miles.md) and bit-exact with it:
   recomp_add_digital_reverb_test lifts the original routines from the
   user's installed DLL at build time (`recomp_lift --only`) and compares;
   tests/digital_reverb_test checks a hash of our output on every host.
@@ -388,9 +388,9 @@ projects, memory dumps, extracted archives.
 
 Licence hygiene: dxvk (zlib), SDL3 (zlib), SoftFloat 3e (BSD-3), Zydis
 (MIT) are fine to vendor or link. ffmpeg is LGPL (built without GPL
-parts): link dynamically. Wine and Bochs (LGPL) and GPL engine sources
-(ioquake3, iortcw) are references only: read them to learn behaviour, do
-not copy code from them.
+parts): link dynamically. Wine and Bochs (LGPL) and GPL engine source
+releases are references only: read them to learn behaviour, do not copy
+code from them.
 
 ### Known macOS risk: memory ordering
 x86 is TSO; ARM64 is weakly ordered. Lifted code that shares data
@@ -402,7 +402,6 @@ a game's threads gets explicit barriers via the manifest. Revisit before
 the macOS port.
 
 ## Roadmap
-- opengl32/wgl HLE on gfx::Device (Call of Duty).
 - EAX for games on DirectSound3D (IDirectSound3DBuffer property sets),
   on the same EAX model and reverb buses as the Miles providers.
 - SDL_GPU backend (Vulkan) with the fixed-function generator, matched

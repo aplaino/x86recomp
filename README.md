@@ -38,7 +38,9 @@ Used by:
   a Windows 98 recorder for Creative hardware, the same cases rendered by
   the runtime, and their comparison).
 
-[ARCHITECTURE.md](ARCHITECTURE.md) describes the design.
+[ARCHITECTURE.md](ARCHITECTURE.md) describes the design; `docs/` the
+observed behaviour of the middleware reimplemented here
+([docs/miles.md](docs/miles.md)).
 
 ## Using it from a game project
 

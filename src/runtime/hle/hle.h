@@ -41,8 +41,8 @@ struct Registrar {
 };
 
 // The full export table of a DLL we provide, for games that GetProcAddress
-// every entry point up front and only call some (Quake 3's QGL loads all
-// of opengl32). GetProcAddress then returns a thunk for any listed name;
+// every entry point up front and only call some (an engine's GL loader
+// that resolves all of opengl32). GetProcAddress then returns a thunk for any listed name;
 // calling one without a handler is fatal and names it, as for imports.
 struct Exports {
   Exports(const char* dll, std::initializer_list<const char*> names);
@@ -83,8 +83,8 @@ uint32_t PutCounted(uint32_t buf, uint32_t cap, const std::string& s, bool wide)
 
 // Makes [va, va+len) readable before host code copies it, the way a DLL's
 // read would on Windows: each uncommitted page raises a guest access
-// violation, which the game's handlers may resolve (Dungeon Siege's Tank
-// demand paging commits file views this way). False if a page stays
+// violation, which the game's handlers may resolve (a game that
+// demand-pages archive data commits file views this way). False if a page stays
 // inaccessible.
 bool EnsureReadable(Ctx& c, uint32_t va, uint32_t len);
 

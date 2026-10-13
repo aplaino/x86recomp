@@ -16,7 +16,7 @@
 // the x87 model at the Windows default control word (0x27F), and every
 // fragment of output, the on/off state and the coefficients must match
 // bit for bit. Addresses and driver-block offsets used here are documented
-// in Call of Duty's FINDINGS.md ("Miles 6.5e digital reverb: behaviour").
+// in docs/miles.md ("Miles 6.5e digital reverb").
 // The coefficients are also compared over a sweep of reverb times and
 // dampings, for both of the CRT's pow paths (x87 and SSE2).
 

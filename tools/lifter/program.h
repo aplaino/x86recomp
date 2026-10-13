@@ -18,7 +18,7 @@
 namespace lifter {
 
 struct Module {
-  std::string name;  // file name without extension, e.g. "gamex86"
+  std::string name;  // file name without extension, e.g. "game"
   recomp::PeImage img;
   uint32_t text_lo = 0, text_hi = 0;  // [lo, hi) of .text
 };

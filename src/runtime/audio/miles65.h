@@ -3,9 +3,8 @@
 // volume and pan into left and right levels and those into mixer gains,
 // and how its "Miles Fast 2D Positional Audio" provider (msssoft.m3d)
 // turns a 3D sample's position into the levels. Written from the
-// behavioural description in Call of Duty's FINDINGS.md ("Miles 6.5e
-// sample levels and Fast 2D: behaviour", with the addresses it was
-// observed at) so that the gains come out the same. Miles 6.1c works
+// behavioural description in docs/miles.md ("Miles 6.5e sample levels
+// and Fast 2D", with the addresses it was observed at) so that the gains come out the same. Miles 6.1c works
 // differently (balance table; Mixer::TargetGains).
 //
 // In short: volume v and pan p give levels v^(5/3) (1 - p)^0.3 and

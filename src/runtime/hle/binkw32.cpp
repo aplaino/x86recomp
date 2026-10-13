@@ -1,8 +1,8 @@
 // binkw32 (Bink video, RAD 1.x API): the 10 entry points the game imports,
-// on ffmpeg's Bink demuxer and decoders. Dungeon Siege opens its movies
-// from memory (BINKFROMMEMORY, a Tank file view), decodes one frame per
-// BinkWait/BinkDoFrame, and copies it into a locked DirectDraw surface
-// with BinkCopyToBuffer. Audio goes to the Miles mixer, as BinkOpenMiles
+// on ffmpeg's Bink demuxer and decoders. Movies may be opened from memory
+// (BINKFROMMEMORY, e.g. a view of an archive file); the game decodes one
+// frame per BinkWait/BinkDoFrame and copies it into a locked DirectDraw
+// surface with BinkCopyToBuffer. Audio goes to the Miles mixer, as BinkOpenMiles
 // would route it.
 //
 // The BINK struct is a guest block: the game reads Frames (+0x08) and

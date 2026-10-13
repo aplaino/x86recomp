@@ -203,7 +203,7 @@ function(recomp_add_digital_reverb_test)
   if(NOT EXISTS "${A_DLL}")
     return()
   endif()
-  # mss32.dll 6.5e as Call of Duty ships it.
+  # mss32.dll 6.5e (docs/miles.md).
   set(_known 7855b8fbae917cb8449f2d4361ab61b5ecec4df0a11130d797cb0aa99b4260ea)
   file(SHA256 "${A_DLL}" _hash)
   if(NOT _hash STREQUAL _known)
@@ -246,7 +246,7 @@ function(recomp_add_fast2d_test)
   if(NOT EXISTS "${A_MSS32}" OR NOT EXISTS "${A_FAST2D}")
     return()
   endif()
-  # mss32.dll 6.5e and miles/msssoft.m3d as Call of Duty ships them.
+  # mss32.dll 6.5e and miles/msssoft.m3d (docs/miles.md).
   set(_known_mss32 7855b8fbae917cb8449f2d4361ab61b5ecec4df0a11130d797cb0aa99b4260ea)
   set(_known_fast2d 62233bebccb6aeb97370a8499c577e2982f46924e3a1bc55c53fa1f8a2404252)
   foreach(_f MSS32 FAST2D)

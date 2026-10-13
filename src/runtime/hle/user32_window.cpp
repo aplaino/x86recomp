@@ -123,7 +123,7 @@ std::map<uint32_t, Queue> g_queues;  // by tid
 std::vector<Timer> g_timers;
 
 // ClipCursor: while the game confines the cursor to one of our windows
-// (Quake 3-style mouse look), the cursor is virtual, as in exclusive mode.
+// (mouse look), the cursor is virtual, as in exclusive mode.
 struct Clip {
   bool on = false;
   int32_t l = 0, t = 0, r = 0, b = 0;  // screen coordinates
@@ -1568,7 +1568,7 @@ HLE("user32.dll", DefWindowProcA, 4) {
 // "static", "edit" and "button" exist in every Windows process. Nothing is
 // drawn; the text (the window title) and state are kept so the game can
 // read them back. A read-only multi-line edit is a log the game appends to
-// (Quake 3-style console windows): appended text is echoed to stdout,
+// (a dedicated console window): appended text is echoed to stdout,
 // which is where that log is visible here.
 
 constexpr uint32_t ES_MULTILINE = 0x0004, ES_READONLY = 0x0800;
@@ -1797,7 +1797,7 @@ HLE("user32.dll", ShowCursor, 1) {
 
 // Some games re-centre the pointer every frame and move their own cursor
 // by trunc((pos - ref) * sensitivity), clamped to the screen, where ref is
-// the last position they read or set (Dungeon Siege fullscreen does). Over
+// the last position they read or set (some do in fullscreen). Over
 // a desktop window that drifts from the host pointer, so while the pointer
 // is over the window and the game is re-centring, GetCursorPos returns the
 // position that lands the game's cursor exactly under the pointer.

@@ -1,12 +1,11 @@
 // shfolder (special folders) and wsock32 (by ordinal).
 //
-// Special folders live in the per-user tree (see HostPath): Dungeon
-// Siege's saves end up under $XDG_DATA_HOME/ds1/drive_c/Documents and
-// Settings/Player/My Documents/Dungeon Siege, matching where the GOG
-// build puts them on Windows ({userdocs}/Dungeon Siege).
+// Special folders live in the per-user tree (see HostPath): a game that
+// saves under My Documents writes to $XDG_DATA_HOME/<id>/drive_c/
+// Documents and Settings/Player/My Documents/...
 //
-// Networking: Dungeon Siege's multiplayer goes through DirectPlay8 (not
-// provided), so wsock32 only answers host-name queries.
+// Networking: wsock32 only answers host-name queries (DirectPlay8 is not
+// provided).
 
 #include <cstring>
 #include <string>
