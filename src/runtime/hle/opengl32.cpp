@@ -141,15 +141,12 @@ uint32_t g_next_hglrc = 0x00C00010;
 thread_local GlContext* t_current = nullptr;
 thread_local uint32_t t_current_hglrc = 0, t_current_dc = 0;
 
-int PixelsW(SDL_Window* w) {
-  int pw = 0, ph = 0;
-  SDL_GetWindowSizeInPixels(w, &pw, &ph);
-  return std::max(pw, 1);
-}
-int PixelsH(SDL_Window* w) {
-  int pw = 0, ph = 0;
-  SDL_GetWindowSizeInPixels(w, &pw, &ph);
-  return std::max(ph, 1);
+// The default framebuffer has the window's client size as the game sees
+// it (present fits it into the host window).
+void FramebufferSize(uint32_t hwnd, int* w, int* h) {
+  ClientAreaSize(hwnd, w, h);
+  *w = std::max(*w, 1);
+  *h = std::max(*h, 1);
 }
 
 // The current GL; a GL call without one is a game bug on Windows too
@@ -233,7 +230,8 @@ HLE("opengl32.dll", wglMakeCurrent, 2) {
     SDL_Window* w = SdlWindowFor(ctx->hwnd);
     if (!w) return 0;
     ctx->dev = CreateGfxDevice(w);
-    int pw = PixelsW(w), ph = PixelsH(w);
+    int pw, ph;
+    FramebufferSize(ctx->hwnd, &pw, &ph);
     ctx->dev->ResetSwapChain(pw, ph, false);
     ctx->gl = std::make_unique<gl::Context>(ctx->dev.get(), pw, ph);
   }
@@ -272,7 +270,9 @@ uint32_t Swap(uint32_t dc) {
   if (!ctx) return 0;
   ctx->gl->EndFrame();
   PresentFrame(*ctx->dev, ctx->gl->Width(), ctx->gl->Height());
-  if (SDL_Window* w = SdlWindowFor(hwnd)) ctx->gl->Resize(PixelsW(w), PixelsH(w));
+  int fw, fh;
+  FramebufferSize(hwnd, &fw, &fh);
+  ctx->gl->Resize(fw, fh);
   return 1;
 }
 

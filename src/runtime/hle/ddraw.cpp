@@ -592,17 +592,6 @@ HLE_NAMED("ddraw.dll", "IDirectDraw7::SetCooperativeLevel", DD7_SetCooperativeLe
   return DD_OK;
 }
 
-// Display modes offered: the classic 4:3 set up to the desktop size.
-std::vector<std::pair<int, int>> ModeSizes() {
-  std::vector<std::pair<int, int>> v;
-  const int sizes[][2] = {{640, 480}, {800, 600}, {1024, 768}, {1152, 864},
-                          {1280, 960}, {1280, 1024}, {1600, 1200}};
-  for (const auto& s : sizes)
-    if (s[0] <= std::max(g_display_w, 1024) && s[1] <= std::max(g_display_h, 768))
-      v.push_back({s[0], s[1]});
-  return v;
-}
-
 void FillModeDesc(DDSURFACEDESC2* d, int w, int h, int bpp) {
   std::memset(d, 0, sizeof *d);
   d->dwSize = sizeof *d;
@@ -620,8 +609,8 @@ HLE_NAMED("ddraw.dll", "IDirectDraw7::EnumDisplayModes", DD7_EnumDisplayModes, 5
   EnsureSdlVideo();
   uint32_t d = HeapAllocProcess(sizeof(DDSURFACEDESC2), true);
   for (int bpp : {16, 32})
-    for (auto [w, h] : ModeSizes()) {
-      FillModeDesc(G<DDSURFACEDESC2>(d), w, h, bpp);
+    for (const ModeSize& m : DisplayModeSizes()) {
+      FillModeDesc(G<DDSURFACEDESC2>(d), m.w, m.h, bpp);
       if (!CallGuest(c, cb, {d, ctx})) goto done;
     }
 done:

@@ -152,6 +152,22 @@ class Device {
   virtual void Present() = 0;
 };
 
+// Where a src_w x src_h frame is shown in a dst_w x dst_h output: scaled
+// to fit with its aspect kept and centred, black around it (letterbox or
+// pillarbox). Backends present the front buffer through it; the window
+// system maps the pointer back through it.
+Rect FitRect(int src_w, int src_h, int dst_w, int dst_h);
+
+// The last frame any device showed, in pixels: the frame's size, the
+// output's (swap chain) and FitRect's result. Zeros before the first.
+struct Presentation {
+  int src_w, src_h, out_w, out_h;
+  Rect rect;
+};
+// Backends call this when they show the front buffer.
+void NotePresentation(const Presentation& p);
+Presentation LastPresentation();
+
 // Vertex size in bytes for a D3D7 FVF code.
 uint32_t FvfStride(uint32_t fvf);
 uint32_t PrimitiveCountFromVertices(uint32_t prim_type, uint32_t verts);

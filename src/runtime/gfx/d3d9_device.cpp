@@ -11,6 +11,7 @@
 
 #include <windows.h>
 #include <d3d9.h>
+#include <SDL3/SDL_video.h>
 
 #include <algorithm>
 #include <array>
@@ -90,14 +91,19 @@ class D3D9Device final : public Device {
     if (d3d_) d3d_->Release();
   }
 
-  // Always X8R8G8B8; 16-bit modes convert on blit.
+  // Always X8R8G8B8; 16-bit modes convert on blit. The swap chain has
+  // the window's size; PresentFront fits the w x h front buffer into it.
   void ResetSwapChain(int w, int h, bool vsync) override {
+    bb_w_ = w;
+    bb_h_ = h;
+    vsync_ = vsync;
+    WindowPixels(&swap_w_, &swap_h_);
     D3DPRESENT_PARAMETERS pp{};
     pp.Windowed = TRUE;
     pp.SwapEffect = D3DSWAPEFFECT_DISCARD;
     pp.BackBufferFormat = D3DFMT_X8R8G8B8;
-    pp.BackBufferWidth = UINT(w);
-    pp.BackBufferHeight = UINT(h);
+    pp.BackBufferWidth = UINT(swap_w_);
+    pp.BackBufferHeight = UINT(swap_h_);
     pp.BackBufferCount = 1;
     pp.hDeviceWindow = reinterpret_cast<HWND>(window_);
     pp.PresentationInterval =
@@ -287,10 +293,23 @@ class D3D9Device final : public Device {
     ReadSurface(front_, r, dst, pitch, fmt);
   }
 
+  // Front buffer to the window: scaled to fit with its aspect kept, black
+  // around it (FitRect). When the window has changed size the swap chain
+  // follows it, which costs a device Reset: the front and back buffers
+  // start black again and that frame is lost.
   void PresentFront() override {
     if (in_scene_) EndScene();
-    dev_->StretchRect(front_, nullptr, swap_, nullptr, D3DTEXF_POINT);
+    int ww, wh;
+    WindowPixels(&ww, &wh);
+    if (ww != swap_w_ || wh != swap_h_) ResetSwapChain(bb_w_, bb_h_, vsync_);
+    const Rect r = FitRect(bb_w_, bb_h_, swap_w_, swap_h_);
+    const RECT dst{r.left, r.top, r.right, r.bottom};
+    const int w = r.right - r.left, h = r.bottom - r.top;
+    if (w != swap_w_ || h != swap_h_) dev_->ColorFill(swap_, nullptr, D3DCOLOR_XRGB(0, 0, 0));
+    const bool same = w == bb_w_ && h == bb_h_;
+    dev_->StretchRect(front_, nullptr, swap_, &dst, same ? D3DTEXF_POINT : D3DTEXF_LINEAR);
     dev_->Present(nullptr, nullptr, nullptr, nullptr);
+    NotePresentation({bb_w_, bb_h_, swap_w_, swap_h_, r});
   }
 
   void ReadBack(const Rect& r, void* dst, uint32_t pitch, Format fmt) override {
@@ -609,6 +628,16 @@ class D3D9Device final : public Device {
     return Format::Unknown;
   }
 
+  void WindowPixels(int* w, int* h) {
+    *w = bb_w_;
+    *h = bb_h_;
+    int pw = 0, ph = 0;
+    if (SDL_GetWindowSizeInPixels(window_, &pw, &ph) && pw > 0 && ph > 0) {
+      *w = pw;
+      *h = ph;
+    }
+  }
+
   void ReleaseTargets() {
     for (IDirect3DSurface9** t : {&swap_, &backbuffer_, &front_})
       if (*t) {
@@ -689,6 +718,9 @@ class D3D9Device final : public Device {
   IDirect3DSurface9* swap_ = nullptr;        // the swap chain's back buffer
   IDirect3DSurface9* backbuffer_ = nullptr;  // the game's back buffer
   IDirect3DSurface9* front_ = nullptr;       // the DirectDraw primary
+  int bb_w_ = 0, bb_h_ = 0;      // back and front buffer size
+  int swap_w_ = 0, swap_h_ = 0;  // swap chain (window) size
+  bool vsync_ = false;
   IDirect3DTexture9* staging_ = nullptr;
   IDirect3DSurface9* readback_ = nullptr;  // system-memory copy of the RT
   Ring<IDirect3DVertexBuffer9> vb_;

@@ -44,6 +44,19 @@ struct GameConfig {
   bool (*game_cursor)(uint32_t userdata, int32_t* x, int32_t* y, float* kx,
                       float* ky) = nullptr;
 
+  // How a game window that covers the whole screen the game sees (a
+  // fullscreen window after a display mode change, DirectDraw exclusive
+  // mode) is shown on the host. The frame keeps its aspect either way
+  // (black bars where it differs from the screen's). <ID>_FULLSCREEN=
+  // window|desktop|exclusive overrides it; automated runs (<ID>_BACKGROUND)
+  // default to window.
+  enum class Fullscreen {
+    Window,     // a host window of the mode's size
+    Desktop,    // borderless fullscreen at the desktop's resolution
+    Exclusive,  // fullscreen in the host display mode closest to the game's
+  };
+  Fullscreen fullscreen = Fullscreen::Desktop;
+
   // Video memory DirectDraw reports, in MB. Games pick detail settings
   // from it; a game's best profile may need more than the default.
   uint32_t video_memory_mb = 64;

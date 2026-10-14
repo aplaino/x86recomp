@@ -1196,22 +1196,38 @@ class GpuDevice final : public Device {
     pass_clear_color_ = pass_clear_depth_ = pass_clear_stencil_ = false;
   }
 
-  // Front buffer to the window (scaled to its size).
+  // Front buffer to the window: scaled to fit with its aspect kept,
+  // black around it (FitRect).
   void Show(SDL_GPUCommandBuffer* cmd) {
     SDL_GPUTexture* sc = nullptr;
     Uint32 sw = 0, sh = 0;
     if (!SDL_WaitAndAcquireGPUSwapchainTexture(cmd, window_, &sc, &sw, &sh) || !sc) return;
+    const Rect r = FitRect(bb_w_, bb_h_, int(sw), int(sh));
+    const int w = r.right - r.left, h = r.bottom - r.top;
     SDL_GPUBlitInfo b{};
     b.source.texture = front_;
     b.source.w = Uint32(bb_w_);
     b.source.h = Uint32(bb_h_);
     b.destination.texture = sc;
-    b.destination.w = sw;
-    b.destination.h = sh;
+    b.destination.x = Uint32(r.left);
+    b.destination.y = Uint32(r.top);
+    b.destination.w = Uint32(w);
+    b.destination.h = Uint32(h);
     b.load_op = SDL_GPU_LOADOP_DONT_CARE;
-    b.filter = (sw == Uint32(bb_w_) && sh == Uint32(bb_h_)) ? SDL_GPU_FILTER_NEAREST
-                                                              : SDL_GPU_FILTER_LINEAR;
+    if (w != int(sw) || h != int(sh)) {
+      // The bars: clear the whole image (a blit's own clear is only
+      // specified for its destination region), then blit over it.
+      SDL_GPUColorTargetInfo t{};
+      t.texture = sc;
+      t.load_op = SDL_GPU_LOADOP_CLEAR;
+      t.store_op = SDL_GPU_STOREOP_STORE;
+      t.clear_color = {0, 0, 0, 1};
+      SDL_EndGPURenderPass(SDL_BeginGPURenderPass(cmd, &t, 1, nullptr));
+      b.load_op = SDL_GPU_LOADOP_LOAD;
+    }
+    b.filter = (w == bb_w_ && h == bb_h_) ? SDL_GPU_FILTER_NEAREST : SDL_GPU_FILTER_LINEAR;
     SDL_BlitGPUTexture(cmd, &b);
+    NotePresentation({bb_w_, bb_h_, int(sw), int(sh), r});
   }
 
   void ReadTexture(SDL_GPUTexture* tex, int tw, int th, const Rect& r, void* dst, uint32_t pitch,

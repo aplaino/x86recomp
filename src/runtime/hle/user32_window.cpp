@@ -24,6 +24,7 @@
 #include <thread>
 #include <vector>
 
+#include "runtime/display.h"
 #include "runtime/hle/hle.h"
 #include "runtime/hle/input_state.h"
 #include "runtime/hle/kernel32_state.h"
@@ -92,6 +93,9 @@ struct Window {
   bool visible = false, enabled = true, destroyed = false;
   bool minimized = false;      // as the game asked (IsIconic)
   int mode_w = 0, mode_h = 0;  // DirectDraw exclusive mode, see header
+  // Host fullscreen (UpdateFullscreen), entered for a screen of fs_w x fs_h.
+  bool fullscreen = false;
+  int fs_w = 0, fs_h = 0;
   SDL_Window* sdl = nullptr;
   // Built-in controls (see "built-in control classes"): the text is
   // `title`; selection, font, image and check state are kept here.
@@ -340,25 +344,48 @@ bool ExclusiveSize(uint32_t hwnd, int* w, int* h) {
   return true;
 }
 
-// SDL window coordinates -> client coordinates. In exclusive mode the
-// client area is the display mode, whatever size the host window really
-// has (resized by the user, or by desktop scaling), so scale.
-void ModeScale(uint32_t hwnd, float* sx, float* sy) {
-  *sx = *sy = 1.0f;
+// The client area as the game sees it: the display mode in exclusive mode.
+void GameClientSize(const Window& w, int* cw, int* ch) {
+  if (w.mode_w) {
+    *cw = w.mode_w;
+    *ch = w.mode_h;
+  } else {
+    ClientSize(w, cw, ch);
+  }
+}
+
+// Host window coordinates -> client coordinates: client = (host - x0) * k.
+// The frame (the client area) is shown fitted into the host window with
+// its aspect kept (gfx::FitRect, as present does), so when the host window
+// has another size (fullscreen, or resized by the window manager or by
+// desktop scaling) points map through that rectangle. `fitted` is false
+// when the two have the same size (k = 1, no offset).
+struct ClientMap {
+  float kx = 1, ky = 1, x0 = 0, y0 = 0;
+  int cw = 0, ch = 0;
+  bool fitted = false;
+};
+ClientMap MapToClient(uint32_t hwnd) {
+  ClientMap m;
   SDL_Window* sdl;
-  int mw, mh;
   {
     std::lock_guard<std::recursive_mutex> l(g_mu);
     Window* w = Win(hwnd);
-    if (!w || !w->mode_w || !w->sdl) return;
+    if (!w || !w->sdl) return m;
     sdl = w->sdl;
-    mw = w->mode_w;
-    mh = w->mode_h;
+    GameClientSize(*w, &m.cw, &m.ch);
   }
   int ww = 0, wh = 0;
-  if (!SDL_GetWindowSize(sdl, &ww, &wh) || ww <= 0 || wh <= 0) return;
-  *sx = float(mw) / ww;
-  *sy = float(mh) / wh;
+  if (!SDL_GetWindowSize(sdl, &ww, &wh) || ww <= 0 || wh <= 0 || m.cw <= 0 || m.ch <= 0 ||
+      (ww == m.cw && wh == m.ch))
+    return m;
+  const gfx::Rect r = gfx::FitRect(m.cw, m.ch, ww, wh);
+  m.kx = float(m.cw) / float(r.right - r.left);
+  m.ky = float(m.ch) / float(r.bottom - r.top);
+  m.x0 = float(r.left);
+  m.y0 = float(r.top);
+  m.fitted = true;
+  return m;
 }
 
 // The window whose client area holds the clip rectangle, or 0.
@@ -476,12 +503,11 @@ void HandleSdlEvent(const SDL_Event& e) {
       if (!h) break;
       int ox, oy;
       WindowOrigin(h, &ox, &oy);
-      float kx, ky;
-      ModeScale(h, &kx, &ky);
+      const ClientMap cm = MapToClient(h);
       int mw, mh;
       if (!Background() || e.motion.which == kTestPointer) {
-        g_real_x = int(e.motion.x * kx);
-        g_real_y = int(e.motion.y * ky);
+        g_real_x = int((e.motion.x - cm.x0) * cm.kx);
+        g_real_y = int((e.motion.y - cm.y0) * cm.ky);
         g_pointer_inside = true;
       }
       AttachClip();
@@ -491,10 +517,13 @@ void HandleSdlEvent(const SDL_Event& e) {
         // frame and steers its own pointer by the difference, as on a
         // fullscreen Windows desktop. Real motion moves the virtual
         // position; the host pointer is never warped (while clipped it
-        // is grabbed in SDL's relative mode instead).
+        // is grabbed in SDL's relative mode instead). Motion is not
+        // scaled by how the frame is shown: one unit of host motion is
+        // one pixel of the game's screen, as a mickey is on Windows, so
+        // mouse look turns the same windowed, fullscreen and in any mode.
         static float fx = 0, fy = 0;  // sub-pixel remainder
-        fx += e.motion.xrel * kx;
-        fy += e.motion.yrel * ky;
+        fx += e.motion.xrel;
+        fy += e.motion.yrel;
         int dx = int(fx), dy = int(fy);
         fx -= dx;
         fy -= dy;
@@ -506,8 +535,14 @@ void HandleSdlEvent(const SDL_Event& e) {
           g_mouse_y = std::clamp(g_mouse_y + dy, oy, oy + mh - 1);
         }
       } else {
-        g_mouse_x = ox + int(e.motion.x * kx);
-        g_mouse_y = oy + int(e.motion.y * ky);
+        int x = int((e.motion.x - cm.x0) * cm.kx), y = int((e.motion.y - cm.y0) * cm.ky);
+        if (cm.fitted) {
+          // Over the black bars: the pointer is at the screen's edge.
+          x = std::clamp(x, 0, std::max(cm.cw - 1, 0));
+          y = std::clamp(y, 0, std::max(cm.ch - 1, 0));
+        }
+        g_mouse_x = ox + x;
+        g_mouse_y = oy + y;
       }
       Post(h, WM_MOUSEMOVE, MouseKeys(), MkLparam(g_mouse_x - ox, g_mouse_y - oy));
       break;
@@ -602,6 +637,102 @@ bool TakeMessage(uint32_t hwnd, uint32_t lo, uint32_t hi, bool remove, Msg* out)
 
 bool OnMainThread() { return std::this_thread::get_id() == g_main_thread_id; }
 
+GameConfig::Fullscreen FullscreenPolicy() {
+  using F = GameConfig::Fullscreen;
+  static const F f = [] {
+    const char* e = Env("FULLSCREEN");
+    if (!e || !*e) return Background() ? F::Window : Game().fullscreen;
+    if (!std::strcmp(e, "window")) return F::Window;
+    if (!std::strcmp(e, "desktop")) return F::Desktop;
+    if (!std::strcmp(e, "exclusive")) return F::Exclusive;
+    FatalF("FULLSCREEN=%s: expected window, desktop or exclusive", e);
+  }();
+  return f;
+}
+
+// The screen a window would cover: the display mode in exclusive mode,
+// else the screen the game sees.
+void ScreenFor(const Window& w, int* sw, int* sh) {
+  *sw = w.mode_w ? w.mode_w : g_display_w;
+  *sh = w.mode_w ? w.mode_h : g_display_h;
+}
+
+// Whether a visible top-level window covers the whole screen the game
+// sees: DirectDraw exclusive mode, or a client area spanning the screen
+// (a fullscreen window after a display mode change, or a borderless one at
+// the desktop's size). Caller holds g_mu.
+bool CoversScreen(const Window& w) {
+  if (w.destroyed || !w.sdl || !w.visible) return false;
+  if (w.mode_w) return true;
+  int ox, oy, cw, ch;
+  WindowOrigin(w.hwnd, &ox, &oy);
+  ClientSize(w, &cw, &ch);
+  return ox <= 0 && oy <= 0 && ox + cw >= g_display_w && oy + ch >= g_display_h;
+}
+
+// Host fullscreen follows CoversScreen (GameConfig::fullscreen). Called
+// after anything that changes a window's placement, visibility or mode,
+// or the screen size. Leaving it gives the host window the client size
+// again.
+void UpdateFullscreen(uint32_t hwnd) {
+  using F = GameConfig::Fullscreen;
+  SDL_Window* sdl;
+  bool want;
+  int sw, sh, cw, ch;
+  {
+    std::lock_guard<std::recursive_mutex> l(g_mu);
+    Window* w = Win(hwnd);
+    if (!w || !w->sdl) return;
+    want = FullscreenPolicy() != F::Window && CoversScreen(*w);
+    ScreenFor(*w, &sw, &sh);
+    if (want == w->fullscreen && (!want || (w->fs_w == sw && w->fs_h == sh))) return;
+    w->fullscreen = want;
+    w->fs_w = sw;
+    w->fs_h = sh;
+    sdl = w->sdl;
+    GameClientSize(*w, &cw, &ch);
+  }
+  if (want) {
+    // Exclusive: the smallest host mode that holds the game's screen at
+    // the display's own aspect (a 4:3 mode on a 16:9 display asks for
+    // 16:9 at the same height), so the monitor or compositor never
+    // stretches it and present adds the bars. None found, or desktop
+    // policy: the desktop's mode.
+    SDL_DisplayMode m;
+    bool exclusive = false;
+    const SDL_DisplayID display = SDL_GetDisplayForWindow(sdl);
+    const SDL_DisplayMode* d = SDL_GetDesktopDisplayMode(display);
+    if (FullscreenPolicy() == F::Exclusive && d && d->w > 0 && d->h > 0) {
+      int tw = sw, th = sh;
+      if (int64_t(sw) * d->h < int64_t(sh) * d->w)
+        tw = int((int64_t(sh) * d->w + d->h - 1) / d->h);
+      else
+        th = int((int64_t(sw) * d->h + d->w - 1) / d->w);
+      exclusive = SDL_GetClosestFullscreenDisplayMode(display, tw, th, 0.0f, false, &m);
+    }
+    SDL_SetWindowFullscreenMode(sdl, exclusive ? &m : nullptr);
+    SDL_SetWindowFullscreen(sdl, true);
+    if (exclusive)
+      std::fprintf(stderr, "user32: window %X fullscreen for a %dx%d screen, host mode %dx%d\n",
+                   hwnd, sw, sh, m.w, m.h);
+    else
+      std::fprintf(stderr, "user32: window %X fullscreen for a %dx%d screen\n", hwnd, sw, sh);
+  } else {
+    SDL_SetWindowFullscreen(sdl, false);
+    SDL_SetWindowSize(sdl, std::max(cw, 1), std::max(ch, 1));
+  }
+}
+
+void UpdateFullscreenAll() {
+  std::vector<uint32_t> hwnds;
+  {
+    std::lock_guard<std::recursive_mutex> l(g_mu);
+    for (auto& [h, w] : g_windows)
+      if (w.sdl && !w.destroyed) hwnds.push_back(h);
+  }
+  for (uint32_t h : hwnds) UpdateFullscreen(h);
+}
+
 }  // namespace
 
 void EnsureSdlVideo() {
@@ -614,9 +745,15 @@ void EnsureSdlVideo() {
   if (!SDL_Init(SDL_INIT_VIDEO)) FatalF("SDL_Init: %s", SDL_GetError());
   g_sdl_up = true;
   if (const SDL_DisplayMode* m = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay())) {
-    g_display_w = m->w;
-    g_display_h = m->h;
+    g_display_w = g_desktop_w = m->w;
+    g_display_h = g_desktop_h = m->h;
   }
+}
+
+void DesktopSize(int* w, int* h) {
+  if (OnMainThread()) EnsureSdlVideo();
+  *w = g_desktop_w;
+  *h = g_desktop_h;
 }
 
 namespace {
@@ -849,9 +986,36 @@ void SetExclusiveMode(uint32_t hwnd, int w, int h) {
     if (!win) return;
     win->mode_w = w;
     win->mode_h = h;
-    sdl = win->sdl;
+    sdl = win->fullscreen ? nullptr : win->sdl;
   }
   if (sdl && w) SDL_SetWindowSize(sdl, w, h);
+  UpdateFullscreen(hwnd);
+}
+
+std::vector<ModeSize> DisplayModeSizes() {
+  static const ModeSize kSizes[] = {
+      {640, 480},   {800, 600},   {1024, 768},  {1152, 864},  {1280, 960},
+      {1280, 1024}, {1600, 1200}, {1280, 720},  {1366, 768},  {1600, 900},
+      {1920, 1080}, {1920, 1200}, {2560, 1080}, {2560, 1440}, {3440, 1440},
+      {3840, 2160}};
+  EnsureSdlVideo();
+  // Never smaller than a 1024x768 desktop, so the classic modes stay.
+  const int mw = std::max(g_desktop_w, 1024), mh = std::max(g_desktop_h, 768);
+  std::vector<ModeSize> v{{g_desktop_w, g_desktop_h}};
+  for (const ModeSize& s : kSizes)
+    if (s.w <= mw && s.h <= mh) v.push_back(s);
+  std::sort(v.begin(), v.end(),
+            [](const ModeSize& a, const ModeSize& b) { return a.w != b.w ? a.w < b.w : a.h < b.h; });
+  v.erase(std::unique(v.begin(), v.end(),
+                      [](const ModeSize& a, const ModeSize& b) { return a.w == b.w && a.h == b.h; }),
+          v.end());
+  return v;
+}
+
+void ClientAreaSize(uint32_t hwnd, int* w, int* h) {
+  std::lock_guard<std::recursive_mutex> l(g_mu);
+  *w = *h = 0;
+  if (Window* win = Win(hwnd)) GameClientSize(*win, w, h);
 }
 
 namespace hle {
@@ -994,11 +1158,14 @@ HLE("user32.dll", CreateWindowExA, 12) {
     return 0;
   }
   if (style & WS_VISIBLE) {
-    std::lock_guard<std::recursive_mutex> l(g_mu);
-    if (Window* wp = Win(hwnd)) {
-      wp->visible = true;
-      if (wp->sdl) SDL_ShowWindow(wp->sdl);
+    {
+      std::lock_guard<std::recursive_mutex> l(g_mu);
+      if (Window* wp = Win(hwnd)) {
+        wp->visible = true;
+        if (wp->sdl) SDL_ShowWindow(wp->sdl);
+      }
     }
+    UpdateFullscreen(hwnd);
   }
   return hwnd;
 }
@@ -1069,6 +1236,7 @@ HLE("user32.dll", ShowWindow, 2) {
       if (restore && !exclusive) SDL_RestoreWindow(sdl);
     }
   }
+  UpdateFullscreen(hwnd);
   if (show != was) Send(hwnd, WM_SHOWWINDOW, show ? 1 : 0, 0);
   bool activate = false;
   {
@@ -1155,10 +1323,12 @@ void ApplyRect(uint32_t hwnd, int x, int y, int w, int h, bool move, bool size) 
       sized = true;
     }
     ClientSize(*win, &cw, &ch);
-    // In exclusive mode the host window keeps the display-mode size.
-    sdl = win->mode_w ? nullptr : win->sdl;
+    // In exclusive mode the host window keeps the display-mode size, and
+    // a fullscreen one the screen's.
+    sdl = win->mode_w || win->fullscreen ? nullptr : win->sdl;
   }
   if (sdl && sized) SDL_SetWindowSize(sdl, std::max(cw, 1), std::max(ch, 1));
+  if (moved || sized) UpdateFullscreen(hwnd);
   if (sized) Send(hwnd, WM_SIZE, 0, MkLparam(cw, ch));
   if (moved) Send(hwnd, WM_MOVE, 0, MkLparam(x, y));
 }
@@ -1170,8 +1340,11 @@ HLE("user32.dll", SetWindowPos, 7) {
             int32_t(Arg(c, 5)), !nomove, !nosize);
   if (flags & 0x40) {  // SWP_SHOWWINDOW
     if (SDL_Window* s = SdlWindowFor(hwnd)) SDL_ShowWindow(s);
-    std::lock_guard<std::recursive_mutex> l(g_mu);
-    if (Window* w = Win(hwnd)) w->visible = true;
+    {
+      std::lock_guard<std::recursive_mutex> l(g_mu);
+      if (Window* w = Win(hwnd)) w->visible = true;
+    }
+    UpdateFullscreen(hwnd);
   }
   return 1;
 }
@@ -1927,12 +2100,8 @@ struct Mode {
 
 std::vector<Mode> Modes() {
   std::vector<Mode> m;
-  const int sizes[][2] = {{640, 480}, {800, 600}, {1024, 768}, {1152, 864},
-                          {1280, 960}, {1280, 1024}, {1600, 1200}};
   for (int bpp : {16, 32})
-    for (const auto& s : sizes)
-      if (s[0] <= std::max(g_display_w, 1024) && s[1] <= std::max(g_display_h, 768))
-        m.push_back({s[0], s[1], bpp});
+    for (const ModeSize& s : DisplayModeSizes()) m.push_back({s.w, s.h, bpp});
   return m;
 }
 
@@ -1961,21 +2130,17 @@ HLE("user32.dll", EnumDisplaySettingsA, 3) {
   return 1;
 }
 
-// Display modes are virtual: the host's mode never changes. A mode the
-// game switches to becomes the screen it sees (GetSystemMetrics,
-// EnumDisplaySettings), as after a real switch; its fullscreen window is
-// then an SDL window of that size. NULL restores the desktop size.
+// Display modes are virtual: the host's mode never changes here. A mode
+// the game switches to becomes the screen it sees (GetSystemMetrics,
+// EnumDisplaySettings), as after a real switch; a window covering it goes
+// host fullscreen (UpdateFullscreen). NULL restores the desktop size.
 HLE("user32.dll", ChangeDisplaySettingsA, 2) {
   EnsureSdlVideo();
-  static int desktop_w = 0, desktop_h = 0;
-  if (!desktop_w) {
-    desktop_w = g_display_w;
-    desktop_h = g_display_h;
-  }
   uint32_t dm = Arg(c, 0), flags = Arg(c, 1);
   if (!dm) {
-    g_display_w = desktop_w;
-    g_display_h = desktop_h;
+    g_display_w = g_desktop_w;
+    g_display_h = g_desktop_h;
+    UpdateFullscreenAll();
     return 0;  // DISP_CHANGE_SUCCESSFUL
   }
   uint32_t fields = Rd32(dm + 40);
@@ -1988,6 +2153,7 @@ HLE("user32.dll", ChangeDisplaySettingsA, 2) {
   if (flags & 2) return 0;          // CDS_TEST
   g_display_w = w;
   g_display_h = h;
+  UpdateFullscreenAll();
   return 0;
 }
 

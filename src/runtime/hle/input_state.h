@@ -11,11 +11,14 @@ extern std::atomic<uint8_t> g_key_down[256];
 extern std::atomic<uint8_t> g_key_toggled[256];
 extern std::atomic<uint8_t> g_key_pressed_since[256];
 
-// Desktop size reported to the game (GetSystemMetrics, EnumDisplaySettings).
-// Set from the primary display once SDL is up; the default is a safe
-// 2002-era desktop.
+// Screen size reported to the game (GetSystemMetrics, EnumDisplaySettings):
+// the desktop, or the display mode the game switched to. Set from the
+// primary display once SDL is up; the default is a safe 2002-era desktop.
 inline int g_display_w = 1024;
 inline int g_display_h = 768;
+// The host desktop's size (DesktopSize, display.h); fixed once SDL is up.
+inline int g_desktop_w = 1024;
+inline int g_desktop_h = 768;
 
 // Set-1 scan code for a virtual key (US layout); *ext = E0-prefixed.
 uint8_t ScanCodeForVk(uint8_t vk, bool* ext);

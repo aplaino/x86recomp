@@ -416,7 +416,9 @@ const char* Context::GetString(Enum name) const {
 
 bool Context::GetIntegerv(Enum pname, int32_t* out) {
   switch (pname) {
-    case MAX_TEXTURE_SIZE: *out = 2048; return true;
+    // Games also check it against the screen size (a 2560-wide mode needs
+    // more than 2048); every SDL_GPU and d3d9 target takes 8192.
+    case MAX_TEXTURE_SIZE: *out = 8192; return true;
     case MAX_TEXTURE_UNITS: *out = kUnits; return true;
     case VIEWPORT: std::copy(vp_, vp_ + 4, out); return true;
     case DEPTH_BITS: *out = 24; return true;

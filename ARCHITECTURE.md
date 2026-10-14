@@ -96,7 +96,9 @@ its lifted code with `recomp_add_lifted()`, and fills a
 - `guest_dir`, `exe_name`: where the game believes it is installed;
 - `registry`: what the retail installer would have written;
 - hooks for the rare behaviour that needs game knowledge (e.g.
-  `game_cursor` for games that re-centre the pointer).
+  `game_cursor` for games that re-centre the pointer);
+- `fullscreen`: how a window covering the game's screen is shown (see
+  "Display modes, fullscreen and presentation").
 
 Game-specific patches to lifted code (fixes, enhancements such as
 widescreen) live in the game project as hand-written replacements of
@@ -552,6 +554,53 @@ state; DDSCL_FPUPRESERVE = D3D saves and restores the CW around each
 call; without either, the Windows runtime switches the thread to single
 precision and leaves it there. Wine's ddraw does not model that default,
 so Wine is not a reference for this point. d3d7.cpp models it.
+
+### Display modes, fullscreen and presentation
+Display modes are virtual: the host's mode never changes behind the
+game's back. What games see and what the host shows:
+- Modes (EnumDisplaySettings, ChangeDisplaySettings, DirectDraw's
+  EnumDisplayModes; one list, `DisplayModeSizes()`): the classic 4:3 and
+  5:4 sizes, common wide ones (1280x720 to 3840x2160) and the desktop's
+  own size, up to the desktop's size, in 16 and 32 bpp. A mode switch
+  makes that the screen the game sees (GetSystemMetrics, ...).
+- Host fullscreen: a visible top-level window that covers the whole
+  screen the game sees (a popup at a switched mode, a borderless window
+  at the desktop's size, DirectDraw exclusive mode) goes fullscreen on
+  the host, and back to a window of its client size when it no longer
+  does. `GameConfig::fullscreen` (<ID>_FULLSCREEN=window|desktop|
+  exclusive) picks how: a host window of the mode's size (the old
+  behaviour; the default for <ID>_BACKGROUND runs), borderless at the
+  desktop's resolution (the default), or a real host mode switch. For
+  exclusive, the host mode asked for is the game's mode widened to the
+  display's aspect (4:3 1024x768 on a 16:9 display asks for 1366x768 and
+  gets the smallest 16:9 mode that holds it), so the monitor or the
+  compositor (Wayland emulates mode switches by scaling) never stretches
+  it. The cursor clip and focus handling are those of any window: a
+  clip is in the game's screen coordinates, whatever the host window's
+  size.
+- Presentation: the frame (the game's back buffer: the display mode, or
+  a window's client area as the game sees it; OpenGL's default
+  framebuffer has that size too, not the host window's) is shown scaled
+  to fit the host window with its aspect kept and black bars around it
+  (`gfx::FitRect`), in every backend's present (SDL_GPU: a clear and a
+  blit into the fitted rectangle; d3d9: a swap chain of the window's
+  size, recreated with a device Reset when the window changes size).
+  The bars appear when the mode's aspect differs from the screen's (4:3
+  on 16:9 is pillarboxed) or the window manager gave the window another
+  shape.
+- Pointer: absolute positions map back through the same rectangle
+  (positions over the bars clamp to the edge of the game's screen).
+  Relative motion that drives a virtual cursor (clipped mouse look,
+  exclusive mode) is not scaled: one unit of host motion is one pixel of
+  the game's screen, as a mickey is on Windows, so mouse look turns the
+  same in a window, fullscreen and in any mode.
+- For game patches (runtime/display.h): `DesktopSize()` (the host
+  desktop, in the units modes use: points on macOS and on scaled Wayland
+  outputs, so "native" there is the point size unless a window asks for
+  high pixel density) and `gfx::LastPresentation()` (the last frame's
+  size, the output's size and the fitted rectangle, so the output's
+  aspect). Deciding what to do with them (FOV, where 2D goes) is the
+  game's.
 
 ### Frame pacing
 Old games limit their frame rate by spinning on a millisecond timer,

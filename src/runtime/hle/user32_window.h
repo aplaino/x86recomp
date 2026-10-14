@@ -5,6 +5,7 @@
 #include <SDL3/SDL.h>
 
 #include <cstdint>
+#include <vector>
 
 namespace recomp {
 
@@ -33,5 +34,20 @@ void PumpHostEvents();
 // minimize/restore on deactivation) is bookkeeping only, as it would be
 // behind a fullscreen exclusive surface on Windows. w = 0 ends it.
 void SetExclusiveMode(uint32_t hwnd, int w, int h);
+
+// The size of hwnd's client area as the game sees it (in exclusive mode,
+// the display mode): what its frames are drawn at. The host window may
+// differ (fullscreen, or resized by the window manager); present fits the
+// frame into it (gfx::FitRect) and the pointer is mapped back.
+void ClientAreaSize(uint32_t hwnd, int* w, int* h);
+
+// The display mode sizes games can switch to, smallest first: the classic
+// 4:3 and 5:4 ones, common wide ones and the desktop's own size, up to the
+// desktop's size (EnumDisplaySettings, ChangeDisplaySettings, DirectDraw's
+// EnumDisplayModes).
+struct ModeSize {
+  int w, h;
+};
+std::vector<ModeSize> DisplayModeSizes();
 
 }  // namespace recomp
