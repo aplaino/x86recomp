@@ -1,9 +1,11 @@
 // FramePacer (runtime/pacing.h): the average frame rate is the one asked
-// for, waiting does not spin, and a late frame does not cause a burst.
+// for, frames start close to their deadlines, waiting does not spin, and
+// a late frame does not cause a burst.
 // Timing on a shared host: the bounds leave room for scheduling noise.
 
 #include <time.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -46,12 +48,19 @@ void Rate(double fps) {
   const double cpu = double(CpuNs() - cpu0);
   const double wall = double(start[n - 1] - start[0]);
   const double mean = wall / (n - 1);
-  double late = 0;
-  for (int i = 0; i < n; i++)
-    late = std::max(late, double(start[i] - start[0]) - i * period);
-  std::printf("%.0f fps: mean period %.4f ms (%+.3f%%), max lateness %.3f ms, CPU %.1f%%\n",
-              fps, mean / 1e6, (mean / period - 1) * 100, late / 1e6, cpu / wall * 100);
+  std::vector<double> lateness(n);
+  for (int i = 0; i < n; i++) lateness[i] = double(start[i] - start[0]) - i * period;
+  const double late = *std::max_element(lateness.begin(), lateness.end());
+  std::nth_element(lateness.begin(), lateness.begin() + n / 2, lateness.end());
+  const double median = lateness[n / 2];
+  std::printf("%.0f fps: mean period %.4f ms (%+.3f%%), lateness median %.3f max %.3f ms, "
+              "CPU %.1f%%\n",
+              fps, mean / 1e6, (mean / period - 1) * 100, median / 1e6, late / 1e6,
+              cpu / wall * 100);
   Check(std::fabs(mean / period - 1) < 0.01, "mean period within 1%");
+  // Wake-ups land some tens of microseconds late; timer coalescing (a
+  // sleep with leeway) made it milliseconds.
+  Check(median < 0.5e6, "median lateness under 0.5 ms");
   Check(cpu / wall < 0.25, "waiting does not spin");
 }
 

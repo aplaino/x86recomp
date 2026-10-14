@@ -68,7 +68,7 @@ uint64_t MonotonicNs();
 // Sleeps until MonotonicNs() reaches t, without spinning. On an idle
 // host it wakes within some tens of microseconds of t (Linux: absolute
 // clock_nanosleep with the thread's timer slack at 1 us; macOS:
-// mach_wait_until).
+// mach_wait_until with the thread real-time while it waits).
 void SleepUntilNs(uint64_t t);
 
 // ---- stacks

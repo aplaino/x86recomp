@@ -416,14 +416,22 @@ class GpuDevice final : public Device {
     }
     bb_w_ = w;
     bb_h_ = h;
-    // Without vsync, mailbox where there is one (no tearing, never
-    // blocks), as the d3d9 backend has DXVK do.
+    // Without vsync, mailbox (no tearing, never blocks), as the d3d9
+    // backend has DXVK do. Where there is none (Metal), it is emulated on
+    // vsync: Show() presents at most one frame per refresh (immediate
+    // presentation tears in fullscreen).
     SDL_GPUPresentMode mode = SDL_GPU_PRESENTMODE_VSYNC;
+    mailbox_emulated_ = false;
     if (!vsync) {
-      if (SDL_WindowSupportsGPUPresentMode(dev_, window_, SDL_GPU_PRESENTMODE_MAILBOX))
+      if (SDL_WindowSupportsGPUPresentMode(dev_, window_, SDL_GPU_PRESENTMODE_MAILBOX)) {
         mode = SDL_GPU_PRESENTMODE_MAILBOX;
-      else if (SDL_WindowSupportsGPUPresentMode(dev_, window_, SDL_GPU_PRESENTMODE_IMMEDIATE))
-        mode = SDL_GPU_PRESENTMODE_IMMEDIATE;
+      } else {
+        mailbox_emulated_ = true;
+        const SDL_DisplayMode* dm = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window_));
+        const double hz = dm && dm->refresh_rate > 0 ? double(dm->refresh_rate) : 60.0;
+        refresh_ns_ = uint64_t(1e9 / hz + 0.5);
+        next_show_ns_ = 0;
+      }
     }
     SDL_SetGPUSwapchainParameters(dev_, window_, SDL_GPU_SWAPCHAINCOMPOSITION_SDR, mode);
     // Both start black, as a fresh D3D swap chain does.
@@ -434,7 +442,8 @@ class GpuDevice final : public Device {
       Flush();
     }
     BindTarget();
-    std::fprintf(stderr, "gfx: back buffer %dx%d%s\n", w, h, vsync ? " (vsync)" : "");
+    std::fprintf(stderr, "gfx: back buffer %dx%d%s\n", w, h,
+                 vsync ? " (vsync)" : mailbox_emulated_ ? " (mailbox on vsync)" : "");
   }
 
   // ---- resources
@@ -1221,7 +1230,24 @@ class GpuDevice final : public Device {
   void Show(SDL_GPUCommandBuffer* cmd) {
     SDL_GPUTexture* sc = nullptr;
     Uint32 sw = 0, sh = 0;
-    if (!SDL_WaitAndAcquireGPUSwapchainTexture(cmd, window_, &sc, &sw, &sh) || !sc) return;
+    if (mailbox_emulated_) {
+      // One frame per refresh, on a grid of refresh periods: a frame
+      // before the next grid point stays in the front buffer unshown, so
+      // the vsync queue never fills and acquiring does not wait. If it
+      // does wait (the grid drifted ahead of the display), the grid
+      // restarts from the moment a drawable came free.
+      const uint64_t now = SDL_GetTicksNS();
+      if (next_show_ns_ && now < next_show_ns_) return;
+      next_show_ns_ = next_show_ns_ && now < next_show_ns_ + refresh_ns_
+                          ? next_show_ns_ + refresh_ns_
+                          : now + refresh_ns_;
+      const bool ok = SDL_WaitAndAcquireGPUSwapchainTexture(cmd, window_, &sc, &sw, &sh);
+      const uint64_t after = SDL_GetTicksNS();
+      if (after - now > refresh_ns_ / 4) next_show_ns_ = after + refresh_ns_;
+      if (!ok || !sc) return;
+    } else if (!SDL_WaitAndAcquireGPUSwapchainTexture(cmd, window_, &sc, &sw, &sh) || !sc) {
+      return;
+    }
     const Rect r = FitRect(bb_w_, bb_h_, int(sw), int(sh));
     const int w = r.right - r.left, h = r.bottom - r.top;
     SDL_GPUBlitInfo b{};
@@ -1791,6 +1817,9 @@ class GpuDevice final : public Device {
   SDL_GPUTexture* front_ = nullptr;       // the DirectDraw primary
   SDL_GPUTexture* dummy_ = nullptr;
   int bb_w_ = 0, bb_h_ = 0;
+  // Mailbox emulated on vsync (ResetSwapChain, Show).
+  bool mailbox_emulated_ = false;
+  uint64_t refresh_ns_ = 0, next_show_ns_ = 0;
   std::map<TextureId, Tex> textures_;
   std::map<DepthId, Depth> depths_;
   uint32_t next_id_ = 1;

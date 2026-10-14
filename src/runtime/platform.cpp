@@ -16,7 +16,10 @@
 #include <ucontext.h>
 
 #if defined(__APPLE__)
+#include <mach/mach.h>
 #include <mach/mach_time.h>
+#include <mach/thread_policy.h>
+#include <pthread.h>
 #else
 #include <sys/prctl.h>
 #endif
@@ -79,9 +82,27 @@ void SleepUntilNs(uint64_t t) {
     mach_timebase_info(&i);
     return i;
   }();
-  while (MonotonicNs() < t) {
-    const unsigned __int128 ticks = (unsigned __int128)t * tb.denom / tb.numer;
-    mach_wait_until(uint64_t(ticks));
+  auto ticks = [](uint64_t ns) {
+    return uint64_t((unsigned __int128)ns * tb.denom / tb.numer);
+  };
+  // A timeshare thread's timer gets coalescing leeway: it woke 1-3.5 ms
+  // late (no QoS class, latency tier or task role brought it under 1 ms).
+  // A time-constraint (real-time) thread's timer has none and wakes
+  // within some tens of microseconds. The thread is real-time only while
+  // it waits: past its computation budget the kernel would demote it.
+  const thread_act_t self = pthread_mach_thread_np(pthread_self());
+  thread_time_constraint_policy_data_t rt = {};
+  rt.computation = uint32_t(ticks(500000));  // 0.5 ms after waking
+  rt.constraint = uint32_t(ticks(1000000));
+  rt.preemptible = 1;
+  const bool set = thread_policy_set(self, THREAD_TIME_CONSTRAINT_POLICY,
+                                     reinterpret_cast<thread_policy_t>(&rt),
+                                     THREAD_TIME_CONSTRAINT_POLICY_COUNT) == KERN_SUCCESS;
+  while (MonotonicNs() < t) mach_wait_until(ticks(t));
+  if (set) {
+    thread_standard_policy_data_t ts = {};
+    thread_policy_set(self, THREAD_STANDARD_POLICY, reinterpret_cast<thread_policy_t>(&ts),
+                      THREAD_STANDARD_POLICY_COUNT);
   }
 }
 #else
