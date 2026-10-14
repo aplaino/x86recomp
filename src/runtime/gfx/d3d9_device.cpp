@@ -22,6 +22,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <vector>
 
 #include "runtime/gfx/device.h"
 #include "runtime/log.h"
@@ -312,11 +313,49 @@ class D3D9Device final : public Device {
     NotePresentation({bb_w_, bb_h_, swap_w_, swap_h_, r});
   }
 
+  void BlitBlend(const void* src, uint32_t pitch, const Rect& sr, const Rect& dr) override {
+    DrawImage(src, pitch, Format::A8R8G8B8, sr, dr, false, 0, true);
+  }
+
   void ReadBack(const Rect& r, void* dst, uint32_t pitch, Format fmt) override {
     IDirect3DSurface9* rt = nullptr;
     dev_->GetRenderTarget(0, &rt);
     ReadSurface(rt, r, dst, pitch, fmt);
     rt->Release();
+  }
+
+  // Reads at once (GetRenderTargetData waits anyway) and keeps the
+  // pixels for FinishReadBack.
+  uint32_t StartReadBack(const Rect& r) override {
+    uint32_t t = next_read_++;
+    if (!t) t = next_read_++;
+    Read& rd = reads_[t];
+    rd.r = r;
+    int w = r.right - r.left, h = r.bottom - r.top;
+    if (w > 0 && h > 0) {
+      rd.px.resize(size_t(w) * h);
+      ReadBack(r, rd.px.data(), uint32_t(w) * 4, Format::A8R8G8B8);
+    }
+    return t;
+  }
+
+  void FinishReadBack(uint32_t ticket, void* dst, uint32_t pitch, Format fmt) override {
+    auto it = reads_.find(ticket);
+    if (it == reads_.end()) return;
+    const Read& rd = it->second;
+    int w = rd.r.right - rd.r.left, h = rd.r.bottom - rd.r.top;
+    if (dst && !rd.px.empty()) {
+      uint32_t bpp = BitsPerPixel(fmt) / 8;
+      for (int y = 0; y < h; y++) {
+        const uint32_t* s = rd.px.data() + size_t(y) * w;
+        uint8_t* out = static_cast<uint8_t*>(dst) + size_t(y) * pitch;
+        if (fmt == Format::X8R8G8B8 || fmt == Format::A8R8G8B8)
+          std::memcpy(out, s, size_t(w) * 4);
+        else
+          for (int x = 0; x < w; x++) EncodePixel(out + size_t(x) * bpp, fmt, s[x]);
+      }
+    }
+    reads_.erase(it);
   }
 
   void SetRenderState(uint32_t s, uint32_t v) override {
@@ -490,8 +529,9 @@ class D3D9Device final : public Device {
   }
 
  private:
+  // A blit; with `blend`, an A8R8G8B8 image blended by its alpha.
   void DrawImage(const void* src, uint32_t pitch, Format fmt, const Rect& sr,
-                 const Rect& dr, bool colorkey, uint32_t key) {
+                 const Rect& dr, bool colorkey, uint32_t key, bool blend = false) {
     int w = sr.right - sr.left, h = sr.bottom - sr.top;
     if (w <= 0 || h <= 0) return;
     EnsureStaging(w, h);
@@ -506,7 +546,8 @@ class D3D9Device final : public Device {
                                                 size_t(y) * uint32_t(lr.Pitch));
       if (!colorkey && (fmt == Format::X8R8G8B8 || fmt == Format::A8R8G8B8)) {
         const uint32_t* p = reinterpret_cast<const uint32_t*>(s);
-        for (int x = 0; x < w; x++) d[x] = p[x] | 0xFF000000u;
+        const uint32_t opaque = blend ? 0 : 0xFF000000u;
+        for (int x = 0; x < w; x++) d[x] = p[x] | opaque;
         continue;
       }
       for (int x = 0; x < w; x++, s += bpp) {
@@ -538,7 +579,10 @@ class D3D9Device final : public Device {
     dev_->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
     dev_->SetRenderState(D3DRS_LIGHTING, FALSE);
     dev_->SetRenderState(D3DRS_FOGENABLE, FALSE);
-    dev_->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+    dev_->SetRenderState(D3DRS_ALPHABLENDENABLE, blend ? TRUE : FALSE);
+    dev_->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+    dev_->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+    dev_->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
     dev_->SetRenderState(D3DRS_ALPHATESTENABLE, colorkey ? TRUE : FALSE);
     dev_->SetRenderState(D3DRS_ALPHAFUNC, D3DCMP_GREATER);
     dev_->SetRenderState(D3DRS_ALPHAREF, 0);
@@ -723,6 +767,12 @@ class D3D9Device final : public Device {
   bool vsync_ = false;
   IDirect3DTexture9* staging_ = nullptr;
   IDirect3DSurface9* readback_ = nullptr;  // system-memory copy of the RT
+  struct Read {
+    Rect r{};
+    std::vector<uint32_t> px;  // A8R8G8B8
+  };
+  std::map<uint32_t, Read> reads_;  // StartReadBack tickets
+  uint32_t next_read_ = 1;
   Ring<IDirect3DVertexBuffer9> vb_;
   Ring<IDirect3DIndexBuffer9> ib_;
   struct MappedDraw {

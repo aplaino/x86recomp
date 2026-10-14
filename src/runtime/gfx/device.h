@@ -101,9 +101,24 @@ class Device {
   virtual void Blit(const void* src, uint32_t pitch, Format fmt,
                     const Rect& src_rect, const Rect& dst_rect, bool colorkey,
                     uint32_t key) = 0;
+  // Draws `src_rect` of an A8R8G8B8 image over `dst_rect` of the current
+  // render target, blended by the image's alpha (source over, straight
+  // alpha). For what a host hook draws in place of a game's own CPU
+  // blending onto read-back pixels (a software cursor), which would make
+  // the CPU wait for the frame's GPU work.
+  virtual void BlitBlend(const void* src, uint32_t pitch,
+                         const Rect& src_rect, const Rect& dst_rect) = 0;
   // Reads `r` of the current render target into linear memory.
   virtual void ReadBack(const Rect& r, void* dst, uint32_t pitch,
                         Format fmt) = 0;
+  // ReadBack in two steps, so the CPU need not wait for the GPU:
+  // StartReadBack takes `r` of the current render target as the draws so
+  // far leave it and returns a ticket (never 0); FinishReadBack waits for
+  // that copy and converts it as ReadBack does, or only drops it if `dst`
+  // is null. Every ticket is finished exactly once.
+  virtual uint32_t StartReadBack(const Rect& r) = 0;
+  virtual void FinishReadBack(uint32_t ticket, void* dst, uint32_t pitch,
+                              Format fmt) = 0;
 
   // ---- front buffer (the DirectDraw primary): the last presented frame,
   // which the game may also read and draw on between frames (its cursor).

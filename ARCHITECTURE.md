@@ -529,6 +529,17 @@ draws). Backends:
      arenas) and flushed as one copy pass plus one render pass when the
      target changes, a texture in use is updated, or on readback and
      present. A full-target Clear before any draw is the pass's load op.
+     So a readback in the middle of a frame (a game blending a software
+     cursor on the CPU) is what submits the frame, and the CPU waits for
+     all of its GPU work. Splitting the pass earlier so the GPU starts
+     sooner does not pay on tile-based GPUs: the extra store and load of
+     the target is cheap (~0.1 ms at 5120x2880 on an M3 Pro), but hidden
+     surface removal works within a pass, so everything an early part
+     draws gets shaded even where later draws cover it (one 5K frame:
+     11 ms of fragment work whole, 16 ms split seven ways, measured with
+     Metal System Trace). Instead the device can read back without
+     waiting (StartReadBack / FinishReadBack) and blend an ARGB image
+     itself (BlitBlend), for hooks that move such CPU work to the GPU.
    - Colour textures and targets are B8G8R8A8 (the memory layout of D3D's
      A8R8G8B8); other formats convert on upload and readback, as the d3d9
      backend does for its X8R8G8B8 back buffer. DXT stays BC1-3. Blends

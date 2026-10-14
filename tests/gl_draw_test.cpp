@@ -67,6 +67,9 @@ class RecordingDevice final : public gfx::Device {
   void Blit(const void*, uint32_t, gfx::Format, const gfx::Rect&, const gfx::Rect&, bool,
             uint32_t) override {}
   void ReadBack(const gfx::Rect&, void*, uint32_t, gfx::Format) override {}
+  void BlitBlend(const void*, uint32_t, const gfx::Rect&, const gfx::Rect&) override {}
+  uint32_t StartReadBack(const gfx::Rect&) override { return 1; }
+  void FinishReadBack(uint32_t, void*, uint32_t, gfx::Format) override {}
   void BlitFront(const void*, uint32_t, gfx::Format, const gfx::Rect&,
                  const gfx::Rect&) override {}
   void ReadBackFront(const gfx::Rect&, void*, uint32_t, gfx::Format) override {}

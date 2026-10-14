@@ -387,6 +387,7 @@ class GpuDevice final : public Device {
     if (!dev_) return;
     SDL_WaitForGPUIdle(dev_);
     for (SDL_GPUFence* f : in_flight_) SDL_ReleaseGPUFence(dev_, f);
+    for (auto& [t, rd] : reads_) FinishRead(rd, nullptr, 0, Format::Unknown);
     for (auto& [k, p] : pipelines_) SDL_ReleaseGPUGraphicsPipeline(dev_, p);
     for (auto& [k, s] : samplers_) SDL_ReleaseGPUSampler(dev_, s);
     for (auto& [id, t] : textures_) SDL_ReleaseGPUTexture(dev_, t.tex);
@@ -595,9 +596,30 @@ class GpuDevice final : public Device {
     DrawImage(src, pitch, fmt, sr, dr, colorkey, key);
   }
 
+  void BlitBlend(const void* src, uint32_t pitch, const Rect& sr, const Rect& dr) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    DrawImage(src, pitch, Format::A8R8G8B8, sr, dr, false, 0, true);
+  }
+
   void ReadBack(const Rect& r, void* dst, uint32_t pitch, Format fmt) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     ReadTexture(pass_color_, pass_w_, pass_h_, r, dst, pitch, fmt);
+  }
+
+  uint32_t StartReadBack(const Rect& r) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    uint32_t t = next_read_++;
+    if (!t) t = next_read_++;
+    reads_[t] = StartRead(pass_color_, pass_w_, pass_h_, r, false);
+    return t;
+  }
+
+  void FinishReadBack(uint32_t ticket, void* dst, uint32_t pitch, Format fmt) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    auto it = reads_.find(ticket);
+    if (it == reads_.end()) return;
+    FinishRead(it->second, dst, pitch, fmt);
+    reads_.erase(it);
   }
 
   void BlitFront(const void* src, uint32_t pitch, Format fmt, const Rect& sr,
@@ -899,6 +921,14 @@ class GpuDevice final : public Device {
   struct BlitTex {
     SDL_GPUTexture* tex;
     int w, h;
+  };
+  // A readback in flight: the copy of `c` (`r` clipped to the texture)
+  // into `tb` (download_tb_ unless `own`), done when `fence` signals.
+  struct Read {
+    Rect r{}, c{};
+    SDL_GPUTransferBuffer* tb = nullptr;
+    SDL_GPUFence* fence = nullptr;
+    bool own = false;
   };
 
   // ---- defaults (D3D9's, which the front ends rely on: they only send
@@ -1278,53 +1308,88 @@ class GpuDevice final : public Device {
 
   void ReadTexture(SDL_GPUTexture* tex, int tw, int th, const Rect& r, void* dst, uint32_t pitch,
                    Format fmt) {
+    Read rd = StartRead(tex, tw, th, r, true);
+    FinishRead(rd, dst, pitch, fmt);
+  }
+
+  SDL_GPUTransferBuffer* NewDownload(uint32_t bytes) {
+    SDL_GPUTransferBufferCreateInfo tbi{};
+    tbi.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+    tbi.size = bytes;
+    SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(dev_, &tbi);
+    if (!tb) FatalF("gfx: download buffer: %s", SDL_GetError());
+    return tb;
+  }
+
+  // Copies `r` of `tex` (after everything recorded so far) into a
+  // download transfer buffer: the shared one for a read finished at once
+  // (ReadTexture), else one of the read's own.
+  Read StartRead(SDL_GPUTexture* tex, int tw, int th, const Rect& r, bool shared) {
     Flush();
-    Rect c = Clip(r, tw, th);
-    int w = c.right - c.left, h = c.bottom - c.top;
-    if (w <= 0 || h <= 0 || !tex) return;
+    Read rd;
+    rd.r = r;
+    rd.c = Clip(r, tw, th);
+    int w = rd.c.right - rd.c.left, h = rd.c.bottom - rd.c.top;
+    if (w <= 0 || h <= 0 || !tex) return rd;
     uint32_t bytes = uint32_t(w) * uint32_t(h) * 4;
-    if (!download_tb_ || download_tb_cap_ < bytes) {
-      if (download_tb_) SDL_ReleaseGPUTransferBuffer(dev_, download_tb_);
-      download_tb_cap_ = std::max(bytes, 1u << 20);
-      SDL_GPUTransferBufferCreateInfo tbi{};
-      tbi.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
-      tbi.size = download_tb_cap_;
-      download_tb_ = SDL_CreateGPUTransferBuffer(dev_, &tbi);
+    if (!shared) {
+      rd.tb = NewDownload(bytes);
+      rd.own = true;
+    } else {
+      if (!download_tb_ || download_tb_cap_ < bytes) {
+        if (download_tb_) SDL_ReleaseGPUTransferBuffer(dev_, download_tb_);
+        download_tb_cap_ = std::max(bytes, 1u << 20);
+        download_tb_ = NewDownload(download_tb_cap_);
+      }
+      rd.tb = download_tb_;
     }
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(dev_);
     SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
     SDL_GPUTextureRegion src{};
     src.texture = tex;
-    src.x = Uint32(c.left);
-    src.y = Uint32(c.top);
+    src.x = Uint32(rd.c.left);
+    src.y = Uint32(rd.c.top);
     src.w = Uint32(w);
     src.h = Uint32(h);
     src.d = 1;
     SDL_GPUTextureTransferInfo d{};
-    d.transfer_buffer = download_tb_;
+    d.transfer_buffer = rd.tb;
     d.pixels_per_row = Uint32(w);
     d.rows_per_layer = Uint32(h);
     SDL_DownloadFromGPUTexture(cp, &src, &d);
     SDL_EndGPUCopyPass(cp);
-    SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
-    SDL_WaitForGPUFences(dev_, true, &fence, 1);
-    SDL_ReleaseGPUFence(dev_, fence);
-    const auto* px = static_cast<const uint32_t*>(SDL_MapGPUTransferBuffer(dev_, download_tb_, false));
-    uint32_t bpp = BitsPerPixel(fmt) / 8;
-    // Rows of the requested rectangle that fell outside the target stay
-    // as they were.
-    int ox = c.left - r.left, oy = c.top - r.top;
-    for (int y = 0; y < h; y++) {
-      const uint32_t* s = px + size_t(y) * uint32_t(w);
-      uint8_t* out = static_cast<uint8_t*>(dst) + size_t(y + oy) * pitch + size_t(ox) * bpp;
-      if (fmt == Format::X8R8G8B8 || fmt == Format::A8R8G8B8) {
-        auto* o = reinterpret_cast<uint32_t*>(out);
-        for (int x = 0; x < w; x++) o[x] = s[x] | 0xFF000000u;
-      } else {
-        for (int x = 0; x < w; x++) EncodePixel(out + size_t(x) * bpp, fmt, s[x] | 0xFF000000u);
+    rd.fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+    if (!rd.fence) FatalF("gfx: SDL_SubmitGPUCommandBuffer: %s", SDL_GetError());
+    return rd;
+  }
+
+  // Waits for `rd` and converts it into dst, or only drops it if dst is
+  // null.
+  void FinishRead(Read& rd, void* dst, uint32_t pitch, Format fmt) {
+    if (!rd.fence) return;
+    int w = rd.c.right - rd.c.left, h = rd.c.bottom - rd.c.top;
+    if (dst) {
+      SDL_WaitForGPUFences(dev_, true, &rd.fence, 1);
+      const auto* px = static_cast<const uint32_t*>(SDL_MapGPUTransferBuffer(dev_, rd.tb, false));
+      uint32_t bpp = BitsPerPixel(fmt) / 8;
+      // Rows of the requested rectangle that fell outside the target stay
+      // as they were.
+      int ox = rd.c.left - rd.r.left, oy = rd.c.top - rd.r.top;
+      for (int y = 0; y < h; y++) {
+        const uint32_t* s = px + size_t(y) * uint32_t(w);
+        uint8_t* out = static_cast<uint8_t*>(dst) + size_t(y + oy) * pitch + size_t(ox) * bpp;
+        if (fmt == Format::X8R8G8B8 || fmt == Format::A8R8G8B8) {
+          auto* o = reinterpret_cast<uint32_t*>(out);
+          for (int x = 0; x < w; x++) o[x] = s[x] | 0xFF000000u;
+        } else {
+          for (int x = 0; x < w; x++) EncodePixel(out + size_t(x) * bpp, fmt, s[x] | 0xFF000000u);
+        }
       }
+      SDL_UnmapGPUTransferBuffer(dev_, rd.tb);
     }
-    SDL_UnmapGPUTransferBuffer(dev_, download_tb_);
+    SDL_ReleaseGPUFence(dev_, rd.fence);
+    if (rd.own) SDL_ReleaseGPUTransferBuffer(dev_, rd.tb);
+    rd = {};
   }
 
   static void ConvertToArgb(const uint8_t* src, uint32_t pitch, Format f, int w, int h,
@@ -1346,8 +1411,9 @@ class GpuDevice final : public Device {
 
   // ---- DirectDraw blits: a textured screen quad with private state
 
+  // A blit; with `blend`, an A8R8G8B8 image blended by its alpha.
   void DrawImage(const void* src, uint32_t pitch, Format fmt, const Rect& sr, const Rect& dr,
-                 bool colorkey, uint32_t key) {
+                 bool colorkey, uint32_t key, bool blend = false) {
     int w = sr.right - sr.left, h = sr.bottom - sr.top;
     if (w <= 0 || h <= 0 || dr.right <= dr.left || dr.bottom <= dr.top) return;
     std::vector<uint32_t> px(size_t(w) * h);
@@ -1356,7 +1422,8 @@ class GpuDevice final : public Device {
                           size_t(sr.left) * bpp;
     if (!colorkey) {
       ConvertToArgb(base, pitch, fmt, w, h, px.data());
-      for (uint32_t& p : px) p |= 0xFF000000u;
+      if (!blend)
+        for (uint32_t& p : px) p |= 0xFF000000u;
     } else {
       for (int y = 0; y < h; y++) {
         const uint8_t* s = base + size_t(y) * pitch;
@@ -1392,6 +1459,11 @@ class GpuDevice final : public Device {
                 uint32_t(w) * 4, true);
 
     PipelineKey k = BaseKey(SDL_GPU_PRIMITIVETYPE_TRIANGLELIST);
+    if (blend) {
+      k.blend = 1;
+      k.src = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+      k.dst = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    }
     Cmd c = InternalCmd(k, 0x004 | 0x100, true, colorkey);
     c.tex[0] = bt.tex;
     SamplerKey sk{};
@@ -1859,6 +1931,8 @@ class GpuDevice final : public Device {
   static constexpr size_t kMaxInFlight = 4;
   std::deque<SDL_GPUFence*> in_flight_;  // submitted, not known finished
   SDL_GPUTransferBuffer* download_tb_ = nullptr;
+  std::map<uint32_t, Read> reads_;  // StartReadBack tickets
+  uint32_t next_read_ = 1;
   uint32_t upload_tb_cap_ = 0, download_tb_cap_ = 0;
   std::unordered_map<PipelineKey, SDL_GPUGraphicsPipeline*, PipelineKeyHash> pipelines_;
   std::map<SamplerKey, SDL_GPUSampler*> samplers_;
