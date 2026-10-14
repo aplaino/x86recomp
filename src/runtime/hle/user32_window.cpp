@@ -800,7 +800,8 @@ void InjectTestFocus() {
 //   <t> pointer <x> <y>   the host pointer is at client (x, y) (the
 //                         game's cursor should follow it exactly)
 //   <t> click [left|right]
-//   <t> key <SDL scancode name>   e.g. Escape, Return, Space, A
+//   <t> key <SDL scancode name> [seconds]   e.g. Escape, Return, Space, A;
+//                         held for that long (default 0.08)
 // '#' starts a comment.
 struct TestEvent {
   double t;
@@ -886,7 +887,7 @@ void InjectTestInput() {
         q.push_back({t, e});
         e.type = SDL_EVENT_KEY_UP;
         e.key.down = false;
-        q.push_back({t + 0.08, e});
+        q.push_back({t + (n >= 4 ? std::atof(b) : 0.08), e});
       } else {
         WarnF("TEST_INPUT: bad line: %s", line);
       }
