@@ -238,6 +238,7 @@ bool HasAlpha(Format f) {
     case Format::A8R8G8B8: case Format::A1R5G5B5: case Format::A4R4G4B4:
     case Format::A8: case Format::A8L8: case Format::DXT1: case Format::DXT2:
     case Format::DXT3: case Format::DXT4: case Format::DXT5:
+    case Format::A16B16G16R16F: case Format::A32B32G32R32F:
       return true;
     default:
       return false;
@@ -527,6 +528,11 @@ class GpuDevice final : public Device {
     if (IsCompressed(t.fmt)) {
       uint32_t row = RowPitch(t.fmt, uint32_t(w)), rows = RowCount(t.fmt, uint32_t(h));
       QueueUpload(t.tex, level, c.left, c.top, w, h, s, pitch, rows, row, false, true);
+      return;
+    }
+    if (IsFloat(t.fmt)) {  // same layout as the GPU format
+      QueueUpload(t.tex, level, c.left, c.top, w, h, s, pitch, uint32_t(h),
+                  RowPitch(t.fmt, uint32_t(w)));
       return;
     }
     std::vector<uint32_t> px(size_t(w) * h);
@@ -1018,6 +1024,12 @@ class GpuDevice final : public Device {
       case Format::DXT1: return SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM;
       case Format::DXT2: case Format::DXT3: return SDL_GPU_TEXTUREFORMAT_BC2_RGBA_UNORM;
       case Format::DXT4: case Format::DXT5: return SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM;
+      case Format::R16F: return SDL_GPU_TEXTUREFORMAT_R16_FLOAT;
+      case Format::G16R16F: return SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT;
+      case Format::A16B16G16R16F: return SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+      case Format::R32F: return SDL_GPU_TEXTUREFORMAT_R32_FLOAT;
+      case Format::G32R32F: return SDL_GPU_TEXTUREFORMAT_R32G32_FLOAT;
+      case Format::A32B32G32R32F: return SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT;
       default: return SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;
     }
   }

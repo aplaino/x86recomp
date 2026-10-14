@@ -21,6 +21,14 @@ uint32_t BitsPerPixel(Format f) {
       return 4;
     case Format::DXT2: case Format::DXT3: case Format::DXT4: case Format::DXT5:
       return 8;
+    case Format::R16F:
+      return 16;
+    case Format::G16R16F: case Format::R32F:
+      return 32;
+    case Format::A16B16G16R16F: case Format::G32R32F:
+      return 64;
+    case Format::A32B32G32R32F:
+      return 128;
     default:
       return 0;
   }
@@ -29,6 +37,11 @@ uint32_t BitsPerPixel(Format f) {
 bool IsCompressed(Format f) {
   return f == Format::DXT1 || f == Format::DXT2 || f == Format::DXT3 ||
          f == Format::DXT4 || f == Format::DXT5;
+}
+
+bool IsFloat(Format f) {
+  return f == Format::R16F || f == Format::G16R16F || f == Format::A16B16G16R16F ||
+         f == Format::R32F || f == Format::G32R32F || f == Format::A32B32G32R32F;
 }
 
 uint32_t RowPitch(Format f, uint32_t width) {

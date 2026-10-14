@@ -1,8 +1,9 @@
-// d3d9: Direct3DCreate9, IDirect3D9, IDirect3DDevice9, IDirect3DSurface9.
+// d3d9: Direct3DCreate9, IDirect3D9 and the core of IDirect3DDevice9
+// (creation, swap chain, present, state). Resources: d3d9_resource.cpp.
 //
 // One adapter: the host desktop, presented through the gfx device. State
-// calls are cached for the Get* methods; resources and drawing come with
-// the programmable path of the gfx device.
+// calls are cached for the Get* methods; drawing comes with the
+// programmable path of the gfx device.
 //
 // FPU side effect of device creation: unless the app passes
 // D3DCREATE_FPU_PRESERVE, the D3D9 runtime switches the calling thread's
@@ -18,7 +19,7 @@
 
 #include "runtime/display.h"
 #include "runtime/hle/com.h"
-#include "runtime/hle/d3d9_types.h"
+#include "runtime/hle/d3d9_impl.h"
 #include "runtime/hle/hle.h"
 #include "runtime/hle/present.h"
 #include "runtime/hle/user32_window.h"
@@ -26,52 +27,6 @@
 #include "runtime/x87.h"
 
 namespace recomp::d3d9 {
-
-namespace {
-
-using namespace guest;
-
-constexpr GUID kIID_IUnknown = {0x00000000, 0x0000, 0x0000, {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
-constexpr GUID kIID_IDirect3D9 = {0x81BDCBCA, 0x64D4, 0x426D, {0xAE, 0x8D, 0xAD, 0x01, 0x47, 0xF4, 0x27, 0x5C}};
-constexpr GUID kIID_IDirect3DDevice9 = {0xD0223B96, 0xBF7A, 0x43FD, {0x92, 0xBD, 0xA4, 0x3B, 0x0D, 0x82, 0xB9, 0xEB}};
-constexpr GUID kIID_IDirect3DSurface9 = {0x0CFBAF3A, 0x9FF6, 0x429A, {0x99, 0xB3, 0xA2, 0x79, 0x6A, 0xF8, 0xB8, 0x9B}};
-
-constexpr uint32_t D3D_OK = 0;
-constexpr uint32_t D3DERR_NOTFOUND = 0x88760866;
-constexpr uint32_t D3DERR_NOTAVAILABLE = 0x8876086A;
-constexpr uint32_t D3DERR_INVALIDCALL = 0x8876086C;
-
-// D3DFORMAT values
-enum : uint32_t {
-  D3DFMT_UNKNOWN = 0, D3DFMT_R8G8B8 = 20, D3DFMT_A8R8G8B8 = 21,
-  D3DFMT_X8R8G8B8 = 22, D3DFMT_R5G6B5 = 23, D3DFMT_X1R5G5B5 = 24,
-  D3DFMT_A1R5G5B5 = 25, D3DFMT_A4R4G4B4 = 26, D3DFMT_R3G3B2 = 27,
-  D3DFMT_A8 = 28, D3DFMT_X4R4G4B4 = 30, D3DFMT_P8 = 41, D3DFMT_L8 = 50,
-  D3DFMT_A8L8 = 51, D3DFMT_D16_LOCKABLE = 70, D3DFMT_D32 = 71,
-  D3DFMT_D15S1 = 73, D3DFMT_D24S8 = 75, D3DFMT_D24X8 = 77, D3DFMT_D16 = 80,
-  D3DFMT_DXT1 = 0x31545844, D3DFMT_DXT2 = 0x32545844,
-  D3DFMT_DXT3 = 0x33545844, D3DFMT_DXT4 = 0x34545844,
-  D3DFMT_DXT5 = 0x35545844,
-};
-// D3DRESOURCETYPE
-enum : uint32_t {
-  D3DRTYPE_SURFACE = 1, D3DRTYPE_VOLUME = 2, D3DRTYPE_TEXTURE = 3,
-  D3DRTYPE_VOLUMETEXTURE = 4, D3DRTYPE_CUBETEXTURE = 5,
-  D3DRTYPE_VERTEXBUFFER = 6, D3DRTYPE_INDEXBUFFER = 7,
-};
-// D3DUSAGE
-enum : uint32_t {
-  D3DUSAGE_RENDERTARGET = 0x1, D3DUSAGE_DEPTHSTENCIL = 0x2,
-  D3DUSAGE_DYNAMIC = 0x200, D3DUSAGE_AUTOGENMIPMAP = 0x400,
-  D3DUSAGE_QUERY_SRGBREAD = 0x10000, D3DUSAGE_QUERY_FILTER = 0x20000,
-  D3DUSAGE_QUERY_SRGBWRITE = 0x40000,
-  D3DUSAGE_QUERY_POSTPIXELSHADER_BLENDING = 0x80000,
-  D3DUSAGE_QUERY_VERTEXTEXTURE = 0x100000,
-  D3DUSAGE_QUERY_WRAPANDMIP = 0x200000,
-};
-constexpr uint32_t D3DCREATE_FPU_PRESERVE = 0x2;
-constexpr uint32_t D3DPRESENT_INTERVAL_IMMEDIATE = 0x80000000;
-constexpr uint32_t D3DPOOL_DEFAULT = 0;
 
 gfx::Format FormatFromD3D(uint32_t f) {
   using F = gfx::Format;
@@ -99,6 +54,12 @@ gfx::Format FormatFromD3D(uint32_t f) {
     case D3DFMT_DXT3: return F::DXT3;
     case D3DFMT_DXT4: return F::DXT4;
     case D3DFMT_DXT5: return F::DXT5;
+    case D3DFMT_R16F: return F::R16F;
+    case D3DFMT_G16R16F: return F::G16R16F;
+    case D3DFMT_A16B16G16R16F: return F::A16B16G16R16F;
+    case D3DFMT_R32F: return F::R32F;
+    case D3DFMT_G32R32F: return F::G32R32F;
+    case D3DFMT_A32B32G32R32F: return F::A32B32G32R32F;
     default: return F::Unknown;
   }
 }
@@ -109,11 +70,25 @@ bool IsDepthFormat(gfx::Format f) {
          f == F::D15S1;
 }
 
-// Formats a swap chain or render target can have.
-bool IsRenderTargetFormat(uint32_t f) {
+bool IsBackBufferFormat(uint32_t f) {
   return f == D3DFMT_X8R8G8B8 || f == D3DFMT_A8R8G8B8 || f == D3DFMT_R5G6B5 ||
          f == D3DFMT_X1R5G5B5 || f == D3DFMT_A1R5G5B5;
 }
+
+bool IsRenderTargetFormat(uint32_t f) {
+  return IsBackBufferFormat(f) || gfx::IsFloat(FormatFromD3D(f));
+}
+
+namespace {
+
+using namespace guest;
+
+constexpr GUID kIID_IUnknown = {0x00000000, 0x0000, 0x0000, {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
+constexpr GUID kIID_IDirect3D9 = {0x81BDCBCA, 0x64D4, 0x426D, {0xAE, 0x8D, 0xAD, 0x01, 0x47, 0xF4, 0x27, 0x5C}};
+constexpr GUID kIID_IDirect3DDevice9 = {0xD0223B96, 0xBF7A, 0x43FD, {0x92, 0xBD, 0xA4, 0x3B, 0x0D, 0x82, 0xB9, 0xEB}};
+
+constexpr uint32_t D3DCREATE_FPU_PRESERVE = 0x2;
+constexpr uint32_t D3DPRESENT_INTERVAL_IMMEDIATE = 0x80000000;
 
 // Display (adapter) formats: what a full-screen mode can be.
 bool IsDisplayFormat(uint32_t f) {
@@ -212,42 +187,7 @@ D3DCAPS9 Caps() {
   return d;
 }
 
-template <typename T>
-T* G(uint32_t va) {
-  return reinterpret_cast<T*>(GPtr(va));
-}
-
 struct Direct3D : com::Object {};
-
-struct Device;
-
-struct Surface : com::Object {
-  enum class Kind { BackBuffer, DepthStencil };
-  Kind kind = Kind::BackBuffer;
-  uint32_t device = 0;  // IDirect3DDevice9 guest pointer
-  D3DSURFACE_DESC desc{};
-  gfx::DepthId depth = 0;
-};
-
-struct Device : com::Object {
-  uint32_t d3d = 0;  // IDirect3D9 guest pointer
-  D3DDEVICE_CREATION_PARAMETERS creation{};
-  D3DPRESENT_PARAMETERS pp{};
-  uint32_t hwnd = 0;
-  std::unique_ptr<gfx::Device> gfx;
-  std::shared_ptr<Surface> backbuffer, auto_depth;
-  uint32_t render_target = 0;  // current RT 0 and depth (guest surfaces)
-  uint32_t depth_stencil = 0;
-  uint32_t rs[256] = {};
-  uint32_t ss[20][14] = {};  // samplers 0-15 and the 4 vertex samplers
-  uint32_t tss[8][33] = {};
-  uint32_t fvf = 0;
-  BOOL software_vp = 0;
-  std::map<uint32_t, std::array<float, 16>> transforms;
-  D3DVIEWPORT9 viewport{};
-  D3DRECT scissor{};
-  int scene_depth = 0;
-};
 
 uint32_t Direct3DVtable() {
   return com::Vtable(
@@ -303,26 +243,7 @@ uint32_t DeviceVtable() {
        "DrawTriPatch", "DeletePatch", "CreateQuery"});
 }
 
-uint32_t SurfaceVtable() {
-  return com::Vtable(
-      "d3d9.dll", "IDirect3DSurface9",
-      {"QueryInterface", "AddRef", "Release", "GetDevice", "SetPrivateData",
-       "GetPrivateData", "FreePrivateData", "SetPriority", "GetPriority",
-       "PreLoad", "GetType", "GetContainer", "GetDesc", "LockRect",
-       "UnlockRect", "GetDC", "ReleaseDC"});
-}
-
-Device* Dev(Ctx& c) {
-  Device* d = com::As<Device>(hle::Arg(c, 0));
-  if (!d) FatalF("IDirect3DDevice9 call on unknown object %08X", hle::Arg(c, 0));
-  return d;
-}
-
-Surface* Surf(Ctx& c) {
-  Surface* s = com::As<Surface>(hle::Arg(c, 0));
-  if (!s) FatalF("IDirect3DSurface9 call on unknown object %08X", hle::Arg(c, 0));
-  return s;
-}
+Device* Dev(Ctx& c) { return DeviceOf(hle::Arg(c, 0)); }
 
 // Default render, sampler and texture stage states (D3D9 docs).
 void InitDefaults(Device& d) {
@@ -414,25 +335,8 @@ bool Vsync(const D3DPRESENT_PARAMETERS& p) {
   return p.PresentationInterval != D3DPRESENT_INTERVAL_IMMEDIATE;
 }
 
-uint32_t NewSurface(Device& d, uint32_t self, Surface::Kind kind, uint32_t w,
-                    uint32_t h, uint32_t fmt, uint32_t usage,
-                    std::shared_ptr<Surface>* keep) {
-  auto s = std::make_shared<Surface>();
-  s->kind = kind;
-  s->device = self;
-  s->desc.Format = fmt;
-  s->desc.Type = D3DRTYPE_SURFACE;
-  s->desc.Usage = usage;
-  s->desc.Pool = D3DPOOL_DEFAULT;
-  s->desc.Width = w;
-  s->desc.Height = h;
-  if (kind == Surface::Kind::DepthStencil)
-    s->depth = d.gfx->CreateDepth(int(w), int(h), FormatFromD3D(fmt));
-  *keep = s;
-  return com::Publish(s, SurfaceVtable());
-}
-
-// (Re)creates the swap chain and the implicit surfaces for d.pp.
+// (Re)creates the swap chain and the implicit surfaces for d.pp, and binds
+// them.
 void SetUpSwapChain(Device& d, uint32_t self) {
   ResolvePresentParams(d);
   const D3DPRESENT_PARAMETERS& p = d.pp;
@@ -441,32 +345,70 @@ void SetUpSwapChain(Device& d, uint32_t self) {
   else
     SetExclusiveMode(d.hwnd, 0, 0);
   d.gfx->ResetSwapChain(int(p.BackBufferWidth), int(p.BackBufferHeight), Vsync(p));
+  for (uint32_t& rt : d.render_targets) Bind(&rt, 0);
+  Bind(&d.depth_stencil, 0);
   if (d.backbuffer) com::Release(d.backbuffer->guest);
   if (d.auto_depth) com::Release(d.auto_depth->guest);
   d.backbuffer.reset();
   d.auto_depth.reset();
-  d.render_target = NewSurface(d, self, Surface::Kind::BackBuffer,
-                               p.BackBufferWidth, p.BackBufferHeight,
-                               p.BackBufferFormat, D3DUSAGE_RENDERTARGET,
-                               &d.backbuffer);
-  d.depth_stencil = 0;
-  if (p.EnableAutoDepthStencil)
-    d.depth_stencil = NewSurface(d, self, Surface::Kind::DepthStencil,
-                                 p.BackBufferWidth, p.BackBufferHeight,
-                                 p.AutoDepthStencilFormat,
-                                 D3DUSAGE_DEPTHSTENCIL, &d.auto_depth);
+  NewSurface(d, self, Surface::Kind::BackBuffer, p.BackBufferWidth,
+             p.BackBufferHeight, p.BackBufferFormat, D3DUSAGE_RENDERTARGET,
+             D3DPOOL_DEFAULT, &d.backbuffer);
+  Bind(&d.render_targets[0], d.backbuffer->guest);
+  if (p.EnableAutoDepthStencil) {
+    NewSurface(d, self, Surface::Kind::DepthStencil, p.BackBufferWidth,
+               p.BackBufferHeight, p.AutoDepthStencilFormat,
+               D3DUSAGE_DEPTHSTENCIL, D3DPOOL_DEFAULT, &d.auto_depth);
+    Bind(&d.depth_stencil, d.auto_depth->guest);
+  }
   d.viewport = {0, 0, p.BackBufferWidth, p.BackBufferHeight, 0.0f, 1.0f};
   d.scissor = {0, 0, LONG(p.BackBufferWidth), LONG(p.BackBufferHeight)};
 }
 
-void BindTargets(Device& d) {
-  Surface* z = com::As<Surface>(d.depth_stencil);
-  d.gfx->SetRenderTarget(0, z ? z->depth : 0);
+// Releases everything bound to the device (Reset, last Release).
+void UnbindAll(Device& d) {
+  for (uint32_t& t : d.textures) Bind(&t, 0);
+  for (Device::Stream& st : d.streams) {
+    Bind(&st.buffer, 0);
+    st = {};
+  }
+  Bind(&d.indices, 0);
+  Bind(&d.decl, 0);
+  Bind(&d.vs, 0);
+  Bind(&d.ps, 0);
 }
 
 int g_perf_level = 0;
 
 }  // namespace
+
+uint32_t QueryInterfaceFor(Ctx& c, const guest::GUID& iid) {
+  if (com::GuidEq(hle::Arg(c, 1), iid) || com::GuidEq(hle::Arg(c, 1), kIID_IUnknown)) {
+    com::AddRef(hle::Arg(c, 0));
+    Wr32(hle::Arg(c, 2), hle::Arg(c, 0));
+    return D3D_OK;
+  }
+  Wr32(hle::Arg(c, 2), 0);
+  return com::kE_NOINTERFACE;
+}
+
+Device* DeviceOf(uint32_t self) {
+  Device* d = com::As<Device>(self);
+  if (!d) FatalF("IDirect3DDevice9 call on unknown object %08X", self);
+  return d;
+}
+
+int SamplerIndex(uint32_t s) {
+  if (s < 16) return int(s);
+  if (s >= 256 && s < 260) return int(s - 240);
+  return -1;
+}
+
+void Bind(uint32_t* slot, uint32_t obj) {
+  if (obj) com::AddRef(obj);
+  if (*slot) com::Release(*slot);
+  *slot = obj;
+}
 
 }  // namespace recomp::d3d9
 
@@ -475,16 +417,6 @@ namespace {
 
 using namespace d3d9;
 using namespace guest;
-
-uint32_t QueryInterfaceFor(Ctx& c, const GUID& iid) {
-  if (com::GuidEq(Arg(c, 1), iid) || com::GuidEq(Arg(c, 1), kIID_IUnknown)) {
-    com::AddRef(Arg(c, 0));
-    Wr32(Arg(c, 2), Arg(c, 0));
-    return D3D_OK;
-  }
-  Wr32(Arg(c, 2), 0);
-  return com::kE_NOINTERFACE;
-}
 
 HLE("d3d9.dll", Direct3DCreate9, 1) {
   std::fprintf(stderr, "d3d9: Direct3DCreate9(SDK %u)\n", Arg(c, 0));
@@ -558,7 +490,7 @@ HLE_NAMED("d3d9.dll", "IDirect3D9::GetAdapterDisplayMode", D3D9_GetAdapterDispla
 HLE_NAMED("d3d9.dll", "IDirect3D9::CheckDeviceType", D3D9_CheckDeviceType, 6) {
   uint32_t adapter_fmt = Arg(c, 3), bb_fmt = Arg(c, 4);
   bool ok = Arg(c, 1) == 0 && Arg(c, 2) == 1 && IsDisplayFormat(adapter_fmt) &&
-            (bb_fmt == D3DFMT_UNKNOWN || IsRenderTargetFormat(bb_fmt));
+            (bb_fmt == D3DFMT_UNKNOWN || IsBackBufferFormat(bb_fmt));
   RECOMP_TRACE("  CheckDeviceType(%u, %u, %u) -> %s\n", adapter_fmt, bb_fmt,
                Arg(c, 5), ok ? "ok" : "not available");
   return ok ? D3D_OK : D3DERR_NOTAVAILABLE;
@@ -660,8 +592,12 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::Release", D3DDev9_Release, 1) {
   uint32_t self = Arg(c, 0);
   Device* d = Dev(c);
   if (d->refs > 1) return com::Release(self);
-  // Last reference: the implicit surfaces and the IDirect3D9 go with it.
+  // Last reference: what is bound, the implicit surfaces and the
+  // IDirect3D9 go with it.
   uint32_t d3d = d->d3d;
+  UnbindAll(*d);
+  for (uint32_t& rt : d->render_targets) Bind(&rt, 0);
+  Bind(&d->depth_stencil, 0);
   if (d->backbuffer) com::Release(d->backbuffer->guest);
   if (d->auto_depth) com::Release(d->auto_depth->guest);
   d->backbuffer.reset();
@@ -718,6 +654,7 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::Reset", D3DDev9_Reset, 2) {
   Device* d = Dev(c);
   d->pp = *G<D3DPRESENT_PARAMETERS>(Arg(c, 1));
   if (!d->pp.hDeviceWindow) d->pp.hDeviceWindow = d->hwnd;
+  UnbindAll(*d);
   SetUpSwapChain(*d, Arg(c, 0));
   *G<D3DPRESENT_PARAMETERS>(Arg(c, 1)) = d->pp;
   std::memset(d->rs, 0, sizeof d->rs);
@@ -757,12 +694,13 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetRasterStatus", D3DDev9_GetRasterStat
 // (index, ppRenderTarget)
 HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetRenderTarget", D3DDev9_GetRenderTarget, 3) {
   Device* d = Dev(c);
-  if (Arg(c, 1) != 0 || !d->render_target) {
+  uint32_t i = Arg(c, 1);
+  if (i >= 4 || !d->render_targets[i]) {
     Wr32(Arg(c, 2), 0);
-    return Arg(c, 1) < 4 ? D3DERR_NOTFOUND : D3DERR_INVALIDCALL;
+    return i < 4 ? D3DERR_NOTFOUND : D3DERR_INVALIDCALL;
   }
-  com::AddRef(d->render_target);
-  Wr32(Arg(c, 2), d->render_target);
+  com::AddRef(d->render_targets[i]);
+  Wr32(Arg(c, 2), d->render_targets[i]);
   return D3D_OK;
 }
 
@@ -853,13 +791,6 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetRenderState", D3DDev9_GetRenderState
   return D3D_OK;
 }
 
-// Sampler index: 0-15, or D3DVERTEXTEXTURESAMPLER0..3 (256..259) -> 16..19.
-int SamplerIndex(uint32_t s) {
-  if (s < 16) return int(s);
-  if (s >= 256 && s < 260) return int(s - 240);
-  return -1;
-}
-
 HLE_NAMED("d3d9.dll", "IDirect3DDevice9::SetSamplerState", D3DDev9_SetSamplerState, 4) {
   int s = SamplerIndex(Arg(c, 1));
   uint32_t t = Arg(c, 2);
@@ -916,28 +847,6 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::SetFVF", D3DDev9_SetFVF, 2) {
 
 HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetFVF", D3DDev9_GetFVF, 2) {
   Wr32(Arg(c, 1), Dev(c)->fvf);
-  return D3D_OK;
-}
-
-// ---- IDirect3DSurface9 -------------------------------------------------------------
-
-HLE_NAMED("d3d9.dll", "IDirect3DSurface9::QueryInterface", D3DSurf9_QueryInterface, 3) {
-  return QueryInterfaceFor(c, kIID_IDirect3DSurface9);
-}
-HLE_NAMED("d3d9.dll", "IDirect3DSurface9::AddRef", D3DSurf9_AddRef, 1) { return com::AddRef(Arg(c, 0)); }
-HLE_NAMED("d3d9.dll", "IDirect3DSurface9::Release", D3DSurf9_Release, 1) { return com::Release(Arg(c, 0)); }
-
-HLE_NAMED("d3d9.dll", "IDirect3DSurface9::GetDevice", D3DSurf9_GetDevice, 2) {
-  uint32_t dev = Surf(c)->device;
-  com::AddRef(dev);
-  Wr32(Arg(c, 1), dev);
-  return D3D_OK;
-}
-
-HLE_NAMED("d3d9.dll", "IDirect3DSurface9::GetType", D3DSurf9_GetType, 1) { return D3DRTYPE_SURFACE; }
-
-HLE_NAMED("d3d9.dll", "IDirect3DSurface9::GetDesc", D3DSurf9_GetDesc, 2) {
-  *G<D3DSURFACE_DESC>(Arg(c, 1)) = Surf(c)->desc;
   return D3D_OK;
 }
 

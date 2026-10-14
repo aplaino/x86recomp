@@ -25,9 +25,13 @@ enum class Format : uint32_t {
   X4R4G4B4, R3G3B2, A8, L8, A8L8, P8,
   D16, D24X8, D24S8, D32, D15S1,
   DXT1, DXT2, DXT3, DXT4, DXT5,
+  // Floating point, in D3D9's memory layout (red first): uploaded and
+  // stored as is.
+  R16F, G16R16F, A16B16G16R16F, R32F, G32R32F, A32B32G32R32F,
 };
 uint32_t BitsPerPixel(Format f);
 bool IsCompressed(Format f);
+bool IsFloat(Format f);
 // Bytes per row of `width` pixels (per row of 4x4 blocks if compressed).
 uint32_t RowPitch(Format f, uint32_t width);
 // Rows in the data for `height` (block rows if compressed).

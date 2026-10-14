@@ -56,6 +56,12 @@ D3DFORMAT ToD3D(Format f) {
     case Format::DXT3: return D3DFMT_DXT3;
     case Format::DXT4: return D3DFMT_DXT4;
     case Format::DXT5: return D3DFMT_DXT5;
+    case Format::R16F: return D3DFMT_R16F;
+    case Format::G16R16F: return D3DFMT_G16R16F;
+    case Format::A16B16G16R16F: return D3DFMT_A16B16G16R16F;
+    case Format::R32F: return D3DFMT_R32F;
+    case Format::G32R32F: return D3DFMT_G32R32F;
+    case Format::A32B32G32R32F: return D3DFMT_A32B32G32R32F;
     default: return D3DFMT_UNKNOWN;
   }
 }
@@ -667,7 +673,7 @@ class D3D9Device final : public Device {
   };
 
   static Format FromD3D(D3DFORMAT f) {
-    for (uint32_t i = 0; i <= uint32_t(Format::DXT5); i++)
+    for (uint32_t i = 0; i <= uint32_t(Format::A32B32G32R32F); i++)
       if (ToD3D(Format(i)) == f) return Format(i);
     return Format::Unknown;
   }
