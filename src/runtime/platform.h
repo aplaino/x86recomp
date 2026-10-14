@@ -1,6 +1,7 @@
 #pragma once
 // Host platform specifics (Linux, macOS) that the runtime cannot express
-// in plain POSIX: signal contexts, stack switching, stat's time fields.
+// in plain POSIX: signal contexts, stack switching, stat's time fields,
+// precise sleeps.
 // Everything here is behind one interface so the rest of the runtime has
 // no #ifdef __linux__ / __APPLE__.
 
@@ -60,6 +61,15 @@ inline const char* HostFpProblem() {
   if (denormal * 0x1p100 == 0) return "denormal operands are treated as zero";
   return nullptr;
 }
+
+// ---- time
+// The host's monotonic clock in nanoseconds (not a guest tick counter).
+uint64_t MonotonicNs();
+// Sleeps until MonotonicNs() reaches t, without spinning. On an idle
+// host it wakes within some tens of microseconds of t (Linux: absolute
+// clock_nanosleep with the thread's timer slack at 1 us; macOS:
+// mach_wait_until).
+void SleepUntilNs(uint64_t t);
 
 // ---- stacks
 // Runs fn() on [stack, stack + size) on the calling thread and returns

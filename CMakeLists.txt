@@ -73,6 +73,7 @@ add_subdirectory(tools/lifter)
 # would drop.
 add_library(recomp_runtime OBJECT
   src/runtime/dispatch.cpp
+  src/runtime/pacing.cpp
   src/runtime/platform.cpp
   src/runtime/process.cpp
   src/runtime/watchdog.cpp

@@ -553,6 +553,21 @@ call; without either, the Windows runtime switches the thread to single
 precision and leaves it there. Wine's ddraw does not model that default,
 so Wine is not a reference for this point. d3d7.cpp models it.
 
+### Frame pacing
+Old games limit their frame rate by spinning on a millisecond timer,
+which burns a core and only reaches rates of 1000/n. `FramePacer`
+(runtime/pacing.h) is for game patches that replace such a limiter:
+Wait(fps) at the start of each frame sleeps until the next frame's start
+on a grid of exact periods on the host's monotonic clock. Lateness does
+not add up (the next start is a period after the previous one, not
+after the wake-up), a frame that ends late is followed by a shorter
+wait, and one more than a period late moves the grid instead of causing
+a burst. The sleep is the platform layer's `SleepUntilNs`: an absolute
+clock_nanosleep with the thread's timer slack at 1 us on Linux,
+mach_wait_until on macOS; no spinning. tests/pacing_test checks the
+rate (within 1%), the CPU use and the late-frame rule; on an idle Linux
+host wake-ups land 15-30 us after the deadline.
+
 ### HLE surface
 - kernel32: heap/virtual memory in the arena, files with case-insensitive
   path mapping onto the game dir, MapViewOfFile as mmap into the arena,

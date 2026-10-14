@@ -10,8 +10,16 @@
 
 #include "runtime/platform.h"
 
+#include <errno.h>
 #include <signal.h>
+#include <time.h>
 #include <ucontext.h>
+
+#if defined(__APPLE__)
+#include <mach/mach_time.h>
+#else
+#include <sys/prctl.h>
+#endif
 
 namespace recomp::platform {
 
@@ -60,6 +68,43 @@ FaultContext ReadFaultContext(const void* uc) {
 #endif
   return f;
 }
+
+#if defined(__APPLE__)
+uint64_t MonotonicNs() { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+
+void SleepUntilNs(uint64_t t) {
+  // CLOCK_UPTIME_RAW is mach_absolute_time in nanoseconds.
+  static const mach_timebase_info_data_t tb = [] {
+    mach_timebase_info_data_t i;
+    mach_timebase_info(&i);
+    return i;
+  }();
+  while (MonotonicNs() < t) {
+    const unsigned __int128 ticks = (unsigned __int128)t * tb.denom / tb.numer;
+    mach_wait_until(uint64_t(ticks));
+  }
+}
+#else
+uint64_t MonotonicNs() {
+  timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return uint64_t(ts.tv_sec) * 1000000000u + uint64_t(ts.tv_nsec);
+}
+
+void SleepUntilNs(uint64_t t) {
+  // The default slack (50 us) would delay every wake-up by about that.
+  static thread_local bool slack_set = false;
+  if (!slack_set) {
+    prctl(PR_SET_TIMERSLACK, 1UL, 0UL, 0UL, 0UL);
+    slack_set = true;
+  }
+  timespec ts;
+  ts.tv_sec = time_t(t / 1000000000u);
+  ts.tv_nsec = long(t % 1000000000u);
+  while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr) == EINTR) {
+  }
+}
+#endif
 
 bool RedirectToCall(void* uc, void (*fn)()) {
 #if defined(__APPLE__) && defined(__aarch64__)

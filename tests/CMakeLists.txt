@@ -49,6 +49,16 @@ target_compile_features(gl_draw_test PRIVATE cxx_std_20)
 target_compile_options(gl_draw_test PRIVATE -O2)
 add_test(NAME gl_draw COMMAND gl_draw_test)
 
+# pacing_test: FramePacer's rate and that it waits without spinning;
+# portable. Timing-sensitive, so it runs alone.
+add_executable(pacing_test pacing_test.cpp
+               ${PROJECT_SOURCE_DIR}/src/runtime/pacing.cpp
+               ${PROJECT_SOURCE_DIR}/src/runtime/platform.cpp)
+target_include_directories(pacing_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_features(pacing_test PRIVATE cxx_std_20)
+add_test(NAME pacing COMMAND pacing_test)
+set_tests_properties(pacing PROPERTIES RUN_SERIAL TRUE)
+
 # lift_semantics_test checks the integer/flag helpers in lifted.h against
 # the host CPU the same way.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
