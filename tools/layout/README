@@ -12,3 +12,11 @@ Regenerate the checks (dev-time; uses mingw-w64 headers and wine):
 
 The output is a list of static_asserts compiled into the runtime, so any
 mismatch is a build error.
+
+d3d9_layout.c / d3d9_fields.inc do the same for d3d9_types.h:
+
+  i686-w64-mingw32-gcc -O0 -o /tmp/d3d9_layout.exe d3d9_layout.c
+  wine /tmp/d3d9_layout.exe > ../../src/runtime/hle/d3d9_layout_check.inc
+
+(d3d9_fields.inc lists every struct/field of d3d9_types.h; LARGE_INTEGER
+DriverVersion is split into DriverVersionLowPart/HighPart.)

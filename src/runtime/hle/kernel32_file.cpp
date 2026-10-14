@@ -409,6 +409,28 @@ HLE("kernel32.dll", SetFilePointer, 4) {
   return uint32_t(r);
 }
 
+// (hFile, LARGE_INTEGER liDistanceToMove (two stack slots),
+// PLARGE_INTEGER lpNewFilePointer, dwMoveMethod)
+HLE("kernel32.dll", SetFilePointerEx, 5) {
+  int fd = FdOf(Arg(c, 0));
+  int64_t dist = int64_t((uint64_t(Arg(c, 2)) << 32) | Arg(c, 1));
+  uint32_t out = Arg(c, 3), method = Arg(c, 4);
+  if (fd < 0) {
+    SetLastError(kErrorInvalidHandle);
+    return 0;
+  }
+  off_t r = lseek(fd, dist, method == 0 ? SEEK_SET : method == 1 ? SEEK_CUR : SEEK_END);
+  if (r < 0) {
+    SetLastError(kErrorInvalidParameter);
+    return 0;
+  }
+  if (out) {
+    Wr32(out, uint32_t(r));
+    Wr32(out + 4, uint32_t(uint64_t(r) >> 32));
+  }
+  return 1;
+}
+
 HLE("kernel32.dll", SetEndOfFile, 1) {
   int fd = FdOf(Arg(c, 0));
   off_t pos = fd < 0 ? -1 : lseek(fd, 0, SEEK_CUR);

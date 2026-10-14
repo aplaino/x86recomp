@@ -1072,8 +1072,9 @@ void EnsureSystemClasses() {
   }
 }
 
-HLE("user32.dll", RegisterClassA, 1) {
-  uint32_t wc = Arg(c, 0);
+// WNDCLASSA at wc, or the same fields 4 bytes on in WNDCLASSEXA (after
+// cbSize).
+uint32_t RegisterWndClass(uint32_t wc) {
   WndClass k;
   k.style = Rd32(wc + 0);
   k.wndproc = Rd32(wc + 4);
@@ -1087,6 +1088,17 @@ HLE("user32.dll", RegisterClassA, 1) {
   k.atom = g_next_atom++;
   g_classes[k.name] = k;
   return k.atom;
+}
+
+HLE("user32.dll", RegisterClassA, 1) { return RegisterWndClass(Arg(c, 0)); }
+
+HLE("user32.dll", RegisterClassExA, 1) {
+  uint32_t wc = Arg(c, 0);
+  if (Rd32(wc) != 48) {  // cbSize: sizeof(WNDCLASSEXA)
+    SetLastError(87);    // ERROR_INVALID_PARAMETER
+    return 0;
+  }
+  return RegisterWndClass(wc + 4);
 }
 
 HLE("user32.dll", UnregisterClassA, 2) {
