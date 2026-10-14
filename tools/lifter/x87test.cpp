@@ -220,12 +220,15 @@ namespace {
 bool BadOperands(const Insn& in);
 
 bool Excluded(const Insn& in) {
-  // SSE/MMX forms (some are DATAXFER/LOGICAL, not the SSE category): the
-  // integer test compares only general registers and memory.
+  // SSE/MMX forms (some are DATAXFER/LOGICAL, not the SSE category) and
+  // FCMOVcc (CMOV category): the integer test compares only general
+  // registers and memory.
   for (int i = 0; i < in.d.operand_count; i++)
     if (in.ops[i].type == ZYDIS_OPERAND_TYPE_REGISTER) {
       ZydisRegisterClass rc = ZydisRegisterGetClass(in.ops[i].reg.value);
-      if (rc == ZYDIS_REGCLASS_XMM || rc == ZYDIS_REGCLASS_MMX) return true;
+      if (rc == ZYDIS_REGCLASS_XMM || rc == ZYDIS_REGCLASS_MMX ||
+          rc == ZYDIS_REGCLASS_X87)
+        return true;
     }
   switch (in.d.meta.isa_set) {
     case ZYDIS_ISA_SET_SSEMXCSR: case ZYDIS_ISA_SET_SSE_PREFETCH:

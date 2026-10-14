@@ -164,8 +164,22 @@ bool IsSse(const ZydisDecodedInstruction& d) {
   }
 }
 
+bool IsFcmov(ZydisMnemonic m) {
+  switch (m) {
+    case ZYDIS_MNEMONIC_FCMOVB: case ZYDIS_MNEMONIC_FCMOVBE:
+    case ZYDIS_MNEMONIC_FCMOVE: case ZYDIS_MNEMONIC_FCMOVNB:
+    case ZYDIS_MNEMONIC_FCMOVNBE: case ZYDIS_MNEMONIC_FCMOVNE:
+    case ZYDIS_MNEMONIC_FCMOVNU: case ZYDIS_MNEMONIC_FCMOVU:
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Zydis files FCMOVcc under ZYDIS_CATEGORY_CMOV with the integer CMOVcc.
 bool IsX87(const ZydisDecodedInstruction& d) {
-  return d.meta.category == ZYDIS_CATEGORY_X87_ALU || d.mnemonic == ZYDIS_MNEMONIC_FWAIT;
+  return d.meta.category == ZYDIS_CATEGORY_X87_ALU || d.mnemonic == ZYDIS_MNEMONIC_FWAIT ||
+         IsFcmov(d.mnemonic);
 }
 
 // Arithmetic that pops (FADDP...) and integer-operand arithmetic (FIADD...).
