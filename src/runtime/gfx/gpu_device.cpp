@@ -26,6 +26,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <set>
@@ -385,6 +386,7 @@ class GpuDevice final : public Device {
   ~GpuDevice() override {
     if (!dev_) return;
     SDL_WaitForGPUIdle(dev_);
+    for (SDL_GPUFence* f : in_flight_) SDL_ReleaseGPUFence(dev_, f);
     for (auto& [k, p] : pipelines_) SDL_ReleaseGPUGraphicsPipeline(dev_, p);
     for (auto& [k, s] : samplers_) SDL_ReleaseGPUSampler(dev_, s);
     for (auto& [id, t] : textures_) SDL_ReleaseGPUTexture(dev_, t.tex);
@@ -607,7 +609,7 @@ class GpuDevice final : public Device {
     Flush();
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(dev_);
     Show(cmd);
-    SDL_SubmitGPUCommandBuffer(cmd);
+    Submit(cmd);
   }
 
   // ---- fixed-function state
@@ -848,7 +850,7 @@ class GpuDevice final : public Device {
     SDL_CopyGPUTextureToTexture(cp, &s, &d, Uint32(bb_w_), Uint32(bb_h_), 1, false);
     SDL_EndGPUCopyPass(cp);
     Show(cmd);
-    SDL_SubmitGPUCommandBuffer(cmd);
+    Submit(cmd);
   }
 
  private:
@@ -1074,6 +1076,24 @@ class GpuDevice final : public Device {
 
   // ---- flush: one copy pass, then one render pass for the target
 
+  // Submits cmd, keeping at most kMaxInFlight submissions unfinished.
+  // Each flush maps the upload transfer buffer cycling: while earlier
+  // submissions still use it, SDL gives the mapping a fresh buffer of the
+  // same size and keeps it for reuse. Unbounded, a burst of flushes with
+  // no present to pace it (every texture upload while a level loads) piled
+  // up tens of GB of staging memory.
+  void Submit(SDL_GPUCommandBuffer* cmd) {
+    SDL_GPUFence* f = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+    if (!f) FatalF("gfx: SDL_SubmitGPUCommandBuffer: %s", SDL_GetError());
+    in_flight_.push_back(f);
+    while (!in_flight_.empty() &&
+           (in_flight_.size() > kMaxInFlight || SDL_QueryGPUFence(dev_, in_flight_.front()))) {
+      SDL_WaitForGPUFences(dev_, true, &in_flight_.front(), 1);
+      SDL_ReleaseGPUFence(dev_, in_flight_.front());
+      in_flight_.pop_front();
+    }
+  }
+
   void Flush() {
     bool draw = !cmds_.empty() || pass_clear_color_ || pass_clear_depth_ || pass_clear_stencil_;
     if (!draw && uploads_.empty()) return;
@@ -1183,7 +1203,7 @@ class GpuDevice final : public Device {
       }
       SDL_EndGPURenderPass(rp);
     }
-    SDL_SubmitGPUCommandBuffer(cmd);
+    Submit(cmd);
 
     cmds_.clear();
     uploads_.clear();
@@ -1807,6 +1827,8 @@ class GpuDevice final : public Device {
   SDL_GPUBuffer* ibuf_ = nullptr;
   uint32_t vbuf_cap_ = 0, ibuf_cap_ = 0;
   SDL_GPUTransferBuffer* upload_tb_ = nullptr;
+  static constexpr size_t kMaxInFlight = 4;
+  std::deque<SDL_GPUFence*> in_flight_;  // submitted, not known finished
   SDL_GPUTransferBuffer* download_tb_ = nullptr;
   uint32_t upload_tb_cap_ = 0, download_tb_cap_ = 0;
   std::unordered_map<PipelineKey, SDL_GPUGraphicsPipeline*, PipelineKeyHash> pipelines_;
