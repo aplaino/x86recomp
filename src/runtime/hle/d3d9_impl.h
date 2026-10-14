@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "runtime/gfx/device.h"
+#include "runtime/hlsl/hlsl.h"
 #include "runtime/hle/com.h"
 #include "runtime/hle/d3d9_types.h"
 #include "runtime/ctx.h"
@@ -140,6 +141,8 @@ struct Shader : com::Object {
   uint32_t device = 0;
   bool pixel = false;
   std::vector<uint32_t> tokens;  // the function, END token included
+  // A function D3DXCompileShader translated (TranslatedFunction).
+  std::shared_ptr<const hlsl::Program> program;
 };
 
 struct Query : com::Object {
@@ -208,6 +211,15 @@ void BindTargets(Device& d);
 uint32_t NewTexture(Device& d, uint32_t device, bool cube, uint32_t w, uint32_t h,
                     uint32_t levels, uint32_t usage, uint32_t fmt, uint32_t pool,
                     uint32_t* out);
+
+// D3DXCompileShader's output: a shader function holding the HLSL
+// translation instead of shader model bytecode. Version token, one comment
+// with kTranslatedTag and the serialised hlsl::Program, END. Create*Shader
+// recognise it.
+constexpr uint32_t kTranslatedTag = 0x504D4352;  // 'RCMP'
+std::vector<uint32_t> TranslatedFunction(const hlsl::Program& p);
+// The Program in such a function; null for any other function.
+std::shared_ptr<const hlsl::Program> ReadTranslated(const std::vector<uint32_t>& tokens);
 
 // Replaces a whole level's pixels (rows of `pitch` bytes, in the
 // texture's format) and uploads them: D3DX loaders.

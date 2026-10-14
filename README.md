@@ -11,7 +11,9 @@ Used by:
 - [DS1-Rebuilt](https://github.com/JTM-rootstorm/DS1-Rebuilt) (Dungeon
   Siege, 2002), where it was developed;
 - [CoD1-Reissued](https://github.com/JTM-rootstorm/CoD1-Reissued) (Call
-  of Duty, 2003), in progress.
+  of Duty, 2003), in progress;
+- [LSWTCS_Rebricked](https://github.com/JTM-rootstorm/LSWTCS_Rebricked)
+  (LEGO Star Wars: The Complete Saga, 2009), started.
 
 ## What is here
 
@@ -32,7 +34,11 @@ Used by:
   System (with EAX 1-3 on our own reverb, modelled on Creative
   hardware), Bink, DirectDraw 7/Direct3D 7 and OpenGL 1.x (on a
   fixed-function device: SDL_GPU on Vulkan or native Metal, or
-  dxvk-native's Direct3D 9 as a reference) and dbghelp.
+  dxvk-native's Direct3D 9 as a reference), Direct3D 9 and D3DX 9 (in
+  progress), DirectInput 8 and dbghelp.
+- **HLSL translator** (`src/runtime/hlsl`, `recomp_hlslc`): D3DX 9's
+  HLSL dialect (shader models 1-3) to GLSL, for games that compile
+  shaders at run time.
 - **Tools**: Ghidra export scripts (`tools/ghidra`), a PE symbol dumper
   (`tools/pe_symbols.py`), dev-time reference checks (`tools/layout`,
   `tools/undname`), and EAX reference measurement (`tools/eax_capture`:

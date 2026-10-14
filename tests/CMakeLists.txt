@@ -89,3 +89,26 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
   add_test(NAME lift_semantics COMMAND lift_semantics_test)
   set_tests_properties(lift_semantics PROPERTIES TIMEOUT 300)
 endif()
+
+# HLSL translator: each shader in hlsl/ through recomp_hlslc, then
+# glslangValidator (the GLSL must compile for Vulkan), with the reflection
+# (constant table, inputs, varyings, samplers) compared with its
+# <name>.reflect; error.hlsl must fail.
+function(recomp_hlsl_test name src stage)  # ARGN: recomp_hlslc arguments
+  string(REPLACE ";" "|" _args "${ARGN}")
+  add_test(NAME hlsl_${name} COMMAND "${CMAKE_COMMAND}"
+           -DHLSLC=$<TARGET_FILE:recomp_hlslc> -DGLSLANG=${RECOMP_GLSLANG}
+           -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/hlsl/${src}.hlsl -DSTAGE=${stage}
+           -DARGS=${_args} -DPRELUDE=${CMAKE_CURRENT_SOURCE_DIR}/hlsl/prelude.glsl
+           -DOUT=${CMAKE_CURRENT_BINARY_DIR}/hlsl_${name}.${stage}
+           -DEXPECT=${CMAKE_CURRENT_SOURCE_DIR}/hlsl/${name}.reflect
+           -P ${CMAKE_CURRENT_SOURCE_DIR}/hlsl/run.cmake)
+endfunction()
+recomp_hlsl_test(vs_features vs_features vert -T vs_3_0 -E main)
+recomp_hlsl_test(ps_features ps_features frag -T ps_3_0 -E main)
+recomp_hlsl_test(preprocess preprocess frag -T ps_2_0 -E main -D FROM_COMMAND_LINE=0.5)
+recomp_hlsl_test(sm2_vs sm2 vert -T vs_2_0 -E vs)
+recomp_hlsl_test(sm2_ps sm2 frag -T ps_2_0 -E ps)
+add_test(NAME hlsl_error COMMAND recomp_hlslc ${CMAKE_CURRENT_SOURCE_DIR}/hlsl/error.hlsl
+         -T ps_3_0 -E main)
+set_tests_properties(hlsl_error PROPERTIES WILL_FAIL TRUE)

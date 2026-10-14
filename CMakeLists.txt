@@ -194,6 +194,18 @@ if(DXVK_NATIVE_DIR)
     COMPILE_DEFINITIONS "DXVK_WSI_SDL3")
 endif()
 
+# HLSL (D3DX 9's dialect) to GLSL (runtime/hlsl/hlsl.h); no HLE in it,
+# so a plain static library, also used by the recomp_hlslc dev tool.
+add_library(recomp_hlsl STATIC
+  src/runtime/hlsl/preprocess.cpp
+  src/runtime/hlsl/parse.cpp
+  src/runtime/hlsl/check.cpp
+  src/runtime/hlsl/glsl.cpp
+  src/runtime/hlsl/hlsl.cpp)
+target_include_directories(recomp_hlsl PUBLIC src)
+target_compile_features(recomp_hlsl PUBLIC cxx_std_20)
+add_subdirectory(tools/hlslc)
+
 # DirectDraw 7 / Direct3D 7 over gfx::Device.
 add_library(recomp_d3d7 OBJECT
   src/runtime/hle/ddraw.cpp
@@ -207,7 +219,7 @@ target_link_libraries(recomp_dinput8 PUBLIC recomp_runtime)
 # Direct3D 9 and D3DX 9 over gfx::Device.
 add_library(recomp_d3d9 OBJECT src/runtime/hle/d3d9.cpp
   src/runtime/hle/d3d9_resource.cpp src/runtime/hle/d3dx9.cpp)
-target_link_libraries(recomp_d3d9 PUBLIC recomp_runtime recomp_gfx)
+target_link_libraries(recomp_d3d9 PUBLIC recomp_runtime recomp_gfx recomp_hlsl)
 
 # OpenGL 1.x (opengl32, wgl, gdi32 pixel formats) over gfx::Device.
 add_library(recomp_opengl OBJECT

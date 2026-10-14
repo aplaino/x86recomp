@@ -558,6 +558,42 @@ API front ends:
 - OpenGL 1.x: opengl32/wgl HLE as a GL state machine on gfx::Device,
   not a pass-through to host OpenGL, so the same Metal path serves it
   (macOS OpenGL is deprecated and capped at 2.1 for legacy contexts).
+- Direct3D 9 / D3DX 9 (recomp_d3d9, in progress): device, resources and
+  state in the HLE; the programmable pipeline on gfx::Device is next.
+
+### Shaders: HLSL translated from source
+Games that build HLSL at run time and compile it with D3DXCompileShader
+get it translated from source by src/runtime/hlsl (HLSL to GLSL; a
+graphics backend compiles the GLSL with glslang, and SPIRV-Cross for
+Metal, as for the fixed-function shaders but at run time). Translating
+the source rather than compiled bytecode keeps the Direct3D 9 interface
+the game relies on:
+- Uniforms live in D3D's constant registers (c, i, b, s). Explicit
+  `register()` bindings are honoured, including deliberately overlapping
+  ones; the others are placed in free registers away from every explicit
+  binding (read or not, since games set registers by number), and the
+  ID3DXConstantTable describes that placement. The GLSL reads the
+  register file (`vec4 c[n]`), so the application's register writes need
+  no translation.
+- Inputs and varyings keep D3D semantics: vertex inputs are fetched by
+  slot through the backend (`r_fetch`, so the vertex declaration is not
+  pipeline state), varyings sit at a fixed location per semantic, so
+  any vertex shader pairs with any pixel shader.
+- HLSL's implicit conversions (scalar splat, vector and matrix
+  truncation) are made explicit by the checker; matrices are GLSL
+  matrices whose columns are the HLSL rows (mul reverses its operands);
+  log, rsqrt, sqrt and pow take the absolute value of their argument as
+  the D3D9 instructions they compile to do; non-static globals the
+  shader writes become private copies (D3DX accepts that).
+- D3DXCompileShader returns a shader function holding the translation in
+  a comment (version token, comment, END), which Create*Shader
+  recognise. Shaders shipped as compiled bytecode are not translated
+  yet.
+The translator stops at the first construct it does not support, so a
+gap is a fatal error naming it, never a silently wrong shader.
+<ID>_SHADER_DUMP=dir saves every source, and recomp_hlslc translates a
+saved source and reports the reflection; tests/hlsl runs its shaders
+through glslang.
 
 D3D7 FPU side effect: the HLE must reproduce whatever the real runtime
 does to the guest thread's CW, because the game's own float maths runs

@@ -5,6 +5,11 @@
 // are generated with a box filter for uncompressed formats. Anything
 // else (other image formats, resizing, format conversion) is fatal and
 // named, to be added when a game needs it.
+//
+// Shaders: D3DXCompileShader translates HLSL to GLSL (runtime/hlsl) and
+// returns it in a shader function Create*Shader recognise
+// (d3d9::TranslatedFunction), with an ID3DXConstantTable of the registers
+// the translation placed the uniforms in.
 
 #include <algorithm>
 #include <cstdio>
@@ -14,6 +19,7 @@
 
 #include "runtime/hle/d3d9_impl.h"
 #include "runtime/hle/hle.h"
+#include "runtime/hle/kernel32_state.h"
 #include "runtime/log.h"
 
 namespace recomp::hle {
@@ -263,21 +269,191 @@ HLE("d3dx9_35.dll", D3DXCreateCubeTextureFromFileInMemory, 4) {
                           0, Arg(c, 3));
 }
 
+// ---- ID3DXBuffer ------------------------------------------------------------------------
+
+struct XBuffer : com::Object {
+  uint32_t mem = 0, size = 0;
+  ~XBuffer() override {
+    if (mem) HeapFreeProcess(mem);
+  }
+};
+
+uint32_t XBufferVtable() {
+  return com::Vtable("d3dx9_35.dll", "ID3DXBuffer",
+                     {"QueryInterface", "AddRef", "Release", "GetBufferPointer", "GetBufferSize"});
+}
+
+// A new ID3DXBuffer of `size` bytes, copied from `data` if given (else zero).
+uint32_t NewXBuffer(const void* data, uint32_t size) {
+  auto b = std::make_shared<XBuffer>();
+  b->size = size;
+  b->mem = HeapAllocProcess(std::max(size, 1u), true);
+  if (data) std::memcpy(GPtr(b->mem), data, size);
+  return com::Publish(b, XBufferVtable());
+}
+
+XBuffer* XBuf(Ctx& c) {
+  auto* b = com::As<XBuffer>(Arg(c, 0));
+  if (!b) FatalF("ID3DXBuffer call on unknown object %08X", Arg(c, 0));
+  return b;
+}
+
+HLE_NAMED("d3dx9_35.dll", "ID3DXBuffer::AddRef", D3DXBuffer_AddRef, 1) { return com::AddRef(Arg(c, 0)); }
+HLE_NAMED("d3dx9_35.dll", "ID3DXBuffer::Release", D3DXBuffer_Release, 1) { return com::Release(Arg(c, 0)); }
+HLE_NAMED("d3dx9_35.dll", "ID3DXBuffer::GetBufferPointer", D3DXBuffer_GetBufferPointer, 1) {
+  return XBuf(c)->mem;
+}
+HLE_NAMED("d3dx9_35.dll", "ID3DXBuffer::GetBufferSize", D3DXBuffer_GetBufferSize, 1) {
+  return XBuf(c)->size;
+}
+
+// (NumBytes, ppBuffer)
+HLE("d3dx9_35.dll", D3DXCreateBuffer, 2) {
+  if (!Arg(c, 1)) return D3DERR_INVALIDCALL;
+  Wr32(Arg(c, 1), NewXBuffer(nullptr, Arg(c, 0)));
+  return D3D_OK;
+}
+
+// ---- ID3DXConstantTable -----------------------------------------------------------------
+// Top-level constants only (the translator has no struct uniforms). A
+// D3DXHANDLE is an address inside `handles`, one byte per constant; like
+// D3DX, any other value passed as a handle is read as a constant's name.
+
+struct ConstantTable : com::Object {
+  uint32_t version = 0;  // the shader's version token
+  std::vector<hlsl::Constant> constants;
+  uint32_t handles = 0;
+  std::vector<uint32_t> names;  // guest strings
+  uint32_t creator = 0;
+  ~ConstantTable() override {
+    if (handles) HeapFreeProcess(handles);
+    for (uint32_t n : names) HeapFreeProcess(n);
+    if (creator) HeapFreeProcess(creator);
+  }
+};
+
+uint32_t ConstantTableVtable() {
+  return com::Vtable(
+      "d3dx9_35.dll", "ID3DXConstantTable",
+      {"QueryInterface", "AddRef", "Release", "GetBufferPointer", "GetBufferSize", "GetDesc",
+       "GetConstantDesc", "GetSamplerIndex", "GetConstant", "GetConstantByName",
+       "GetConstantElement", "SetDefaults", "SetValue", "SetBool", "SetBoolArray", "SetInt",
+       "SetIntArray", "SetFloat", "SetFloatArray", "SetVector", "SetVectorArray", "SetMatrix",
+       "SetMatrixArray", "SetMatrixPointerArray", "SetMatrixTranspose",
+       "SetMatrixTransposeArray", "SetMatrixTransposePointerArray"});
+}
+
+uint32_t GuestString(const std::string& s) {
+  uint32_t p = HeapAllocProcess(uint32_t(s.size()) + 1, true);
+  std::memcpy(GPtr(p), s.c_str(), s.size() + 1);
+  return p;
+}
+
+uint32_t NewConstantTable(const hlsl::Program& p, uint32_t version) {
+  auto t = std::make_shared<ConstantTable>();
+  t->version = version;
+  t->constants = p.constants;
+  t->handles = HeapAllocProcess(std::max<uint32_t>(uint32_t(p.constants.size()), 1), true);
+  for (const auto& k : p.constants) t->names.push_back(GuestString(k.name));
+  t->creator = GuestString("x86recomp HLSL translator");
+  return com::Publish(t, ConstantTableVtable());
+}
+
+ConstantTable* Table(Ctx& c) {
+  auto* t = com::As<ConstantTable>(Arg(c, 0));
+  if (!t) FatalF("ID3DXConstantTable call on unknown object %08X", Arg(c, 0));
+  return t;
+}
+
+// The constant a handle (or name) refers to, -1 if none.
+int FindConstant(const ConstantTable& t, uint32_t h) {
+  if (!h) return -1;
+  if (h >= t.handles && h < t.handles + t.constants.size()) return int(h - t.handles);
+  std::string name = GStr(h);
+  for (size_t i = 0; i < t.constants.size(); i++)
+    if (t.constants[i].name == name) return int(i);
+  return -1;
+}
+
+HLE_NAMED("d3dx9_35.dll", "ID3DXConstantTable::AddRef", D3DXConstTable_AddRef, 1) {
+  return com::AddRef(Arg(c, 0));
+}
+HLE_NAMED("d3dx9_35.dll", "ID3DXConstantTable::Release", D3DXConstTable_Release, 1) {
+  return com::Release(Arg(c, 0));
+}
+
+// (pDesc): D3DXCONSTANTTABLE_DESC {Creator, Version, Constants}
+HLE_NAMED("d3dx9_35.dll", "ID3DXConstantTable::GetDesc", D3DXConstTable_GetDesc, 2) {
+  ConstantTable* t = Table(c);
+  uint32_t d = Arg(c, 1);
+  if (!d) return D3DERR_INVALIDCALL;
+  Wr32(d, t->creator);
+  Wr32(d + 4, t->version);
+  Wr32(d + 8, uint32_t(t->constants.size()));
+  return D3D_OK;
+}
+
+// (hConstant, pConstantDesc, pCount): D3DXCONSTANT_DESC, 48 bytes each.
+HLE_NAMED("d3dx9_35.dll", "ID3DXConstantTable::GetConstantDesc", D3DXConstTable_GetConstantDesc, 4) {
+  ConstantTable* t = Table(c);
+  int i = FindConstant(*t, Arg(c, 1));
+  uint32_t d = Arg(c, 2), count = Arg(c, 3);
+  if (i < 0 || !count) return D3DERR_INVALIDCALL;
+  if (d && Rd32(count) >= 1) {
+    const hlsl::Constant& k = t->constants[i];
+    const uint32_t v[12] = {t->names[i], uint32_t(k.set), k.index, k.count, uint32_t(k.cls),
+                            uint32_t(k.type), k.rows, k.columns, k.elements, k.struct_members,
+                            k.bytes, 0 /* DefaultValue */};
+    for (int w = 0; w < 12; w++) Wr32(d + 4 * w, v[w]);
+  }
+  Wr32(count, 1);
+  return D3D_OK;
+}
+
+// (hConstant): the sampler register, or -1.
+HLE_NAMED("d3dx9_35.dll", "ID3DXConstantTable::GetSamplerIndex", D3DXConstTable_GetSamplerIndex, 2) {
+  ConstantTable* t = Table(c);
+  int i = FindConstant(*t, Arg(c, 1));
+  if (i < 0 || t->constants[i].set != hlsl::RegisterSet::Sampler) return 0xFFFFFFFF;
+  return t->constants[i].index;
+}
+
+// (hConstant, Index): the Index-th top-level constant when hConstant is
+// null.
+HLE_NAMED("d3dx9_35.dll", "ID3DXConstantTable::GetConstant", D3DXConstTable_GetConstant, 3) {
+  ConstantTable* t = Table(c);
+  if (Arg(c, 1)) FatalF("ID3DXConstantTable::GetConstant of a struct member");
+  return Arg(c, 2) < t->constants.size() ? t->handles + Arg(c, 2) : 0;
+}
+
+// (hConstant, pName)
+HLE_NAMED("d3dx9_35.dll", "ID3DXConstantTable::GetConstantByName", D3DXConstTable_GetConstantByName, 3) {
+  ConstantTable* t = Table(c);
+  if (Arg(c, 1)) FatalF("ID3DXConstantTable::GetConstantByName of a struct member");
+  if (!Arg(c, 2)) return 0;
+  std::string name = GStr(Arg(c, 2));
+  for (size_t i = 0; i < t->constants.size(); i++)
+    if (t->constants[i].name == name) return t->handles + uint32_t(i);
+  return 0;
+}
+
 // ---- shaders --------------------------------------------------------------------------
 
 // <ID>_SHADER_DUMP=dir: every HLSL source D3DXCompileShader gets is
-// written to dir/<FNV-1a of the source>.hlsl, with the profile, entry
-// point and macros in a comment on top (dev aid for the translator).
-void DumpShader(const std::string& src, const char* profile, const char* entry,
+// written to dir/<FNV-1a of profile, entry and source>.hlsl, with the
+// profile, entry point and macros in a comment on top (the format
+// recomp_hlslc reads).
+void DumpShader(const std::string& src, const std::string& profile, const std::string& entry,
                 const std::string& defines) {
   const char* dir = Env("SHADER_DUMP");
   if (!dir || !*dir) return;
   uint64_t h = 1469598103934665603ull;
-  for (unsigned char ch : src) h = (h ^ ch) * 1099511628211ull;
+  for (const std::string* s : {&profile, &entry, &src})
+    for (unsigned char ch : *s) h = (h ^ ch) * 1099511628211ull;
   char path[512];
   std::snprintf(path, sizeof path, "%s/%016llx.hlsl", dir, (unsigned long long)h);
   if (FILE* f = std::fopen(path, "wb")) {
-    std::fprintf(f, "// profile %s, entry %s%s%s\n", profile, entry,
+    std::fprintf(f, "// profile %s, entry %s%s%s\n", profile.c_str(), entry.c_str(),
                  defines.empty() ? "" : ", defines ", defines.c_str());
     std::fwrite(src.data(), 1, src.size(), f);
     std::fclose(f);
@@ -290,18 +466,30 @@ HLE("d3dx9_35.dll", D3DXCompileShader, 10) {
   uint32_t src = Arg(c, 0), len = Arg(c, 1), defs = Arg(c, 2);
   if (!EnsureReadable(c, src, len)) return D3DERR_INVALIDCALL;
   std::string text(reinterpret_cast<const char*>(GPtr(src)), len);
+  std::vector<hlsl::Define> macros;
   std::string defines;
   for (uint32_t d = defs; d && Rd32(d); d += 8) {  // D3DXMACRO {Name, Definition}
+    hlsl::Define m{GStr(Rd32(d)), Rd32(d + 4) ? GStr(Rd32(d + 4)) : ""};
     if (!defines.empty()) defines += ' ';
-    defines += GStr(Rd32(d));
-    if (Rd32(d + 4)) defines += "=" + GStr(Rd32(d + 4));
+    defines += m.name + (m.value.empty() ? "" : "=" + m.value);
+    macros.push_back(std::move(m));
   }
   std::string entry = GStr(Arg(c, 4)), profile = GStr(Arg(c, 5));
-  DumpShader(text, profile.c_str(), entry.c_str(), defines);
+  uint32_t flags = Arg(c, 6);
+  DumpShader(text, profile, entry, defines);
   if (Arg(c, 3)) FatalF("d3dx9: D3DXCompileShader with an include handler not supported yet");
-  FatalF("d3dx9: D3DXCompileShader(%s, %s, %u bytes, flags %X): the HLSL translator is "
-         "not written yet",
-         profile.c_str(), entry.c_str(), len, Arg(c, 6));
+  hlsl::Program prog;
+  std::string errors;
+  // A source the original compiler accepts and the translator does not is
+  // a translator gap: fatal, with the message (dump the source to see it).
+  if (!hlsl::Compile(text, macros, entry, profile, flags, &prog, &errors))
+    FatalF("d3dx9: D3DXCompileShader(%s, %s, %u bytes, flags %X) failed: %s", profile.c_str(),
+           entry.c_str(), len, flags, errors.c_str());
+  std::vector<uint32_t> fn = TranslatedFunction(prog);
+  if (Arg(c, 7)) Wr32(Arg(c, 7), NewXBuffer(fn.data(), uint32_t(fn.size() * 4)));
+  if (Arg(c, 8)) Wr32(Arg(c, 8), 0);  // no messages
+  if (Arg(c, 9)) Wr32(Arg(c, 9), NewConstantTable(prog, fn[0]));
+  return D3D_OK;
 }
 
 }  // namespace

@@ -213,6 +213,33 @@ std::vector<uint32_t> ReadFunction(uint32_t va) {
 
 }  // namespace
 
+std::vector<uint32_t> TranslatedFunction(const hlsl::Program& p) {
+  std::vector<uint8_t> data = hlsl::Serialize(p);
+  uint32_t words = 2 + uint32_t((data.size() + 3) / 4);  // tag, byte count, data
+  if (words > 0x7FFF) FatalF("d3dx9: translated shader of %zu bytes is too big for a comment", data.size());
+  std::vector<uint32_t> t;
+  t.push_back((p.stage == hlsl::Stage::Pixel ? 0xFFFF0000u : 0xFFFE0000u) | p.major << 8 | p.minor);
+  t.push_back(words << 16 | 0xFFFE);  // D3DSIO_COMMENT
+  t.push_back(kTranslatedTag);
+  t.push_back(uint32_t(data.size()));
+  size_t at = t.size();
+  t.resize(at + words - 2, 0);
+  std::memcpy(t.data() + at, data.data(), data.size());
+  t.push_back(0x0000FFFF);  // D3DSIO_END
+  return t;
+}
+
+std::shared_ptr<const hlsl::Program> ReadTranslated(const std::vector<uint32_t>& tokens) {
+  if (tokens.size() < 5 || (tokens[1] & 0xFFFF) != 0xFFFE || tokens[2] != kTranslatedTag)
+    return nullptr;
+  uint32_t words = (tokens[1] >> 16) & 0x7FFF, size = tokens[3];
+  if (words < 2 || 2 + words > tokens.size() || size > 4 * (words - 2)) return nullptr;
+  auto p = std::make_shared<hlsl::Program>();
+  if (!hlsl::Deserialize(reinterpret_cast<const uint8_t*>(tokens.data() + 4), size, p.get()))
+    FatalF("d3d9: a translated shader that does not deserialise");
+  return p;
+}
+
 Surface::~Surface() {
   Device* d = com::As<Device>(device);
   if (d && depth) d->gfx->DestroyDepth(depth);
@@ -446,6 +473,10 @@ uint32_t CreateShader(Ctx& c, bool pixel) {
   s->device = Arg(c, 0);
   s->pixel = pixel;
   s->tokens = ReadFunction(Arg(c, 1));
+  s->program = ReadTranslated(s->tokens);
+  if (s->program && (s->program->stage == hlsl::Stage::Pixel) != pixel)
+    FatalF("d3d9: Create%sShader with a translated %s shader", pixel ? "Pixel" : "Vertex",
+           pixel ? "vertex" : "pixel");
   Wr32(Arg(c, 2), com::Publish(s, ShaderVtable(pixel)));
   return D3D_OK;
 }

@@ -11,6 +11,8 @@ a game is where it came up.
 - Users (sibling checkouts, they add this tree with add_subdirectory):
   - ~/Documents/Programming/Recomp/Dungeon Siege/DS1 (DS1-Rebuilt)
   - ~/Documents/Programming/Recomp/CoD/CoD1 (Call of Duty)
+  - ~/Documents/Programming/Recomp/Travellers_Tales/LSWTCS (LEGO Star
+    Wars: The Complete Saga)
 
 ## Build and test
 - Standalone (library tests only):
