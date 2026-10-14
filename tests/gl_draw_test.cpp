@@ -61,6 +61,8 @@ class RecordingDevice final : public gfx::Device {
   void DestroyTexture(gfx::TextureId) override {}
   void FillTexture(gfx::TextureId, const gfx::Rect&, uint32_t) override {}
   void UpdateTexture(gfx::TextureId, int, const gfx::Rect&, const void*, uint32_t) override {}
+  gfx::TextureId CreateCubeTexture(int, int, gfx::Format) override { return ++ids_; }
+  void UpdateCubeTexture(gfx::TextureId, int, int, const gfx::Rect&, const void*, uint32_t) override {}
   gfx::DepthId CreateDepth(int, int, gfx::Format) override { return 1; }
   void DestroyDepth(gfx::DepthId) override {}
   void SetRenderTarget(gfx::TextureId, gfx::DepthId) override {}
