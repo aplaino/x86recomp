@@ -143,6 +143,37 @@ typename Fmt<D>::U ArithLane(Scope& sc, Op op, typename Fmt<D>::U a,
 }
 
 template <bool D>
+typename Fmt<D>::U SqrtLane(Scope& sc, typename Fmt<D>::U a) {
+  if (IsNaN<D>(a)) {
+    if (IsSNaN<D>(a)) sc.flags |= kIE;
+    return Quiet<D>(a);
+  }
+  // A negative operand is invalid, which takes precedence over a denormal
+  // one (no DE).
+  using U = typename Fmt<D>::U;
+  constexpr U kSign = U(1) << (sizeof(U) * 8 - 1);
+  if (!(a & kSign) || !(a & ~kSign)) sc.Operand<D>(a);
+  sc.Begin();
+  U r;
+  if constexpr (D)
+    r = f64_sqrt(float64_t{a}).v;  // negative: default NaN, invalid
+  else
+    r = f32_sqrt(float32_t{a}).v;
+  sc.End();
+  return r;
+}
+
+template <bool D>
+void SqrtT(Ctx& c, int lanes, Xmm& d, const Xmm& s, uint32_t va) {
+  using U = typename Fmt<D>::U;
+  Scope sc(c, va);
+  Xmm r = d;
+  for (int i = 0; i < lanes; i++) SetLane<U>(r, i, SqrtLane<D>(sc, Lane<U>(s, i)));
+  sc.Finish();
+  d = r;
+}
+
+template <bool D>
 void ArithT(Ctx& c, Op op, int lanes, Xmm& d, const Xmm& s, uint32_t va) {
   using U = typename Fmt<D>::U;
   Scope sc(c, va);
@@ -248,6 +279,60 @@ int Comi(Ctx& c, bool dbl, bool ordered, const Xmm& a, const Xmm& b,
          uint32_t va) {
   return dbl ? ComiT<true>(c, ordered, a, b, va) : ComiT<false>(c, ordered, a, b, va);
 }
+
+void Sqrt(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s, uint32_t va) {
+  if (dbl)
+    SqrtT<true>(c, lanes, d, s, va);
+  else
+    SqrtT<false>(c, lanes, d, s, va);
+}
+
+// For a positive normal x, the float nearest to y = 1/sqrt(x). A first
+// guess from binary64 (sqrt, then a division: two roundings, then a
+// third to binary32) is checked exactly and moved by an ulp if needed:
+// r is correct iff y lies between the midpoints to its neighbours, i.e.
+// lo^2 * x <= 1 <= hi^2 * x, evaluated in 128-bit integers. y is never a
+// midpoint (it would be a dyadic rational with a 25-bit significand whose
+// square's reciprocal is a float), so there are no ties.
+uint32_t RsqrtLane(uint32_t x) {
+  const uint32_t exp = (x >> 23) & 0xFF, frac = x & 0x7FFFFF;
+  if (exp == 0xFF && frac) return x | 0x00400000u;     // NaN: quieted
+  if (exp == 0) return (x & 0x80000000u) | 0x7F800000u;  // ±0, denormal: ±inf
+  if (x & 0x80000000u) return 0xFFC00000u;               // negative: default NaN
+  if (exp == 0xFF) return 0;                             // +inf: +0
+  const uint_fast8_t mode = softfloat_roundingMode, flags = softfloat_exceptionFlags;
+  softfloat_roundingMode = softfloat_round_near_even;
+  float64_t one{0x3FF0000000000000ull};
+  uint32_t r = f64_to_f32(f64_div(one, f64_sqrt(f32_to_f64(float32_t{x})))).v;
+  softfloat_roundingMode = mode;
+  softfloat_exceptionFlags = flags;
+  const unsigned __int128 mx = frac | 0x800000u;
+  const int ex = int(exp) - 150;  // x = mx * 2^ex
+  for (;;) {
+    const uint32_t rexp = (r >> 23) & 0xFF;
+    const unsigned __int128 mr = (r & 0x7FFFFF) | 0x800000u;
+    const int er = int(rexp) - 150;  // r = mr * 2^er
+    // Midpoints in units of 2^(er-2): the one below is closer when r's
+    // significand is a power of two (the next float down has half the ulp).
+    const unsigned __int128 lo = 4 * mr - (mr == 0x800000u ? 1 : 2), hi = 4 * mr + 2;
+    const int shift = -(2 * (er - 2) + ex);  // 1 = 2^shift in those units
+    const unsigned __int128 one_scaled = static_cast<unsigned __int128>(1) << shift;
+    if (lo * lo * mx > one_scaled)
+      r--;
+    else if (hi * hi * mx < one_scaled)
+      r++;
+    else
+      return r;
+  }
+}
+
+void Rsqrt(Xmm& d, const Xmm& s) {
+  Xmm r;
+  for (int i = 0; i < 4; i++) SetLane<uint32_t>(r, i, RsqrtLane(Lane<uint32_t>(s, i)));
+  d = r;
+}
+
+void Cvtsi2sd(Xmm& d, int32_t v) { SetLane<uint64_t>(d, 0, i32_to_f64(v).v); }
 
 uint32_t CvtToI32(Ctx& c, bool dbl, const Xmm& s, bool truncate, uint32_t va) {
   Scope sc(c, va);

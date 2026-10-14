@@ -18,6 +18,15 @@ target_compile_options(x87_fast_test PRIVATE -O2 ${RECOMP_X87_FP_FLAGS})
 add_test(NAME x87_fast COMMAND x87_fast_test)
 set_tests_properties(x87_fast PROPERTIES TIMEOUT 300)
 
+# sse_rsqrt_test: RSQRTPS is the correctly rounded 1/sqrt(x), checked
+# exhaustively with exact arithmetic (the host oracle cannot: CPUs differ);
+# portable.
+add_executable(sse_rsqrt_test sse_rsqrt_test.cpp)
+target_link_libraries(sse_rsqrt_test PRIVATE recomp_x87)
+target_compile_options(sse_rsqrt_test PRIVATE -O2)
+add_test(NAME sse_rsqrt COMMAND sse_rsqrt_test)
+set_tests_properties(sse_rsqrt PROPERTIES TIMEOUT 300)
+
 # digital_reverb_test: the Miles-compatible digital reverb against a hash
 # of its own output recorded when it matched the original
 # (recomp_add_digital_reverb_test compares with the original itself);

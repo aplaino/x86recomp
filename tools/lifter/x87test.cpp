@@ -230,7 +230,10 @@ bool Excluded(const Insn& in) {
           rc == ZYDIS_REGCLASS_X87)
         return true;
     }
+  // SSE/SSE2 forms without an XMM operand (CVTTSD2SI r32, m64) too: they
+  // belong to the SSE test.
   switch (in.d.meta.isa_set) {
+    case ZYDIS_ISA_SET_SSE: case ZYDIS_ISA_SET_SSE2:
     case ZYDIS_ISA_SET_SSEMXCSR: case ZYDIS_ISA_SET_SSE_PREFETCH:
       return true;
     default:
@@ -312,6 +315,8 @@ bool SseCandidate(const Insn& in) {
       return false;
   }
   if (in.d.mnemonic == ZYDIS_MNEMONIC_LDMXCSR) return false;
+  // Approximate: no host result to match (tests/sse_rsqrt_test instead).
+  if (in.d.mnemonic == ZYDIS_MNEMONIC_RSQRTPS) return false;
   for (int i = 0; i < in.d.operand_count; i++)
     if (in.ops[i].type == ZYDIS_OPERAND_TYPE_REGISTER &&
         ZydisRegisterGetClass(in.ops[i].reg.value) == ZYDIS_REGCLASS_MMX)

@@ -9,6 +9,12 @@
 // or DAZ actually changing a result (a tiny result or a denormal operand
 // while they are set).
 //
+// RSQRTPS has no architectural result, only an error bound (|rel. error|
+// <= 1.5 * 2^-12), and CPUs differ: here it is the correctly rounded
+// 1/sqrt(x), within the bound and the same on every host (and what a
+// native replacement computes). tests/sse_rsqrt_test checks it
+// exhaustively; the bit-for-bit oracle against the host skips it.
+//
 // Only the forms the supported games use are implemented; the lifter
 // reports the rest as unimplemented.
 
@@ -64,6 +70,19 @@ void Cmp(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s, uint8_t pred,
 int Comi(Ctx& c, bool dbl, bool ordered, const Xmm& a, const Xmm& b,
          uint32_t va);
 
+// SQRTSD/SQRTSS/SQRTPD/SQRTPS: d = sqrt(s), lane-wise; scalar forms keep
+// the upper lanes of d.
+void Sqrt(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s, uint32_t va);
+
+// RSQRTPS: d = 1/sqrt(s) in all four float lanes (see above). No flags:
+// ±0 and denormals give ±inf, negative values the default NaN, +inf +0,
+// NaNs themselves quieted.
+void Rsqrt(Xmm& d, const Xmm& s);
+uint32_t RsqrtLane(uint32_t x);
+
+// CVTSI2SD: the low lane of d = (double)v (always exact).
+void Cvtsi2sd(Xmm& d, int32_t v);
+
 // CVT(T)SS2SI / CVT(T)SD2SI of the low lane of s.
 uint32_t CvtToI32(Ctx& c, bool dbl, const Xmm& s, bool truncate, uint32_t va);
 
@@ -99,6 +118,12 @@ template <typename T>
 inline void CmpEq(Xmm& d, const Xmm& s) {
   for (int i = 0; i < int(16 / sizeof(T)); i++)
     SetLane<T>(d, i, Lane<T>(d, i) == Lane<T>(s, i) ? T(~T(0)) : T(0));
+}
+// PADDB/W/D/Q (wrapping).
+template <typename T>
+inline void Add(Xmm& d, const Xmm& s) {
+  for (int i = 0; i < int(16 / sizeof(T)); i++)
+    SetLane<T>(d, i, T(Lane<T>(d, i) + Lane<T>(s, i)));
 }
 // PSUBB/W/D/Q (wrapping).
 template <typename T>
@@ -148,6 +173,36 @@ inline void ShufPs(Xmm& d, const Xmm& s, uint8_t imm) {
 // UNPCKLPD: high quadword of d = low quadword of s.
 inline void UnpckLPd(Xmm& d, const Xmm& s) {
   SetLane<uint64_t>(d, 1, Lane<uint64_t>(s, 0));
+}
+// UNPCKHPD: low quadword of d = its high one, high quadword = s's high one.
+inline void UnpckHPd(Xmm& d, const Xmm& s) {
+  SetLane<uint64_t>(d, 0, Lane<uint64_t>(d, 1));
+  SetLane<uint64_t>(d, 1, Lane<uint64_t>(s, 1));
+}
+// UNPCKLPS / UNPCKHPS: the low / high two lanes of d and s interleaved.
+inline void UnpckPs(Xmm& d, const Xmm& s, bool high) {
+  Xmm r;
+  int b = high ? 2 : 0;
+  SetLane<uint32_t>(r, 0, Lane<uint32_t>(d, b));
+  SetLane<uint32_t>(r, 1, Lane<uint32_t>(s, b));
+  SetLane<uint32_t>(r, 2, Lane<uint32_t>(d, b + 1));
+  SetLane<uint32_t>(r, 3, Lane<uint32_t>(s, b + 1));
+  d = r;
+}
+// MOVLHPS: high quadword of d = low quadword of s. MOVHLPS: low quadword
+// of d = high quadword of s.
+inline void MovLHPs(Xmm& d, const Xmm& s) {
+  SetLane<uint64_t>(d, 1, Lane<uint64_t>(s, 0));
+}
+inline void MovHLPs(Xmm& d, const Xmm& s) {
+  SetLane<uint64_t>(d, 0, Lane<uint64_t>(s, 1));
+}
+// SHUFPD: low quadword from d, high from s, picked by imm bits 0 and 1.
+inline void ShufPd(Xmm& d, const Xmm& s, uint8_t imm) {
+  Xmm r;
+  SetLane<uint64_t>(r, 0, Lane<uint64_t>(d, imm & 1));
+  SetLane<uint64_t>(r, 1, Lane<uint64_t>(s, (imm >> 1) & 1));
+  d = r;
 }
 
 }  // namespace recomp::sse

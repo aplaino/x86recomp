@@ -1407,6 +1407,29 @@ void InsnEmitter::EmitSse() {
       L(Fmt("%s = ::recomp::sse::Cvtdq2pd(%s);", XmmRef(0).c_str(), s.c_str()));
       return;
     }
+    case ZYDIS_MNEMONIC_CVTSI2SD:
+      if (!IsXmm(0) || IsXmm(1)) return Unimpl();
+      L(Fmt("::recomp::sse::Cvtsi2sd(%s, int32_t(%s));", XmmRef(0).c_str(), Read(1).c_str()));
+      return;
+    case ZYDIS_MNEMONIC_SQRTSD: {
+      if (!IsXmm(0)) return Unimpl();
+      std::string s = src(1);
+      L(Fmt("::recomp::sse::Sqrt(c, true, 1, %s, %s, %s);", XmmRef(0).c_str(), s.c_str(),
+            va.c_str()));
+      return;
+    }
+    case ZYDIS_MNEMONIC_RSQRTPS: {
+      if (!IsXmm(0)) return Unimpl();
+      std::string s = src(1);
+      L(Fmt("::recomp::sse::Rsqrt(%s, %s);", XmmRef(0).c_str(), s.c_str()));
+      return;
+    }
+    case ZYDIS_MNEMONIC_PADDQ: {
+      if (!IsXmm(0)) return Unimpl();
+      std::string s = src(1);
+      L(Fmt("::recomp::sse::Add<uint64_t>(%s, %s);", XmmRef(0).c_str(), s.c_str()));
+      return;
+    }
     case ZYDIS_MNEMONIC_PCMPEQB: case ZYDIS_MNEMONIC_PCMPEQW: case ZYDIS_MNEMONIC_PCMPEQD:
     case ZYDIS_MNEMONIC_PSUBB: case ZYDIS_MNEMONIC_PSUBW: case ZYDIS_MNEMONIC_PSUBD:
     case ZYDIS_MNEMONIC_PSUBQ: {
@@ -1459,10 +1482,29 @@ void InsnEmitter::EmitSse() {
       L(Fmt("::recomp::sse::SetLane<uint16_t>(%s, %u, uint16_t(%s));", XmmRef(0).c_str(),
             unsigned(Op(2).imm.value.u & 7), Read(1).c_str()));
       return;
-    case ZYDIS_MNEMONIC_UNPCKLPD: {
+    case ZYDIS_MNEMONIC_UNPCKLPD: case ZYDIS_MNEMONIC_UNPCKHPD:
+    case ZYDIS_MNEMONIC_MOVLHPS: case ZYDIS_MNEMONIC_MOVHLPS: {
       if (!IsXmm(0)) return Unimpl();
       std::string s = src(1);
-      L(Fmt("::recomp::sse::UnpckLPd(%s, %s);", XmmRef(0).c_str(), s.c_str()));
+      const char* fn = m == ZYDIS_MNEMONIC_UNPCKLPD   ? "UnpckLPd"
+                       : m == ZYDIS_MNEMONIC_UNPCKHPD ? "UnpckHPd"
+                       : m == ZYDIS_MNEMONIC_MOVLHPS  ? "MovLHPs"
+                                                      : "MovHLPs";
+      L(Fmt("::recomp::sse::%s(%s, %s);", fn, XmmRef(0).c_str(), s.c_str()));
+      return;
+    }
+    case ZYDIS_MNEMONIC_UNPCKLPS: case ZYDIS_MNEMONIC_UNPCKHPS: {
+      if (!IsXmm(0)) return Unimpl();
+      std::string s = src(1);
+      L(Fmt("::recomp::sse::UnpckPs(%s, %s, %s);", XmmRef(0).c_str(), s.c_str(),
+            b(m == ZYDIS_MNEMONIC_UNPCKHPS)));
+      return;
+    }
+    case ZYDIS_MNEMONIC_SHUFPD: {
+      if (!IsXmm(0) || Nvis() < 3) return Unimpl();
+      std::string s = src(1);
+      L(Fmt("::recomp::sse::ShufPd(%s, %s, %s);", XmmRef(0).c_str(), s.c_str(),
+            imm8(2).c_str()));
       return;
     }
     case ZYDIS_MNEMONIC_STMXCSR:
