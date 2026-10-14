@@ -121,6 +121,16 @@ const KeyDef* ByVk(uint8_t vk) {
 
 }  // namespace
 
+namespace {
+std::atomic<RawInputSink> g_raw_sink{nullptr};
+}  // namespace
+
+void SetRawInputSink(RawInputSink sink) { g_raw_sink = sink; }
+
+void EmitRawInput(RawInput::Kind kind, uint8_t code, int32_t value) {
+  if (RawInputSink sink = g_raw_sink) sink({kind, code, value, TickCount()});
+}
+
 uint8_t ScanCodeForVk(uint8_t vk, bool* ext) {
   *ext = false;
   switch (vk) {  // left/right specific VKs

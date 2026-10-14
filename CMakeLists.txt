@@ -200,6 +200,10 @@ add_library(recomp_d3d7 OBJECT
   src/runtime/hle/d3d7.cpp)
 target_link_libraries(recomp_d3d7 PUBLIC recomp_runtime recomp_gfx)
 
+# DirectInput 8 (keyboard and mouse) on the event pump's raw input.
+add_library(recomp_dinput8 OBJECT src/runtime/hle/dinput8.cpp)
+target_link_libraries(recomp_dinput8 PUBLIC recomp_runtime)
+
 # Direct3D 9 over gfx::Device.
 add_library(recomp_d3d9 OBJECT src/runtime/hle/d3d9.cpp
   src/runtime/hle/d3d9_resource.cpp)

@@ -645,6 +645,39 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetCreationParameters", D3DDev9_GetCrea
   return D3D_OK;
 }
 
+// The D3D cursor is not drawn yet; games that draw their own keep it
+// hidden. A visible one with an image is reported once.
+void NoteCursor(Device& d) {
+  static bool warned = false;
+  if (d.cursor_shown && d.cursor_set && !warned) {
+    warned = true;
+    WarnF("d3d9: the D3D cursor is shown but not drawn yet\n");
+  }
+}
+
+// (bShow): returns the previous visibility.
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::ShowCursor", D3DDev9_ShowCursor, 2) {
+  Device* d = Dev(c);
+  bool was = d->cursor_shown;
+  d->cursor_shown = Arg(c, 1) != 0;
+  NoteCursor(*d);
+  return was ? 1 : 0;
+}
+
+// (XHotSpot, YHotSpot, pCursorBitmap)
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::SetCursorProperties", D3DDev9_SetCursorProperties, 4) {
+  Device* d = Dev(c);
+  if (!Arg(c, 3)) return D3DERR_INVALIDCALL;
+  d->cursor_set = true;
+  NoteCursor(*d);
+  return D3D_OK;
+}
+
+// (X, Y, Flags): the D3D cursor follows the host pointer.
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::SetCursorPosition", D3DDev9_SetCursorPosition, 4) {
+  return 0;
+}
+
 HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetNumberOfSwapChains", D3DDev9_GetNumberOfSwapChains, 1) {
   return 1;
 }

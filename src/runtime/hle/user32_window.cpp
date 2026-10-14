@@ -470,6 +470,8 @@ void HandleSdlEvent(const SDL_Event& e) {
       bool ext;
       uint8_t sc = ScanCodeForVk(vk, &ext);
       if (e.key.scancode == SDL_SCANCODE_KP_ENTER) ext = true;
+      if (!down || !was_down)  // DirectInput reports changes, not repeats
+        EmitRawInput(RawInput::Key, uint8_t(sc | (ext ? 0x80 : 0)), down ? 1 : 0);
       uint32_t lp = 1u | (uint32_t(sc) << 16) | (ext ? 1u << 24 : 0);
       if (!down) lp |= 0xC0000000u;
       else if (was_down) lp |= 0x40000000u;
@@ -509,6 +511,16 @@ void HandleSdlEvent(const SDL_Event& e) {
         g_real_x = int((e.motion.x - cm.x0) * cm.kx);
         g_real_y = int((e.motion.y - cm.y0) * cm.ky);
         g_pointer_inside = true;
+      }
+      {
+        static float rx = 0, ry = 0;  // sub-mickey remainder
+        rx += e.motion.xrel;
+        ry += e.motion.yrel;
+        int dx = int(rx), dy = int(ry);
+        rx -= dx;
+        ry -= dy;
+        if (dx) EmitRawInput(RawInput::MouseX, 0, dx);
+        if (dy) EmitRawInput(RawInput::MouseY, 0, dy);
       }
       AttachClip();
       bool clipped = g_clip.on && g_clip.hwnd == h;
@@ -558,6 +570,11 @@ void HandleSdlEvent(const SDL_Event& e) {
       int ox, oy;
       WindowOrigin(h, &ox, &oy);
       int x = g_mouse_x - ox, y = g_mouse_y - oy;  // where motion left it
+      if (e.button.button >= SDL_BUTTON_LEFT && e.button.button <= SDL_BUTTON_X2) {
+        // SDL: left, middle, right, X1, X2; DirectInput: left, right, middle.
+        static const uint8_t kDiButton[] = {0, 2, 1, 3, 4};
+        EmitRawInput(RawInput::MouseButton, kDiButton[e.button.button - 1], down ? 1 : 0);
+      }
       uint32_t base;
       uint8_t vk;
       switch (e.button.button) {
@@ -582,6 +599,7 @@ void HandleSdlEvent(const SDL_Event& e) {
       if (!h) break;
       int delta = int(e.wheel.y * 120.0f);
       if (!delta) break;
+      EmitRawInput(RawInput::Wheel, 0, delta);
       Post(h, WM_MOUSEWHEEL, MouseKeys() | (uint32_t(uint16_t(int16_t(delta))) << 16),
            MkLparam(g_mouse_x, g_mouse_y));
       break;

@@ -173,6 +173,8 @@ struct Device : com::Object {
   int32_t vs_i[16][4] = {}, ps_i[16][4] = {};
   guest::BOOL vs_b[16] = {}, ps_b[16] = {};
   int scene_depth = 0;
+  // The D3D cursor (SetCursorProperties / ShowCursor).
+  bool cursor_shown = false, cursor_set = false;
 };
 
 // IUnknown::QueryInterface for an object with one interface `iid` (and
