@@ -59,6 +59,17 @@ target_compile_features(pacing_test PRIVATE cxx_std_20)
 add_test(NAME pacing COMMAND pacing_test)
 set_tests_properties(pacing PROPERTIES RUN_SERIAL TRUE)
 
+# lazy_mem_test: lazily read-back images (DirectDraw Lock of GPU
+# surfaces) through real page faults; portable.
+add_executable(lazy_mem_test lazy_mem_test.cpp
+               ${PROJECT_SOURCE_DIR}/src/runtime/lazy_mem.cpp
+               ${PROJECT_SOURCE_DIR}/src/runtime/guest_memory.cpp
+               ${PROJECT_SOURCE_DIR}/src/runtime/guest_alloc.cpp)
+target_include_directories(lazy_mem_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_features(lazy_mem_test PRIVATE cxx_std_20)
+target_link_libraries(lazy_mem_test PRIVATE Threads::Threads)
+add_test(NAME lazy_mem COMMAND lazy_mem_test)
+
 # lift_semantics_test checks the integer/flag helpers in lifted.h against
 # the host CPU the same way.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")

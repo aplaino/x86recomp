@@ -3,8 +3,9 @@
 //
 // Surfaces:
 //   - Back buffer: the gfx render target. The game presents with
-//     Blt(primary <- back buffer) (or Flip). Lock reads it back; Unlock
-//     writes the changed rows back.
+//     Blt(primary <- back buffer) (or Flip). Its guest memory mirrors it
+//     lazily (lazy_mem.h): Lock reads back only the rows the game
+//     touches, Unlock writes back the rows it changed.
 //   - Primary: the gfx front buffer (the last presented frame), which the
 //     game's cursor thread draws on between frames.
 //   - Z buffers: gfx depth surfaces, attached to the back buffer.
@@ -186,7 +187,12 @@ Surface::~Surface() {
     if (tex && level == 0) s.gfx->DestroyTexture(tex);
     if (depth) s.gfx->DestroyDepth(depth);
   }
-  if (mem) HeapFreeProcess(mem);
+  if (shadow) {
+    shadow.reset();
+    g_proc->vm.Release(mem);
+  } else if (mem) {
+    HeapFreeProcess(mem);
+  }
   if (s.backbuffer == this) s.backbuffer = nullptr;
 }
 
@@ -216,12 +222,42 @@ uint32_t SurfaceVtable() {
        "GetLOD"});
 }
 
-// Allocates guest memory for a surface of the surface's size/format.
+bool OnGpu(const Surface& s) {
+  return s.kind == Surface::Kind::BackBuffer || s.kind == Surface::Kind::Primary;
+}
+
+// Reads rect `r` of the back buffer or of the primary (the front buffer)
+// into `dst` (r's top-left).
+void ReadGpu(const Surface& s, const gfx::Rect& r, uint8_t* dst, uint32_t pitch) {
+  if (s.kind == Surface::Kind::Primary)
+    Gfx()->ReadBackFront(r, dst, pitch, s.fmt);
+  else
+    Gfx()->ReadBack(r, dst, pitch, s.fmt);
+}
+
+// Allocates guest memory for a surface of the surface's size/format. The
+// back buffer's and the primary's get host pages of their own, which are
+// protected while the game has them locked (lazy_mem.h).
 void AllocMem(Surface& s) {
   s.pitch = gfx::RowPitch(s.fmt, uint32_t(s.width));
   s.pitch = (s.pitch + 3) & ~3u;
   uint32_t rows = gfx::RowCount(s.fmt, uint32_t(s.height));
-  s.mem = HeapAllocProcess(std::max(1u, s.pitch * rows), true);
+  uint32_t size = std::max(1u, s.pitch * rows);
+  if (!OnGpu(s)) {
+    s.mem = HeapAllocProcess(size, true);
+    return;
+  }
+  uint32_t hp = uint32_t(g_proc->mem.host_page_size());
+  size = (size + hp - 1) / hp * hp;
+  s.mem = g_proc->vm.Reserve(0, size);
+  if (!s.mem || !g_proc->vm.Commit(s.mem, size, Prot::RW))
+    FatalF("ddraw: no guest memory for a %dx%d surface", s.width, s.height);
+  const Surface* self = &s;
+  s.shadow = std::make_unique<lazy::LazyImage>(
+      g_proc->mem, s.mem, s.pitch, s.width, s.height, gfx::BitsPerPixel(s.fmt) / 8,
+      [self](const lazy::LazyImage::Rect& r, uint8_t* dst, uint32_t pitch) {
+        ReadGpu(*self, {r.left, r.top, r.right, r.bottom}, dst, pitch);
+      });
 }
 
 std::shared_ptr<Surface> NewSurface(Surface::Kind kind, int w, int h,
@@ -409,19 +445,22 @@ void BlitMem(Surface& dst, const guest::RECT& dr, Surface& src,
   }
 }
 
-bool OnGpu(const Surface& s) {
-  return s.kind == Surface::Kind::BackBuffer || s.kind == Surface::Kind::Primary;
+// Makes rect `r` of the back buffer's or the primary's guest memory
+// accessible to host code (it may be protected for a lazy read-back).
+void Settle(Surface& s, const guest::RECT& r) {
+  if (!s.mem) AllocMem(s);
+  s.shadow->Settle({r.left, r.top, r.right, r.bottom});
 }
 
-// Brings the back buffer's or the primary's (front buffer's) pixels into
-// its guest memory, for Lock and Blt from it.
-void Pull(Surface& s) {
-  if (!s.mem) AllocMem(s);
-  gfx::Rect r{0, 0, s.width, s.height};
-  if (s.kind == Surface::Kind::Primary)
-    Gfx()->ReadBackFront(r, GPtr(s.mem), s.pitch, s.fmt);
-  else
-    Gfx()->ReadBack(r, GPtr(s.mem), s.pitch, s.fmt);
+// Brings rect `r` of the back buffer's or the primary's (front buffer's)
+// pixels into its guest memory, for a Blt that reads them.
+void Pull(Surface& s, const guest::RECT& r) {
+  Settle(s, r);
+  gfx::Rect c{std::max(r.left, 0), std::max(r.top, 0), std::min(r.right, s.width),
+              std::min(r.bottom, s.height)};
+  if (c.right <= c.left || c.bottom <= c.top) return;
+  uint32_t off = uint32_t(c.top) * s.pitch + uint32_t(c.left) * (gfx::BitsPerPixel(s.fmt) / 8);
+  ReadGpu(s, c, GPtr(s.mem + off), s.pitch);
 }
 
 // Writes rows/rect `r` of the primary's guest memory to the front buffer.
@@ -450,7 +489,7 @@ uint32_t BltImpl(Surface& dst, const guest::RECT& dr, Surface* src,
     return DD_OK;
   }
   if (fill && dst.kind == Surface::Kind::Primary) {
-    Pull(dst);
+    Settle(dst, dr);
     FillMem(dst, dr, fill_raw);
     PushFront(dst, {dr.left, dr.top, dr.right, dr.bottom});
     return DD_OK;
@@ -481,11 +520,14 @@ uint32_t BltImpl(Surface& dst, const guest::RECT& dr, Surface* src,
     PresentPrimary();
     return DD_OK;
   }
-  if (OnGpu(*src)) Pull(*src);
+  if (OnGpu(*src)) Pull(*src, sr);
   if (!src->mem) return DDERR_UNSUPPORTED;
   if (dst.kind == Surface::Kind::Primary) {
-    if (key || src == &dst) Pull(dst);
-    if (!dst.mem) AllocMem(dst);
+    // Keyed or overlapping blits keep some destination pixels.
+    if (key || src == &dst)
+      Pull(dst, dr);
+    else
+      Settle(dst, dr);
     BlitMem(dst, dr, *src, sr, key, keyval);
     PushFront(dst, {dr.left, dr.top, dr.right, dr.bottom});
     return DD_OK;
@@ -820,16 +862,24 @@ HLE_NAMED("ddraw.dll", "IDirectDrawSurface7::DeleteAttachedSurface", DDS7_Delete
 
 HLE_NAMED("ddraw.dll", "IDirectDrawSurface7::Lock", DDS7_Lock, 5) {
   Surface* s = Self(c);
-  uint32_t rect = Arg(c, 1), desc = Arg(c, 2);
+  uint32_t rect = Arg(c, 1), desc = Arg(c, 2), flags = Arg(c, 3);
   if (s->kind == Surface::Kind::ZBuffer) {
     WarnF("ddraw: Lock of a Z buffer is not supported\n");
     return DDERR_UNSUPPORTED;
   }
-  if (OnGpu(*s)) {
-    Pull(*s);
-    s->lock_snapshot.assign(GPtr(s->mem), GPtr(s->mem) + size_t(s->pitch) * s->height);
-  }
   if (!s->mem) AllocMem(*s);
+  if (OnGpu(*s)) {
+    // Nothing is read back yet: the pixels come in when the game touches
+    // them. DDLOCK_READONLY (0x10): nothing goes back on Unlock.
+    // DDLOCK_WRITEONLY still reads what is touched, so that bytes the game
+    // leaves alone in a row it writes go back unchanged.
+    lazy::LazyImage::Rect r{0, 0, s->width, s->height};
+    if (rect) {
+      const guest::RECT& g = *G<guest::RECT>(rect);
+      r = {g.left, g.top, g.right, g.bottom};
+    }
+    s->shadow->Begin(r, flags & 0x10);
+  }
   s->locked = true;
   DDSURFACEDESC2 d = s->desc;
   d.dwFlags |= DDSD_LPSURFACE | DDSD_PITCH;
@@ -853,27 +903,13 @@ HLE_NAMED("ddraw.dll", "IDirectDrawSurface7::Unlock", DDS7_Unlock, 2) {
     UploadLevel(*s);
   } else if (OnGpu(*s)) {
     // Write the rows the game edited back.
-    const uint8_t* mem = GPtr(s->mem);
-    const uint8_t* snap = s->lock_snapshot.data();
-    int top = s->height, bottom = 0;
-    if (s->lock_snapshot.size() == size_t(s->pitch) * s->height) {
-      for (int y = 0; y < s->height; y++)
-        if (std::memcmp(mem + size_t(y) * s->pitch, snap + size_t(y) * s->pitch, s->pitch)) {
-          top = std::min(top, y);
-          bottom = y + 1;
-        }
-    } else {
-      top = 0;
-      bottom = s->height;
-    }
-    s->lock_snapshot.clear();
-    if (top < bottom) {
-      gfx::Rect r{0, top, s->width, bottom};
+    s->shadow->End([s](const lazy::LazyImage::Rect& b) {
+      gfx::Rect r{b.left, b.top, b.right, b.bottom};
       if (s->kind == Surface::Kind::Primary)
         PushFront(*s, r);
       else
         Gfx()->Blit(GPtr(s->mem), s->pitch, s->fmt, r, r, false, 0);
-    }
+    });
   }
   return DD_OK;
 }

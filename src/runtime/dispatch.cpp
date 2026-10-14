@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "runtime/hle/hle.h"
+#include "runtime/lazy_mem.h"
 #include "runtime/lifted.h"
 #include "runtime/log.h"
 #include "runtime/platform.h"
@@ -135,7 +136,9 @@ void TraceF(const char* fmt, ...) {
   va_end(ap);
 }
 
-// Host faults (SIGSEGV/SIGBUS) in guest memory are guest access
+// Host faults (SIGSEGV/SIGBUS) in guest memory are first offered to the
+// lazy regions (lazy_mem.h), whose pages fault by design, on any thread
+// and from host code too. Others are guest access
 // violations: they go to the guest SEH chain (games may demand-page data
 // from an exception filter). Anything unhandled, or a fault outside
 // the arena (a runtime bug), is reported with the host call chain (lifted
@@ -167,6 +170,8 @@ void FaultHandler(int sig, siginfo_t* si, void* uc) {
   char buf[256];
   uintptr_t a = reinterpret_cast<uintptr_t>(si->si_addr);
   uintptr_t base = reinterpret_cast<uintptr_t>(g_guest_base);
+  if (a - base < (1ull << 32) && lazy::HandleFault(uint32_t(a - base)))
+    return;  // filled: retry the faulting instruction
   platform::FaultContext fc = platform::ReadFaultContext(uc);
   if (a - base < (1ull << 32) && CurrentThread() &&
       t_fault_depth < kMaxFaultDepth && hle::t_hle_depth == 0) {

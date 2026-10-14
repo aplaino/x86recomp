@@ -9,6 +9,7 @@
 #include "runtime/gfx/device.h"
 #include "runtime/hle/com.h"
 #include "runtime/hle/ddraw_types.h"
+#include "runtime/lazy_mem.h"
 #include "runtime/runtime.h"
 
 namespace recomp::ddraw {
@@ -93,9 +94,10 @@ struct Surface : com::Object {
   bool has_ck_src = false;
   guest::DDCOLORKEY ck_src{};
   bool locked = false;
-  // Render-target pixels as handed out by Lock, to upload only what the
-  // game changed on Unlock (it often locks just to wait for the GPU).
-  std::vector<uint8_t> lock_snapshot;
+  // Back buffer and primary: `mem` mirrors the GPU image lazily. Lock
+  // reads back only what the game touches, Unlock uploads only rows it
+  // changed (games often lock just to wait for the GPU).
+  std::unique_ptr<lazy::LazyImage> shadow;
   uint32_t priority = 0, lod = 0;
   ~Surface() override;
 };

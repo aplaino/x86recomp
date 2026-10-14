@@ -121,8 +121,8 @@ Win32 memory semantics (4 KiB commit granularity, 64 KiB allocation
 granularity, page protections, VirtualQuery) are tracked in a per-guest-
 page table. Host protection is only "accessible or not" at host page
 granularity (4 KiB on x86 Linux, 16 KiB on Apple Silicon and Asahi), so
-nothing depends on host page faults for guest behaviour, with one
-exception: games that demand-page reserved memory from an exception
+nothing depends on host page faults for guest behaviour, with two
+exceptions: lazy regions (below, Lazy guest memory), and games that demand-page reserved memory from an exception
 filter (commit and fill one page per access violation). On a host with
 larger pages, committing one guest page makes its whole host page
 accessible, and the other guest pages in it would never fault. So after a
@@ -542,7 +542,8 @@ draws). Backends:
 API front ends:
 - DirectDraw 7 / Direct3D 7 (recomp_d3d7): guest-visible COM objects;
   DirectDraw (surfaces, flipping chain, Lock/Blt, colour keys, display
-  modes) implemented in the HLE itself.
+  modes) implemented in the HLE itself. Locks of the back buffer and
+  primary read back lazily (Lazy guest memory, below).
 - OpenGL 1.x: opengl32/wgl HLE as a GL state machine on gfx::Device,
   not a pass-through to host OpenGL, so the same Metal path serves it
   (macOS OpenGL is deprecated and capped at 2.1 for legacy contexts).
@@ -554,6 +555,58 @@ state; DDSCL_FPUPRESERVE = D3D saves and restores the CW around each
 call; without either, the Windows runtime switches the thread to single
 precision and leaves it there. Wine's ddraw does not model that default,
 so Wine is not a reference for this point. d3d7.cpp models it.
+
+### Lazy guest memory (locks of GPU surfaces)
+Games lock the DirectDraw back buffer and primary, which live on the GPU.
+Reading a whole surface back on every Lock costs a GPU sync and, at
+desktop resolutions, tens of MB per frame (5120x2880x4 is 59 MB), and
+games often lock without touching anything: Lock(back buffer, DDLOCK_WAIT)
+then Unlock is a common way to wait for the GPU. So their guest memory
+mirrors the GPU image lazily (src/runtime/lazy_mem.{h,cpp}, used by
+ddraw.cpp):
+- The surface memory is a VirtualAlloc-style reservation of its own,
+  rounded to host pages, so no other guest data shares its host pages.
+- Lock protects its pages (PROT_NONE) and records the rect. Nothing is
+  read yet.
+- The first access to a protected page faults. The fault handler offers
+  every fault in the arena to the lazy regions first (before guest SEH,
+  on any thread, from lifted or host code): the region reads the locked
+  rect's rows covering that page back from the GPU, copies the rect bytes
+  of that page into guest memory and a snapshot, unprotects the page, and
+  the handler returns, which retries the faulting instruction (on Darwin
+  too: no unwinding, nothing thrown).
+- Pages are 4 or 16 KiB and rows are pitch bytes; neither divides the
+  other in general. A pull reads whole rect rows but writes only the
+  pages it opens, since an open page may already hold the guest's
+  writes. A guest walking the rect would fault once per page, so each
+  fault of a Lock pulls an aligned block twice the size of the last
+  (about log2(pages) read-backs for a sweep in either direction); a rect
+  of at most 1 MiB (a cursor, a sprite) comes in whole on its first
+  touch.
+- Unlock compares the pulled bytes with the snapshot. If nothing was
+  touched there is nothing to compare or upload. Otherwise the band of
+  rows the guest changed is completed (its unpulled pages pulled) and
+  uploaded, as before.
+- DDLOCK_READONLY skips the compare. DDLOCK_WRITEONLY is treated like a
+  normal lock: the bytes of a written row that the game leaves alone
+  must go back unchanged, so they are still read.
+- Pages stay protected after Unlock until touched; touching one outside
+  a lock opens it with whatever it held (DirectDraw leaves that
+  undefined). Host code that reads or writes the surface memory itself
+  (Blt from or to these surfaces) settles the rect it uses first: during
+  a lock the locked bytes in it are pulled, then its pages are
+  unprotected. Blt from them reads back only the source rect.
+- The kernel does not fault on a protected page, it fails the syscall
+  (EFAULT), so HLE handlers that pass guest buffers to the kernel
+  (ReadFile, WriteFile) call lazy::Touch on them first.
+- Threads: regions change state under one lock, which the fault path
+  takes too, so a cursor thread drawing on the primary while the main
+  thread unlocks the back buffer is serialised. A page is unprotected
+  before it is filled, so another thread touching the same page in that
+  window would read stale bytes; DirectDraw gives a locked surface to
+  the thread that locked it, and games do not share it.
+- A fault on a lazy page while that thread holds the region lock (a
+  runtime bug) is not handled but reported like any other fault.
 
 ### Display modes, fullscreen and presentation
 Display modes are virtual: the host's mode never changes behind the

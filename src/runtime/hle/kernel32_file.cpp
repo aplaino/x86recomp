@@ -22,6 +22,7 @@
 #include "runtime/hle/hle.h"
 #include "runtime/hle/kernel32_state.h"
 #include "runtime/hle/win32.h"
+#include "runtime/lazy_mem.h"
 #include "runtime/platform.h"
 #include "runtime/log.h"
 
@@ -362,6 +363,7 @@ HLE("kernel32.dll", ReadFile, 5) {
     return 0;
   }
   if (Arg(c, 4)) FatalF("ReadFile with OVERLAPPED is not supported");
+  lazy::Touch(buf, n);  // the kernel does not fault on lazy pages
   ssize_t r = n ? read(fd, GPtr(buf), n) : 0;
   if (r < 0) {
     SetLastError(ErrnoToWin(errno));
@@ -378,6 +380,7 @@ HLE("kernel32.dll", WriteFile, 5) {
     SetLastError(kErrorInvalidHandle);
     return 0;
   }
+  lazy::Touch(buf, n);
   ssize_t r = n ? write(fd, GPtr(buf), n) : 0;
   if (r < 0) {
     SetLastError(ErrnoToWin(errno));
