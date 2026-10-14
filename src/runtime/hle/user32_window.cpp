@@ -650,6 +650,16 @@ GameConfig::Fullscreen FullscreenPolicy() {
   return f;
 }
 
+// Game sizes (screens, modes, client areas) are pixels; SDL sizes host
+// windows in points, which differ on a scaled desktop. Windows are
+// created with high pixel density, so a client of w x h pixels is a host
+// window of w x h pixels at w / d x h / d points.
+int ToPoints(SDL_Window* sdl, int px) {
+  float d = sdl ? SDL_GetWindowPixelDensity(sdl) : g_desktop_density;
+  if (!(d > 0)) d = 1;
+  return std::max(int(std::lround(float(px) / d)), 1);
+}
+
 // The screen a window would cover: the display mode in exclusive mode,
 // else the screen the game sees.
 void ScreenFor(const Window& w, int* sw, int* sh) {
@@ -698,6 +708,7 @@ void UpdateFullscreen(uint32_t hwnd) {
     // 16:9 at the same height), so the monitor or compositor never
     // stretches it and present adds the bars. None found, or desktop
     // policy: the desktop's mode.
+    // Sizes compared in pixels (a mode's w x h times its pixel density).
     SDL_DisplayMode m;
     bool exclusive = false;
     const SDL_DisplayID display = SDL_GetDisplayForWindow(sdl);
@@ -708,7 +719,19 @@ void UpdateFullscreen(uint32_t hwnd) {
         tw = int((int64_t(sh) * d->w + d->h - 1) / d->h);
       else
         th = int((int64_t(sw) * d->h + d->w - 1) / d->w);
-      exclusive = SDL_GetClosestFullscreenDisplayMode(display, tw, th, 0.0f, false, &m);
+      int n = 0;
+      SDL_DisplayMode** modes = SDL_GetFullscreenDisplayModes(display, &n);
+      int64_t best = 0;
+      for (int i = 0; i < n; i++) {
+        const float k = modes[i]->pixel_density > 0 ? modes[i]->pixel_density : 1.0f;
+        const int64_t pw = std::lround(float(modes[i]->w) * k);
+        const int64_t ph = std::lround(float(modes[i]->h) * k);
+        if (pw < tw || ph < th || (exclusive && pw * ph >= best)) continue;
+        m = *modes[i];
+        best = pw * ph;
+        exclusive = true;
+      }
+      SDL_free(modes);
     }
     SDL_SetWindowFullscreenMode(sdl, exclusive ? &m : nullptr);
     SDL_SetWindowFullscreen(sdl, true);
@@ -719,7 +742,7 @@ void UpdateFullscreen(uint32_t hwnd) {
       std::fprintf(stderr, "user32: window %X fullscreen for a %dx%d screen\n", hwnd, sw, sh);
   } else {
     SDL_SetWindowFullscreen(sdl, false);
-    SDL_SetWindowSize(sdl, std::max(cw, 1), std::max(ch, 1));
+    SDL_SetWindowSize(sdl, ToPoints(sdl, cw), ToPoints(sdl, ch));
   }
 }
 
@@ -745,8 +768,11 @@ void EnsureSdlVideo() {
   if (!SDL_Init(SDL_INIT_VIDEO)) FatalF("SDL_Init: %s", SDL_GetError());
   g_sdl_up = true;
   if (const SDL_DisplayMode* m = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay())) {
-    g_display_w = g_desktop_w = m->w;
-    g_display_h = g_desktop_h = m->h;
+    // Games see pixels: a scaled desktop (Wayland, macOS) reports points.
+    const float d = m->pixel_density > 0 ? m->pixel_density : 1.0f;
+    g_desktop_density = d;
+    g_display_w = g_desktop_w = int(std::lround(float(m->w) * d));
+    g_display_h = g_desktop_h = int(std::lround(float(m->h) * d));
   }
 }
 
@@ -989,7 +1015,7 @@ void SetExclusiveMode(uint32_t hwnd, int w, int h) {
     win->mode_h = h;
     sdl = win->fullscreen ? nullptr : win->sdl;
   }
-  if (sdl && w) SDL_SetWindowSize(sdl, w, h);
+  if (sdl && w) SDL_SetWindowSize(sdl, ToPoints(sdl, w), ToPoints(sdl, h));
   UpdateFullscreen(hwnd);
 }
 
@@ -1121,8 +1147,9 @@ HLE("user32.dll", CreateWindowExA, 12) {
     EnsureSdlVideo();
     int cw, ch;
     ClientSize(win, &cw, &ch);
-    win.sdl = SDL_CreateWindow(win.title.c_str(), std::max(cw, 1), std::max(ch, 1),
-                               SDL_WINDOW_HIDDEN | GfxWindowFlags());
+    win.sdl = SDL_CreateWindow(win.title.c_str(), ToPoints(nullptr, cw), ToPoints(nullptr, ch),
+                               SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY |
+                                   GfxWindowFlags());
     if (!win.sdl) FatalF("SDL_CreateWindow: %s", SDL_GetError());
   }
   uint32_t hwnd = win.hwnd;
@@ -1328,7 +1355,7 @@ void ApplyRect(uint32_t hwnd, int x, int y, int w, int h, bool move, bool size) 
     // a fullscreen one the screen's.
     sdl = win->mode_w || win->fullscreen ? nullptr : win->sdl;
   }
-  if (sdl && sized) SDL_SetWindowSize(sdl, std::max(cw, 1), std::max(ch, 1));
+  if (sdl && sized) SDL_SetWindowSize(sdl, ToPoints(sdl, cw), ToPoints(sdl, ch));
   if (moved || sized) UpdateFullscreen(hwnd);
   if (sized) Send(hwnd, WM_SIZE, 0, MkLparam(cw, ch));
   if (moved) Send(hwnd, WM_MOVE, 0, MkLparam(x, y));

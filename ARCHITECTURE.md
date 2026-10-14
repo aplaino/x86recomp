@@ -594,10 +594,16 @@ game's back. What games see and what the host shows:
   exclusive mode) is not scaled: one unit of host motion is one pixel of
   the game's screen, as a mickey is on Windows, so mouse look turns the
   same in a window, fullscreen and in any mode.
+- Pixels and points: everything games see (modes, the desktop size,
+  screen metrics, client areas, so render resolutions) is in pixels; host
+  windows are sized in points, which differ on a scaled desktop (macOS,
+  scaled Wayland outputs: a 3840x2160 panel at 1.5x is a 2560x1440-point
+  desktop). Windows are created with high pixel density, so a client of
+  w x h pixels is a host window of w x h pixels, w / d x h / d points;
+  the swap chain is the window's pixel size. Pointer positions (points)
+  map through the fitted rectangle in point space.
 - For game patches (runtime/display.h): `DesktopSize()` (the host
-  desktop, in the units modes use: points on macOS and on scaled Wayland
-  outputs, so "native" there is the point size unless a window asks for
-  high pixel density) and `gfx::LastPresentation()` (the last frame's
+  desktop in pixels) and `gfx::LastPresentation()` (the last frame's
   size, the output's size and the fitted rectangle, so the output's
   aspect). Deciding what to do with them (FOV, where 2D goes) is the
   game's.
