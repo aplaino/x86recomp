@@ -91,6 +91,11 @@ class Device {
   // Uploads `r` of mip `level` from linear memory (pitch in bytes).
   virtual void UpdateTexture(TextureId t, int level, const Rect& r,
                              const void* src, uint32_t pitch) = 0;
+  // A cube texture: six square faces in D3D's order (+X, -X, +Y, -Y, +Z,
+  // -Z), filled with UpdateCubeTexture and freed with DestroyTexture.
+  virtual TextureId CreateCubeTexture(int size, int levels, Format fmt) = 0;
+  virtual void UpdateCubeTexture(TextureId t, int face, int level, const Rect& r,
+                                 const void* src, uint32_t pitch) = 0;
   virtual DepthId CreateDepth(int w, int h, Format fmt) = 0;
   virtual void DestroyDepth(DepthId d) = 0;
 

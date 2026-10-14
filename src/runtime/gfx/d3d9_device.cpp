@@ -89,6 +89,7 @@ class D3D9Device final : public Device {
 
   ~D3D9Device() override {
     for (auto& [id, t] : textures_) t->Release();
+    for (auto& [id, t] : cubes_) t->Release();
     for (auto& [id, d] : depths_) d.surf->Release();
     if (staging_) staging_->Release();
     if (readback_) readback_->Release();
@@ -196,11 +197,50 @@ class D3D9Device final : public Device {
   }
 
   void DestroyTexture(TextureId id) override {
+    auto cube = cubes_.find(id);
+    if (cube != cubes_.end()) {
+      cube->second->Release();
+      cubes_.erase(cube);
+      return;
+    }
     auto it = textures_.find(id);
     if (it == textures_.end()) return;
     it->second->Release();
     textures_.erase(it);
     targets_.erase(id);
+  }
+
+  TextureId CreateCubeTexture(int size, int levels, Format fmt) override {
+    IDirect3DCubeTexture9* t = nullptr;
+    HRESULT hr = dev_->CreateCubeTexture(UINT(size), UINT(levels), 0, ToD3D(fmt),
+                                         D3DPOOL_MANAGED, &t, nullptr);
+    if (FAILED(hr)) {
+      WarnF("gfx: CreateCubeTexture %d x%d fmt %u failed (%08lx)\n", size, levels,
+            unsigned(fmt), (unsigned long)hr);
+      return 0;
+    }
+    TextureId id = next_id_++;
+    cubes_[id] = t;
+    return id;
+  }
+
+  void UpdateCubeTexture(TextureId id, int face, int level, const Rect& r, const void* src,
+                         uint32_t pitch) override {
+    auto it = cubes_.find(id);
+    if (it == cubes_.end()) return;
+    D3DSURFACE_DESC desc;
+    it->second->GetLevelDesc(UINT(level), &desc);
+    Format f = FromD3D(desc.Format);
+    RECT rc{r.left, r.top, r.right, r.bottom};
+    D3DLOCKED_RECT lr;
+    if (FAILED(it->second->LockRect(D3DCUBEMAP_FACES(face), UINT(level), &lr, &rc, 0))) return;
+    uint32_t row = RowPitch(f, uint32_t(r.right - r.left));
+    uint32_t rows = RowCount(f, uint32_t(r.bottom - r.top));
+    const uint8_t* s = static_cast<const uint8_t*>(src);
+    uint8_t* d = static_cast<uint8_t*>(lr.pBits);
+    for (uint32_t y = 0; y < rows; y++)
+      std::memcpy(d + size_t(y) * uint32_t(lr.Pitch), s + size_t(y) * pitch, row);
+    it->second->UnlockRect(D3DCUBEMAP_FACES(face), UINT(level));
   }
 
   void FillTexture(TextureId id, const Rect& r, uint32_t argb) override {
@@ -785,6 +825,7 @@ class D3D9Device final : public Device {
     uint32_t nv, stride, ni, vofs = 0, iofs = 0;
   } mapped_{};
   std::map<uint32_t, IDirect3DTexture9*> textures_;
+  std::map<uint32_t, IDirect3DCubeTexture9*> cubes_;  // same id space
   std::map<uint32_t, Target> targets_;  // render-target textures (default pool)
   std::map<uint32_t, Depth> depths_;
   uint32_t next_id_ = 1;

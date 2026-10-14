@@ -204,9 +204,9 @@ target_link_libraries(recomp_d3d7 PUBLIC recomp_runtime recomp_gfx)
 add_library(recomp_dinput8 OBJECT src/runtime/hle/dinput8.cpp)
 target_link_libraries(recomp_dinput8 PUBLIC recomp_runtime)
 
-# Direct3D 9 over gfx::Device.
+# Direct3D 9 and D3DX 9 over gfx::Device.
 add_library(recomp_d3d9 OBJECT src/runtime/hle/d3d9.cpp
-  src/runtime/hle/d3d9_resource.cpp)
+  src/runtime/hle/d3d9_resource.cpp src/runtime/hle/d3dx9.cpp)
 target_link_libraries(recomp_d3d9 PUBLIC recomp_runtime recomp_gfx)
 
 # OpenGL 1.x (opengl32, wgl, gdi32 pixel formats) over gfx::Device.

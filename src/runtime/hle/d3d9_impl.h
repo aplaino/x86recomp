@@ -94,7 +94,7 @@ struct Surface : com::Object {
   gfx::TextureId tex = 0;     // RenderTarget
   Texture* texture = nullptr;  // TextureLevel
   uint32_t container = 0;      // TextureLevel: the texture's guest pointer
-  int level = 0;
+  int face = 0, level = 0;
   uint32_t mem = 0;  // Offscreen: its pixels
   uint32_t pitch = 0;
   ~Surface() override;
@@ -102,6 +102,7 @@ struct Surface : com::Object {
 
 struct Texture : com::Object {
   uint32_t device = 0;
+  bool cube = false;  // IDirect3DCubeTexture9: six faces of levels each
   uint32_t width = 0, height = 0, levels = 0, usage = 0, format = 0, pool = 0;
   gfx::Format fmt = gfx::Format::Unknown;
   gfx::TextureId tex = 0;  // none for SYSTEMMEM/SCRATCH
@@ -113,7 +114,9 @@ struct Texture : com::Object {
     bool lock_readonly = false;
     std::shared_ptr<Surface> surface;  // GetSurfaceLevel, created lazily
   };
-  std::vector<Level> lv;
+  std::vector<Level> lv;  // face * levels + level
+  Level& At(uint32_t face, uint32_t level) { return lv[face * levels + level]; }
+  uint32_t Faces() const { return cube ? 6 : 1; }
   uint32_t lod = 0, priority = 0, autogen_filter = 2;  // D3DTEXF_LINEAR
   ~Texture() override;
 };
@@ -199,5 +202,16 @@ uint32_t NewSurface(Device& d, uint32_t device, Surface::Kind kind, uint32_t w,
 
 // The gfx render target and depth buffer for the current bindings.
 void BindTargets(Device& d);
+
+// CreateTexture / CreateCubeTexture (cube: w = h = edge length): the
+// HRESULT; the new texture's guest pointer in *out (0 on failure).
+uint32_t NewTexture(Device& d, uint32_t device, bool cube, uint32_t w, uint32_t h,
+                    uint32_t levels, uint32_t usage, uint32_t fmt, uint32_t pool,
+                    uint32_t* out);
+
+// Replaces a whole level's pixels (rows of `pitch` bytes, in the
+// texture's format) and uploads them: D3DX loaders.
+void FillLevel(Texture& t, uint32_t face, uint32_t level, const uint8_t* src,
+               uint32_t pitch);
 
 }  // namespace recomp::d3d9

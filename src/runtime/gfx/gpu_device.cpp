@@ -512,8 +512,9 @@ class GpuDevice final : public Device {
                 uint32_t(h), uint32_t(w) * 4);
   }
 
-  void UpdateTexture(TextureId id, int level, const Rect& r, const void* src,
-                     uint32_t pitch) override {
+  // UpdateTexture / UpdateCubeTexture: `layer` is the cube face.
+  void Update(TextureId id, int layer, int level, const Rect& r, const void* src,
+              uint32_t pitch) {
     std::lock_guard<std::recursive_mutex> l(mu_);
     auto it = textures_.find(id);
     if (it == textures_.end() || level < 0 || level >= it->second.levels) return;
@@ -527,19 +528,60 @@ class GpuDevice final : public Device {
     const uint8_t* s = static_cast<const uint8_t*>(src);
     if (IsCompressed(t.fmt)) {
       uint32_t row = RowPitch(t.fmt, uint32_t(w)), rows = RowCount(t.fmt, uint32_t(h));
-      QueueUpload(t.tex, level, c.left, c.top, w, h, s, pitch, rows, row, false, true);
+      QueueUpload(t.tex, level, c.left, c.top, w, h, s, pitch, rows, row, false, true, layer);
       return;
     }
     if (IsFloat(t.fmt)) {  // same layout as the GPU format
       QueueUpload(t.tex, level, c.left, c.top, w, h, s, pitch, uint32_t(h),
-                  RowPitch(t.fmt, uint32_t(w)));
+                  RowPitch(t.fmt, uint32_t(w)), false, false, layer);
       return;
     }
     std::vector<uint32_t> px(size_t(w) * h);
     ConvertToArgb(s, pitch, t.fmt, w, h, px.data());
     QueueUpload(t.tex, level, c.left, c.top, w, h, px.data(), uint32_t(w) * 4, uint32_t(h),
-                uint32_t(w) * 4);
+                uint32_t(w) * 4, false, false, layer);
   }
+  void UpdateTexture(TextureId id, int level, const Rect& r, const void* src,
+                     uint32_t pitch) override {
+    Update(id, 0, level, r, src, pitch);
+  }
+
+  TextureId CreateCubeTexture(int size, int levels, Format fmt) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    if (size <= 0) return 0;
+    if (levels <= 0) {
+      levels = 1;
+      for (int s = size; s > 1; s >>= 1) levels++;
+    }
+    Tex t;
+    t.w = t.h = size;
+    t.levels = levels;
+    t.fmt = fmt;
+    t.cube = true;
+    SDL_GPUTextureCreateInfo ti{};
+    ti.type = SDL_GPU_TEXTURETYPE_CUBE;
+    ti.format = GpuFormat(fmt);
+    ti.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    ti.width = ti.height = Uint32(size);
+    ti.layer_count_or_depth = 6;
+    ti.num_levels = Uint32(levels);
+    t.tex = SDL_CreateGPUTexture(dev_, &ti);
+    if (!t.tex) {
+      WarnF("gfx: CreateCubeTexture %d x%d fmt %u failed: %s\n", size, levels,
+            unsigned(fmt), SDL_GetError());
+      return 0;
+    }
+    TextureId id = next_id_++;
+    textures_[id] = t;
+    return id;
+  }
+
+  void UpdateCubeTexture(TextureId id, int face, int level, const Rect& r, const void* src,
+                         uint32_t pitch) override {
+    if (face < 0 || face > 5) return;
+    Update(id, face, level, r, src, pitch);
+  }
+
 
   DepthId CreateDepth(int w, int h, Format fmt) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
@@ -896,6 +938,7 @@ class GpuDevice final : public Device {
     int w = 0, h = 0, levels = 1;
     Format fmt = Format::Unknown;
     bool rt = false;
+    bool cube = false;
   };
   struct Depth {
     SDL_GPUTexture* tex = nullptr;
@@ -907,6 +950,7 @@ class GpuDevice final : public Device {
   };
   struct Upload {
     SDL_GPUTexture* tex;
+    int layer;
     int level;
     uint32_t x, y, w, h;
     uint32_t offset, pixels_per_row, rows;
@@ -1089,14 +1133,14 @@ class GpuDevice final : public Device {
   // if `compressed`) for the texels at x, y, w, h of `level`.
   void QueueUpload(SDL_GPUTexture* tex, int level, int x, int y, int w, int h, const void* src,
                    uint32_t src_pitch, uint32_t rows, uint32_t row_bytes, bool cycle = false,
-                   bool compressed = false) {
+                   bool compressed = false, int layer = 0) {
     size_t off = (upload_bytes_.size() + 15) & ~size_t(15);
     upload_bytes_.resize(off + size_t(rows) * row_bytes);
     for (uint32_t r = 0; r < rows; r++)
       std::memcpy(upload_bytes_.data() + off + size_t(r) * row_bytes,
                   static_cast<const uint8_t*>(src) + size_t(r) * src_pitch, row_bytes);
-    Upload u{tex, level, uint32_t(x), uint32_t(y), uint32_t(w), uint32_t(h), uint32_t(off),
-             uint32_t(w), uint32_t(h), cycle};
+    Upload u{tex, layer, level, uint32_t(x), uint32_t(y), uint32_t(w), uint32_t(h),
+             uint32_t(off), uint32_t(w), uint32_t(h), cycle};
     if (compressed) {
       u.pixels_per_row = (uint32_t(w) + 3) & ~3u;
       u.rows = (uint32_t(h) + 3) & ~3u;
@@ -1180,6 +1224,7 @@ class GpuDevice final : public Device {
         src.rows_per_layer = u.rows;
         SDL_GPUTextureRegion dst{};
         dst.texture = u.tex;
+        dst.layer = Uint32(u.layer);
         dst.mip_level = Uint32(u.level);
         dst.x = u.x;
         dst.y = u.y;
