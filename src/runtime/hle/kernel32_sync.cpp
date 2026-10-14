@@ -318,6 +318,45 @@ HLE("kernel32.dll", GetThreadPriority, 1) { return 0; }
 HLE("kernel32.dll", GetPriorityClass, 1) { return 0x20; }  // NORMAL
 HLE("kernel32.dll", SetPriorityClass, 2) { return 1; }
 
+// Affinity is bookkeeping only: guest threads are never pinned on the host
+// (games pin a thread to one CPU around QueryPerformanceCounter reads, for
+// processors whose counters differ, which host clocks do not). The masks
+// are over the processors GetSystemInfo reports.
+uint32_t SystemAffinityMask() { return (1u << GuestProcessorCount()) - 1; }
+std::atomic<uint32_t> g_process_affinity{0};  // 0: all processors
+
+uint32_t ProcessAffinityMask() {
+  uint32_t m = g_process_affinity.load();
+  return m ? m : SystemAffinityMask();
+}
+
+HLE("kernel32.dll", GetProcessAffinityMask, 3) {
+  Wr32(Arg(c, 1), ProcessAffinityMask());
+  Wr32(Arg(c, 2), SystemAffinityMask());
+  return 1;
+}
+
+HLE("kernel32.dll", SetProcessAffinityMask, 2) {
+  uint32_t mask = Arg(c, 1);
+  if (!mask || (mask & ~SystemAffinityMask())) {
+    SetLastError(kErrorInvalidParameter);
+    return 0;
+  }
+  g_process_affinity = mask;
+  return 1;
+}
+
+// Returns the previous mask; threads are not tracked, so that is the
+// process mask, as for a thread that was never restricted.
+HLE("kernel32.dll", SetThreadAffinityMask, 2) {
+  uint32_t mask = Arg(c, 1);
+  if (!mask || (mask & ~ProcessAffinityMask())) {
+    SetLastError(kErrorInvalidParameter);
+    return 0;
+  }
+  return ProcessAffinityMask();
+}
+
 HLE("kernel32.dll", GetThreadContext, 2) {
   // Only used by the crash reporter to sample other threads.
   SetLastError(kErrorAccessDenied);

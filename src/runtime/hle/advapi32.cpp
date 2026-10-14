@@ -214,12 +214,16 @@ HLE("advapi32.dll", GetUserNameA, 2) {
 
 // ---- ole32 ------------------------------------------------------------------
 
-HLE("ole32.dll", CoInitializeEx, 2) { return 0; }  // S_OK
+HLE("ole32.dll", CoInitialize, 1) { return 0; }  // S_OK
+HLE("ole32.dll", CoInitializeEx, 2) { return 0; }
 HLE("ole32.dll", CoUninitialize, 0) { return 0; }
 
 HLE("ole32.dll", CoCreateInstance, 5) {
-  // Only DirectPlay8 (multiplayer) and the Zone update object are created
-  // this way; neither exists here. REGDB_E_CLASSNOTREG.
+  // No COM classes are provided. The ones games create are optional and
+  // REGDB_E_CLASSNOTREG reads as "not installed", as on a system without
+  // them: DirectPlay8 (multiplayer), the Zone update object, the WMI
+  // locator (the DirectX SDK's IsXInputDevice: no device is then an XInput
+  // one) and the Game Explorer (VerifyAccess: access is then not denied).
   uint32_t clsid = Arg(c, 0);
   WarnF("CoCreateInstance({%08X-...}): class not available\n", Rd32(clsid));
   if (Arg(c, 4)) Wr32(Arg(c, 4), 0);

@@ -1,4 +1,5 @@
-// shfolder (special folders) and wsock32 (by ordinal).
+// shfolder and shell32 (special folders, directory trees) and wsock32 (by
+// ordinal).
 //
 // Special folders live in the per-user tree (see HostPath): a game that
 // saves under My Documents writes to $XDG_DATA_HOME/<id>/drive_c/
@@ -6,6 +7,8 @@
 //
 // Networking: wsock32 only answers host-name queries (DirectPlay8 is not
 // provided).
+
+#include <sys/stat.h>
 
 #include <cstring>
 #include <string>
@@ -34,7 +37,7 @@ std::string FolderFor(uint32_t csidl) {
   }
 }
 
-HLE("shfolder.dll", SHGetFolderPathA, 5) {
+uint32_t GetFolderPathA(Ctx& c) {
   uint32_t csidl = Arg(c, 1), out = Arg(c, 4);
   std::string p = FolderFor(csidl);
   if (p.empty()) {
@@ -47,6 +50,15 @@ HLE("shfolder.dll", SHGetFolderPathA, 5) {
   return 0;  // S_OK
 }
 
+// shfolder.dll is the redistributable for systems before Windows 2000;
+// later games import the same function from shell32.
+HLE_NAMED("shfolder.dll", "SHGetFolderPathA", ShfolderGetFolderPathA, 5) {
+  return GetFolderPathA(c);
+}
+HLE_NAMED("shell32.dll", "SHGetFolderPathA", Shell32GetFolderPathA, 5) {
+  return GetFolderPathA(c);
+}
+
 HLE("shfolder.dll", SHGetFolderPathW, 5) {
   uint32_t csidl = Arg(c, 1), out = Arg(c, 4);
   std::string p = FolderFor(csidl);
@@ -57,6 +69,21 @@ HLE("shfolder.dll", SHGetFolderPathW, 5) {
   MakeDirs(HostPath(p));
   PutWStr(out, p);
   return 0;
+}
+
+// SHCreateDirectoryExA(hwnd, path, security): the directory and any missing
+// parents. Returns a Win32 error code, not a BOOL.
+HLE("shell32.dll", SHCreateDirectoryExA, 3) {
+  std::string g = GStr(Arg(c, 1));
+  bool absolute = (g.size() > 2 && g[1] == ':' && (g[2] == '\\' || g[2] == '/')) ||
+                  g.rfind("\\\\", 0) == 0;
+  if (!absolute) return 161;  // ERROR_BAD_PATHNAME
+  struct stat st;
+  if (stat(HostPath(g).c_str(), &st) == 0)
+    return S_ISDIR(st.st_mode) ? win32::kErrorAlreadyExists
+                               : win32::kErrorFileExists;
+  MakeDirs(HostPath(g, PathAccess::kWrite));
+  return win32::kErrorSuccess;
 }
 
 // ---- wsock32 ------------------------------------------------------------------------
