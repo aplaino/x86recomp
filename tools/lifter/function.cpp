@@ -203,7 +203,9 @@ bool RecoverJumpTable(const Program& p, const Function& f, const Insn& jmp,
     for (uint32_t i = 0; i < cases; i++) {
       uint32_t t = p.mem.read<uint32_t>(static_cast<uint32_t>(m.mem.disp.value) + 4 * i);
       if (p.TextOf(t) != mod) return false;
-      targets->push_back(t);
+      // Cases often share a target; each becomes one switch case.
+      if (std::find(targets->begin(), targets->end(), t) == targets->end())
+        targets->push_back(t);
     }
     return true;
   }
