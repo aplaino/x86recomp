@@ -4,6 +4,7 @@
 
 #include <SDL3/SDL.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -63,6 +64,30 @@ void PresentFrame(gfx::Device& dev, int w, int h) {
       WarnF("hitch: frame %d took %.1f ms (t=%.2f s)\n", frame, dt,
             (now - start) / 1e9);
     last = now;
+  }
+  // <ID>_FPS_REPORT=s: every s seconds, the frame rate and the spread of
+  // frame intervals.
+  static const double report_s = [] {
+    const char* e = Env("FPS_REPORT");
+    return e ? std::atof(e) : 0.0;
+  }();
+  if (report_s > 0) {
+    static Uint64 last = 0, first = 0, t0 = 0;
+    static std::vector<double> dts;
+    Uint64 now = SDL_GetTicksNS();
+    if (!t0) t0 = now;
+    if (last) dts.push_back((now - last) / 1e6);
+    if (!first) first = now;
+    last = now;
+    if ((now - first) / 1e9 >= report_s && !dts.empty()) {
+      std::sort(dts.begin(), dts.end());
+      auto q = [&](double p) { return dts[size_t(p * double(dts.size() - 1) + 0.5)]; };
+      WarnF("fps: %.2f at t=%.1f s (interval ms: min %.3f p1 %.3f median %.3f p99 %.3f max %.3f)\n",
+            dts.size() / ((now - first) / 1e9), (now - t0) / 1e9, dts.front(), q(0.01),
+            q(0.5), q(0.99), dts.back());
+      dts.clear();
+      first = now;
+    }
   }
 }
 
