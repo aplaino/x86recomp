@@ -263,5 +263,46 @@ HLE("d3dx9_35.dll", D3DXCreateCubeTextureFromFileInMemory, 4) {
                           0, Arg(c, 3));
 }
 
+// ---- shaders --------------------------------------------------------------------------
+
+// <ID>_SHADER_DUMP=dir: every HLSL source D3DXCompileShader gets is
+// written to dir/<FNV-1a of the source>.hlsl, with the profile, entry
+// point and macros in a comment on top (dev aid for the translator).
+void DumpShader(const std::string& src, const char* profile, const char* entry,
+                const std::string& defines) {
+  const char* dir = Env("SHADER_DUMP");
+  if (!dir || !*dir) return;
+  uint64_t h = 1469598103934665603ull;
+  for (unsigned char ch : src) h = (h ^ ch) * 1099511628211ull;
+  char path[512];
+  std::snprintf(path, sizeof path, "%s/%016llx.hlsl", dir, (unsigned long long)h);
+  if (FILE* f = std::fopen(path, "wb")) {
+    std::fprintf(f, "// profile %s, entry %s%s%s\n", profile, entry,
+                 defines.empty() ? "" : ", defines ", defines.c_str());
+    std::fwrite(src.data(), 1, src.size(), f);
+    std::fclose(f);
+  }
+}
+
+// (pSrcData, SrcDataLen, pDefines, pInclude, pFunctionName, pProfile,
+// Flags, ppShader, ppErrorMsgs, ppConstantTable)
+HLE("d3dx9_35.dll", D3DXCompileShader, 10) {
+  uint32_t src = Arg(c, 0), len = Arg(c, 1), defs = Arg(c, 2);
+  if (!EnsureReadable(c, src, len)) return D3DERR_INVALIDCALL;
+  std::string text(reinterpret_cast<const char*>(GPtr(src)), len);
+  std::string defines;
+  for (uint32_t d = defs; d && Rd32(d); d += 8) {  // D3DXMACRO {Name, Definition}
+    if (!defines.empty()) defines += ' ';
+    defines += GStr(Rd32(d));
+    if (Rd32(d + 4)) defines += "=" + GStr(Rd32(d + 4));
+  }
+  std::string entry = GStr(Arg(c, 4)), profile = GStr(Arg(c, 5));
+  DumpShader(text, profile.c_str(), entry.c_str(), defines);
+  if (Arg(c, 3)) FatalF("d3dx9: D3DXCompileShader with an include handler not supported yet");
+  FatalF("d3dx9: D3DXCompileShader(%s, %s, %u bytes, flags %X): the HLSL translator is "
+         "not written yet",
+         profile.c_str(), entry.c_str(), len, Arg(c, 6));
+}
+
 }  // namespace
 }  // namespace recomp::hle
