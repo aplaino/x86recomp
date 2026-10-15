@@ -1,12 +1,18 @@
-// binkw32 (Bink video, RAD 1.x API): the 10 entry points the game imports,
-// on ffmpeg's Bink demuxer and decoders. Movies may be opened from memory
-// (BINKFROMMEMORY, e.g. a view of an archive file); the game decodes one
-// frame per BinkWait/BinkDoFrame and copies it into a locked DirectDraw
-// surface with BinkCopyToBuffer. Audio goes to the Miles mixer, as BinkOpenMiles
-// would route it.
+// binkw32 (Bink video, RAD 1.x API, up to 1.8's) on ffmpeg's Bink demuxer
+// and decoders. Movies may be opened from memory (BINKFROMMEMORY, e.g. a
+// view of an archive file); games decode one frame per BinkWait /
+// BinkDoFrame and copy it into locked memory with BinkCopyToBuffer(Rect).
+// Audio goes to the software mixer whichever sound system the game picks
+// (BinkOpenMiles or BinkOpenDirectSound route it there too).
 //
-// The BINK struct is a guest block: the game reads Frames (+0x08) and
-// FrameNum (+0x0C) directly.
+// Sound tracks: BinkSetSoundTrack(index) (older Bink: ~0 for none) or
+// BinkSetSoundTrack(count, track IDs) with BINKSNDTRACK (1.8) choose the
+// audio tracks; by default the first one plays. Each track has its volume
+// (BinkSetVolume by track ID).
+//
+// The BINK struct is a guest block: games read Width, Height, Frames
+// (+0x08), FrameNum (+0x0C) and, in 1.8, NumTracks (+0xD0) and the track
+// ID list (+0x250) directly.
 
 #include <algorithm>
 #include <chrono>
@@ -34,14 +40,26 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-constexpr uint32_t kBinkFromMemory = 0x04000000;
-constexpr uint32_t kBinkStructSize = 0x200;
+constexpr uint32_t kBinkFromMemory = 0x04000000, kBinkSndTrack = 0x00004000;
+constexpr uint32_t kBinkStructSize = 0x400;
 
-// BINK struct offsets (bink.h, 1.x).
+// BINK struct offsets (bink.h, 1.x; the track fields as 1.8 games read
+// them). The track ID list lives in the block too.
 enum : uint32_t {
   kWidth = 0x00, kHeight = 0x04, kFrames = 0x08, kFrameNum = 0x0C,
   kLastFrameNum = 0x10, kFrameRate = 0x14, kFrameRateDiv = 0x18,
-  kOpenFlags = 0x20, kSize = 0x28,
+  kOpenFlags = 0x20, kSize = 0x28, kNumTracks = 0xD0, kTrackIDs = 0x250,
+  kTrackIDList = 0x300, kMaxTracks = 64,
+};
+
+// An audio track of a movie: its stream, decoder and mixer voice.
+struct Track {
+  uint32_t id = 0;
+  int stream = -1;
+  AVCodecContext* dec = nullptr;
+  std::unique_ptr<audio::Voice> voice;
+  audio::QueueSource* queue = nullptr;
+  float volume = 1.0f;
 };
 
 struct Movie {
@@ -50,9 +68,9 @@ struct Movie {
   int64_t pos = 0;
   AVFormatContext* fmt = nullptr;
   AVIOContext* io = nullptr;
-  int vs = -1, as = -1;
+  int vs = -1;
   AVCodecContext* vdec = nullptr;
-  AVCodecContext* adec = nullptr;
+  std::vector<Track> tracks;  // the ones playing
   AVPacket* pkt = nullptr;
   AVFrame* frame = nullptr;
   SwsContext* sws = nullptr;
@@ -63,20 +81,18 @@ struct Movie {
   bool started = false, paused = false;
   Clock::time_point start, paused_at;
   bool video_eof = false;
-  // Audio through the Miles mixer.
-  std::unique_ptr<audio::Voice> voice;
-  audio::QueueSource* queue = nullptr;
 
   ~Movie() {
-    if (voice) {
+    {
       std::lock_guard<std::mutex> l(audio::GetMixer().mu());
-      audio::GetMixer().Remove(voice.get());
+      for (Track& t : tracks)
+        if (t.voice) audio::GetMixer().Remove(t.voice.get());
     }
+    for (Track& t : tracks) avcodec_free_context(&t.dec);
     sws_freeContext(sws);
     av_frame_free(&frame);
     av_packet_free(&pkt);
     avcodec_free_context(&vdec);
-    avcodec_free_context(&adec);
     avformat_close_input(&fmt);
     if (io) {
       av_freep(&io->buffer);
@@ -87,8 +103,12 @@ struct Movie {
 
 std::mutex g_mu;
 std::map<uint32_t, std::unique_ptr<Movie>> g_movies;  // by BINK guest ptr
-uint32_t g_sound_track = 0;   // BinkSetSoundTrack; ~0 = no sound
-bool g_sound_system = false;  // BinkSetSoundSystem(BinkOpenMiles, ...)
+// BinkSetSoundTrack: the older form's track index (~0: no sound), or the
+// 1.8 form's track IDs, used with BINKSNDTRACK.
+uint32_t g_sound_track = 0;
+std::vector<uint32_t> g_track_ids;
+// BinkSetSoundSystem: none, Miles or DirectSound.
+enum class SoundSystem { None, Miles, DirectSound } g_sound_system = SoundSystem::None;
 
 uint32_t Le32(const uint8_t* p) {
   return p[0] | p[1] << 8 | p[2] << 16 | uint32_t(p[3]) << 24;
@@ -151,22 +171,25 @@ AVCodecContext* OpenDecoder(AVStream* st) {
   return c;
 }
 
-void QueueAudio(Movie& m, AVFrame* f) {
+void QueueAudio(Movie& m, Track& t, AVFrame* f) {
   int out_ch = std::min(f->ch_layout.nb_channels, 2);
-  if (!m.voice) {
+  if (!t.voice) {
     auto q = std::make_unique<audio::QueueSource>(out_ch, f->sample_rate);
-    m.queue = q.get();
-    m.voice = std::make_unique<audio::Voice>();
-    m.voice->src = std::move(q);
+    t.queue = q.get();
+    t.voice = std::make_unique<audio::Voice>();
+    t.voice->src = std::move(q);
+    // Under DirectSound, Bink's buffers play at their volume, centred.
+    t.voice->dsound = g_sound_system == SoundSystem::DirectSound;
     std::lock_guard<std::mutex> l(audio::GetMixer().mu());
-    m.voice->state = m.paused ? audio::Voice::State::Paused
+    t.voice->volume = t.volume;
+    t.voice->state = m.paused ? audio::Voice::State::Paused
                               : audio::Voice::State::Playing;
-    audio::GetMixer().Add(m.voice.get());
+    audio::GetMixer().Add(t.voice.get());
   }
-  if (out_ch != m.queue->channels()) return;
+  if (out_ch != t.queue->channels()) return;
   std::vector<float> buf(size_t(f->nb_samples) * out_ch);
   audio::ConvertFrame(f, out_ch, buf.data());
-  m.queue->Push(buf.data(), f->nb_samples);
+  t.queue->Push(buf.data(), f->nb_samples);
 }
 
 void ConvertVideo(Movie& m) {
@@ -200,11 +223,14 @@ bool DecodeNextFrame(Movie& m) {
     }
     if (m.pkt->stream_index == m.vs) {
       avcodec_send_packet(m.vdec, m.pkt);
-    } else if (m.pkt->stream_index == m.as && m.adec) {
-      if (avcodec_send_packet(m.adec, m.pkt) == 0) {
-        while (avcodec_receive_frame(m.adec, m.frame) == 0) {
-          QueueAudio(m, m.frame);
-          av_frame_unref(m.frame);
+    } else {
+      for (Track& t : m.tracks) {
+        if (m.pkt->stream_index != t.stream || !t.dec) continue;
+        if (avcodec_send_packet(t.dec, m.pkt) == 0) {
+          while (avcodec_receive_frame(t.dec, m.frame) == 0) {
+            QueueAudio(m, t, m.frame);
+            av_frame_unref(m.frame);
+          }
         }
       }
     }
@@ -226,23 +252,90 @@ void SyncGuest(const Movie& m) {
   Wr32(m.guest + kLastFrameNum, m.frame_num > 1 ? m.frame_num - 1 : 0);
 }
 
+// BinkSetSoundSystem(open, param): `open` is the address of BinkOpenMiles
+// or BinkOpenDirectSound (resolved through the import table).
 HLE_NAMED("binkw32.dll", "_BinkSetSoundSystem@8", BinkSetSoundSystem, 2) {
   std::lock_guard<std::mutex> l(g_mu);
-  g_sound_system = Arg(c, 0) != 0;
+  uint32_t open = Arg(c, 0);
+  g_sound_system = !open ? SoundSystem::None
+                   : open == ThunkFor("binkw32.dll", "_BinkOpenDirectSound@4")
+                       ? SoundSystem::DirectSound
+                       : SoundSystem::Miles;
   return 1;
 }
 
+// BinkSetSoundTrack(track): the one track ID BINKSNDTRACK opens (~0: no
+// sound at all).
 HLE_NAMED("binkw32.dll", "_BinkSetSoundTrack@4", BinkSetSoundTrack, 1) {
   std::lock_guard<std::mutex> l(g_mu);
   g_sound_track = Arg(c, 0);
+  g_track_ids.assign(1, Arg(c, 0));
   return 0;
 }
 
-// The game passes this function's address to BinkSetSoundSystem; Bink
-// would call it to attach to the Miles driver. Our Bink talks to the
-// mixer directly, so it is never called.
+// BinkSetSoundTrack(total_tracks, tracks): the IDs BINKSNDTRACK opens.
+HLE_NAMED("binkw32.dll", "_BinkSetSoundTrack@8", BinkSetSoundTrack8, 2) {
+  std::lock_guard<std::mutex> l(g_mu);
+  uint32_t n = std::min<uint32_t>(Arg(c, 0), kMaxTracks), p = Arg(c, 1);
+  g_track_ids.clear();
+  for (uint32_t i = 0; p && i < n; i++) g_track_ids.push_back(Rd32(p + 4 * i));
+  return 0;
+}
+
+// Games pass these functions' addresses to BinkSetSoundSystem; Bink would
+// call them to attach to Miles or DirectSound. Our Bink talks to the mixer
+// directly, so they are never called.
 HLE_NAMED("binkw32.dll", "_BinkOpenMiles@4", BinkOpenMiles, 1) {
   FatalF("binkw32: BinkOpenMiles called directly");
+}
+HLE_NAMED("binkw32.dll", "_BinkOpenDirectSound@4", BinkOpenDirectSound, 1) {
+  FatalF("binkw32: BinkOpenDirectSound called directly");
+}
+
+// The audio track IDs of a Bink file (header: track count at 0x28, from
+// revision 'k' on 4 more bytes, then per track 4 bytes, 4 bytes of rate and
+// flags, then the IDs).
+std::vector<uint32_t> TrackIds(const std::vector<uint8_t>& d) {
+  std::vector<uint32_t> ids;
+  if (d.size() < 44) return ids;
+  uint32_t n = std::min<uint32_t>(Le32(d.data() + 40), kMaxTracks);
+  size_t at = 44 + 8 * size_t(n) + (d[3] >= 'k' ? 4 : 0);
+  for (uint32_t i = 0; i < n && at + 4 * (i + 1) <= d.size(); i++)
+    ids.push_back(Le32(d.data() + at + 4 * i));
+  return ids;
+}
+
+// Opens decoders for the tracks that play.
+void ChooseTracks(Movie& m, uint32_t flags, const std::vector<uint32_t>& ids) {
+  bool sound;
+  std::vector<uint32_t> want;
+  {
+    std::lock_guard<std::mutex> l(g_mu);
+    switch (g_sound_system) {
+      case SoundSystem::None: sound = false; break;
+      case SoundSystem::Miles: sound = MilesDriverOpen(); break;
+      default: sound = audio::GetMixer().rate() > 0; break;
+    }
+    if (g_sound_track == 0xFFFFFFFF) sound = false;
+    if (flags & kBinkSndTrack) want = g_track_ids;
+  }
+  if (!sound) return;
+  std::vector<int> streams;
+  for (unsigned i = 0; i < m.fmt->nb_streams; i++)
+    if (m.fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) streams.push_back(int(i));
+  if (streams.empty()) return;
+  // Without BINKSNDTRACK, the first track.
+  if (!(flags & kBinkSndTrack)) want = {ids.empty() ? 0u : ids[0]};
+  for (uint32_t id : want) {
+    for (size_t k = 0; k < streams.size(); k++) {
+      if ((k < ids.size() ? ids[k] : uint32_t(k)) != id) continue;
+      Track t;
+      t.id = id;
+      t.stream = streams[k];
+      t.dec = OpenDecoder(m.fmt->streams[t.stream]);
+      if (t.dec) m.tracks.push_back(std::move(t));
+    }
+  }
 }
 
 // BinkOpen(name_or_memory, flags) -> HBINK.
@@ -298,15 +391,8 @@ HLE_NAMED("binkw32.dll", "_BinkOpen@8", BinkOpen, 2) {
     WarnF("binkw32: BinkOpen(%s): no decodable video stream\n", what.c_str());
     return 0;
   }
-  bool sound;
-  {
-    std::lock_guard<std::mutex> l(g_mu);
-    sound = g_sound_system && g_sound_track != 0xFFFFFFFF && MilesDriverOpen();
-  }
-  if (sound) {
-    m->as = av_find_best_stream(m->fmt, AVMEDIA_TYPE_AUDIO, -1, m->vs, nullptr, 0);
-    if (m->as >= 0) m->adec = OpenDecoder(m->fmt->streams[m->as]);
-  }
+  std::vector<uint32_t> ids = TrackIds(m->data);
+  ChooseTracks(*m, flags, ids);
   m->w = int(width);
   m->h = int(height);
   m->pkt = av_packet_alloc();
@@ -320,10 +406,14 @@ HLE_NAMED("binkw32.dll", "_BinkOpen@8", BinkOpen, 2) {
   Wr32(m->guest + kFrameRateDiv, div);
   Wr32(m->guest + kOpenFlags, flags);
   Wr32(m->guest + kSize, uint32_t(m->data.size()));
+  Wr32(m->guest + kNumTracks, uint32_t(ids.size()));
+  Wr32(m->guest + kTrackIDs, m->guest + kTrackIDList);
+  for (size_t i = 0; i < ids.size(); i++) Wr32(m->guest + kTrackIDList + 4 * uint32_t(i), ids[i]);
   SyncGuest(*m);
-  WarnF("binkw32: BinkOpen(%s): %ux%u %s, %u frames at %.3f fps, %s\n",
-        what.c_str(), width, height, av_get_pix_fmt_name(m->vdec->pix_fmt),
-        m->frames, m->fps, m->adec ? "with audio" : "silent");
+  WarnF("binkw32: BinkOpen(%s, %08X): %ux%u %s, %u frames at %.3f fps, %zu audio tracks, "
+        "%zu playing\n",
+        what.c_str(), flags, width, height, av_get_pix_fmt_name(m->vdec->pix_fmt), m->frames,
+        m->fps, ids.size(), m->tracks.size());
   uint32_t b = m->guest;
   std::lock_guard<std::mutex> l(g_mu);
   g_movies[b] = std::move(m);
@@ -392,22 +482,19 @@ HLE_NAMED("binkw32.dll", "_BinkPause@8", BinkPause, 2) {
     else if (m->started)
       m->start += now - m->paused_at;
     m->paused = p;
-    if (m->voice) {
-      std::lock_guard<std::mutex> ml(audio::GetMixer().mu());
-      m->voice->state = p ? audio::Voice::State::Paused : audio::Voice::State::Playing;
-    }
+    std::lock_guard<std::mutex> ml(audio::GetMixer().mu());
+    for (Track& t : m->tracks)
+      if (t.voice) t.voice->state = p ? audio::Voice::State::Paused : audio::Voice::State::Playing;
   }
   return p;
 }
 
-// BinkCopyToBuffer(HBINK, dest, destpitch, destheight, destx, desty, flags)
-// with the BINKSURFACE* format in the low bits of flags.
-HLE_NAMED("binkw32.dll", "_BinkCopyToBuffer@28", BinkCopyToBuffer, 7) {
-  std::lock_guard<std::mutex> l(g_mu);
-  Movie* m = Find(Arg(c, 0), "BinkCopyToBuffer");
-  if (!m || m->bgra.empty()) return 0;
-  uint32_t dest = Arg(c, 1), pitch = Arg(c, 2), height = Arg(c, 3);
-  uint32_t dx = Arg(c, 4), dy = Arg(c, 5), type = Arg(c, 6) & 0xF;
+// Copies the source rectangle sx, sy, sw x sh of the current frame to
+// dest (pitch, height rows) at dx, dy, in the BINKSURFACE* format in the
+// low bits of flags.
+void CopyFrame(const Movie& m, uint32_t dest, uint32_t pitch, uint32_t height, uint32_t dx,
+               uint32_t dy, uint32_t sx, uint32_t sy, uint32_t sw, uint32_t sh, uint32_t flags) {
+  uint32_t type = flags & 0xF;
   int bpp;
   switch (type) {
     case 1: case 2: bpp = 3; break;
@@ -416,11 +503,14 @@ HLE_NAMED("binkw32.dll", "_BinkCopyToBuffer@28", BinkCopyToBuffer, 7) {
     default:
       FatalF("binkw32: BinkCopyToBuffer: surface type %u not implemented", type);
   }
-  uint32_t rows = std::min<uint32_t>(m->h, height > dy ? height - dy : 0);
+  sx = std::min<uint32_t>(sx, uint32_t(m.w));
+  sy = std::min<uint32_t>(sy, uint32_t(m.h));
+  sw = std::min<uint32_t>(sw, uint32_t(m.w) - sx);
+  uint32_t rows = std::min<uint32_t>({sh, uint32_t(m.h) - sy, height > dy ? height - dy : 0});
   for (uint32_t y = 0; y < rows; y++) {
-    const uint8_t* s = m->bgra.data() + size_t(y) * m->w * 4;
+    const uint8_t* s = m.bgra.data() + (size_t(sy + y) * m.w + sx) * 4;
     uint8_t* d = GPtr(dest + (dy + y) * pitch + dx * bpp);
-    for (int x = 0; x < m->w; x++, s += 4) {
+    for (uint32_t x = 0; x < sw; x++, s += 4) {
       uint8_t b = s[0], g = s[1], r = s[2], a = s[3];
       switch (type) {
         case 1: d[0] = b; d[1] = g; d[2] = r; break;
@@ -446,6 +536,84 @@ HLE_NAMED("binkw32.dll", "_BinkCopyToBuffer@28", BinkCopyToBuffer, 7) {
       d += bpp;
     }
   }
+}
+
+// BinkCopyToBuffer(HBINK, dest, destpitch, destheight, destx, desty, flags)
+HLE_NAMED("binkw32.dll", "_BinkCopyToBuffer@28", BinkCopyToBuffer, 7) {
+  std::lock_guard<std::mutex> l(g_mu);
+  Movie* m = Find(Arg(c, 0), "BinkCopyToBuffer");
+  if (!m || m->bgra.empty()) return 0;
+  CopyFrame(*m, Arg(c, 1), Arg(c, 2), Arg(c, 3), Arg(c, 4), Arg(c, 5), 0, 0, uint32_t(m->w),
+            uint32_t(m->h), Arg(c, 6));
+  return 0;
+}
+
+// BinkCopyToBufferRect(HBINK, dest, destpitch, destheight, destx, desty,
+// srcx, srcy, srcw, srch, flags)
+HLE_NAMED("binkw32.dll", "_BinkCopyToBufferRect@44", BinkCopyToBufferRect, 11) {
+  std::lock_guard<std::mutex> l(g_mu);
+  Movie* m = Find(Arg(c, 0), "BinkCopyToBufferRect");
+  if (!m || m->bgra.empty()) return 0;
+  CopyFrame(*m, Arg(c, 1), Arg(c, 2), Arg(c, 3), Arg(c, 4), Arg(c, 5), Arg(c, 6), Arg(c, 7),
+            Arg(c, 8), Arg(c, 9), Arg(c, 10));
+  return 0;
+}
+
+// BinkSetVolume(HBINK, trackid, volume): 32768 is full volume (Bink
+// allows up to 65536).
+HLE_NAMED("binkw32.dll", "_BinkSetVolume@12", BinkSetVolume, 3) {
+  std::lock_guard<std::mutex> l(g_mu);
+  Movie* m = Find(Arg(c, 0), "BinkSetVolume");
+  if (!m) return 0;
+  float v = float(std::min<uint32_t>(Arg(c, 2), 65536)) / 32768.0f;
+  std::lock_guard<std::mutex> ml(audio::GetMixer().mu());
+  for (Track& t : m->tracks) {
+    if (t.id != Arg(c, 1)) continue;
+    t.volume = v;
+    if (t.voice) t.voice->volume = v;
+  }
+  return 0;
+}
+
+// BinkGetRealtime(HBINK, BINKREALTIME*, frames): the frame position and
+// rate; the timing statistics are zero.
+HLE_NAMED("binkw32.dll", "_BinkGetRealtime@12", BinkGetRealtime, 3) {
+  std::lock_guard<std::mutex> l(g_mu);
+  Movie* m = Find(Arg(c, 0), "BinkGetRealtime");
+  uint32_t rt = Arg(c, 1);
+  if (!m || !rt) return 0;
+  std::memset(GPtr(rt), 0, 14 * 4);
+  Wr32(rt + 0, m->frame_num);
+  Wr32(rt + 4, Rd32(m->guest + kFrameRate));
+  Wr32(rt + 8, Rd32(m->guest + kFrameRateDiv));
+  Wr32(rt + 12, Arg(c, 2));
+  return 0;
+}
+
+// BinkGoto(HBINK, frame, flags): back to the start by seeking, forward by
+// decoding; playback time continues from the new frame.
+HLE_NAMED("binkw32.dll", "_BinkGoto@12", BinkGoto, 3) {
+  std::lock_guard<std::mutex> l(g_mu);
+  Movie* m = Find(Arg(c, 0), "BinkGoto");
+  if (!m) return 0;
+  uint32_t target = std::clamp<uint32_t>(Arg(c, 1), 1, std::max(m->frames, 1u));
+  if (target < m->decoded) {
+    if (av_seek_frame(m->fmt, m->vs, 0, AVSEEK_FLAG_BACKWARD) < 0)
+      FatalF("binkw32: BinkGoto(%u): cannot rewind the movie", target);
+    avcodec_flush_buffers(m->vdec);
+    for (Track& t : m->tracks) {
+      avcodec_flush_buffers(t.dec);
+      if (t.queue) t.queue->Clear();
+    }
+    m->decoded = 0;
+    m->video_eof = false;
+  }
+  while (m->decoded < target)
+    if (!DecodeNextFrame(*m)) break;
+  m->frame_num = target;
+  m->start = Clock::now() - std::chrono::duration_cast<Clock::duration>(
+                                std::chrono::duration<double>((target - 1) / m->fps));
+  SyncGuest(*m);
   return 0;
 }
 

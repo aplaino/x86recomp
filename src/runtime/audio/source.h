@@ -79,6 +79,8 @@ class QueueSource : public Source {
  public:
   QueueSource(int channels, int rate);
   void Push(const float* frames, int n);
+  // Drops what is queued and not played yet (a seek).
+  void Clear();
   void Finish();
   // Frames read since creation (pushed frames are consumed in order).
   int64_t Consumed();

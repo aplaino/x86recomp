@@ -116,6 +116,8 @@ class Mixer {
   void Close();
 
   std::mutex& mu() { return mu_; }
+  // Output rate; 0 until opened (no device: never).
+  int rate() const { return rate_; }
   // With mu() held:
   void Add(Voice* v);
   void Remove(Voice* v);

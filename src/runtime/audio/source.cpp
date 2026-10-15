@@ -397,6 +397,12 @@ void QueueSource::Push(const float* frames, int n) {
   q_.insert(q_.end(), frames, frames + size_t(n) * channels_);
 }
 
+void QueueSource::Clear() {
+  std::lock_guard<std::mutex> l(mu_);
+  q_.clear();
+  head_ = 0;
+}
+
 int64_t QueueSource::Consumed() {
   std::lock_guard<std::mutex> l(mu_);
   return consumed_;
