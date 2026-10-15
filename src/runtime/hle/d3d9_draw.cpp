@@ -3,9 +3,14 @@
 // shaders (translated from D3DXCompileShader's HLSL or from bytecode)
 // become gfx::ShaderDraw: the vertex declaration (or FVF) is matched to the
 // vertex shader's input semantics, and the streams, indices, constant
-// registers and samplers are passed as they are. The fixed-function
-// pipeline is not supported yet: such draws are fatal and named.
+// registers and samplers are passed as they are. Draws without shaders
+// use gfx::Device's fixed-function pipeline (D3D7 semantics) with the
+// D3D9 state in its terms: sampler states at D3D7's texture-stage
+// positions, D3D9's transform numbers mapped. Mixing a shader with the
+// fixed-function pipeline and fixed-function draws with a vertex
+// declaration (no FVF) are not supported yet (fatal, named).
 
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
@@ -88,14 +93,92 @@ uint32_t VerticesFor(uint32_t prim, uint32_t count) {
   }
 }
 
+// The fixed-function state in gfx::Device's (D3D7's) terms.
+void SyncFixedFunction(Device& d) {
+  // Stages from the first with COLOROP DISABLE (1) on are unused.
+  bool active = true;
+  for (uint32_t s = 0; s < 8; s++) {
+    active = active && d.tss[s][1] != 1;
+    for (uint32_t t = 1; t < 33; t++)
+      if (t < 13 || t > 21) d.gfx->SetTextureStageState(s, t, d.tss[s][t]);
+    // D3D9 moved these to sampler states. Filters: D3DTEXF (NONE 0, POINT
+    // 1, LINEAR 2, ANISOTROPIC 3) to D3D7's magnification (anisotropic 5)
+    // and mip (NONE 1, POINT 2, LINEAR 3) values.
+    const uint32_t* ss = d.ss[s];
+    d.gfx->SetTextureStageState(s, 13, ss[1]);  // ADDRESSU
+    d.gfx->SetTextureStageState(s, 14, ss[2]);  // ADDRESSV
+    d.gfx->SetTextureStageState(s, 15, ss[4]);  // BORDERCOLOR
+    d.gfx->SetTextureStageState(s, 16, ss[5] == 3 ? 5 : ss[5]);  // MAGFILTER
+    d.gfx->SetTextureStageState(s, 17, ss[6]);  // MINFILTER
+    d.gfx->SetTextureStageState(s, 18, ss[7] + 1);  // MIPFILTER
+    d.gfx->SetTextureStageState(s, 19, ss[8]);  // MIPMAPLODBIAS
+    d.gfx->SetTextureStageState(s, 20, ss[9]);  // MAXMIPLEVEL
+    d.gfx->SetTextureStageState(s, 21, ss[10]);  // MAXANISOTROPY
+    auto* t = active ? com::As<Texture>(d.textures[s]) : nullptr;
+    if (t && t->cube) FatalF("d3d9: fixed-function stage %u with a cube texture", s);
+    d.gfx->SetTexture(s, t ? t->tex : 0);
+  }
+  // D3DTS_VIEW 2, PROJECTION 3 and TEXTURE0-7 16-23 are D3D7's numbers;
+  // WORLD-WORLD3 are 256-259 (D3D7: 1, 4-6).
+  static const std::pair<uint32_t, uint32_t> kTransforms[] = {
+      {2, 2}, {3, 3}, {256, 1}, {257, 4}, {258, 5}, {259, 6}, {16, 16}, {17, 17}, {18, 18},
+      {19, 19}, {20, 20}, {21, 21}, {22, 22}, {23, 23},
+  };
+  static const float kIdentity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+  for (const auto& [d3d9, d3d7] : kTransforms) {
+    auto it = d.transforms.find(d3d9);
+    d.gfx->SetTransform(d3d7, it != d.transforms.end() ? it->second.data() : kIdentity);
+  }
+}
+
+// A draw without shaders: stream 0 with the FVF.
+void DrawFixed(Device& d, gfx::ShaderDraw& sd, const char* what) {
+  if (com::As<VertexDecl>(d.decl) || !d.fvf)
+    FatalF("d3d9: fixed-function %s with a vertex declaration (only FVFs are supported)", what);
+  if (!sd.streams[0].data) {
+    const Device::Stream& st = d.streams[0];
+    auto* b = com::As<Buffer>(st.buffer);
+    if (!b || st.offset >= b->length) return;
+    sd.streams[0] = {static_cast<const uint8_t*>(GPtr(b->mem)) + st.offset, b->length - st.offset,
+                     st.stride};
+  }
+  const gfx::VertexStream& vs = sd.streams[0];
+  uint32_t first = uint32_t(std::max(sd.base_vertex, 0));
+  // Vertices from base_vertex; indexed draws index from there.
+  uint32_t nv = sd.indices ? sd.min_index + sd.vertex_count : sd.vertex_count;
+  if (!vs.stride || uint64_t(first + nv) * vs.stride > vs.size)
+    FatalF("d3d9: fixed-function %s reads past its vertex buffer", what);
+  std::vector<uint16_t> idx;
+  uint32_t ni = 0;
+  if (sd.indices) {
+    ni = VerticesFor(sd.prim, sd.primitives);
+    idx.resize(ni);
+    for (uint32_t i = 0; i < ni; i++) {
+      uint32_t v = sd.index_size == 4 ? static_cast<const uint32_t*>(sd.indices)[i]
+                                      : static_cast<const uint16_t*>(sd.indices)[i];
+      if (v > 0xFFFF) FatalF("d3d9: fixed-function %s with an index above 65535", what);
+      idx[i] = uint16_t(v);
+    }
+  }
+  SyncState(d);
+  SyncFixedFunction(d);
+  BindTargets(d);
+  d.gfx->Draw(sd.prim, d.fvf, vs.data + size_t(first) * vs.stride, nv, vs.stride,
+              sd.indices ? idx.data() : nullptr, ni);
+}
+
 // Completes `sd` (primitive, counts, and any streams already given) from
 // the device's bindings and draws it.
 void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
   Shader* vs = com::As<Shader>(d.vs);
   Shader* ps = com::As<Shader>(d.ps);
+  if (!vs && !ps) {
+    DrawFixed(d, sd, what);
+    return;
+  }
   if (!vs || !ps)
-    FatalF("d3d9: %s without a %s shader: the fixed-function pipeline is not supported yet",
-           what, !vs ? "vertex" : "pixel");
+    FatalF("d3d9: %s with a %s shader and the fixed-function %s stage is not supported yet",
+           what, vs ? "vertex" : "pixel", vs ? "pixel" : "vertex");
 
   std::vector<guest::D3DVERTEXELEMENT9> from_fvf;
   const std::vector<guest::D3DVERTEXELEMENT9>* elements = nullptr;

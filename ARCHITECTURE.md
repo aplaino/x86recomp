@@ -572,8 +572,10 @@ API front ends:
 - Direct3D 9 / D3DX 9 (recomp_d3d9, in progress): device, resources and
   state in the HLE, sent to gfx::Device at each draw; draws with
   translated shaders (from HLSL or bytecode) on its programmable
-  pipeline. The fixed-function pipeline under D3D9 and instancing are not
-  done yet (fatal and named).
+  pipeline, draws without shaders on gfx::Device's fixed-function one
+  (D3D9's sampler states and transform numbers mapped to D3D7's). Mixing
+  a shader with the fixed-function pipeline, fixed-function draws with a
+  vertex declaration, and instancing are not done yet (fatal and named).
 
 ### Shaders: HLSL translated from source
 Games that build HLSL at run time and compile it with D3DXCompileShader
@@ -814,7 +816,11 @@ late-frame rule; on an idle host wake-ups land 15-30 us (Linux) or
 - winmm: multimedia timers on one timer thread, as on Windows (TimeProc
   callbacks, or SetEvent / PulseEvent on the given event).
 - binkw32: ffmpeg (Bink demuxer from memory, binkvideo/binkaudio,
-  swscale), audio into the Miles mixer.
+  swscale), audio into the software mixer whichever sound system the
+  game picks (BinkOpenMiles or BinkOpenDirectSound). The 1.x API up to
+  Bink 1.8's: sound tracks by ID (BINKSNDTRACK, the track list in the
+  BINK struct), per-track volume, BinkCopyToBufferRect, BinkGoto,
+  BinkGetRealtime.
 - dbghelp: UnDecorateSymbolName (LLVM's Microsoft demangler, normalised
   to MSVC's output); the rest stubbed.
 - shfolder, wsock32 (host-name queries), imm32, version: small shims.
