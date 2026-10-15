@@ -1178,7 +1178,7 @@ HLE("user32.dll", CreateWindowExA, 12) {
     EnsureSdlVideo();
     int cw, ch;
     ClientSize(win, &cw, &ch);
-    win.sdl = SDL_CreateWindow(win.title.c_str(), ToPoints(nullptr, cw), ToPoints(nullptr, ch),
+    win.sdl = SDL_CreateWindow(AnsiToUtf8(win.title).c_str(), ToPoints(nullptr, cw), ToPoints(nullptr, ch),
                                SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY |
                                    GfxWindowFlags());
     if (!win.sdl) FatalF("SDL_CreateWindow: %s", SDL_GetError());
@@ -1530,7 +1530,7 @@ HLE("user32.dll", SetWindowTextA, 2) {
     w->title = t;
     s = w->sdl;
   }
-  if (s) SDL_SetWindowTitle(s, t.c_str());
+  if (s) SDL_SetWindowTitle(s, AnsiToUtf8(t).c_str());
   return 1;
 }
 

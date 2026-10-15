@@ -101,6 +101,27 @@ inline std::string Narrow(const std::u16string& w) {
   return s;
 }
 
+// Windows-1252 text as UTF-8, for host APIs that take UTF-8 (SDL window
+// titles, message boxes). macOS rejects titles that are not valid UTF-8.
+inline std::string AnsiToUtf8(const std::string& s) {
+  std::string u;
+  u.reserve(s.size());
+  for (unsigned char ch : s) {
+    uint16_t c = Cp1252ToUnicode(ch);
+    if (c < 0x80) {
+      u.push_back(char(c));
+    } else if (c < 0x800) {
+      u.push_back(char(0xC0 | (c >> 6)));
+      u.push_back(char(0x80 | (c & 0x3F)));
+    } else {
+      u.push_back(char(0xE0 | (c >> 12)));
+      u.push_back(char(0x80 | ((c >> 6) & 0x3F)));
+      u.push_back(char(0x80 | (c & 0x3F)));
+    }
+  }
+  return u;
+}
+
 // CT_CTYPE1 classification for Latin-1 + the CP1252 extras.
 inline uint16_t CharType1(uint16_t u) {
   enum { kUpper = 1, kLower = 2, kDigit = 4, kSpace = 8, kPunct = 0x10,

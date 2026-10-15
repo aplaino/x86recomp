@@ -407,8 +407,9 @@ uint32_t ShowMessageBox(uint32_t owner, const std::string& text,
   SDL_MessageBoxData data{};
   data.flags = flags;
   data.window = owner ? SdlWindowFor(owner) : nullptr;
-  data.title = caption.c_str();
-  data.message = text.c_str();
+  const std::string title_utf8 = AnsiToUtf8(caption), text_utf8 = AnsiToUtf8(text);
+  data.title = title_utf8.c_str();
+  data.message = text_utf8.c_str();
   data.numbuttons = int(sdl.size());
   data.buttons = sdl.data();
   int chosen = -1;
