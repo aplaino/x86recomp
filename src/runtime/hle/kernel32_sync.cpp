@@ -43,17 +43,38 @@ struct Waitable : KObject {
   // Under g_wait_mu: a wait on it was satisfied; consume (auto-reset,
   // mutex ownership, semaphore count).
   virtual void Acquire(uint32_t tid) { (void)tid; }
+  // Under g_wait_mu: thread `tid` starts (on) or stops waiting on it.
+  virtual void Waiting(uint32_t tid, bool on) { (void)tid, (void)on; }
 };
 
 struct EventObject : Waitable {
   EventObject(bool manual, bool initial)
       : Waitable(Type::Event), manual_reset(manual), signalled(initial) {}
-  bool Signalled(uint32_t) const override { return signalled; }
-  void Acquire(uint32_t) override {
+  bool Signalled(uint32_t tid) const override { return signalled || pulsed.count(tid); }
+  void Acquire(uint32_t tid) override {
+    if (pulsed.erase(tid)) return;
     if (!manual_reset) signalled = false;
+  }
+  void Waiting(uint32_t tid, bool on) override {
+    if (on) {
+      waiters.insert(tid);
+    } else {
+      waiters.erase(tid);
+      pulsed.erase(tid);
+    }
+  }
+  // PulseEvent: satisfies the threads waiting now (one of them if
+  // auto-reset) and leaves the event reset.
+  void Pulse() {
+    signalled = false;
+    if (manual_reset)
+      pulsed = waiters;
+    else if (!waiters.empty())
+      pulsed.insert(*waiters.begin());
   }
   bool manual_reset;
   bool signalled;
+  std::set<uint32_t> waiters, pulsed;  // threads waiting; those a pulse released
 };
 
 struct MutexObject : Waitable {
@@ -101,6 +122,15 @@ uint32_t WaitObjects(const std::vector<std::shared_ptr<Waitable>>& objs,
   auto deadline = std::chrono::steady_clock::now() +
                   std::chrono::milliseconds(timeout_ms);
   std::unique_lock<std::mutex> l(g_wait_mu);
+  // Registered as a waiter for the whole wait (PulseEvent), under the lock.
+  struct Registration {
+    const std::vector<std::shared_ptr<Waitable>>& objs;
+    uint32_t tid;
+    ~Registration() {
+      for (const auto& o : objs) o->Waiting(tid, false);
+    }
+  } reg{objs, tid};
+  for (const auto& o : objs) o->Waiting(tid, true);
   for (;;) {
     if (wait_all) {
       bool all = true;
@@ -126,6 +156,24 @@ uint32_t WaitObjects(const std::vector<std::shared_ptr<Waitable>>& objs,
 }
 
 void SignalChanged() { g_wait_cv.notify_all(); }
+
+}  // namespace
+
+bool SignalEventHandle(uint32_t h, bool pulse) {
+  auto e = std::dynamic_pointer_cast<EventObject>(GetHandle(h));
+  if (!e) return false;
+  {
+    std::lock_guard<std::mutex> l(g_wait_mu);
+    if (pulse)
+      e->Pulse();
+    else
+      e->signalled = true;
+  }
+  SignalChanged();
+  return true;
+}
+
+namespace {
 
 std::string NameOf(uint32_t va) { return va ? GStr(va) : std::string(); }
 
@@ -171,14 +219,12 @@ HLE("kernel32.dll", CreateEventA, 4) {
 
 HLE("kernel32.dll", SetEvent, 1) {
   GuestSyncPoint sync;
-  auto e = std::dynamic_pointer_cast<EventObject>(GetHandle(Arg(c, 0)));
-  if (!e) return 0;
-  {
-    std::lock_guard<std::mutex> l(g_wait_mu);
-    e->signalled = true;
-  }
-  SignalChanged();
-  return 1;
+  return SignalEventHandle(Arg(c, 0), false) ? 1 : 0;
+}
+
+HLE("kernel32.dll", PulseEvent, 1) {
+  GuestSyncPoint sync;
+  return SignalEventHandle(Arg(c, 0), true) ? 1 : 0;
 }
 
 HLE("kernel32.dll", ResetEvent, 1) {

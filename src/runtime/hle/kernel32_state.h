@@ -75,6 +75,10 @@ struct GuestThreadExit {
 void OnGuestThreadFinished(uint32_t tid);
 
 struct Thread;
+// SetEvent (or PulseEvent) on an event handle from host code (WinMM
+// timers). False if `h` is not an event.
+bool SignalEventHandle(uint32_t h, bool pulse);
+
 // Runs guest function entry(param) on a new detached host thread bound to
 // guest thread t.
 void StartHostThread(Thread* t, uint32_t entry, uint32_t param);
