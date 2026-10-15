@@ -66,6 +66,10 @@ class RecordingDevice final : public gfx::Device {
   gfx::DepthId CreateDepth(int, int, gfx::Format) override { return 1; }
   void DestroyDepth(gfx::DepthId) override {}
   void SetRenderTarget(gfx::TextureId, gfx::DepthId) override {}
+  void SetRenderTargets(const gfx::TextureId*, gfx::DepthId) override {}
+  gfx::ShaderId CreateShader(const hlsl::Program&) override { return 0; }
+  void DestroyShader(gfx::ShaderId) override {}
+  void DrawShader(const gfx::ShaderDraw&) override {}
   void Blit(const void*, uint32_t, gfx::Format, const gfx::Rect&, const gfx::Rect&, bool,
             uint32_t) override {}
   void ReadBack(const gfx::Rect&, void*, uint32_t, gfx::Format) override {}

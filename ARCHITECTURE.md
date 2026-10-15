@@ -547,8 +547,19 @@ draws). Backends:
    - D3D9's integer pixel centres become SDL_GPU's half-integer ones
      with a half-pixel shift in the vertex shader. SDL_GPU flips Vulkan's
      viewport, so clip space is y-up on both APIs.
+   - Direct3D 9 shaders (translated from HLSL, see Shaders below) are
+     compiled when created: the backend prepends its prelude (bindings
+     in SDL_GPU's layout, vertex pulling by declaration type from the
+     same storage buffer, D3D9's pixel centres, the alpha test), glslang
+     makes SPIR-V and, on Metal, SPIRV-Cross MSL. Their draws record
+     like the fixed-function ones: each stream's vertex range is copied
+     to the arena, the constant registers are uniform buffers, and the
+     pipeline is cached by state, shader pair and target formats (up to
+     four targets). Front faces stay D3D's clockwise ones whatever is
+     culled, so VFACE keeps its sign.
    <ID>_GFX=d3d9|gpu selects the backend; the default is SDL_GPU, with
-   d3d9 kept (where the build has it) as the reference image.
+   d3d9 kept (where the build has it) as the reference image (it has no
+   programmable pipeline: DXVK would need the shaders as D3D bytecode).
 
 API front ends:
 - DirectDraw 7 / Direct3D 7 (recomp_d3d7): guest-visible COM objects;
@@ -559,7 +570,10 @@ API front ends:
   not a pass-through to host OpenGL, so the same Metal path serves it
   (macOS OpenGL is deprecated and capped at 2.1 for legacy contexts).
 - Direct3D 9 / D3DX 9 (recomp_d3d9, in progress): device, resources and
-  state in the HLE; the programmable pipeline on gfx::Device is next.
+  state in the HLE, sent to gfx::Device at each draw; draws with
+  translated shaders on its programmable pipeline. The fixed-function
+  pipeline under D3D9, compiled shader bytecode and instancing are not
+  done yet (fatal and named).
 
 ### Shaders: HLSL translated from source
 Games that build HLSL at run time and compile it with D3DXCompileShader

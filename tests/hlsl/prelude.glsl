@@ -13,4 +13,6 @@ vec4 r_position(vec4 p) { return vec4(p.x, -p.y, p.z, p.w); }
 #define R_SAMPLER_BINDING(n) set = 2, binding = n
 vec2 r_vpos() { return gl_FragCoord.xy - 0.5; }
 float r_vface() { return gl_FrontFacing ? 1.0 : -1.0; }
+layout(std140, set = 3, binding = 2) uniform r_test_ps { float r_test_ref; };
+void r_color0(inout vec4 c) { if (c.a < r_test_ref) discard; }
 #endif

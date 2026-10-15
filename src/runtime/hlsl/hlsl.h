@@ -16,7 +16,9 @@
 //                                   holds it, defaults for missing ones;
 //   vec4 r_position(vec4 p)         vertex shaders: the POSITION output to
 //                                   gl_Position (clip-space conventions);
-//   vec2 r_vpos(), float r_vface()  pixel shaders: VPOS and VFACE.
+//   vec2 r_vpos(), float r_vface()  pixel shaders: VPOS and VFACE;
+//   void r_color0(inout vec4 c)     pixel shaders that write COLOR0: called
+//                                   last with it (the alpha test).
 // The body declares, if it reads them:
 //   layout(std140, R_FLOAT_BINDING) uniform r_float_regs { vec4 c[n]; };
 //   layout(std140, R_INT_BINDING) uniform r_int_regs { ivec4 r_i[16];

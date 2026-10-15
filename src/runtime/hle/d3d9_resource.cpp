@@ -247,6 +247,11 @@ Surface::~Surface() {
   if (mem) HeapFreeProcess(mem);
 }
 
+Shader::~Shader() {
+  Device* d = com::As<Device>(device);
+  if (d && id) d->gfx->DestroyShader(id);
+}
+
 Texture::~Texture() {
   Device* d = com::As<Device>(device);
   if (d && tex) d->gfx->DestroyTexture(tex);
@@ -343,17 +348,23 @@ uint32_t NewSurface(Device& d, uint32_t device, Surface::Kind kind, uint32_t w,
 }
 
 void BindTargets(Device& d) {
-  Surface* rt = com::As<Surface>(d.render_targets[0]);
   Surface* z = com::As<Surface>(d.depth_stencil);
-  gfx::TextureId color = 0;
-  if (rt && rt->kind == Surface::Kind::RenderTarget) color = rt->tex;
-  if (rt && rt->kind == Surface::Kind::TextureLevel) {
-    if (rt->level != 0)
-      FatalF("d3d9: render target is level %d of a texture (only level 0 is "
-             "supported)", rt->level);
-    color = rt->texture->tex;
+  gfx::TextureId color[4] = {};
+  for (int i = 0; i < 4; i++) {
+    Surface* rt = com::As<Surface>(d.render_targets[i]);
+    if (!rt) break;
+    if (rt->kind == Surface::Kind::RenderTarget) color[i] = rt->tex;
+    if (rt->kind == Surface::Kind::TextureLevel) {
+      if (rt->level != 0 || rt->texture->cube)
+        FatalF("d3d9: render target %d is level %d%s of a texture (only level 0 of a 2D "
+               "texture is supported)", i, rt->level, rt->texture->cube ? " of a cube face" : "");
+      color[i] = rt->texture->tex;
+    }
+    if (i > 0 && !color[i])
+      FatalF("d3d9: render target %d is a %s surface", i,
+             rt->kind == Surface::Kind::BackBuffer ? "back buffer" : "non-target");
   }
-  d.gfx->SetRenderTarget(color, z ? z->depth : 0);
+  d.gfx->SetRenderTargets(color, z ? z->depth : 0);
 }
 
 }  // namespace recomp::d3d9
@@ -477,6 +488,7 @@ uint32_t CreateShader(Ctx& c, bool pixel) {
   if (s->program && (s->program->stage == hlsl::Stage::Pixel) != pixel)
     FatalF("d3d9: Create%sShader with a translated %s shader", pixel ? "Pixel" : "Vertex",
            pixel ? "vertex" : "pixel");
+  if (s->program) s->id = Dev(c)->gfx->CreateShader(*s->program);
   Wr32(Arg(c, 2), com::Publish(s, ShaderVtable(pixel)));
   return D3D_OK;
 }
@@ -514,16 +526,14 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::SetRenderTarget", D3DDev9_SetRenderTarg
   Device* d = Dev(c);
   uint32_t i = Arg(c, 1), surf = Arg(c, 2);
   if (i >= 4 || (i == 0 && !surf)) return D3DERR_INVALIDCALL;
-  if (i != 0 && surf)
-    FatalF("d3d9: SetRenderTarget(%u): multiple render targets not supported", i);
+  if (surf && !com::As<Surface>(surf)) FatalF("d3d9: SetRenderTarget: %08X is not a surface", surf);
   Bind(&d->render_targets[i], surf);
   if (i == 0) {
     Surface* s = com::As<Surface>(surf);
-    if (!s) FatalF("d3d9: SetRenderTarget: %08X is not a surface", surf);
     d->viewport = {0, 0, s->desc.Width, s->desc.Height, 0.0f, 1.0f};
     d->scissor = {0, 0, LONG(s->desc.Width), LONG(s->desc.Height)};
-    BindTargets(*d);
   }
+  BindTargets(*d);
   return D3D_OK;
 }
 
@@ -599,8 +609,10 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetIndices", D3DDev9_GetIndices, 2) {
   return D3D_OK;
 }
 
+// A declaration replaces the FVF and the other way round (SetFVF).
 HLE_NAMED("d3d9.dll", "IDirect3DDevice9::SetVertexDeclaration", D3DDev9_SetVertexDeclaration, 2) {
   Bind(&Dev(c)->decl, Arg(c, 1));
+  Dev(c)->fvf = 0;
   return D3D_OK;
 }
 

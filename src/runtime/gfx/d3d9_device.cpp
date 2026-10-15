@@ -296,6 +296,20 @@ class D3D9Device final : public Device {
     depths_.erase(it);
   }
 
+  // The programmable pipeline runs GLSL translated from HLSL, which this
+  // backend cannot: it stays the reference for fixed-function games.
+  void SetRenderTargets(const TextureId color[4], DepthId depth) override {
+    if (color[1]) FatalF("gfx: multiple render targets need the SDL_GPU backend (<ID>_GFX=gpu)");
+    SetRenderTarget(color[0], depth);
+  }
+  ShaderId CreateShader(const hlsl::Program&) override {
+    FatalF("gfx: translated shaders need the SDL_GPU backend (<ID>_GFX=gpu)");
+  }
+  void DestroyShader(ShaderId) override {}
+  void DrawShader(const ShaderDraw&) override {
+    FatalF("gfx: translated shaders need the SDL_GPU backend (<ID>_GFX=gpu)");
+  }
+
   void SetRenderTarget(TextureId color, DepthId depth) override {
     current_color_ = color;
     if (color) {

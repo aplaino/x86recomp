@@ -971,6 +971,8 @@ class Emitter {
       o += "  " + Decl(entry_->ret, "r_ret") + " = " + call + ";\n";
       outs = Output("r_ret", entry_->ret, entry_->ret_semantic, entry_->loc) + outs;
     }
+    // The backend's per-pixel work on the colour (the alpha test).
+    if (out_->color_outputs & 1) outs += "  r_color0(r_c0);\n";
     return o + outs + "}\n";
   }
 

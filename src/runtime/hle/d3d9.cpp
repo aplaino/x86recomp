@@ -774,6 +774,7 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::Clear", D3DDev9_Clear, 7) {
     const D3DRECT& dr = G<D3DRECT>(rects)[i];
     r.push_back({dr.x1, dr.y1, dr.x2, dr.y2});
   }
+  SyncState(*d);
   BindTargets(*d);
   d->gfx->Clear(uint32_t(r.size()), r.empty() ? nullptr : r.data(), Arg(c, 3),
                 Arg(c, 4), z, Arg(c, 6));
@@ -874,6 +875,7 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetSoftwareVertexProcessing", D3DDev9_G
 }
 
 HLE_NAMED("d3d9.dll", "IDirect3DDevice9::SetFVF", D3DDev9_SetFVF, 2) {
+  Bind(&Dev(c)->decl, 0);
   Dev(c)->fvf = Arg(c, 1);
   return D3D_OK;
 }

@@ -12,9 +12,18 @@
 // SLOPESCALEDEPTHBIAS 175, DEPTHBIAS 195), and FVFs may use D3D9's
 // XYZW position (0x4002: homogeneous, untransformed). Plain data structs mirror the
 // D3D7 ones (which D3D9 also kept unchanged).
+//
+// Direct3D 9's programmable pipeline (shaders translated from HLSL,
+// runtime/hlsl) is a second way to draw: CreateShader / DrawShader, with
+// up to four render targets (SetRenderTargets). Its render states are
+// D3D9's (also COLORWRITEENABLE1-3 190-192, BLENDFACTOR 193,
+// SEPARATEALPHABLENDENABLE 206 and the alpha blend 207-209). The d3d9
+// backend does not have it.
 
 #include <cstdint>
 #include <memory>
+
+#include "runtime/hlsl/hlsl.h"
 
 struct SDL_Window;
 
@@ -72,6 +81,51 @@ struct Light {
 
 using TextureId = uint32_t;  // 0: none
 using DepthId = uint32_t;    // 0: none
+using ShaderId = uint32_t;   // 0: none
+
+// ---- the programmable pipeline (Direct3D 9 shaders translated from HLSL)
+
+// Where a vertex shader input (hlsl::Program::inputs slot) comes from: a
+// stream, the byte offset in its vertices and the D3DDECLTYPE; type 17
+// (D3DDECLTYPE_UNUSED) if the vertex declaration does not supply it.
+struct VertexInput {
+  uint32_t stream = 0, offset = 0, type = 17;
+};
+
+struct VertexStream {
+  const uint8_t* data = nullptr;  // vertex 0 (the buffer at its stream offset)
+  uint32_t size = 0;              // bytes readable from data
+  uint32_t stride = 0;
+};
+
+// A Direct3D 9 draw with shaders. Vertex v of a stream is at data +
+// v * stride; v is index + base_vertex (indexed) or base_vertex + i, i <
+// vertex_count (not indexed). Indexed draws read only vertices
+// base_vertex + min_index .. + vertex_count - 1.
+struct ShaderDraw {
+  ShaderId vs = 0, ps = 0;
+  uint32_t prim = 0;        // D3DPRIMITIVETYPE
+  uint32_t primitives = 0;  // primitive count
+  const VertexInput* inputs = nullptr;  // one per vertex shader input slot
+  uint32_t input_count = 0;
+  VertexStream streams[16];
+  int32_t base_vertex = 0;
+  uint32_t min_index = 0, vertex_count = 0;
+  const void* indices = nullptr;  // null: not indexed
+  uint32_t index_size = 2;        // bytes
+  // Constant registers: float c (vs 256, ps 224), int i (16 x 4), bool b
+  // (16).
+  const float (*vs_float)[4] = nullptr;
+  const int32_t (*vs_int)[4] = nullptr;
+  const uint32_t* vs_bool = nullptr;
+  const float (*ps_float)[4] = nullptr;
+  const int32_t (*ps_int)[4] = nullptr;
+  const uint32_t* ps_bool = nullptr;
+  // Samplers 0-15, then the vertex samplers 0-3: texture (0: none) and
+  // D3DSAMPLERSTATETYPE values (index 1-13).
+  TextureId textures[20] = {};
+  const uint32_t (*sampler_states)[14] = nullptr;
+};
 
 class Device {
  public:
@@ -102,6 +156,10 @@ class Device {
   // ---- render target (color 0 = back buffer; Present copies it to the
   // front buffer and shows that)
   virtual void SetRenderTarget(TextureId color, DepthId depth) = 0;
+  // Up to four colour targets drawn at once (shaders' COLOR0-3): color[0]
+  // as SetRenderTarget's, the others textures or 0 (none, and none after
+  // the first 0).
+  virtual void SetRenderTargets(const TextureId color[4], DepthId depth) = 0;
 
   // ---- 2D (DirectDraw Blt onto the back buffer / render target)
   // Copies `src_rect` of a linear image into `dst_rect` of the current
@@ -174,6 +232,14 @@ class Device {
                          uint32_t index_count) = 0;
   virtual void DrawMapped(uint32_t prim, uint32_t fvf) = 0;
   virtual void Present() = 0;
+
+  // ---- programmable pipeline. A shader from the HLSL translation (null
+  // on failure); render states (blend, depth, stencil, cull, colour
+  // write, alpha test, scissor), the viewport and the targets as set
+  // above, the rest per draw.
+  virtual ShaderId CreateShader(const hlsl::Program& p) = 0;
+  virtual void DestroyShader(ShaderId s) = 0;
+  virtual void DrawShader(const ShaderDraw& d) = 0;
 };
 
 // Where a src_w x src_h frame is shown in a dst_w x dst_h output: scaled

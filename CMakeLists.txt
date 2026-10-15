@@ -127,6 +127,18 @@ if(FFMPEG_FOUND)
   target_link_libraries(recomp_bink PUBLIC recomp_mss32)
 endif()
 
+# HLSL (D3DX 9's dialect) to GLSL (runtime/hlsl/hlsl.h); no HLE in it,
+# so a plain static library, also used by the recomp_hlslc dev tool.
+add_library(recomp_hlsl STATIC
+  src/runtime/hlsl/preprocess.cpp
+  src/runtime/hlsl/parse.cpp
+  src/runtime/hlsl/check.cpp
+  src/runtime/hlsl/glsl.cpp
+  src/runtime/hlsl/hlsl.cpp)
+target_include_directories(recomp_hlsl PUBLIC src)
+target_compile_features(recomp_hlsl PUBLIC cxx_std_20)
+add_subdirectory(tools/hlslc)
+
 # gfx::Device and its backends; no HLE in it, so a plain static library
 # shared by the graphics API modules below. Backends:
 # - SDL_GPU (gfx/gpu_device.cpp): always; Vulkan, or Metal on macOS;
@@ -135,10 +147,19 @@ endif()
 add_library(recomp_gfx STATIC
   src/runtime/gfx/format.cpp
   src/runtime/gfx/device.cpp
-  src/runtime/gfx/gpu_device.cpp)
+  src/runtime/gfx/gpu_device.cpp
+  src/runtime/gfx/shader_compile.cpp)
 target_include_directories(recomp_gfx PUBLIC src)
 target_compile_features(recomp_gfx PUBLIC cxx_std_20)
-target_link_libraries(recomp_gfx PUBLIC SDL3::SDL3)
+# Shaders translated at run time (Direct3D 9) are compiled then: glslang
+# to SPIR-V, and SPIRV-Cross to MSL on macOS (gfx/shader_compile.cpp).
+find_package(glslang CONFIG REQUIRED)
+target_link_libraries(recomp_gfx PUBLIC SDL3::SDL3 recomp_hlsl
+  PRIVATE glslang::glslang glslang::SPIRV glslang::glslang-default-resource-limits)
+if(APPLE)
+  find_package(spirv_cross_msl CONFIG REQUIRED)
+  target_link_libraries(recomp_gfx PRIVATE spirv-cross-msl)
+endif()
 # SDL_GPU's shaders, one GLSL source per stage (gfx/shaders): glslang
 # compiles it to SPIR-V for Vulkan; for Metal, SPIRV-Cross turns a build
 # with Metal's binding order (METAL defined) into MSL source. Either way
@@ -194,18 +215,6 @@ if(DXVK_NATIVE_DIR)
     COMPILE_DEFINITIONS "DXVK_WSI_SDL3")
 endif()
 
-# HLSL (D3DX 9's dialect) to GLSL (runtime/hlsl/hlsl.h); no HLE in it,
-# so a plain static library, also used by the recomp_hlslc dev tool.
-add_library(recomp_hlsl STATIC
-  src/runtime/hlsl/preprocess.cpp
-  src/runtime/hlsl/parse.cpp
-  src/runtime/hlsl/check.cpp
-  src/runtime/hlsl/glsl.cpp
-  src/runtime/hlsl/hlsl.cpp)
-target_include_directories(recomp_hlsl PUBLIC src)
-target_compile_features(recomp_hlsl PUBLIC cxx_std_20)
-add_subdirectory(tools/hlslc)
-
 # DirectDraw 7 / Direct3D 7 over gfx::Device.
 add_library(recomp_d3d7 OBJECT
   src/runtime/hle/ddraw.cpp
@@ -217,9 +226,12 @@ add_library(recomp_dinput8 OBJECT src/runtime/hle/dinput8.cpp)
 target_link_libraries(recomp_dinput8 PUBLIC recomp_runtime)
 
 # Direct3D 9 and D3DX 9 over gfx::Device.
-add_library(recomp_d3d9 OBJECT src/runtime/hle/d3d9.cpp
+add_library(recomp_d3d9 OBJECT src/runtime/hle/d3d9.cpp src/runtime/hle/d3d9_draw.cpp
   src/runtime/hle/d3d9_resource.cpp src/runtime/hle/d3dx9.cpp)
 target_link_libraries(recomp_d3d9 PUBLIC recomp_runtime recomp_gfx recomp_hlsl)
+# D3DX's maths rounds like the original only without contraction into FMA.
+set_source_files_properties(src/runtime/hle/d3dx9.cpp TARGET_DIRECTORY recomp_d3d9
+  PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 
 # OpenGL 1.x (opengl32, wgl, gdi32 pixel formats) over gfx::Device.
 add_library(recomp_opengl OBJECT

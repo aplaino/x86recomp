@@ -12,6 +12,8 @@
 // the translation placed the uniforms in.
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -267,6 +269,85 @@ HLE("d3dx9_35.dll", D3DXCreateCubeTextureFromFileInMemory, 4) {
   return CreateFromMemory(c, true, Arg(c, 0), Arg(c, 1), Arg(c, 2), D3DX_DEFAULT,
                           D3DX_DEFAULT, D3DX_DEFAULT, 0, D3DFMT_UNKNOWN, D3DPOOL_MANAGED, 0,
                           0, Arg(c, 3));
+}
+
+// ---- maths -----------------------------------------------------------------------------
+// In single precision, operations in the order D3DX evaluates them (built
+// without FMA contraction, see CMakeLists.txt): the game's own maths uses
+// the results. D3DXMATRIX: 16 floats, row-major, row vectors.
+
+using Mat = std::array<float, 16>;
+
+Mat ReadMatrix(uint32_t va) {
+  Mat m;
+  std::memcpy(m.data(), GPtr(va), sizeof m);
+  return m;
+}
+
+void WriteMatrix(uint32_t va, const Mat& m) { std::memcpy(GPtr(va), m.data(), sizeof m); }
+
+struct Vec3 {
+  float x, y, z;
+};
+
+Vec3 ReadVec3(uint32_t va) {
+  Vec3 v;
+  std::memcpy(&v, GPtr(va), sizeof v);
+  return v;
+}
+
+Vec3 Sub(Vec3 a, Vec3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+float Dot(Vec3 a, Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+Vec3 Cross(Vec3 a, Vec3 b) {
+  return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+// D3DXVec3Normalize: a zero vector stays zero.
+Vec3 Normalize(Vec3 v) {
+  float len = std::sqrt(Dot(v, v));
+  if (len == 0.0f) return {0, 0, 0};
+  return {v.x / len, v.y / len, v.z / len};
+}
+
+// (pOut, pM1, pM2): pOut may be either input.
+HLE("d3dx9_35.dll", D3DXMatrixMultiply, 3) {
+  Mat a = ReadMatrix(Arg(c, 1)), b = ReadMatrix(Arg(c, 2)), r;
+  for (int i = 0; i < 4; i++)
+    for (int j = 0; j < 4; j++)
+      r[i * 4 + j] = a[i * 4] * b[j] + a[i * 4 + 1] * b[4 + j] + a[i * 4 + 2] * b[8 + j] +
+                     a[i * 4 + 3] * b[12 + j];
+  WriteMatrix(Arg(c, 0), r);
+  return Arg(c, 0);
+}
+
+// (pOut, pEye, pAt, pUp)
+HLE("d3dx9_35.dll", D3DXMatrixLookAtLH, 4) {
+  Vec3 eye = ReadVec3(Arg(c, 1)), at = ReadVec3(Arg(c, 2)), up = ReadVec3(Arg(c, 3));
+  Vec3 z = Normalize(Sub(at, eye));
+  Vec3 x = Normalize(Cross(up, z));
+  Vec3 y = Cross(z, x);
+  Mat m = {x.x, y.x, z.x, 0, x.y, y.y, z.y, 0, x.z, y.z, z.z, 0,
+           -Dot(x, eye), -Dot(y, eye), -Dot(z, eye), 1};
+  WriteMatrix(Arg(c, 0), m);
+  return Arg(c, 0);
+}
+
+// (pOut, w, h, zn, zf)
+HLE("d3dx9_35.dll", D3DXMatrixOrthoLH, 5) {
+  auto f = [&](int i) {
+    uint32_t v = Arg(c, i);
+    float x;
+    std::memcpy(&x, &v, 4);
+    return x;
+  };
+  float w = f(1), h = f(2), zn = f(3), zf = f(4);
+  Mat m{};
+  m[0] = 2.0f / w;
+  m[5] = 2.0f / h;
+  m[10] = 1.0f / (zf - zn);
+  m[14] = zn / (zn - zf);
+  m[15] = 1.0f;
+  WriteMatrix(Arg(c, 0), m);
+  return Arg(c, 0);
 }
 
 // ---- ID3DXBuffer ------------------------------------------------------------------------
