@@ -314,7 +314,10 @@ HLE("kernel32.dll", ExitThread, 1) {
   throw GuestThreadExit{Arg(c, 0)};
 }
 
+// Thread priorities are not applied: host threads keep the default
+// scheduling, and every guest thread reports THREAD_PRIORITY_NORMAL.
 HLE("kernel32.dll", GetThreadPriority, 1) { return 0; }
+HLE("kernel32.dll", SetThreadPriority, 2) { return 1; }
 HLE("kernel32.dll", GetPriorityClass, 1) { return 0x20; }  // NORMAL
 HLE("kernel32.dll", SetPriorityClass, 2) { return 1; }
 
