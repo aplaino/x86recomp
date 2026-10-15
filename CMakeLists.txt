@@ -139,7 +139,8 @@ add_library(recomp_hlsl STATIC
   src/runtime/hlsl/parse.cpp
   src/runtime/hlsl/check.cpp
   src/runtime/hlsl/glsl.cpp
-  src/runtime/hlsl/hlsl.cpp)
+  src/runtime/hlsl/hlsl.cpp
+  src/runtime/hlsl/bytecode.cpp)
 target_include_directories(recomp_hlsl PUBLIC src)
 target_compile_features(recomp_hlsl PUBLIC cxx_std_20)
 add_subdirectory(tools/hlslc)

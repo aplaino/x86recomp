@@ -571,8 +571,8 @@ API front ends:
   (macOS OpenGL is deprecated and capped at 2.1 for legacy contexts).
 - Direct3D 9 / D3DX 9 (recomp_d3d9, in progress): device, resources and
   state in the HLE, sent to gfx::Device at each draw; draws with
-  translated shaders on its programmable pipeline. The fixed-function
-  pipeline under D3D9, compiled shader bytecode and instancing are not
+  translated shaders (from HLSL or bytecode) on its programmable
+  pipeline. The fixed-function pipeline under D3D9 and instancing are not
   done yet (fatal and named).
 
 ### Shaders: HLSL translated from source
@@ -601,12 +601,21 @@ the game relies on:
   shader writes become private copies (D3DX accepts that).
 - D3DXCompileShader returns a shader function holding the translation in
   a comment (version token, comment, END), which Create*Shader
-  recognise. Shaders shipped as compiled bytecode are not translated
-  yet.
+  recognise.
+- Shaders shipped compiled (shader model 1.1-3.0 tokens) go through a
+  second front end to the same GLSL contract (runtime/hlsl/bytecode.cpp):
+  registers become GLSL variables, each instruction a vec4 expression
+  with the source swizzles and modifiers, then the shift / saturate
+  result modifiers, write mask and predication; co-issued pairs read
+  before they write; subroutines become functions and rep / loop / if /
+  break GLSL's own; def'd constants override the register file, also
+  for relative reads. ps_1_x texture-matrix and bump instructions and
+  ps_1_4 are not supported (named).
 The translator stops at the first construct it does not support, so a
 gap is a fatal error naming it, never a silently wrong shader.
 <ID>_SHADER_DUMP=dir saves every source, and recomp_hlslc translates a
-saved source and reports the reflection; tests/hlsl runs its shaders
+saved source (or dumped bytecode, .vso / .pso) and reports the
+reflection; tests/hlsl and tests/hlsl_bytecode_test run their shaders
 through glslang.
 
 D3D7 FPU side effect: the HLE must reproduce whatever the real runtime

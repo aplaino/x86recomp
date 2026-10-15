@@ -112,3 +112,10 @@ recomp_hlsl_test(sm2_ps sm2 frag -T ps_2_0 -E ps)
 add_test(NAME hlsl_error COMMAND recomp_hlslc ${CMAKE_CURRENT_SOURCE_DIR}/hlsl/error.hlsl
          -T ps_3_0 -E main)
 set_tests_properties(hlsl_error PROPERTIES WILL_FAIL TRUE)
+
+# The bytecode translator on hand-assembled shaders (shader models
+# 1.1-3.0); each translation must compile with glslangValidator.
+add_executable(hlsl_bytecode_test hlsl_bytecode_test.cpp)
+target_link_libraries(hlsl_bytecode_test PRIVATE recomp_hlsl)
+add_test(NAME hlsl_bytecode COMMAND hlsl_bytecode_test ${RECOMP_GLSLANG}
+         ${CMAKE_CURRENT_SOURCE_DIR}/hlsl/prelude.glsl ${CMAKE_CURRENT_BINARY_DIR})

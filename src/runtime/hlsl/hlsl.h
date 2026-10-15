@@ -109,6 +109,12 @@ bool Compile(std::string_view source, const std::vector<Define>& defines,
              const std::string& entry, const std::string& profile, uint32_t flags,
              Program* out, std::string* errors);
 
+// Translates a compiled D3D9 shader (shader model 1.1-3.0 tokens, as
+// CreateVertexShader / CreatePixelShader take them, END included) to the
+// same GLSL contract. No constant table: applications set the registers
+// the bytecode reads. On failure returns false with a message in *errors.
+bool TranslateBytecode(const uint32_t* tokens, size_t count, Program* out, std::string* errors);
+
 // A Program as bytes and back (shader containers).
 std::vector<uint8_t> Serialize(const Program& p);
 bool Deserialize(const uint8_t* data, size_t size, Program* p);

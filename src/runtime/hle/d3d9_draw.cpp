@@ -1,10 +1,10 @@
 // Direct3D 9 draws. The device's state reaches gfx::Device at each draw
 // (render states that changed, viewport, scissor, targets). Draws with
-// shaders from D3DXCompileShader become gfx::ShaderDraw: the vertex
-// declaration (or FVF) is matched to the vertex shader's input semantics,
-// and the streams, indices, constant registers and samplers are passed as
-// they are. The fixed-function pipeline and shaders shipped as compiled
-// bytecode are not supported yet: such draws are fatal and named.
+// shaders (translated from D3DXCompileShader's HLSL or from bytecode)
+// become gfx::ShaderDraw: the vertex declaration (or FVF) is matched to the
+// vertex shader's input semantics, and the streams, indices, constant
+// registers and samplers are passed as they are. The fixed-function
+// pipeline is not supported yet: such draws are fatal and named.
 
 #include <cstring>
 #include <vector>
@@ -96,9 +96,6 @@ void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
   if (!vs || !ps)
     FatalF("d3d9: %s without a %s shader: the fixed-function pipeline is not supported yet",
            what, !vs ? "vertex" : "pixel");
-  if (!vs->program || !ps->program)
-    FatalF("d3d9: %s with a shader that D3DXCompileShader did not make (compiled bytecode is "
-           "not supported yet)", what);
 
   std::vector<guest::D3DVERTEXELEMENT9> from_fvf;
   const std::vector<guest::D3DVERTEXELEMENT9>* elements = nullptr;

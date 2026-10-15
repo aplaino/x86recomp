@@ -2,6 +2,7 @@
 //
 //   recomp_hlslc <file.hlsl> [-T profile] [-E entry] [-D name[=value]]...
 //                [--prelude file] [-o out.glsl] [--reflect]
+//   recomp_hlslc <file.vso|file.pso> [--prelude file] [-o out.glsl] [--reflect]
 //
 // Profile and entry default to the "// profile P, entry E" line the
 // D3DXCompileShader source dump starts with. --prelude makes a complete
@@ -105,11 +106,18 @@ int main(int argc, char** argv) {
       }
     }
   }
-  if (profile.empty() || entry.empty()) return PrintUsage();
+  // Compiled shaders (.vso / .pso: D3D9 tokens, as <ID>_SHADER_DUMP
+  // writes them) go through the bytecode translator.
+  std::string ext = std::string(in).size() > 4 ? std::string(in).substr(std::string(in).size() - 4) : "";
+  bool bytecode = ext == ".vso" || ext == ".pso";
+  if (!bytecode && (profile.empty() || entry.empty())) return PrintUsage();
 
   Program prog;
   std::string errors;
-  if (!Compile(src, defines, entry, profile, 0, &prog, &errors)) {
+  bool ok = bytecode ? TranslateBytecode(reinterpret_cast<const uint32_t*>(src.data()), src.size() / 4,
+                                         &prog, &errors)
+                     : Compile(src, defines, entry, profile, 0, &prog, &errors);
+  if (!ok) {
     // fxc style: the file name for "memory".
     if (errors.rfind("memory", 0) == 0) errors.replace(0, 6, in);
     std::fprintf(stderr, "%s\n", errors.c_str());

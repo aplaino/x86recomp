@@ -36,9 +36,9 @@ Used by:
   fixed-function device: SDL_GPU on Vulkan or native Metal, or
   dxvk-native's Direct3D 9 as a reference), Direct3D 9 and D3DX 9 (in
   progress), DirectSound 8, DirectInput 8, XInput and dbghelp.
-- **HLSL translator** (`src/runtime/hlsl`, `recomp_hlslc`): D3DX 9's
-  HLSL dialect (shader models 1-3) to GLSL, for games that compile
-  shaders at run time.
+- **Shader translators** (`src/runtime/hlsl`, `recomp_hlslc`): D3DX 9's
+  HLSL dialect and compiled Direct3D 9 shaders (shader models 1-3) to
+  GLSL, for the programmable pipeline on SDL_GPU.
 - **Tools**: Ghidra export scripts (`tools/ghidra`), a PE symbol dumper
   (`tools/pe_symbols.py`), dev-time reference checks (`tools/layout`,
   `tools/undname`), and EAX reference measurement (`tools/eax_capture`:

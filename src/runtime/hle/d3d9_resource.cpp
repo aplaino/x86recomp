@@ -477,8 +477,8 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::CreateVertexDeclaration", D3DDev9_Creat
   return D3D_OK;
 }
 
-// <ID>_SHADER_DUMP=dir: shaders created from compiled bytecode (not
-// translated) are written to dir/<FNV-1a>.vso / .pso, as D3D9 tokens.
+// <ID>_SHADER_DUMP=dir: shaders created from compiled bytecode are written
+// to dir/<FNV-1a>.vso / .pso, as D3D9 tokens (recomp_hlslc reads them).
 void DumpBytecode(const Shader& s) {
   const char* dir = Env("SHADER_DUMP");
   if (!dir || !*dir) return;
@@ -502,11 +502,20 @@ uint32_t CreateShader(Ctx& c, bool pixel) {
   s->pixel = pixel;
   s->tokens = ReadFunction(Arg(c, 1));
   s->program = ReadTranslated(s->tokens);
-  if (s->program && (s->program->stage == hlsl::Stage::Pixel) != pixel)
-    FatalF("d3d9: Create%sShader with a translated %s shader", pixel ? "Pixel" : "Vertex",
+  if (!s->program) {
+    // Compiled bytecode: translated here.
+    DumpBytecode(*s);
+    auto p = std::make_shared<hlsl::Program>();
+    std::string err;
+    if (!hlsl::TranslateBytecode(s->tokens.data(), s->tokens.size(), p.get(), &err))
+      FatalF("d3d9: Create%sShader: %s (<ID>_SHADER_DUMP writes the tokens)",
+             pixel ? "Pixel" : "Vertex", err.c_str());
+    s->program = std::move(p);
+  }
+  if ((s->program->stage == hlsl::Stage::Pixel) != pixel)
+    FatalF("d3d9: Create%sShader with a %s shader", pixel ? "Pixel" : "Vertex",
            pixel ? "vertex" : "pixel");
-  if (s->program) s->id = Dev(c)->gfx->CreateShader(*s->program);
-  else DumpBytecode(*s);
+  s->id = Dev(c)->gfx->CreateShader(*s->program);
   Wr32(Arg(c, 2), com::Publish(s, ShaderVtable(pixel)));
   return D3D_OK;
 }
