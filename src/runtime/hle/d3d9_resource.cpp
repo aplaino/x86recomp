@@ -477,6 +477,23 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::CreateVertexDeclaration", D3DDev9_Creat
   return D3D_OK;
 }
 
+// <ID>_SHADER_DUMP=dir: shaders created from compiled bytecode (not
+// translated) are written to dir/<FNV-1a>.vso / .pso, as D3D9 tokens.
+void DumpBytecode(const Shader& s) {
+  const char* dir = Env("SHADER_DUMP");
+  if (!dir || !*dir) return;
+  uint64_t h = 1469598103934665603ull;
+  for (uint32_t t : s.tokens)
+    for (int i = 0; i < 4; i++) h = (h ^ ((t >> (8 * i)) & 0xFF)) * 1099511628211ull;
+  char path[512];
+  std::snprintf(path, sizeof path, "%s/%016llx.%s", dir, (unsigned long long)h,
+                s.pixel ? "pso" : "vso");
+  if (FILE* f = std::fopen(path, "wb")) {
+    std::fwrite(s.tokens.data(), 4, s.tokens.size(), f);
+    std::fclose(f);
+  }
+}
+
 uint32_t CreateShader(Ctx& c, bool pixel) {
   // (pFunction, ppShader)
   if (!Arg(c, 1)) return D3DERR_INVALIDCALL;
@@ -489,6 +506,7 @@ uint32_t CreateShader(Ctx& c, bool pixel) {
     FatalF("d3d9: Create%sShader with a translated %s shader", pixel ? "Pixel" : "Vertex",
            pixel ? "vertex" : "pixel");
   if (s->program) s->id = Dev(c)->gfx->CreateShader(*s->program);
+  else DumpBytecode(*s);
   Wr32(Arg(c, 2), com::Publish(s, ShaderVtable(pixel)));
   return D3D_OK;
 }

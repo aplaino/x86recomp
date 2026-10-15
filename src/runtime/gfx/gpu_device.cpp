@@ -677,6 +677,47 @@ class GpuDevice final : public Device {
     BindTarget();
   }
 
+  void StretchRect(TextureId src, const Rect& sr, TextureId dst, const Rect& dr,
+                   bool linear) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    auto target = [&](TextureId id, int* w, int* h) -> SDL_GPUTexture* {
+      if (!id) {
+        *w = bb_w_;
+        *h = bb_h_;
+        return backbuffer_;
+      }
+      auto it = textures_.find(id);
+      if (it == textures_.end() || !it->second.rt) return nullptr;
+      *w = it->second.w;
+      *h = it->second.h;
+      return it->second.tex;
+    };
+    int sw, sh, dw, dh;
+    SDL_GPUTexture* s = target(src, &sw, &sh);
+    SDL_GPUTexture* d = target(dst, &dw, &dh);
+    if (!s || !d) return;
+    Rect a = Clip(sr, sw, sh), b = Clip(dr, dw, dh);
+    if (a.right <= a.left || a.bottom <= a.top || b.right <= b.left || b.bottom <= b.top) return;
+    // Draws recorded so far come first (into either texture).
+    Flush();
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(dev_);
+    SDL_GPUBlitInfo bi{};
+    bi.source.texture = s;
+    bi.source.x = Uint32(a.left);
+    bi.source.y = Uint32(a.top);
+    bi.source.w = Uint32(a.right - a.left);
+    bi.source.h = Uint32(a.bottom - a.top);
+    bi.destination.texture = d;
+    bi.destination.x = Uint32(b.left);
+    bi.destination.y = Uint32(b.top);
+    bi.destination.w = Uint32(b.right - b.left);
+    bi.destination.h = Uint32(b.bottom - b.top);
+    bi.load_op = SDL_GPU_LOADOP_LOAD;
+    bi.filter = linear ? SDL_GPU_FILTER_LINEAR : SDL_GPU_FILTER_NEAREST;
+    SDL_BlitGPUTexture(cmd, &bi);
+    Submit(cmd);
+  }
+
   // ---- 2D
 
   void Blit(const void* src, uint32_t pitch, Format fmt, const Rect& sr, const Rect& dr,

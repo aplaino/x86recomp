@@ -160,6 +160,11 @@ class Device {
   // as SetRenderTarget's, the others textures or 0 (none, and none after
   // the first 0).
   virtual void SetRenderTargets(const TextureId color[4], DepthId depth) = 0;
+  // Copies `sr` of a colour target (render-target texture, 0 = the back
+  // buffer) to `dr` of another, scaled with linear or nearest filtering
+  // (Direct3D 9's StretchRect).
+  virtual void StretchRect(TextureId src, const Rect& sr, TextureId dst, const Rect& dr,
+                           bool linear) = 0;
 
   // ---- 2D (DirectDraw Blt onto the back buffer / render target)
   // Copies `src_rect` of a linear image into `dst_rect` of the current

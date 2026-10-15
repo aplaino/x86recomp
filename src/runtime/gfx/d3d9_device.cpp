@@ -302,6 +302,9 @@ class D3D9Device final : public Device {
     if (color[1]) FatalF("gfx: multiple render targets need the SDL_GPU backend (<ID>_GFX=gpu)");
     SetRenderTarget(color[0], depth);
   }
+  void StretchRect(TextureId, const Rect&, TextureId, const Rect&, bool) override {
+    FatalF("gfx: StretchRect needs the SDL_GPU backend (<ID>_GFX=gpu)");
+  }
   ShaderId CreateShader(const hlsl::Program&) override {
     FatalF("gfx: translated shaders need the SDL_GPU backend (<ID>_GFX=gpu)");
   }

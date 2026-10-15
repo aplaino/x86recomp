@@ -239,5 +239,43 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::DrawIndexedPrimitiveUP", D3DDev9_DrawIn
   return D3D_OK;
 }
 
+// The gfx colour target behind a surface for StretchRect (0: the back
+// buffer); fatal for the kinds it does not support.
+gfx::TextureId StretchTarget(Surface* s, const char* which) {
+  switch (s->kind) {
+    case Surface::Kind::BackBuffer:
+      return 0;
+    case Surface::Kind::RenderTarget:
+      return s->tex;
+    case Surface::Kind::TextureLevel:
+      if (s->level == 0 && !s->texture->cube && (s->texture->usage & D3DUSAGE_RENDERTARGET))
+        return s->texture->tex;
+      break;
+    default:
+      break;
+  }
+  FatalF("d3d9: StretchRect %s is not a colour target (kind %d, level %d)", which, int(s->kind),
+         s->level);
+}
+
+gfx::Rect SurfaceRect(Surface* s, uint32_t rect) {
+  if (!rect) return {0, 0, int32_t(s->desc.Width), int32_t(s->desc.Height)};
+  const auto* r = G<guest::RECT>(rect);
+  return {r->left, r->top, r->right, r->bottom};
+}
+
+// (pSourceSurface, pSourceRect, pDestSurface, pDestRect, Filter)
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::StretchRect", D3DDev9_StretchRect, 6) {
+  Device* d = Dev(c);
+  auto* src = com::As<Surface>(Arg(c, 1));
+  auto* dst = com::As<Surface>(Arg(c, 3));
+  if (!src || !dst || src == dst) return D3DERR_INVALIDCALL;
+  gfx::TextureId s = StretchTarget(src, "source"), t = StretchTarget(dst, "destination");
+  // D3DTEXF_LINEAR (2) filters; NONE and POINT take the nearest texel.
+  d->gfx->StretchRect(s, SurfaceRect(src, Arg(c, 2)), t, SurfaceRect(dst, Arg(c, 4)),
+                      Arg(c, 5) >= 2);
+  return D3D_OK;
+}
+
 }  // namespace
 }  // namespace recomp::hle
