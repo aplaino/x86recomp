@@ -163,6 +163,9 @@ find_package(glslang CONFIG REQUIRED)
 target_link_libraries(recomp_gfx PUBLIC SDL3::SDL3 recomp_hlsl
   PRIVATE glslang::glslang glslang::SPIRV glslang::glslang-default-resource-limits)
 if(APPLE)
+  # SPIRV-Cross's per-module configs do not find their dependencies.
+  find_package(spirv_cross_core CONFIG REQUIRED)
+  find_package(spirv_cross_glsl CONFIG REQUIRED)
   find_package(spirv_cross_msl CONFIG REQUIRED)
   target_link_libraries(recomp_gfx PRIVATE spirv-cross-msl)
 endif()

@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <map>
 #include <mutex>
+#include <thread>
 
 #include "runtime/hle/hle.h"
 #include "runtime/hle/kernel32_state.h"
