@@ -22,6 +22,10 @@ SDL_Window* SdlWindowFor(uint32_t hwnd);
 uint32_t DcForWindow(uint32_t hwnd);
 uint32_t WindowForDc(uint32_t hdc);
 
+// Whether the caller is the guest's main thread (the one SDL's video and
+// events belong to).
+bool OnMainThread();
+
 // Ensures SDL video is initialised (main thread only).
 void EnsureSdlVideo();
 

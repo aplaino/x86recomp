@@ -35,7 +35,7 @@ Used by:
   hardware), Bink, DirectDraw 7/Direct3D 7 and OpenGL 1.x (on a
   fixed-function device: SDL_GPU on Vulkan or native Metal, or
   dxvk-native's Direct3D 9 as a reference), Direct3D 9 and D3DX 9 (in
-  progress), DirectInput 8 and dbghelp.
+  progress), DirectSound 8, DirectInput 8, XInput and dbghelp.
 - **HLSL translator** (`src/runtime/hlsl`, `recomp_hlslc`): D3DX 9's
   HLSL dialect (shader models 1-3) to GLSL, for games that compile
   shaders at run time.

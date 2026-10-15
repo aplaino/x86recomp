@@ -793,6 +793,17 @@ late-frame rule; on an idle host wake-ups land 15-30 us (Linux) or
   deviation is a guess; the outdoor presets with long delays (forest,
   mountains, plain) are barely measurable; EAX 1.0's damping and
   decay-time effects rest on two settings each.
+- dsound (DirectSound 8): on the same mixer, as Windows Vista and later
+  implement it (software only). Buffers keep a host copy of their
+  samples, updated at Unlock, and play it as a ring; the write cursor is
+  how far the mixer has read ahead. DirectSound's volume and pan law;
+  DS3D buffers and the listener (deferred settings, rolloff) use the
+  DS3D panning model above. Cones and Doppler are stored only;
+  notifications and effects are not implemented.
+- xinput1_3: SDL gamepads in the Xbox controller's layout, user indices
+  in connection order; none in automated runs.
+- winmm: multimedia timers on one timer thread, as on Windows (TimeProc
+  callbacks, or SetEvent / PulseEvent on the given event).
 - binkw32: ffmpeg (Bink demuxer from memory, binkvideo/binkaudio,
   swscale), audio into the Miles mixer.
 - dbghelp: UnDecorateSymbolName (LLVM's Microsoft demangler, normalised

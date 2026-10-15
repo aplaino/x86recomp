@@ -653,7 +653,6 @@ bool TakeMessage(uint32_t hwnd, uint32_t lo, uint32_t hi, bool remove, Msg* out)
   return false;
 }
 
-bool OnMainThread() { return std::this_thread::get_id() == g_main_thread_id; }
 
 GameConfig::Fullscreen FullscreenPolicy() {
   using F = GameConfig::Fullscreen;
@@ -775,6 +774,8 @@ void UpdateFullscreenAll() {
 }
 
 }  // namespace
+
+bool OnMainThread() { return std::this_thread::get_id() == g_main_thread_id; }
 
 void EnsureSdlVideo() {
   if (g_sdl_up) return;
