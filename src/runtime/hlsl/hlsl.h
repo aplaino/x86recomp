@@ -17,6 +17,10 @@
 //   vec4 r_position(vec4 p)         vertex shaders: the POSITION output to
 //                                   gl_Position (clip-space conventions);
 //   vec2 r_vpos(), float r_vface()  pixel shaders: VPOS and VFACE;
+//   float R_BIAS(n)                 pixel shaders: an LOD bias added where
+//                                   sampler register n is sampled with an
+//                                   implicit level (0.0 if the backend's
+//                                   samplers apply D3D9's MIPMAPLODBIAS);
 //   void r_color0(inout vec4 c)     pixel shaders that write COLOR0: called
 //                                   last with it (the alpha test).
 // The body declares, if it reads them:

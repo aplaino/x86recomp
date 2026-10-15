@@ -1022,6 +1022,7 @@ class GpuDevice final : public Device {
   };
   struct PsState {
     int32_t alpha[4];  // D3DCMPFUNC (ALWAYS when the test is off), ALPHAREF
+    float bias[16];    // per sampler register: MIPMAPLODBIAS (R_BIAS on Metal)
   };
 
   static std::string Prelude(hlsl::Stage stage, uint32_t samplers) {
@@ -1094,7 +1095,11 @@ vec4 r_position(vec4 p) { return vec4(p.x + p.w * r_pixel.x, p.y - p.w * r_pixel
       p += "#define R_FLOAT_BINDING " + binding(3, 0) + "\n";
       p += "#define R_INT_BINDING " + binding(3, 1) + "\n";
       p += std::string("#define R_SAMPLER_BINDING(n) set = ") + (metal ? "0" : "2") + ", binding = n\n";
-      p += "layout(std140, " + binding(3, 2) + ") uniform r_ps_state { ivec4 r_alpha; };\n";
+      p += "layout(std140, " + binding(3, 2) +
+           ") uniform r_ps_state { ivec4 r_alpha; vec4 r_bias[4]; };\n";
+      // Metal samplers have no LOD bias (SDL_GPU drops it there): the
+      // shader adds it where the level is implicit. Vulkan's apply it.
+      p += metal ? "#define R_BIAS(n) r_bias[(n) >> 2][(n) & 3]\n" : "#define R_BIAS(n) 0.0\n";
       p += R"(vec2 r_vpos() { return gl_FragCoord.xy - 0.5; }
 float r_vface() { return gl_FrontFacing ? 1.0 : -1.0; }
 // The alpha test, on the alpha at 8-bit precision.
@@ -1302,6 +1307,7 @@ void r_color0(inout vec4 c) {
     PsState pst{};
     pst.alpha[0] = rs_[15] ? int32_t(rs_[25]) : 8;
     pst.alpha[1] = int32_t(rs_[24] & 0xFF);
+    for (uint32_t r = 0; r < 16 && d.sampler_states; r++) pst.bias[r] = AsFloat(d.sampler_states[r][8]);
     PushUniform(sc, 5, &pst, sizeof pst);
 
     // Samplers: pixel 0-15 at 0-15, vertex 0-3 at 16-19.
@@ -1321,7 +1327,11 @@ void r_color0(inout vec4 c) {
       if (it != textures_.end() && it->second.cube == (want == hlsl::ParamType::SamplerCube) &&
           want != hlsl::ParamType::Sampler3D)
         sc.tex[r] = it->second.tex;
-      sc.smp[r] = Sampler(D3D9Sampler(d.sampler_states ? d.sampler_states[r] : nullptr));
+      SamplerKey sk = D3D9Sampler(d.sampler_states ? d.sampler_states[r] : nullptr);
+#if defined(__APPLE__)
+      sk.lod_bias = 0;  // in the shader (R_BIAS)
+#endif
+      sc.smp[r] = Sampler(sk);
     }
     ShaderPipeline(sc.key);
     c.shader = int(shader_cmds_.size());

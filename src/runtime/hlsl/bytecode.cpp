@@ -483,12 +483,15 @@ class Translator {
         ParamType ty = sampler_type_.count(s[1].num) ? sampler_type_[s[1].num] : ParamType::Sampler2D;
         std::string smp = SamplerName(s[1].num), c = S(s[0]);
         std::string co = ty == ParamType::Sampler2D ? "(" + c + ").xy" : "(" + c + ").xyz";
+        // The sampler's LOD bias (R_BIAS, hlsl.h); texld is pixel-only.
+        std::string b = "R_BIAS(" + std::to_string(s[1].num) + ")";
         if (in.ctl == 1) {  // texldp
-          if (ty == ParamType::Sampler2D) return "textureProj(" + smp + ", " + c + ")";
-          return "texture(" + smp + ", (" + c + ").xyz / (" + c + ").w)";
+          if (ty == ParamType::Sampler2D) return "textureProj(" + smp + ", " + c + ", " + b + ")";
+          return "texture(" + smp + ", (" + c + ").xyz / (" + c + ").w, " + b + ")";
         }
-        if (in.ctl == 2) return "texture(" + smp + ", " + co + ", (" + c + ").w)";  // texldb
-        return "texture(" + smp + ", " + co + ")";
+        if (in.ctl == 2)  // texldb
+          return "texture(" + smp + ", " + co + ", (" + c + ").w + " + b + ")";
+        return "texture(" + smp + ", " + co + ", " + b + ")";
       }
       case TEXLDL: {
         need(2);
@@ -699,7 +702,8 @@ class Translator {
     }
     if (pixel_ && major_ == 1 && in.op == TEX) {
       std::string n = std::to_string(in.dst.num);
-      Line("r_tx[" + n + "] = texture(" + SamplerName(in.dst.num) + ", r_tc[" + n + "].xy);");
+      Line("r_tx[" + n + "] = texture(" + SamplerName(in.dst.num) + ", r_tc[" + n + "].xy, R_BIAS(" +
+           n + "));");
       return;
     }
     if (pixel_ && major_ == 1 && in.op == TEXCOORD) {

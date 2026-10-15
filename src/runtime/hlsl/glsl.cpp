@@ -673,13 +673,18 @@ class Emitter {
       return dim == Dim::D1 ? "vec2(" + v + ", 0.5)" : v;
     };
     bool grads = e.args.size() == 4;
+    // Pixel shaders add the sampler's LOD bias where the level is implicit
+    // (R_BIAS, hlsl.h); a sampler passed as a parameter has no register.
+    const bool pixel = tg_.stage == Stage::Pixel;
+    const std::string bias =
+        s.rfind("r_s", 0) == 0 ? "R_BIAS(" + s.substr(3) + ")" : std::string("0.0");
     if (variant == 0 || variant == 2) {
       if (grads) {
         std::string dx = dim == Dim::D1 ? "vec2(" + a[2] + ", 0.0)" : a[2];
         std::string dy = dim == Dim::D1 ? "vec2(" + a[3] + ", 0.0)" : a[3];
         return "textureGrad(" + s + ", " + coords(a[1]) + ", " + dx + ", " + dy + ")";
       }
-      return "texture(" + s + ", " + coords(a[1]) + ")";
+      return "texture(" + s + ", " + coords(a[1]) + (pixel ? ", " + bias : "") + ")";
     }
     // bias, lod and proj take a float4: a helper so it is evaluated once.
     static const char* const kVariant[] = {"", "bias", "", "lod", "proj"};
@@ -687,17 +692,21 @@ class Emitter {
     std::string name = "r_tex" + dname + kVariant[variant];
     std::string body;
     std::string c = dim == Dim::D1 ? "vec2(t.x, 0.5)" : "t" + cs;
+    // The bias and proj helpers of a pixel shader take the sampler's bias.
+    const bool b = pixel && variant != 3;
+    const std::string pb = b ? ", b" : "";
     switch (variant) {
-      case 1: body = "texture(s, " + c + ", t.w)"; break;
+      case 1: body = "texture(s, " + c + ", t.w" + (b ? " + b" : "") + ")"; break;
       case 3: body = "textureLod(s, " + c + ", t.w)"; break;
       default:
-        if (dim == Dim::D2 || dim == Dim::D3) body = "textureProj(s, t)";
-        else if (dim == Dim::D1) body = "texture(s, vec2(t.x / t.w, 0.5))";
-        else body = "texture(s, t.xyz / t.w)";
+        if (dim == Dim::D2 || dim == Dim::D3) body = "textureProj(s, t" + pb + ")";
+        else if (dim == Dim::D1) body = "texture(s, vec2(t.x / t.w, 0.5)" + pb + ")";
+        else body = "texture(s, t.xyz / t.w" + pb + ")";
         break;
     }
-    Helper(name, "vec4 " + name + "(" + sampler + " s, vec4 t) { return " + body + "; }\n");
-    return name + "(" + s + ", " + a[1] + ")";
+    Helper(name, "vec4 " + name + "(" + sampler + " s, vec4 t" + (b ? ", float b" : "") +
+                     ") { return " + body + "; }\n");
+    return name + "(" + s + ", " + a[1] + (b ? ", " + bias : "") + ")";
   }
 
   // ---- Statements
