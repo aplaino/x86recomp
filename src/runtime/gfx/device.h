@@ -83,6 +83,13 @@ using TextureId = uint32_t;  // 0: none
 using DepthId = uint32_t;    // 0: none
 using ShaderId = uint32_t;   // 0: none
 
+// A colour target: a mip level of a render-target texture, or the back
+// buffer (tex 0, level 0). A level is max(1, size >> level) on each side.
+struct ColorTarget {
+  TextureId tex = 0;
+  int level = 0;
+};
+
 // ---- the programmable pipeline (Direct3D 9 shaders translated from HLSL)
 
 // Where a vertex shader input (hlsl::Program::inputs slot) comes from: a
@@ -157,13 +164,12 @@ class Device {
   // front buffer and shows that)
   virtual void SetRenderTarget(TextureId color, DepthId depth) = 0;
   // Up to four colour targets drawn at once (shaders' COLOR0-3): color[0]
-  // as SetRenderTarget's, the others textures or 0 (none, and none after
-  // the first 0).
-  virtual void SetRenderTargets(const TextureId color[4], DepthId depth) = 0;
-  // Copies `sr` of a colour target (render-target texture, 0 = the back
-  // buffer) to `dr` of another, scaled with linear or nearest filtering
-  // (Direct3D 9's StretchRect).
-  virtual void StretchRect(TextureId src, const Rect& sr, TextureId dst, const Rect& dr,
+  // as SetRenderTarget's (or a level of it), the others texture levels or
+  // tex 0 (none, and none after the first one).
+  virtual void SetRenderTargets(const ColorTarget color[4], DepthId depth) = 0;
+  // Copies `sr` of a colour target to `dr` of another, scaled with linear
+  // or nearest filtering (Direct3D 9's StretchRect).
+  virtual void StretchRect(ColorTarget src, const Rect& sr, ColorTarget dst, const Rect& dr,
                            bool linear) = 0;
 
   // ---- 2D (DirectDraw Blt onto the back buffer / render target)

@@ -319,17 +319,17 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::DrawIndexedPrimitiveUP", D3DDev9_DrawIn
   return D3D_OK;
 }
 
-// The gfx colour target behind a surface for StretchRect (0: the back
+// The gfx colour target behind a surface for StretchRect (tex 0: the back
 // buffer); fatal for the kinds it does not support.
-gfx::TextureId StretchTarget(Surface* s, const char* which) {
+gfx::ColorTarget StretchTarget(Surface* s, const char* which) {
   switch (s->kind) {
     case Surface::Kind::BackBuffer:
-      return 0;
+      return {};
     case Surface::Kind::RenderTarget:
-      return s->tex;
+      return {s->tex, 0};
     case Surface::Kind::TextureLevel:
-      if (s->level == 0 && !s->texture->cube && (s->texture->usage & D3DUSAGE_RENDERTARGET))
-        return s->texture->tex;
+      if (!s->texture->cube && (s->texture->usage & D3DUSAGE_RENDERTARGET))
+        return {s->texture->tex, int(s->level)};
       break;
     default:
       break;
@@ -350,7 +350,7 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::StretchRect", D3DDev9_StretchRect, 6) {
   auto* src = com::As<Surface>(Arg(c, 1));
   auto* dst = com::As<Surface>(Arg(c, 3));
   if (!src || !dst || src == dst) return D3DERR_INVALIDCALL;
-  gfx::TextureId s = StretchTarget(src, "source"), t = StretchTarget(dst, "destination");
+  gfx::ColorTarget s = StretchTarget(src, "source"), t = StretchTarget(dst, "destination");
   // D3DTEXF_LINEAR (2) filters; NONE and POINT take the nearest texel.
   d->gfx->StretchRect(s, SurfaceRect(src, Arg(c, 2)), t, SurfaceRect(dst, Arg(c, 4)),
                       Arg(c, 5) >= 2);

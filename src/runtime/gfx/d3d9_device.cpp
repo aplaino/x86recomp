@@ -298,11 +298,12 @@ class D3D9Device final : public Device {
 
   // The programmable pipeline runs GLSL translated from HLSL, which this
   // backend cannot: it stays the reference for fixed-function games.
-  void SetRenderTargets(const TextureId color[4], DepthId depth) override {
-    if (color[1]) FatalF("gfx: multiple render targets need the SDL_GPU backend (<ID>_GFX=gpu)");
-    SetRenderTarget(color[0], depth);
+  void SetRenderTargets(const ColorTarget color[4], DepthId depth) override {
+    if (color[1].tex) FatalF("gfx: multiple render targets need the SDL_GPU backend (<ID>_GFX=gpu)");
+    if (color[0].level) FatalF("gfx: rendering to a mip level needs the SDL_GPU backend (<ID>_GFX=gpu)");
+    SetRenderTarget(color[0].tex, depth);
   }
-  void StretchRect(TextureId, const Rect&, TextureId, const Rect&, bool) override {
+  void StretchRect(ColorTarget, const Rect&, ColorTarget, const Rect&, bool) override {
     FatalF("gfx: StretchRect needs the SDL_GPU backend (<ID>_GFX=gpu)");
   }
   ShaderId CreateShader(const hlsl::Program&) override {

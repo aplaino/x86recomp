@@ -349,18 +349,17 @@ uint32_t NewSurface(Device& d, uint32_t device, Surface::Kind kind, uint32_t w,
 
 void BindTargets(Device& d) {
   Surface* z = com::As<Surface>(d.depth_stencil);
-  gfx::TextureId color[4] = {};
+  gfx::ColorTarget color[4] = {};
   for (int i = 0; i < 4; i++) {
     Surface* rt = com::As<Surface>(d.render_targets[i]);
     if (!rt) break;
-    if (rt->kind == Surface::Kind::RenderTarget) color[i] = rt->tex;
+    if (rt->kind == Surface::Kind::RenderTarget) color[i].tex = rt->tex;
     if (rt->kind == Surface::Kind::TextureLevel) {
-      if (rt->level != 0 || rt->texture->cube)
-        FatalF("d3d9: render target %d is level %d%s of a texture (only level 0 of a 2D "
-               "texture is supported)", i, rt->level, rt->texture->cube ? " of a cube face" : "");
-      color[i] = rt->texture->tex;
+      if (rt->texture->cube)
+        FatalF("d3d9: render target %d is a cube face (not supported)", i);
+      color[i] = {rt->texture->tex, int(rt->level)};
     }
-    if (i > 0 && !color[i])
+    if (i > 0 && !color[i].tex)
       FatalF("d3d9: render target %d is a %s surface", i,
              rt->kind == Surface::Kind::BackBuffer ? "back buffer" : "non-target");
   }
