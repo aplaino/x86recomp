@@ -39,6 +39,11 @@ void PumpHostEvents();
 // behind a fullscreen exclusive surface on Windows. w = 0 ends it.
 void SetExclusiveMode(uint32_t hwnd, int w, int h);
 
+// Shows hwnd without activating it, as SetWindowPos with SWP_SHOWWINDOW |
+// SWP_NOACTIVATE does. Direct3D 9 does this to the device window when it
+// goes fullscreen; games may leave that window hidden until then.
+void ShowWindowNoActivate(uint32_t hwnd);
+
 // The size of hwnd's client area as the game sees it (in exclusive mode,
 // the display mode): what its frames are drawn at. The host window may
 // differ (fullscreen, or resized by the window manager); present fits the

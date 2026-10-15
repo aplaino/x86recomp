@@ -1038,6 +1038,19 @@ void SetExclusiveMode(uint32_t hwnd, int w, int h) {
   UpdateFullscreen(hwnd);
 }
 
+void ShowWindowNoActivate(uint32_t hwnd) {
+  SDL_Window* sdl;
+  {
+    std::lock_guard<std::recursive_mutex> l(g_mu);
+    Window* win = Win(hwnd);
+    if (!win || win->visible) return;
+    win->visible = true;
+    sdl = win->sdl;
+  }
+  if (sdl) SDL_ShowWindow(sdl);
+  UpdateFullscreen(hwnd);
+}
+
 std::vector<ModeSize> DisplayModeSizes() {
   static const ModeSize kSizes[] = {
       {640, 480},   {800, 600},   {1024, 768},  {1152, 864},  {1280, 960},

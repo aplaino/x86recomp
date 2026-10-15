@@ -340,10 +340,14 @@ bool Vsync(const D3DPRESENT_PARAMETERS& p) {
 void SetUpSwapChain(Device& d, uint32_t self) {
   ResolvePresentParams(d);
   const D3DPRESENT_PARAMETERS& p = d.pp;
-  if (!p.Windowed)
+  if (!p.Windowed) {
     SetExclusiveMode(d.hwnd, int(p.BackBufferWidth), int(p.BackBufferHeight));
-  else
+    // Fullscreen shows the device window: some games create it hidden
+    // (ShowWindow(SW_HIDE)) and never show it themselves.
+    ShowWindowNoActivate(d.hwnd);
+  } else {
     SetExclusiveMode(d.hwnd, 0, 0);
+  }
   d.gfx->ResetSwapChain(int(p.BackBufferWidth), int(p.BackBufferHeight), Vsync(p));
   for (uint32_t& rt : d.render_targets) Bind(&rt, 0);
   Bind(&d.depth_stencil, 0);
