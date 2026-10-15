@@ -123,6 +123,10 @@ if(FFMPEG_FOUND)
   add_library(recomp_mss32 OBJECT src/runtime/hle/mss32.cpp)
   target_link_libraries(recomp_mss32 PUBLIC recomp_runtime recomp_audio)
 
+  # DirectSound 8 (dsound) on the same software mixer.
+  add_library(recomp_dsound OBJECT src/runtime/hle/dsound.cpp)
+  target_link_libraries(recomp_dsound PUBLIC recomp_runtime recomp_audio)
+
   # Bink video (binkw32) on ffmpeg; audio through the Miles mixer.
   add_library(recomp_bink OBJECT src/runtime/hle/binkw32.cpp)
   target_link_libraries(recomp_bink PUBLIC recomp_mss32)

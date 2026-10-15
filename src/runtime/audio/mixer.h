@@ -1,6 +1,6 @@
 #pragma once
 // Software mixer on an SDL3 audio stream: the host side of Miles' digital
-// driver. Voices are linear-interpolated, gain-ramped and summed into
+// driver and of DirectSound (Voice::dsound). Voices are linear-interpolated, gain-ramped and summed into
 // stereo float. Gains follow the mixer of the game's Miles generation
 // (Voice::miles), and positional voices get the "Miles Fast 2D Positional
 // Audio" treatment (distance attenuation and stereo panning), or with
@@ -57,6 +57,12 @@ struct Voice {
   // Pan and distance as DirectSound3D hardware does them (measured on an
   // Audigy 2 ZS; Mixer::TargetGains) instead of Miles Fast 2D's.
   bool ds3d = false;
+  // DirectSound's own buffers: `volume` is linear, `pan` DSBPAN (-10000 to
+  // 10000: hundredths of a dB taken off the other channel); positional
+  // ones use the DS3D model with the mixer's rolloff factor.
+  bool dsound = false;
+  // DS3DMODE_HEADRELATIVE: pos is in the listener's frame.
+  bool head_relative = false;
   Vec3 pos;
   float min_dist = 1.0f, max_dist = 1e30f;
 
@@ -116,6 +122,9 @@ class Mixer {
   void set_master(float g) { master_ = g; }
   void SetReverb(int bus, const ReverbParams& p) { reverb_.Set(bus, p); }
   void SetListener(const Vec3& pos, const Vec3& face, const Vec3& up);
+  // DirectSound3D's rolloff factor for DS3D voices: distance attenuation
+  // is (min_dist / d)^rolloff (1: 6 dB per doubling; 0: none).
+  void set_rolloff(float r) { rolloff_ = r; }
   DigitalReverb& digital_reverb() { return digital_; }
   // The millisecond clock of the reverb's tail: the time mixed so far.
   uint32_t now_ms() const { return rate_ ? uint32_t(mixed_ * 1000 / uint64_t(rate_)) : 0; }
@@ -149,6 +158,7 @@ class Mixer {
   std::vector<int32_t> wet_int_, reverb_out_;
   uint64_t mixed_ = 0;  // frames
   Vec3 lpos_, lface_{0, 0, 1}, lup_{0, 1, 0};  // face and up normalised
+  float rolloff_ = 1.0f;
   miles65::Listener listener65_;
   std::vector<Voice*> voices_;
 };

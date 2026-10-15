@@ -245,7 +245,8 @@ void Mixer::SetListener(const Vec3& pos, const Vec3& face, const Vec3& up) {
 //    balance table, the near one stays full; gains are out of 2048.
 // DS3D voices follow DirectSound3D hardware as measured on an Audigy 2 ZS
 // (Miles' DS3D and EAX providers, stereo output):
-//  - distance: min_dist / d, continuous; DirectSound stops attenuating at
+//  - distance: min_dist / d (to the power of the rolloff factor, which
+//    only DirectSound changes), continuous; DirectSound stops attenuating at
 //    max_dist rather than muting; no cut behind the listener;
 //  - pan: the azimuth folded to the front half (135 degrees pans like 45)
 //    is panned between virtual speakers at +-45 degrees with gains
@@ -267,12 +268,13 @@ void Mixer::TargetGains(const Voice& v, float* l, float* r, float* send_volume) 
   }
   float g = v.volume * master_;
   if (v.positional && v.ds3d) {
-    Vec3 rel = Sub(v.pos, lpos_);
+    Vec3 rel = v.head_relative ? v.pos : Sub(v.pos, lpos_);
     float d = std::sqrt(Dot(rel, rel));
     float min = std::max(v.min_dist, 1e-4f);
     d = std::min(d, std::max(v.max_dist, min));
-    if (d > min) g *= min / d;
-    float x = Dot(rel, Cross(lup_, lface_)), z = std::fabs(Dot(rel, lface_));
+    if (d > min) g *= rolloff_ == 1.0f ? min / d : std::pow(min / d, rolloff_);
+    float x = v.head_relative ? rel.x : Dot(rel, Cross(lup_, lface_));
+    float z = std::fabs(v.head_relative ? rel.z : Dot(rel, lface_));
     float az = x == 0 && z == 0 ? 0.0f : std::atan2(std::fabs(x), z);
     float near, far = 0;
     if (az <= float(kPi / 4)) {
@@ -286,6 +288,12 @@ void Mixer::TargetGains(const Voice& v, float* l, float* r, float* send_volume) 
     far *= g * float(std::sqrt(2.0));
     *l = x < 0 ? near : far;
     *r = x < 0 ? far : near;
+    return;
+  }
+  if (v.dsound) {
+    // DSBPAN: the attenuation of the channel away from the pan.
+    *l = g * (v.pan > 0 ? std::pow(10.0f, -v.pan / 2000.0f) : 1.0f);
+    *r = g * (v.pan < 0 ? std::pow(10.0f, v.pan / 2000.0f) : 1.0f);
     return;
   }
   // Mss32's balance table: 2 * pan up to 62, then full (128).
