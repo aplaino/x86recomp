@@ -53,6 +53,7 @@ observed behaviour of the middleware reimplemented here
 
 ```cmake
 set(X86RECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../x86recomp" CACHE PATH "")
+set(CMAKE_LINK_DEPENDS_NO_SHARED ON)  # no relink when only a library changes
 enable_testing()
 add_subdirectory("${X86RECOMP_DIR}" x86recomp)
 

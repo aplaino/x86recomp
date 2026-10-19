@@ -41,19 +41,32 @@ endif()
 # For the helper functions below, which run in the game project's scope.
 set(RECOMP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}" CACHE INTERNAL "")
 
-# Guest address space + PE mapping. Shared by the runtime and the lifter.
-add_library(recomp_image STATIC
+# The runtime, the HLE modules and their helpers are shared libraries
+# (ARCHITECTURE.md "Game projects"): one copy of their state, and a change
+# to one rebuilds only that library. Their thread-locals use the
+# initial-exec model: the fault handler reads them, and a general-dynamic
+# access can allocate. --no-undefined holds Linux to what macOS requires
+# of a dylib: everything it uses comes from the libraries it links.
+add_compile_options(-ftls-model=initial-exec)
+if(NOT APPLE)
+  string(APPEND CMAKE_SHARED_LINKER_FLAGS " -Wl,--no-undefined")
+endif()
+
+# Guest address space + PE mapping, and logging (runtime/log.h). Shared by
+# the runtime, the x87 model and the lifter.
+add_library(recomp_image SHARED
   src/runtime/guest_memory.cpp
-  src/runtime/pe_image.cpp)
+  src/runtime/pe_image.cpp
+  src/runtime/log.cpp)
 target_include_directories(recomp_image PUBLIC src)
 target_compile_features(recomp_image PUBLIC cxx_std_20)
 
 # --- x87 and SSE models (SoftFloat 3e) ---------------------------------
 include(cmake/softfloat.cmake)  # defines target `softfloat`
-add_library(recomp_x87 STATIC src/runtime/x87.cpp src/runtime/sse.cpp)
+add_library(recomp_x87 SHARED src/runtime/x87.cpp src/runtime/sse.cpp)
 target_include_directories(recomp_x87 PUBLIC src)
 target_compile_features(recomp_x87 PUBLIC cxx_std_20)
-target_link_libraries(recomp_x87 PRIVATE softfloat)
+target_link_libraries(recomp_x87 PRIVATE softfloat recomp_image)
 # Every x87 instruction of the game runs through these: always optimise
 # (an -O0 debug build made float-heavy scenes several times slower).
 # No stack protector: its canary check sat in every hot x87 helper.
@@ -68,10 +81,9 @@ target_compile_options(softfloat PRIVATE -O2)
 # Lifter (build-time tool): x86-32 machine code -> C++.
 add_subdirectory(tools/lifter)
 
-# Runtime core and the Win32 HLE. OBJECT libraries throughout: handlers
-# register themselves from static initialisers, which a static archive
-# would drop.
-add_library(recomp_runtime OBJECT
+# Runtime core and the Win32 HLE. HLE handlers register themselves from
+# static initialisers, which run when their library is loaded.
+add_library(recomp_runtime SHARED
   src/runtime/dispatch.cpp
   src/runtime/pacing.cpp
   src/runtime/platform.cpp
@@ -94,12 +106,18 @@ add_library(recomp_runtime OBJECT
   src/runtime/hle/com.cpp
   src/runtime/hle/present.cpp)
 target_link_libraries(recomp_runtime PUBLIC recomp_image recomp_x87
-                      SDL3::SDL3 Threads::Threads)
+                      SDL3::SDL3 Threads::Threads
+                      PRIVATE recomp_gfx)  # presentation (hle/present.cpp)
+# Nothing in a game refers to an HLE module's symbols: keep the linker
+# from dropping them where it links --as-needed (ld64 keeps every dylib).
+if(NOT APPLE)
+  target_link_options(recomp_runtime INTERFACE "LINKER:--no-as-needed")
+endif()
 
 if(FFMPEG_FOUND)
   # The software mixer, its sources, the EAX model and the reverb; no HLE
   # in it (it logs through the runtime's WarnF).
-  add_library(recomp_audio STATIC
+  add_library(recomp_audio SHARED
     src/runtime/audio/source.cpp
     src/runtime/audio/mixer.cpp
     src/runtime/audio/reverb.cpp
@@ -108,7 +126,8 @@ if(FFMPEG_FOUND)
     src/runtime/audio/eax.cpp)
   target_include_directories(recomp_audio PUBLIC src)
   target_compile_features(recomp_audio PUBLIC cxx_std_20)
-  target_link_libraries(recomp_audio PUBLIC SDL3::SDL3 PkgConfig::FFMPEG)
+  target_link_libraries(recomp_audio PUBLIC SDL3::SDL3 PkgConfig::FFMPEG
+                        PRIVATE recomp_runtime)
   # Per-sample host paths: optimised in every build type.
   set_source_files_properties(src/runtime/audio/mixer.cpp
     src/runtime/audio/source.cpp TARGET_DIRECTORY recomp_audio
@@ -120,21 +139,21 @@ if(FFMPEG_FOUND)
     PROPERTIES COMPILE_OPTIONS "-O2;-ffp-contract=off")
 
   # Miles Sound System (mss32) on the software mixer.
-  add_library(recomp_mss32 OBJECT src/runtime/hle/mss32.cpp)
+  add_library(recomp_mss32 SHARED src/runtime/hle/mss32.cpp)
   target_link_libraries(recomp_mss32 PUBLIC recomp_runtime recomp_audio)
 
   # DirectSound 8 (dsound) on the same software mixer.
-  add_library(recomp_dsound OBJECT src/runtime/hle/dsound.cpp)
+  add_library(recomp_dsound SHARED src/runtime/hle/dsound.cpp)
   target_link_libraries(recomp_dsound PUBLIC recomp_runtime recomp_audio)
 
   # Bink video (binkw32) on ffmpeg; audio through the Miles mixer.
-  add_library(recomp_bink OBJECT src/runtime/hle/binkw32.cpp)
+  add_library(recomp_bink SHARED src/runtime/hle/binkw32.cpp)
   target_link_libraries(recomp_bink PUBLIC recomp_mss32)
 endif()
 
 # HLSL (D3DX 9's dialect) to GLSL (runtime/hlsl/hlsl.h); no HLE in it,
-# so a plain static library, also used by the recomp_hlslc dev tool.
-add_library(recomp_hlsl STATIC
+# also used by the recomp_hlslc dev tool.
+add_library(recomp_hlsl SHARED
   src/runtime/hlsl/preprocess.cpp
   src/runtime/hlsl/parse.cpp
   src/runtime/hlsl/check.cpp
@@ -145,12 +164,12 @@ target_include_directories(recomp_hlsl PUBLIC src)
 target_compile_features(recomp_hlsl PUBLIC cxx_std_20)
 add_subdirectory(tools/hlslc)
 
-# gfx::Device and its backends; no HLE in it, so a plain static library
-# shared by the graphics API modules below. Backends:
+# gfx::Device and its backends; no HLE in it, shared by the graphics API
+# modules below. Backends:
 # - SDL_GPU (gfx/gpu_device.cpp): always; Vulkan, or Metal on macOS;
 # - d3d9 through dxvk-native (gfx/d3d9_device.cpp): when DXVK_NATIVE_DIR
 #   is set (Linux), with RECOMP_HAVE_D3D9 defined for the runtime too.
-add_library(recomp_gfx STATIC
+add_library(recomp_gfx SHARED
   src/runtime/gfx/format.cpp
   src/runtime/gfx/device.cpp
   src/runtime/gfx/gpu_device.cpp
@@ -161,7 +180,7 @@ target_compile_features(recomp_gfx PUBLIC cxx_std_20)
 # to SPIR-V, and SPIRV-Cross to MSL on macOS (gfx/shader_compile.cpp).
 find_package(glslang CONFIG REQUIRED)
 target_link_libraries(recomp_gfx PUBLIC SDL3::SDL3 recomp_hlsl
-  PRIVATE glslang::glslang glslang::SPIRV glslang::glslang-default-resource-limits)
+  PRIVATE recomp_image glslang::glslang glslang::SPIRV glslang::glslang-default-resource-limits)
 if(APPLE)
   # SPIRV-Cross's per-module configs do not find their dependencies.
   find_package(spirv_cross_core CONFIG REQUIRED)
@@ -225,21 +244,21 @@ if(DXVK_NATIVE_DIR)
 endif()
 
 # DirectDraw 7 / Direct3D 7 over gfx::Device.
-add_library(recomp_d3d7 OBJECT
+add_library(recomp_d3d7 SHARED
   src/runtime/hle/ddraw.cpp
   src/runtime/hle/d3d7.cpp)
 target_link_libraries(recomp_d3d7 PUBLIC recomp_runtime recomp_gfx)
 
 # XInput 1.3 on SDL gamepads.
-add_library(recomp_xinput OBJECT src/runtime/hle/xinput.cpp)
+add_library(recomp_xinput SHARED src/runtime/hle/xinput.cpp)
 target_link_libraries(recomp_xinput PUBLIC recomp_runtime)
 
 # DirectInput 8 (keyboard and mouse) on the event pump's raw input.
-add_library(recomp_dinput8 OBJECT src/runtime/hle/dinput8.cpp)
+add_library(recomp_dinput8 SHARED src/runtime/hle/dinput8.cpp)
 target_link_libraries(recomp_dinput8 PUBLIC recomp_runtime)
 
 # Direct3D 9 and D3DX 9 over gfx::Device.
-add_library(recomp_d3d9 OBJECT src/runtime/hle/d3d9.cpp src/runtime/hle/d3d9_draw.cpp
+add_library(recomp_d3d9 SHARED src/runtime/hle/d3d9.cpp src/runtime/hle/d3d9_draw.cpp
   src/runtime/hle/d3d9_resource.cpp src/runtime/hle/d3dx9.cpp)
 target_link_libraries(recomp_d3d9 PUBLIC recomp_runtime recomp_gfx recomp_hlsl)
 # D3DX's maths rounds like the original only without contraction into FMA.
@@ -247,21 +266,22 @@ set_source_files_properties(src/runtime/hle/d3dx9.cpp TARGET_DIRECTORY recomp_d3
   PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 
 # OpenGL 1.x (opengl32, wgl, gdi32 pixel formats) over gfx::Device.
-add_library(recomp_opengl OBJECT
+add_library(recomp_opengl SHARED
   src/runtime/gl/context.cpp
   src/runtime/hle/opengl32.cpp)
 target_link_libraries(recomp_opengl PUBLIC recomp_runtime recomp_gfx)
 
 # dbghelp (UnDecorateSymbolName) on LLVM's Microsoft demangler.
-add_library(recomp_dbghelp OBJECT src/runtime/hle/dbghelp.cpp)
+add_library(recomp_dbghelp SHARED src/runtime/hle/dbghelp.cpp)
 find_library(RECOMP_LLVM_DEMANGLE libLLVMDemangle.a
   PATHS "${RECOMP_LLVM_ROOT}/lib64" "${RECOMP_LLVM_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)
 target_link_libraries(recomp_dbghelp PUBLIC recomp_runtime "${RECOMP_LLVM_DEMANGLE}")
 target_include_directories(recomp_dbghelp PRIVATE "${RECOMP_LLVM_ROOT}/include")
 
 # recomp_add_lifted(<target> <dir>): an OBJECT library of the lifter's
-# output in <dir> (globbed, so re-run cmake after lifting). Defines nothing
-# when <dir> has no lifted code yet.
+# output in <dir> (globbed, so re-run cmake after lifting), with the
+# registration of its function table (runtime/lifted_table.cpp). Defines
+# nothing when <dir> has no lifted code yet.
 function(recomp_add_lifted target dir)
   file(GLOB _gen CONFIGURE_DEPENDS "${dir}/*.cpp")
   if(NOT _gen)
@@ -269,7 +289,7 @@ function(recomp_add_lifted target dir)
   endif()
   # Lifted code is always optimised: at -O0 it would be unusably slow and
   # debug info for 100+ MB of generated source is not useful.
-  add_library(${target} OBJECT ${_gen})
+  add_library(${target} OBJECT ${_gen} "${RECOMP_ROOT}/src/runtime/lifted_table.cpp")
   target_include_directories(${target} PRIVATE "${RECOMP_ROOT}/src")
   target_compile_features(${target} PRIVATE cxx_std_20)
   # -fnon-call-exceptions: guest access violations are raised from the

@@ -38,7 +38,8 @@ namespace recomp {
 
 static bool g_quiet = false;
 
-// recomp_audio logs through the runtime's WarnF.
+// recomp_audio logs through the runtime's WarnF; this one, which takes its
+// place, honours --quiet.
 void WarnF(const char* fmt, ...) {
   if (g_quiet) return;
   std::fprintf(stderr, "warning: ");

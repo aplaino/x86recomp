@@ -7,6 +7,10 @@
 namespace recomp {
 
 extern bool g_trace;
+// FatalF's report once the message is formatted (set by the runtime: guest
+// state, backtraces, the crash file); must not return. Without one,
+// FatalF prints the message and exits.
+extern void (*g_fatal_report)(const char* msg);
 
 [[noreturn]] void FatalF(const char* fmt, ...)
     __attribute__((format(printf, 1, 2)));

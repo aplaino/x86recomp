@@ -100,6 +100,29 @@ its lifted code with `recomp_add_lifted()`, and fills a
 - `fullscreen`: how a window covering the game's screen is shown (see
   "Display modes, fullscreen and presentation").
 
+The game's executable holds its lifted code, its replacements and
+`main()`; the runtime, the x87 model, the HLE modules and the libraries
+under them are shared libraries (librecomp_*.so, .dylib on macOS), so
+each has one copy of its state (the HLE registry, the x87 model's
+switches, the guest arena) and a change to one rebuilds only it. With
+CMAKE_LINK_DEPENDS_NO_SHARED the game is not relinked either: a change
+that keeps the libraries' interface needs no game rebuild at all. The
+lifted code and the inline headers it includes (lifted.h, ctx.h, x87.h)
+are the exception: changing those still recompiles every game.
+- A library cannot refer to the executable's symbols (a dylib must not;
+  `--no-undefined` holds Linux to the same), so the lifter's function
+  table reaches the dispatcher through `RegisterLiftedFunctions`, called
+  before `main()` from runtime/lifted_table.cpp, which
+  `recomp_add_lifted()` compiles into the lifted code.
+- HLE modules are found by nothing but their registrars: the runtime
+  makes its consumers link `--no-as-needed`, so a linker that drops
+  unreferenced libraries keeps them.
+- Thread-locals use the initial-exec TLS model: the fault handler reads
+  them, and a general-dynamic access may allocate.
+- Logging (runtime/log.h) is in the base library, recomp_image, under
+  the x87 model and the runtime; the runtime adds the guest state,
+  backtraces and crash file to FatalF through `g_fatal_report`.
+
 Game-specific patches to lifted code (fixes, enhancements such as
 widescreen) live in the game project as hand-written replacements of
 specific lifted functions. `replace <va>` in a manifest makes the lifter

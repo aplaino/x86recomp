@@ -77,8 +77,10 @@ a game is where it came up.
   by design. No catch-all stubs that return 0.
 - HLE handlers take arguments with Arg(c, i) and return EAX; declare the
   stdcall argument count correctly in HLE(...) or the guest stack breaks.
-- HLE source files belong to an OBJECT library (registrars must link);
-  put new ones in the matching recomp_* target in CMakeLists.txt.
+- HLE source files belong to the matching recomp_* shared library in
+  CMakeLists.txt (their registrars run when it loads). Every library
+  links what it uses: --no-undefined (Linux) and ld64 (macOS) refuse
+  anything else.
 - lifted.h semantics changes must keep tests/lift_semantics_test.cpp
   passing (bit-exact against the host CPU).
 - Another session may be working in the main checkout: do parallel work

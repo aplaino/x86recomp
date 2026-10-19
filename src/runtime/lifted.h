@@ -24,6 +24,10 @@ struct LiftedFn {
 };
 extern const LiftedFn kLiftedFunctions[];
 extern const uint32_t kLiftedFunctionCount;
+// Hands that table to the runtime (runtime/dispatch.cpp), which as a shared
+// library cannot refer to it; called from runtime/lifted_table.cpp, which
+// recomp_add_lifted compiles into the game's lifted code.
+void RegisterLiftedFunctions(const LiftedFn* fns, uint32_t count);
 
 // Thrown at manifest `resume` sites: the guest abandons the current call
 // chain and continues at `target` in the frame whose EBP is `ebp` (SEH

@@ -30,7 +30,6 @@
 namespace recomp {
 
 uint8_t* g_guest_base = nullptr;
-bool g_trace = false;
 
 namespace {
 
@@ -42,6 +41,8 @@ struct CodeRange {
 };
 CodeRange g_exe;
 std::vector<CodeRange> g_dlls;
+const LiftedFn* g_lifted = nullptr;
+uint32_t g_lifted_count = 0;
 
 CodeRange TextOf(const PeImage& img) {
   CodeRange r;
@@ -51,8 +52,8 @@ CodeRange TextOf(const PeImage& img) {
       r.size = s.vsize;
     }
   r.table.assign(r.size, nullptr);
-  for (uint32_t i = 0; i < kLiftedFunctionCount; i++) {
-    const LiftedFn& f = kLiftedFunctions[i];
+  for (uint32_t i = 0; i < g_lifted_count; i++) {
+    const LiftedFn& f = g_lifted[i];
     if (f.va - r.lo < r.size) r.table[f.va - r.lo] = f.fn;
   }
   return r;
@@ -88,15 +89,12 @@ void DumpGuestState(const Ctx& c) {
 
 }  // namespace
 
-void FatalF(const char* fmt, ...) {
-  char msg[2048];
-  va_list ap;
-  va_start(ap, fmt);
-  std::vsnprintf(msg, sizeof msg, fmt, ap);
-  va_end(ap);
-  std::fflush(stdout);
-  // The report goes to stderr and, so it survives a filtered or closed
-  // terminal, to $XDG_DATA_HOME/<id>/crashes/crash-<time>-<pid>.txt.
+namespace {
+
+// g_fatal_report: FatalF's message with the guest state and backtraces,
+// to stderr and, so it survives a filtered or closed terminal, to
+// $XDG_DATA_HOME/<id>/crashes/crash-<time>-<pid>.txt.
+[[noreturn]] void FatalReport(const char* msg) {
   auto report = [&] {
     std::fprintf(stderr, "FATAL: %s\n", msg);
     if (Thread* t = CurrentThread()) {
@@ -121,20 +119,10 @@ void FatalF(const char* fmt, ...) {
   std::_Exit(3);
 }
 
-void WarnF(const char* fmt, ...) {
-  std::fprintf(stderr, "warning: ");
-  va_list ap;
-  va_start(ap, fmt);
-  std::vfprintf(stderr, fmt, ap);
-  va_end(ap);
-}
+const bool kFatalReportSet = (g_fatal_report = FatalReport, true);
 
-void TraceF(const char* fmt, ...) {
-  va_list ap;
-  va_start(ap, fmt);
-  std::vfprintf(stderr, fmt, ap);
-  va_end(ap);
-}
+}  // namespace
+
 
 // Host faults (SIGSEGV/SIGBUS) in guest memory are first offered to the
 // lazy regions (lazy_mem.h), whose pages fault by design, on any thread
@@ -251,7 +239,15 @@ void InstallFaultHandler() {
 }
 }  // namespace
 
+void RegisterLiftedFunctions(const LiftedFn* fns, uint32_t count) {
+  g_lifted = fns;
+  g_lifted_count = count;
+}
+
 void InitDispatch() {
+  if (!g_lifted)
+    FatalF("no lifted code registered (recomp_add_lifted compiles "
+           "runtime/lifted_table.cpp into it)");
   InstallFaultHandler();
   g_exe = TextOf(g_proc->img);
   for (const Module& m : g_proc->modules) {
