@@ -25,11 +25,23 @@ struct Xmm {
 };
 
 struct Ctx {
-  uint32_t eax, ecx, edx, ebx, esp, ebp, esi, edi;
+  // Each register in an 8-byte slot of its own. With adjacent fields the
+  // compiler merges spills and reloads of neighbours into 64-bit or vector
+  // accesses, which the CPU cannot forward from or to the 32-bit accesses
+  // of the function on the other side of the call (see ARCHITECTURE.md,
+  // "Registers in Ctx").
+  alignas(8) uint32_t eax;
+  alignas(8) uint32_t ecx;
+  alignas(8) uint32_t edx;
+  alignas(8) uint32_t ebx;
+  alignas(8) uint32_t esp;
+  alignas(8) uint32_t ebp;
+  alignas(8) uint32_t esi;
+  alignas(8) uint32_t edi;
   // Flags as one EFLAGS word (PackEFlags), not as the Flags bytes lifted
   // code keeps in locals: a spill is one 32-bit store and a reload one
   // 32-bit load, which the CPU forwards (see ARCHITECTURE.md, "Flags").
-  uint32_t eflags = 0x202;
+  alignas(8) uint32_t eflags = 0x202;
   uint32_t fs_base;  // guest VA of this thread's TEB
   x87::State fpu;
   // SSE state. Unlike the integer registers these are never cached in

@@ -227,11 +227,18 @@ lifter is tractable (rexglue-style: one C++ function per guest function).
     44% of a game's store-to-load conflicts outside its frame limiter.
     Work per frame drops 2.7% in a frame-capped game; in another, the
     frame time changed by less than run-to-run noise (-0.3 to -1.1%).
-  - Most of the rest are the same mismatch on the integer registers:
-    clang merges adjacent register spills and reloads into 64-bit or
-    vector accesses (`movdqu (ctx)`, `mov 0x14(ctx)` for ebp+esi), and
-    the next function's 32-bit loads at entry, or the caller's merged
-    load after a call, do not forward.
+- Registers in Ctx: each guest register (and eflags) has an 8-byte slot
+  of its own (alignas(8) on a uint32_t). With adjacent fields, clang
+  merged spills and reloads of neighbouring registers into 64-bit or
+  vector accesses (`movdqu (ctx)` for eax..ebx, `movq 0x14(ctx)` for
+  ebp+esi): the backend combines adjacent 32-bit loads and stores, and
+  the SLP vectorizer packs them into vectors. The function on the other
+  side of the call used 32-bit accesses, so neither direction forwarded.
+  A gap between the fields leaves no two accesses that can be merged.
+  - Measured on Zen 5 after the flags change: store-to-load conflicts
+    halve again in one game, whose frame time drops 0.6%. In a
+    frame-capped game they drop 20% outside the limiter, and its work
+    per frame does not change measurably.
 - Calls: direct `call` -> C++ call; the real return address is pushed to
   the guest stack so code that reads it (__alloca_probe, SEH) still
   works. `ret N` pops. Tail `jmp` to another entry -> tail call.
