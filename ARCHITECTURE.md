@@ -203,9 +203,35 @@ lifter is tractable (rexglue-style: one C++ function per guest function).
 - Output is plain C++20: no x86 intrinsics, no inline asm, no
   `long double`, no reliance on host FPU state other than the default
   environment (x87 runs on host doubles).
-- Context: `struct Ctx { u32 eax..edi, esp, flags; X87 fpu; fs base }`,
+- Context: `struct Ctx { u32 eax..edi, esp, eflags; X87 fpu; fs base }`,
   one per guest thread. Registers are cached in locals per function and
   flags computed eagerly into locals (clang drops dead ones).
+- Flags: the local `F` is one bool per flag, but Ctx holds them as one
+  EFLAGS word (PackEFlags). Every call spills them with one 32-bit store
+  and reloads them with one 32-bit load, which every x86 and arm64 core
+  forwards from store to load. Flags a function does not touch between
+  the reload and the next spill fold to `eflags & mask | 0x202`.
+  - Ctx used to hold the bools, and spill and reload copied the 9-byte
+    struct. SROA cut each function's copy into widths of its own (one
+    qword, i32+i16+i16+i8, single bytes), so a function that loaded the
+    flags as a qword or a word just after its callee had stored them as
+    bytes could not forward them. That happened after nearly every call
+    and at function entry, and the load waited for the stores to retire.
+  - The flag helpers (Add, Sub, Logic, ..., PackEFlags, UnpackEFlags)
+    are always_inline. In a large switch, clang rates every call site
+    cold (inline threshold 45) and left some of them out of line. One
+    out-of-line helper takes F's address, which keeps F in memory for
+    the whole function: every flag write becomes a byte store, and every
+    spill loads those bytes back.
+  - Measured on Zen 5 (ls_bad_status2.stli_other): the change removes
+    44% of a game's store-to-load conflicts outside its frame limiter.
+    Work per frame drops 2.7% in a frame-capped game; in another, the
+    frame time changed by less than run-to-run noise (-0.3 to -1.1%).
+  - Most of the rest are the same mismatch on the integer registers:
+    clang merges adjacent register spills and reloads into 64-bit or
+    vector accesses (`movdqu (ctx)`, `mov 0x14(ctx)` for ebp+esi), and
+    the next function's 32-bit loads at entry, or the caller's merged
+    load after a call, do not forward.
 - Calls: direct `call` -> C++ call; the real return address is pushed to
   the guest stack so code that reads it (__alloca_probe, SEH) still
   works. `ret N` pops. Tail `jmp` to another entry -> tail call.

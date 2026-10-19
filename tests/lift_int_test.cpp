@@ -181,7 +181,7 @@ int main(int argc, char** argv) {
       c.ebx = uint32_t(in.r[3]); c.ebp = uint32_t(in.r[5]); c.esi = uint32_t(in.r[6]);
       c.edi = uint32_t(in.r[7]);
       c.esp = kStackVa;
-      recomp::UnpackEFlags(c.f, uint32_t(in.flags));
+      c.eflags = uint32_t(in.flags);
       f.fn(c);
       checks++;
 
@@ -190,7 +190,7 @@ int main(int argc, char** argv) {
       std::string why;
       for (int r = 0; r < 8; r++)
         if (r != 4 && got[r] != uint32_t(hw.r[r])) why += std::string(" ") + names[r];
-      uint32_t lf = recomp::PackEFlags(c.f);
+      uint32_t lf = c.eflags;
       if ((lf ^ uint32_t(hw.flags)) & defined) {
         char b[48];
         std::snprintf(b, sizeof b, " flags(%03X vs %03X)", uint32_t(hw.flags) & defined,

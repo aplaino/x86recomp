@@ -45,7 +45,7 @@ void FillContext(uint32_t ctx, const Ctx& c, uint32_t eip, uint32_t esp) {
   Wr32(ctx + 0xB4, c.ebp);
   Wr32(ctx + 0xB8, eip);
   Wr32(ctx + 0xBC, 0x1B);
-  Wr32(ctx + 0xC0, PackEFlags(c.f));
+  Wr32(ctx + 0xC0, c.eflags);
   Wr32(ctx + 0xC4, esp);
   Wr32(ctx + 0xC8, 0x23);
   // FloatSave (FNSAVE image) at +0x1C.

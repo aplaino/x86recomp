@@ -60,12 +60,14 @@ CodeRange TextOf(const PeImage& img) {
 }
 
 void DumpGuestState(const Ctx& c) {
+  Flags f;
+  UnpackEFlags(f, c.eflags);
   std::fprintf(stderr,
                "  eax=%08X ecx=%08X edx=%08X ebx=%08X\n"
                "  esp=%08X ebp=%08X esi=%08X edi=%08X\n"
                "  flags: cf=%d zf=%d sf=%d of=%d df=%d  fpu: cw=%04X sw=%04X\n",
-               c.eax, c.ecx, c.edx, c.ebx, c.esp, c.ebp, c.esi, c.edi, c.f.cf,
-               c.f.zf, c.f.sf, c.f.of, c.f.df, x87::ControlWord(c.fpu),
+               c.eax, c.ecx, c.edx, c.ebx, c.esp, c.ebp, c.esi, c.edi, f.cf,
+               f.zf, f.sf, f.of, f.df, x87::ControlWord(c.fpu),
                x87::StatusWord(c.fpu));
   if (!g_proc) return;
   // Guest backtrace along the EBP chain (VC6 code mostly keeps frames).

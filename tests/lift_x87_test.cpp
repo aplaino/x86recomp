@@ -253,7 +253,7 @@ int main(int argc, char** argv) {
       if (std::memcmp(hm, mem.ptr(kMemVa), 32)) why += " mem";
       if (flags) {
         uint32_t hf = uint32_t(hflags) & 0x45;  // CF PF ZF
-        uint32_t lfl = (c.f.cf ? 1 : 0) | (c.f.pf ? 4 : 0) | (c.f.zf ? 0x40 : 0);
+        uint32_t lfl = c.eflags & 0x45;
         if (hf != lfl) why += " eflags";
       }
       if (ax && uint16_t(hrax) != uint16_t(c.eax)) why += " ax";

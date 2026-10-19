@@ -26,7 +26,10 @@ struct Xmm {
 
 struct Ctx {
   uint32_t eax, ecx, edx, ebx, esp, ebp, esi, edi;
-  Flags f;
+  // Flags as one EFLAGS word (PackEFlags), not as the Flags bytes lifted
+  // code keeps in locals: a spill is one 32-bit store and a reload one
+  // 32-bit load, which the CPU forwards (see ARCHITECTURE.md, "Flags").
+  uint32_t eflags = 0x202;
   uint32_t fs_base;  // guest VA of this thread's TEB
   x87::State fpu;
   // SSE state. Unlike the integer registers these are never cached in
@@ -36,15 +39,15 @@ struct Ctx {
   Thread* thread;    // runtime-owned per-thread data
 };
 
-// EFLAGS packing for pushfd/popfd/lahf/sahf. Bit 1 always reads as 1 and
-// IF (bit 9) as set, like user mode on Windows.
-inline uint32_t PackEFlags(const Flags& f) {
+// EFLAGS packing for Ctx::eflags, pushfd/popfd and lahf/sahf. Bit 1 always
+// reads as 1 and IF (bit 9) as set, like user mode on Windows.
+[[gnu::always_inline]] inline uint32_t PackEFlags(const Flags& f) {
   return (f.cf ? 0x1u : 0) | 0x2u | (f.pf ? 0x4u : 0) | (f.af ? 0x10u : 0) |
          (f.zf ? 0x40u : 0) | (f.sf ? 0x80u : 0) | 0x200u |
          (f.df ? 0x400u : 0) | (f.of ? 0x800u : 0) | (f.ac ? 0x40000u : 0) |
          (f.id ? 0x200000u : 0);
 }
-inline void UnpackEFlags(Flags& f, uint32_t v) {
+[[gnu::always_inline]] inline void UnpackEFlags(Flags& f, uint32_t v) {
   f.cf = v & 0x1;
   f.pf = v & 0x4;
   f.af = v & 0x10;

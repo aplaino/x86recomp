@@ -101,10 +101,12 @@ inline int32_t Sext(uint32_t v) {
   return static_cast<int32_t>(v);
 }
 
-inline bool Parity(uint32_t v) { return !__builtin_parity(v & 0xFFu); }
+[[gnu::always_inline]] inline bool Parity(uint32_t v) {
+  return !__builtin_parity(v & 0xFFu);
+}
 
 template <int N>
-inline void SetSZP(Flags& f, uint32_t r) {
+[[gnu::always_inline]] inline void SetSZP(Flags& f, uint32_t r) {
   r &= W<N>::kMask;
   f.zf = r == 0;
   f.sf = (r & W<N>::kSign) != 0;
@@ -113,7 +115,7 @@ inline void SetSZP(Flags& f, uint32_t r) {
 
 // ---- arithmetic (operands are pre-masked to N bytes by the emitter) -----
 template <int N>
-inline uint32_t Add(Flags& f, uint32_t a, uint32_t b) {
+[[gnu::always_inline]] inline uint32_t Add(Flags& f, uint32_t a, uint32_t b) {
   uint64_t full = uint64_t(a) + b;
   uint32_t r = uint32_t(full) & W<N>::kMask;
   f.cf = full > W<N>::kMask;
@@ -123,7 +125,7 @@ inline uint32_t Add(Flags& f, uint32_t a, uint32_t b) {
   return r;
 }
 template <int N>
-inline uint32_t Adc(Flags& f, uint32_t a, uint32_t b) {
+[[gnu::always_inline]] inline uint32_t Adc(Flags& f, uint32_t a, uint32_t b) {
   uint64_t full = uint64_t(a) + b + (f.cf ? 1 : 0);
   uint32_t r = uint32_t(full) & W<N>::kMask;
   f.cf = full > W<N>::kMask;
@@ -133,7 +135,7 @@ inline uint32_t Adc(Flags& f, uint32_t a, uint32_t b) {
   return r;
 }
 template <int N>
-inline uint32_t Sub(Flags& f, uint32_t a, uint32_t b) {
+[[gnu::always_inline]] inline uint32_t Sub(Flags& f, uint32_t a, uint32_t b) {
   uint32_t r = (a - b) & W<N>::kMask;
   f.cf = a < b;
   f.of = ((a ^ b) & (a ^ r) & W<N>::kSign) != 0;
@@ -142,7 +144,7 @@ inline uint32_t Sub(Flags& f, uint32_t a, uint32_t b) {
   return r;
 }
 template <int N>
-inline uint32_t Sbb(Flags& f, uint32_t a, uint32_t b) {
+[[gnu::always_inline]] inline uint32_t Sbb(Flags& f, uint32_t a, uint32_t b) {
   uint32_t cin = f.cf ? 1 : 0;
   uint32_t r = (a - b - cin) & W<N>::kMask;
   f.cf = uint64_t(a) < uint64_t(b) + cin;
@@ -152,25 +154,25 @@ inline uint32_t Sbb(Flags& f, uint32_t a, uint32_t b) {
   return r;
 }
 template <int N>
-inline uint32_t Inc(Flags& f, uint32_t a) {
+[[gnu::always_inline]] inline uint32_t Inc(Flags& f, uint32_t a) {
   bool cf = f.cf;
   uint32_t r = Add<N>(f, a, 1);
   f.cf = cf;
   return r;
 }
 template <int N>
-inline uint32_t Dec(Flags& f, uint32_t a) {
+[[gnu::always_inline]] inline uint32_t Dec(Flags& f, uint32_t a) {
   bool cf = f.cf;
   uint32_t r = Sub<N>(f, a, 1);
   f.cf = cf;
   return r;
 }
 template <int N>
-inline uint32_t Neg(Flags& f, uint32_t a) {
+[[gnu::always_inline]] inline uint32_t Neg(Flags& f, uint32_t a) {
   return Sub<N>(f, 0, a);
 }
 template <int N>
-inline uint32_t Logic(Flags& f, uint32_t r) {
+[[gnu::always_inline]] inline uint32_t Logic(Flags& f, uint32_t r) {
   r &= W<N>::kMask;
   f.cf = f.of = f.af = false;
   SetSZP<N>(f, r);
@@ -179,7 +181,7 @@ inline uint32_t Logic(Flags& f, uint32_t r) {
 
 // ---- shifts and rotates (count is the raw CL/imm8 value) ----------------
 template <int N>
-inline uint32_t Shl(Flags& f, uint32_t a, uint32_t cnt) {
+[[gnu::always_inline]] inline uint32_t Shl(Flags& f, uint32_t a, uint32_t cnt) {
   cnt &= 31;
   if (!cnt) return a;
   uint64_t v = uint64_t(a & W<N>::kMask) << cnt;
@@ -191,7 +193,7 @@ inline uint32_t Shl(Flags& f, uint32_t a, uint32_t cnt) {
   return r;
 }
 template <int N>
-inline uint32_t Shr(Flags& f, uint32_t a, uint32_t cnt) {
+[[gnu::always_inline]] inline uint32_t Shr(Flags& f, uint32_t a, uint32_t cnt) {
   cnt &= 31;
   if (!cnt) return a;
   a &= W<N>::kMask;
@@ -203,7 +205,7 @@ inline uint32_t Shr(Flags& f, uint32_t a, uint32_t cnt) {
   return r;
 }
 template <int N>
-inline uint32_t Sar(Flags& f, uint32_t a, uint32_t cnt) {
+[[gnu::always_inline]] inline uint32_t Sar(Flags& f, uint32_t a, uint32_t cnt) {
   cnt &= 31;
   if (!cnt) return a;
   int32_t s = Sext<N>(a);
@@ -215,7 +217,7 @@ inline uint32_t Sar(Flags& f, uint32_t a, uint32_t cnt) {
   return r;
 }
 template <int N>
-inline uint32_t Rol(Flags& f, uint32_t a, uint32_t cnt) {
+[[gnu::always_inline]] inline uint32_t Rol(Flags& f, uint32_t a, uint32_t cnt) {
   if (!(cnt & 31)) return a;
   uint32_t k = (cnt & 31) % W<N>::kBits;
   a &= W<N>::kMask;
@@ -225,7 +227,7 @@ inline uint32_t Rol(Flags& f, uint32_t a, uint32_t cnt) {
   return r;
 }
 template <int N>
-inline uint32_t Ror(Flags& f, uint32_t a, uint32_t cnt) {
+[[gnu::always_inline]] inline uint32_t Ror(Flags& f, uint32_t a, uint32_t cnt) {
   if (!(cnt & 31)) return a;
   uint32_t k = (cnt & 31) % W<N>::kBits;
   a &= W<N>::kMask;
@@ -235,7 +237,7 @@ inline uint32_t Ror(Flags& f, uint32_t a, uint32_t cnt) {
   return r;
 }
 template <int N>
-inline uint32_t Rcl(Flags& f, uint32_t a, uint32_t cnt) {
+[[gnu::always_inline]] inline uint32_t Rcl(Flags& f, uint32_t a, uint32_t cnt) {
   uint32_t k = (cnt & 31) % (W<N>::kBits + 1);
   a &= W<N>::kMask;
   for (uint32_t i = 0; i < k; i++) {
@@ -247,7 +249,7 @@ inline uint32_t Rcl(Flags& f, uint32_t a, uint32_t cnt) {
   return a;
 }
 template <int N>
-inline uint32_t Rcr(Flags& f, uint32_t a, uint32_t cnt) {
+[[gnu::always_inline]] inline uint32_t Rcr(Flags& f, uint32_t a, uint32_t cnt) {
   uint32_t k = (cnt & 31) % (W<N>::kBits + 1);
   a &= W<N>::kMask;
   if (cnt & 31) f.of = ((a & W<N>::kSign) != 0) != f.cf;
@@ -259,7 +261,8 @@ inline uint32_t Rcr(Flags& f, uint32_t a, uint32_t cnt) {
   return a;
 }
 template <int N>
-inline uint32_t Shld(Flags& f, uint32_t dst, uint32_t src, uint32_t cnt) {
+[[gnu::always_inline]] inline uint32_t Shld(Flags& f, uint32_t dst,
+                                            uint32_t src, uint32_t cnt) {
   cnt &= 31;
   if (!cnt) return dst;
   uint64_t v = (uint64_t(dst & W<N>::kMask) << W<N>::kBits) |
@@ -272,7 +275,8 @@ inline uint32_t Shld(Flags& f, uint32_t dst, uint32_t src, uint32_t cnt) {
   return r;
 }
 template <int N>
-inline uint32_t Shrd(Flags& f, uint32_t dst, uint32_t src, uint32_t cnt) {
+[[gnu::always_inline]] inline uint32_t Shrd(Flags& f, uint32_t dst,
+                                            uint32_t src, uint32_t cnt) {
   cnt &= 31;
   if (!cnt) return dst;
   uint64_t v = (uint64_t(src & W<N>::kMask) << W<N>::kBits) |
@@ -287,7 +291,7 @@ inline uint32_t Shrd(Flags& f, uint32_t dst, uint32_t src, uint32_t cnt) {
 // ---- multiply / divide --------------------------------------------------
 // Two- and three-operand IMUL: truncated product, CF=OF=overflow.
 template <int N>
-inline uint32_t Imul2(Flags& f, uint32_t a, uint32_t b) {
+[[gnu::always_inline]] inline uint32_t Imul2(Flags& f, uint32_t a, uint32_t b) {
   int64_t p = int64_t(Sext<N>(a)) * Sext<N>(b);
   uint32_t r = uint32_t(p) & W<N>::kMask;
   f.cf = f.of = p != Sext<N>(r);
@@ -296,8 +300,8 @@ inline uint32_t Imul2(Flags& f, uint32_t a, uint32_t b) {
 }
 // One-operand MUL/IMUL. lo/hi are AL:AH, AX:DX or EAX:EDX values.
 template <int N>
-inline void Mul1(Flags& f, uint32_t a, uint32_t b, uint32_t& lo,
-                 uint32_t& hi) {
+[[gnu::always_inline]] inline void Mul1(Flags& f, uint32_t a, uint32_t b,
+                                        uint32_t& lo, uint32_t& hi) {
   uint64_t p = uint64_t(a & W<N>::kMask) * (b & W<N>::kMask);
   lo = uint32_t(p) & W<N>::kMask;
   hi = uint32_t(p >> W<N>::kBits) & W<N>::kMask;
@@ -305,8 +309,8 @@ inline void Mul1(Flags& f, uint32_t a, uint32_t b, uint32_t& lo,
   SetSZP<N>(f, lo);
 }
 template <int N>
-inline void Imul1(Flags& f, uint32_t a, uint32_t b, uint32_t& lo,
-                  uint32_t& hi) {
+[[gnu::always_inline]] inline void Imul1(Flags& f, uint32_t a, uint32_t b,
+                                         uint32_t& lo, uint32_t& hi) {
   int64_t p = int64_t(Sext<N>(a)) * Sext<N>(b);
   lo = uint32_t(p) & W<N>::kMask;
   hi = uint32_t(uint64_t(p) >> W<N>::kBits) & W<N>::kMask;
@@ -347,13 +351,15 @@ inline bool Idiv(uint32_t& lo, uint32_t& hi, uint32_t d) {
 
 // ---- bit ops --------------------------------------------------------------
 template <int N>
-inline uint32_t Bsf(Flags& f, uint32_t dst, uint32_t src) {
+[[gnu::always_inline]] inline uint32_t Bsf(Flags& f, uint32_t dst,
+                                           uint32_t src) {
   src &= W<N>::kMask;
   f.zf = src == 0;
   return src ? uint32_t(__builtin_ctz(src)) : dst;
 }
 template <int N>
-inline uint32_t Bsr(Flags& f, uint32_t dst, uint32_t src) {
+[[gnu::always_inline]] inline uint32_t Bsr(Flags& f, uint32_t dst,
+                                           uint32_t src) {
   src &= W<N>::kMask;
   f.zf = src == 0;
   return src ? uint32_t(31 - __builtin_clz(src)) : dst;
@@ -371,14 +377,14 @@ inline uint32_t SetLo16(uint32_t r, uint32_t v) {
 }
 
 // ---- flags as bytes (sahf/lahf) -----------------------------------------
-inline void Sahf(Flags& f, uint32_t ah) {
+[[gnu::always_inline]] inline void Sahf(Flags& f, uint32_t ah) {
   f.cf = ah & 0x01;
   f.pf = ah & 0x04;
   f.af = ah & 0x10;
   f.zf = ah & 0x40;
   f.sf = ah & 0x80;
 }
-inline uint32_t Lahf(const Flags& f) {
+[[gnu::always_inline]] inline uint32_t Lahf(const Flags& f) {
   return uint32_t(PackEFlags(f) & 0xD5u) | 0x02u;
 }
 
@@ -398,7 +404,8 @@ inline T* AtomicPtr(uint8_t* b, uint32_t a) {
   uint8_t* const B = ::recomp::g_guest_base;                                \
   uint32_t eax = c.eax, ecx = c.ecx, edx = c.edx, ebx = c.ebx,           \
            esp = c.esp, ebp = c.ebp, esi = c.esi, edi = c.edi;           \
-  ::recomp::Flags F = c.f;                                                  \
+  ::recomp::Flags F;                                                        \
+  ::recomp::UnpackEFlags(F, c.eflags);                                   \
   const uint32_t FS = c.fs_base;                                         \
   (void)FS;
 
@@ -414,8 +421,10 @@ inline T* AtomicPtr(uint8_t* b, uint32_t a) {
 
 #define LIFT_SPILL                                                       \
   c.eax = eax; c.ecx = ecx; c.edx = edx; c.ebx = ebx;                    \
-  c.esp = esp; c.ebp = ebp; c.esi = esi; c.edi = edi; c.f = F;
+  c.esp = esp; c.ebp = ebp; c.esi = esi; c.edi = edi;                    \
+  c.eflags = ::recomp::PackEFlags(F);
 
 #define LIFT_RELOAD                                                      \
   eax = c.eax; ecx = c.ecx; edx = c.edx; ebx = c.ebx;                    \
-  esp = c.esp; ebp = c.ebp; esi = c.esi; edi = c.edi; F = c.f;
+  esp = c.esp; ebp = c.ebp; esi = c.esi; edi = c.edi;                    \
+  ::recomp::UnpackEFlags(F, c.eflags);

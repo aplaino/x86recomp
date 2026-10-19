@@ -263,7 +263,7 @@ int main(int argc, char** argv) {
       c.ebx = uint32_t(in.r[3]); c.ebp = uint32_t(in.r[5]); c.esi = uint32_t(in.r[6]);
       c.edi = uint32_t(in.r[7]);
       c.esp = kStackVa;
-      recomp::UnpackEFlags(c.f, uint32_t(in.flags));
+      c.eflags = uint32_t(in.flags);
       std::memcpy(c.xmm, in.xmm, sizeof in.xmm);
       c.mxcsr = in.mxcsr;
       f.fn(c);
@@ -274,7 +274,7 @@ int main(int argc, char** argv) {
       std::string why;
       for (int r = 0; r < 8; r++)
         if (r != 4 && got[r] != uint32_t(hw.r[r])) why += std::string(" ") + names[r];
-      uint32_t lf = recomp::PackEFlags(c.f);
+      uint32_t lf = c.eflags;
       if ((lf ^ uint32_t(hw.flags)) & defined) why += " flags";
       for (int i = 0; i < 8; i++)
         if (std::memcmp(c.xmm[i].b, hw.xmm[i], 16)) why += " xmm" + std::to_string(i);
