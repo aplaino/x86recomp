@@ -176,6 +176,7 @@ Thread* CreateGuestThread(uint32_t stack_size) {
 
   Ctx& c = t->ctx;
   std::memset(&c, 0, sizeof c);
+  c.eflags = 0x202;
   c.esp = t->stack_hi - 16;
   c.fs_base = teb;
   c.thread = t.get();
