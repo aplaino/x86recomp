@@ -249,13 +249,15 @@ add_library(recomp_d3d7 SHARED
   src/runtime/hle/d3d7.cpp)
 target_link_libraries(recomp_d3d7 PUBLIC recomp_runtime recomp_gfx)
 
-# XInput 1.3 on SDL gamepads.
-add_library(recomp_xinput SHARED src/runtime/hle/xinput.cpp)
+# XInput 1.3 on SDL gamepads, and the WMI that tells games which
+# DirectInput game controllers are XInput pads.
+add_library(recomp_xinput SHARED src/runtime/hle/xinput.cpp src/runtime/hle/wbem.cpp)
 target_link_libraries(recomp_xinput PUBLIC recomp_runtime)
 
-# DirectInput 8 (keyboard and mouse) on the event pump's raw input.
+# DirectInput 8 (keyboard and mouse) on the event pump's raw input; it
+# lists the XInput pads as game controllers.
 add_library(recomp_dinput8 SHARED src/runtime/hle/dinput8.cpp)
-target_link_libraries(recomp_dinput8 PUBLIC recomp_runtime)
+target_link_libraries(recomp_dinput8 PUBLIC recomp_runtime recomp_xinput)
 
 # Direct3D 9 and D3DX 9 over gfx::Device.
 add_library(recomp_d3d9 SHARED src/runtime/hle/d3d9.cpp src/runtime/hle/d3d9_draw.cpp

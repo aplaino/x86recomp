@@ -17,6 +17,7 @@ constexpr uint32_t kMagic = 0x4D4F4352;  // 'RCOM'
 std::recursive_mutex g_mu;
 std::map<std::string, uint32_t> g_vtables;
 std::map<uint32_t, std::shared_ptr<Object>> g_objects;  // by guest pointer
+std::vector<std::pair<guest::GUID, CreateFn>> g_classes;
 
 }  // namespace
 
@@ -85,6 +86,31 @@ guest::GUID ReadGuid(uint32_t va) {
 
 bool GuidEq(uint32_t guest_guid, const guest::GUID& g) {
   return guest_guid && std::memcmp(GPtr(guest_guid), &g, sizeof g) == 0;
+}
+
+void RegisterCoClass(const guest::GUID& clsid, CreateFn create) {
+  std::lock_guard<std::recursive_mutex> l(g_mu);
+  g_classes.emplace_back(clsid, create);
+}
+
+CreateFn FindCoClass(uint32_t clsid) {
+  std::lock_guard<std::recursive_mutex> l(g_mu);
+  for (const auto& [g, create] : g_classes)
+    if (GuidEq(clsid, g)) return create;
+  return nullptr;
+}
+
+uint32_t AllocBstr(const std::u16string& s) {
+  const uint32_t bytes = uint32_t(s.size() * 2);
+  const uint32_t p = HeapAllocProcess(4 + bytes + 2, false);
+  Wr32(p, bytes);
+  std::memcpy(GPtr(p + 4), s.data(), bytes);
+  Wr16(p + 4 + bytes, 0);
+  return p + 4;
+}
+
+void FreeBstr(uint32_t bstr) {
+  if (bstr) HeapFreeProcess(bstr - 4);
 }
 
 }  // namespace recomp::com

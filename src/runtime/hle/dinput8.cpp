@@ -21,6 +21,7 @@
 #include "runtime/hle/input_state.h"
 #include "runtime/hle/kernel32_state.h"
 #include "runtime/hle/user32_window.h"
+#include "runtime/hle/xinput.h"
 #include "runtime/log.h"
 
 namespace recomp::hle {
@@ -48,9 +49,11 @@ constexpr uint32_t DIERR_ACQUIRED = 0x800700AA;
 constexpr uint32_t DI8DEVCLASS_ALL = 0, DI8DEVCLASS_DEVICE = 1,
                    DI8DEVCLASS_POINTER = 2, DI8DEVCLASS_KEYBOARD = 3,
                    DI8DEVCLASS_GAMECTRL = 4;
-constexpr uint32_t DI8DEVTYPE_MOUSE = 0x12, DI8DEVTYPE_KEYBOARD = 0x13;
+constexpr uint32_t DI8DEVTYPE_MOUSE = 0x12, DI8DEVTYPE_KEYBOARD = 0x13,
+                   DI8DEVTYPE_GAMEPAD = 0x15;
 constexpr uint32_t kMouseType = DI8DEVTYPE_MOUSE | (2 << 8);        // traditional
 constexpr uint32_t kKeyboardType = DI8DEVTYPE_KEYBOARD | (4 << 8);  // PC enhanced
+constexpr uint32_t kGamepadType = DI8DEVTYPE_GAMEPAD | (2 << 8) | 0x10000;  // standard, HID
 
 constexpr uint32_t DISCL_EXCLUSIVE = 0x1;
 constexpr uint32_t DIGDD_PEEK = 0x1;
@@ -211,6 +214,18 @@ void FillInstance(DIDEVICEINSTANCEA* di, bool keyboard) {
   di->wUsage = keyboard ? 6 : 2;   // keyboard / mouse
 }
 
+void FillPadInstance(DIDEVICEINSTANCEA* di, const XInputPad& pad) {
+  std::memset(di, 0, sizeof *di);
+  di->dwSize = sizeof *di;
+  di->guidInstance = {0x9A6F1D20 + pad.index, 0xD5A0, 0x11CF, {'X', 'I', 'N', 'P', 'U', 'T', 0, 0}};
+  di->guidProduct = {pad.vid | uint32_t(pad.pid) << 16, 0, 0, {0, 0, 'P', 'I', 'D', 'V', 'I', 'D'}};
+  di->dwDevType = kGamepadType;
+  std::snprintf(di->tszInstanceName, sizeof di->tszInstanceName, "%s", pad.name.c_str());
+  std::snprintf(di->tszProductName, sizeof di->tszProductName, "%s", pad.name.c_str());
+  di->wUsagePage = 1;  // generic desktop
+  di->wUsage = 5;      // game pad
+}
+
 uint32_t QueryInterfaceFor(Ctx& c, const GUID& iid) {
   if (com::GuidEq(Arg(c, 1), iid) || com::GuidEq(Arg(c, 1), kIID_IUnknown)) {
     com::AddRef(Arg(c, 0));
@@ -256,21 +271,31 @@ HLE_NAMED("dinput8.dll", "IDirectInput8A::CreateDevice", DI8_CreateDevice, 4) {
   return DI_OK;
 }
 
-// (dwDevType, lpCallback, pvRef, dwFlags): the keyboard and the mouse.
+// (dwDevType, lpCallback, pvRef, dwFlags): the keyboard, the mouse and the
+// XInput pads.
 HLE_NAMED("dinput8.dll", "IDirectInput8A::EnumDevices", DI8_EnumDevices, 5) {
   uint32_t type = Arg(c, 1), cb = Arg(c, 2), ref = Arg(c, 3);
   uint32_t cls = type & 0xFF;
   bool mouse = cls == DI8DEVCLASS_ALL || cls == DI8DEVCLASS_POINTER || cls == DI8DEVTYPE_MOUSE;
   bool keyboard = cls == DI8DEVCLASS_ALL || cls == DI8DEVCLASS_KEYBOARD || cls == DI8DEVTYPE_KEYBOARD;
+  bool pads = cls == DI8DEVCLASS_ALL || cls == DI8DEVCLASS_GAMECTRL || cls == DI8DEVTYPE_GAMEPAD;
   if (cls != DI8DEVCLASS_ALL && cls != DI8DEVCLASS_DEVICE && cls != DI8DEVCLASS_POINTER &&
       cls != DI8DEVCLASS_KEYBOARD && cls != DI8DEVCLASS_GAMECTRL && cls < 0x11)
     return DIERR_INVALIDPARAM;
   uint32_t inst = HeapAllocProcess(sizeof(DIDEVICEINSTANCEA), true);
+  auto* di = reinterpret_cast<DIDEVICEINSTANCEA*>(GPtr(inst));
+  bool more = true;
   for (bool kb : {true, false}) {
-    if (kb ? !keyboard : !mouse) continue;
-    FillInstance(reinterpret_cast<DIDEVICEINSTANCEA*>(GPtr(inst)), kb);
-    if (!CallGuest(c, cb, {inst, ref})) break;  // DIENUM_STOP
+    if (!more || (kb ? !keyboard : !mouse)) continue;
+    FillInstance(di, kb);
+    more = CallGuest(c, cb, {inst, ref});  // 0 = DIENUM_STOP
   }
+  if (pads)
+    for (const XInputPad& pad : XInputPads()) {
+      if (!more) break;
+      FillPadInstance(di, pad);
+      more = CallGuest(c, cb, {inst, ref});
+    }
   HeapFreeProcess(inst);
   return DI_OK;
 }

@@ -152,14 +152,14 @@ bool RecoverJumpTable(const Program& p, const Function& f, const Insn& jmp,
     return n && p.TextOf(a) == mod && p.TextOf(a + n - 1) == mod;
   };
   // Walk back from the jmp through the straight-line code before it
-  // (the compiler schedules unrelated instructions in between): an
-  // optional movzx from the byte index table, the ja, then the cmp that
-  // sets its flags.
+  // (the compiler schedules unrelated instructions in between, e.g. a
+  // run of x87 loads and stores): an optional movzx from the byte index
+  // table, the ja, then the cmp that sets its flags.
   ZydisRegister r = m.mem.index;
   uint32_t index = 0;
   bool two_level = false, seen_ja = false;
   const Insn* in = &jmp;
-  for (int steps = 0; steps < 8; steps++) {
+  for (int steps = 0; steps < 16; steps++) {
     in = Before(f, in->va);
     if (!in) return false;
     const auto& o0 = in->ops[0];
@@ -182,7 +182,7 @@ bool RecoverJumpTable(const Program& p, const Function& f, const Insn& jmp,
       continue;
     }
     if (!WritesFlags(*in)) {
-      if (WritesReg(*in, r)) return false;
+      if (WritesReg(*in, r) || in->d.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE) return false;
       continue;
     }
     if (in->d.mnemonic != ZYDIS_MNEMONIC_CMP ||

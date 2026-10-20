@@ -49,6 +49,25 @@ uint32_t Release(uint32_t guest);
 bool GuidEq(uint32_t guest_guid, const guest::GUID& g);
 guest::GUID ReadGuid(uint32_t va);
 
+// In-process classes for CoCreateInstance, registered by the HLE module
+// that provides them. `create` gets the requested IID (a guest GUID*),
+// writes the interface pointer (or 0) to *out and returns the HRESULT.
+using CreateFn = uint32_t (*)(uint32_t iid, uint32_t* out);
+void RegisterCoClass(const guest::GUID& clsid, CreateFn create);
+// The class for a guest CLSID*; null if none is registered.
+CreateFn FindCoClass(uint32_t clsid);
+// Registers a class at load time (a static of the providing module).
+struct CoClassRegistrar {
+  CoClassRegistrar(const guest::GUID& clsid, CreateFn create) {
+    RegisterCoClass(clsid, create);
+  }
+};
+
+// BSTRs (oleaut32 SysAllocString/SysFreeString): the byte length, then
+// the characters and a NUL; the pointer is to the characters.
+uint32_t AllocBstr(const std::u16string& s);
+void FreeBstr(uint32_t bstr);
+
 constexpr uint32_t kS_OK = 0, kE_NOINTERFACE = 0x80004002;
 
 }  // namespace recomp::com

@@ -5,6 +5,7 @@
 // SDL. Automated runs (<ID>_BACKGROUND) see no pads, as they take no host
 // input. The gamepad subsystem starts on the main thread, where SDL's
 // events are pumped (callers on other threads see no pads until then).
+// DirectInput and WMI list the same pads (xinput.h).
 
 #include <SDL3/SDL.h>
 
@@ -14,6 +15,7 @@
 
 #include "runtime/hle/hle.h"
 #include "runtime/hle/user32_window.h"
+#include "runtime/hle/xinput.h"
 #include "runtime/log.h"
 
 namespace recomp::hle {
@@ -158,4 +160,19 @@ HLE_NAMED("xinput1_3.dll", "#4", XInputGetCapabilities, 3) {
 }
 
 }  // namespace
+
+std::vector<XInputPad> XInputPads() {
+  std::lock_guard<std::mutex> l(g_mu);
+  Refresh();
+  std::vector<XInputPad> pads;
+  for (uint32_t i = 0; i < 4; i++) {
+    SDL_Gamepad* gp = g_pads[i].gp;
+    if (!gp) continue;
+    const char* name = SDL_GetGamepadName(gp);
+    pads.push_back({i, SDL_GetGamepadVendor(gp), SDL_GetGamepadProduct(gp),
+                    name ? name : "Controller"});
+  }
+  return pads;
+}
+
 }  // namespace recomp::hle

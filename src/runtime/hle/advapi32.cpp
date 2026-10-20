@@ -1,4 +1,5 @@
-// advapi32 (registry, user name) and the small ole32 surface the game uses.
+// advapi32 (registry, user name) and the small ole32/oleaut32 surface the
+// game uses.
 //
 // The registry is an in-memory tree persisted to
 // $XDG_DATA_HOME/<id>/registry.txt. It is seeded with what the retail
@@ -13,6 +14,7 @@
 #include <sstream>
 #include <vector>
 
+#include "runtime/hle/com.h"
 #include "runtime/hle/hle.h"
 #include "runtime/hle/kernel32_state.h"
 #include "runtime/hle/win32.h"
@@ -218,17 +220,28 @@ HLE("ole32.dll", CoInitialize, 1) { return 0; }  // S_OK
 HLE("ole32.dll", CoInitializeEx, 2) { return 0; }
 HLE("ole32.dll", CoUninitialize, 0) { return 0; }
 
+// (rclsid, pUnkOuter, dwClsContext, riid, ppv): the classes HLE modules
+// register (com.h). The others games create are optional and
+// REGDB_E_CLASSNOTREG reads as "not installed", as on a system without
+// them: DirectPlay8 (multiplayer), the Zone update object and the Game
+// Explorer (VerifyAccess: access is then not denied).
 HLE("ole32.dll", CoCreateInstance, 5) {
-  // No COM classes are provided. The ones games create are optional and
-  // REGDB_E_CLASSNOTREG reads as "not installed", as on a system without
-  // them: DirectPlay8 (multiplayer), the Zone update object, the WMI
-  // locator (the DirectX SDK's IsXInputDevice: no device is then an XInput
-  // one) and the Game Explorer (VerifyAccess: access is then not denied).
-  uint32_t clsid = Arg(c, 0);
+  uint32_t clsid = Arg(c, 0), out = Arg(c, 4);
+  if (com::CreateFn create = com::FindCoClass(clsid)) {
+    uint32_t obj = 0;
+    uint32_t hr = create(Arg(c, 3), &obj);
+    if (out) Wr32(out, obj);
+    return hr;
+  }
   WarnF("CoCreateInstance({%08X-...}): class not available\n", Rd32(clsid));
-  if (Arg(c, 4)) Wr32(Arg(c, 4), 0);
+  if (out) Wr32(out, 0);
   return 0x80040154;
 }
+
+// (pProxy, dwAuthnSvc, dwAuthzSvc, pServerPrincName, dwAuthnLevel,
+// dwImpLevel, pAuthInfo, dwCapabilities): the objects are in-process, so
+// there is no proxy security to set.
+HLE("ole32.dll", CoSetProxyBlanket, 8) { return 0; }
 
 HLE("ole32.dll", CoCreateGuid, 1) {
   static std::mt19937_64 rng{std::random_device{}()};
@@ -264,6 +277,17 @@ HLE("ole32.dll", IIDFromString, 2) {
   Wr16(g + 4, uint16_t(d2));
   Wr16(g + 6, uint16_t(d3));
   for (int i = 0; i < 8; i++) Wr8(g + 8 + i, uint8_t(b[i]));
+  return 0;
+}
+
+// ---- oleaut32 (imported by ordinal) -----------------------------------------
+
+HLE_NAMED("oleaut32.dll", "#2", SysAllocString, 1) {
+  return Arg(c, 0) ? com::AllocBstr(GWStr(Arg(c, 0))) : 0;
+}
+
+HLE_NAMED("oleaut32.dll", "#6", SysFreeString, 1) {
+  com::FreeBstr(Arg(c, 0));
   return 0;
 }
 
