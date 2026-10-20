@@ -816,7 +816,8 @@ late-frame rule; on an idle host wake-ups land 15-30 us (Linux) or
 - user32/gdi32: SDL3 windows; SDL events translated to WM_* and fed to
   the guest WndProc through PeekMessage/DispatchMessage.
 - advapi32: registry backed by a small file, seeded per game.
-- ole32: CoCreateInstance for what games need (fails cleanly otherwise).
+- ole32: CoCreateInstance for the classes HLE modules register (fails
+  cleanly otherwise); oleaut32 BSTRs.
 - mss32 (Miles): our own mixer on an SDL3 audio stream (runtime/audio):
   resampling, loop counts, gain ramps, the "Miles Fast 2D Positional
   Audio" model of the game's Miles version (6.1c or 6.5; docs/miles.md),
@@ -868,7 +869,10 @@ late-frame rule; on an idle host wake-ups land 15-30 us (Linux) or
   DS3D panning model above. Cones and Doppler are stored only;
   notifications and effects are not implemented.
 - xinput1_3: SDL gamepads in the Xbox controller's layout, user indices
-  in connection order; none in automated runs.
+  in connection order; none in automated runs. DirectInput lists the
+  same pads as game controllers, and WMI (Win32_PNPEntity DeviceIDs with
+  "IG_") marks them as XInput ones, as games that pair the two (the
+  DirectX SDK's IsXInputDevice) expect.
 - winmm: multimedia timers on one timer thread, as on Windows (TimeProc
   callbacks, or SetEvent / PulseEvent on the given event).
 - binkw32: ffmpeg (Bink demuxer from memory, binkvideo/binkaudio,
