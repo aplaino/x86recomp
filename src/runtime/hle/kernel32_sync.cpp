@@ -106,6 +106,7 @@ struct ThreadObject : Waitable {
   uint64_t param = 0;
   std::atomic<bool> started{false};  // CreateThread vs ResumeThread races
   bool finished = false;  // under g_wait_mu
+  uint32_t exit_code = 0;  // once finished
 };
 
 std::map<std::string, std::shared_ptr<KObject>> g_named;  // under g_wait_mu
@@ -509,10 +510,10 @@ bool RunThreadObject(const std::shared_ptr<ThreadObject>& to) {
   return true;
 }
 
-HLE("kernel32.dll", CreateThread, 6) {
+}  // namespace
+
+uint32_t NewThread(uint64_t stack, gaddr entry, uint64_t param, bool suspended, uint32_t* tid) {
   GuestSyncPoint sync;
-  uint32_t stack = Arg(c, 1), entry = Arg(c, 2), param = Arg(c, 3),
-           flags = Arg(c, 4), tid_out = Arg(c, 5);
   auto to = std::make_shared<ThreadObject>();
   to->thread = CreateGuestThread(stack ? stack : g_proc->img.stack_reserve);
   to->entry = entry;
@@ -521,11 +522,30 @@ HLE("kernel32.dll", CreateThread, 6) {
     std::lock_guard<std::mutex> l(g_wait_mu);
     g_thread_objs[to->thread->tid] = to;
   }
-  if (tid_out) Wr32(tid_out, to->thread->tid);
+  *tid = to->thread->tid;
   uint32_t h = NewHandle(to);
-  RECOMP_TRACE("  CreateThread entry=%08X param=%08X -> tid %04X%s\n", entry,
-            param, to->thread->tid, (flags & 4) ? " (suspended)" : "");
-  if (!(flags & 4)) RunThreadObject(to);
+  RECOMP_TRACE("  new thread entry=%08llX param=%08llX -> tid %04X%s\n",
+               (unsigned long long)entry, (unsigned long long)param, to->thread->tid,
+               suspended ? " (suspended)" : "");
+  if (!suspended) RunThreadObject(to);
+  return h;
+}
+
+bool JoinThread(uint32_t h, uint32_t* exit_code) {
+  auto to = std::dynamic_pointer_cast<ThreadObject>(GetHandle(h));
+  if (!to) return false;
+  WaitObjects({to}, false, kInfinite);
+  std::lock_guard<std::mutex> l(g_wait_mu);
+  *exit_code = to->exit_code;
+  return true;
+}
+
+namespace {
+
+HLE("kernel32.dll", CreateThread, 6) {
+  uint32_t tid;
+  uint32_t h = NewThread(Arg(c, 1), Arg(c, 2), Arg(c, 3), Arg(c, 4) & 4, &tid);
+  if (Arg(c, 5)) Wr32(Arg(c, 5), tid);
   return h;
 }
 
@@ -728,12 +748,15 @@ HLE("kernel32.dll", UnmapViewOfFile, 1) {
 }  // namespace
 }  // namespace hle
 
-void OnGuestThreadFinished(uint32_t tid) {
+void OnGuestThreadFinished(uint32_t tid, uint32_t exit_code) {
   GuestSyncPoint sync;
   {
     std::lock_guard<std::mutex> l(g_wait_mu);
     auto it = g_thread_objs.find(tid);
-    if (it != g_thread_objs.end()) it->second->finished = true;
+    if (it != g_thread_objs.end()) {
+      it->second->exit_code = exit_code;
+      it->second->finished = true;
+    }
   }
   SignalChanged();
 }

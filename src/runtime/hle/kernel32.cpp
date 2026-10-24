@@ -387,8 +387,8 @@ HLE64("kernel32.dll", GetCurrentProcessId, 0) { return kGuestPid; }
 HLE64("kernel32.dll", GetCurrentThread, 0) { return HandleRet(0xFFFFFFFE); }
 HLE64("kernel32.dll", GetCurrentThreadId, 0) { return CurrentThread()->tid; }
 
-HLE("kernel32.dll", ExitProcess, 1) {
-  uint32_t code = Arg(c, 0);
+HLE64("kernel32.dll", ExitProcess, 1) {
+  uint32_t code = uint32_t(Arg(c, 0));
   std::fflush(stdout);
   std::fprintf(stderr, "ExitProcess(%u)\n", code);
   std::fflush(stderr);
@@ -403,10 +403,10 @@ HLE64("kernel32.dll", TerminateProcess, 2) {
   return 0;
 }
 
-HLE("kernel32.dll", GetLastError, 0) {
+HLE64("kernel32.dll", GetLastError, 0) {
   return Rd32(CurrentThread()->teb + 0x34);
 }
-HLE("kernel32.dll", SetLastError, 1) {
+HLE64("kernel32.dll", SetLastError, 1) {
   SetLastError(Arg(c, 0));
   return 0;
 }
@@ -420,7 +420,7 @@ HLE64("kernel32.dll", SetUnhandledExceptionFilter, 1) {
 
 HLE64("kernel32.dll", IsDebuggerPresent, 0) { return 0; }
 
-HLE("kernel32.dll", OutputDebugStringA, 1) {
+HLE64("kernel32.dll", OutputDebugStringA, 1) {
   std::fprintf(stderr, "[guest] %s", GStr(Arg(c, 0)).c_str());
   return 0;
 }
@@ -439,14 +439,30 @@ HLE64("kernel32.dll", IsProcessorFeaturePresent, 1) {
   }
 }
 
-HLE("kernel32.dll", GetSystemInfo, 1) {
-  uint32_t si = Arg(c, 0);
+// x64 guests: SYSTEM_INFO's pointer-sized fields, an AMD64 processor (the
+// CPUID model's family 16h) and the address range guest allocations use.
+HLE64("kernel32.dll", GetSystemInfo, 1) {
+  gaddr si = Arg(c, 0);
+  uint32_t ncpu = GuestProcessorCount();
+  if (g_proc->x64) {
+    std::memset(GPtr(si), 0, 48);
+    Wr16(si + 0, 9);              // PROCESSOR_ARCHITECTURE_AMD64
+    Wr32(si + 4, 0x1000);         // page size
+    Wr64(si + 8, kUserLo64);      // lowest application address
+    Wr64(si + 16, kTebLo64 - 1);  // highest
+    Wr64(si + 24, (1ull << ncpu) - 1);
+    Wr32(si + 32, ncpu);
+    Wr32(si + 36, 8664);          // PROCESSOR_AMD_X8664
+    Wr32(si + 40, 0x10000);       // allocation granularity
+    Wr16(si + 44, 0x16);          // level: the family
+    Wr16(si + 46, 0x0001);        // revision: model 0, stepping 1
+    return 0;
+  }
   std::memset(GPtr(si), 0, 36);
   Wr16(si + 0, 0);            // PROCESSOR_ARCHITECTURE_INTEL
   Wr32(si + 4, 0x1000);       // page size
   Wr32(si + 8, 0x00010000);   // lowest application address
   Wr32(si + 12, 0x7FFEFFFF);  // highest
-  uint32_t ncpu = GuestProcessorCount();
   Wr32(si + 16, (1u << ncpu) - 1);  // active processor mask
   Wr32(si + 20, ncpu);              // number of processors
   Wr32(si + 24, 586);         // PROCESSOR_INTEL_PENTIUM
@@ -472,12 +488,25 @@ HLE("kernel32.dll", GlobalMemoryStatus, 1) {
   return 0;
 }
 
-// The same machine as GlobalMemoryStatus, through MEMORYSTATUSEX.
-HLE("kernel32.dll", GlobalMemoryStatusEx, 1) {
-  uint32_t ms = Arg(c, 0);
+// The same machine as GlobalMemoryStatus, through MEMORYSTATUSEX. x64
+// guests see a current one instead (16 GiB RAM, 24 GiB commit limit) and
+// the virtual address range guest allocations use.
+HLE64("kernel32.dll", GlobalMemoryStatusEx, 1) {
+  gaddr ms = Arg(c, 0);
   if (Rd32(ms) != 64) {
     SetLastError(kErrorInvalidParameter);
     return 0;
+  }
+  if (g_proc->x64) {
+    Wr32(ms + 4, 25);
+    Wr64(ms + 8, 16ull << 30);
+    Wr64(ms + 16, 12ull << 30);
+    Wr64(ms + 24, 24ull << 30);
+    Wr64(ms + 32, 20ull << 30);
+    Wr64(ms + 40, kTebLo64 - kUserLo64);
+    Wr64(ms + 48, kTebLo64 - kUserLo64);  // not tracked: all of it
+    Wr64(ms + 56, 0);
+    return 1;
   }
   Wr32(ms + 4, 30);
   Wr64(ms + 8, 0x40000000);
@@ -520,7 +549,7 @@ HLE("kernel32.dll", GetComputerNameA, 2) {
 
 // ---- heaps ---------------------------------------------------------------
 
-HLE("kernel32.dll", GetProcessHeap, 0) { return g_proc->process_heap; }
+HLE64("kernel32.dll", GetProcessHeap, 0) { return g_proc->process_heap; }
 
 HLE("kernel32.dll", HeapCreate, 3) {
   GuestHeap* h = NewHeap(Arg(c, 1), Arg(c, 2));
@@ -532,18 +561,19 @@ HLE("kernel32.dll", HeapDestroy, 1) {
   return g_heaps.erase(Arg(c, 0)) ? 1 : 0;
 }
 
-HLE("kernel32.dll", HeapAlloc, 3) {
+HLE64("kernel32.dll", HeapAlloc, 3) {
   GuestHeap* h = FindHeap(Arg(c, 0));
-  if (!h) FatalF("HeapAlloc on unknown heap %08X", uint32_t(Arg(c, 0)));
+  if (!h) FatalF("HeapAlloc on unknown heap %08llX", (unsigned long long)Arg(c, 0));
   return h->Alloc(Arg(c, 2), Arg(c, 1) & kHeapZeroMemory);
 }
 
-HLE("kernel32.dll", HeapFree, 3) {
-  uint32_t p = Arg(c, 2);
+HLE64("kernel32.dll", HeapFree, 3) {
+  gaddr p = Arg(c, 2);
   if (!p) return 1;
   GuestHeap* h = FindHeap(Arg(c, 0));
   if (!h || !h->Free(p)) {
-    WarnF("HeapFree(%08X, %08X): not a live block\n", uint32_t(Arg(c, 0)), p);
+    WarnF("HeapFree(%08llX, %08llX): not a live block\n", (unsigned long long)Arg(c, 0),
+          (unsigned long long)p);
     return 0;
   }
   return 1;
@@ -608,35 +638,37 @@ uint32_t ProtToWin(Prot p) {
   }
 }
 
-HLE("kernel32.dll", VirtualAlloc, 4) {
-  uint32_t addr = Arg(c, 0), size = Arg(c, 1), type = Arg(c, 2),
-           prot = Arg(c, 3);
+HLE64("kernel32.dll", VirtualAlloc, 4) {
+  gaddr addr = Arg(c, 0);
+  uint64_t size = Arg(c, 1);
+  uint32_t type = uint32_t(Arg(c, 2)), prot = uint32_t(Arg(c, 3));
   GuestAllocator& vm = g_proc->vm;
   // MEM_COMMIT with no address reserves and commits, like MEM_RESERVE|COMMIT.
   if (!addr && (type & kMemCommit)) type |= kMemReserve;
   if (type & kMemReserve) {
-    uint32_t base = vm.Reserve(addr, size + (addr & 0xFFFF),
-                               type & kMemTopDown);
+    gaddr base = vm.Reserve(addr, size + (addr & 0xFFFF), type & kMemTopDown);
     if (!base) {
       SetLastError(kErrorNotEnoughMemory);
       return 0;
     }
     if (type & kMemCommit) vm.Commit(base, size, ProtFromWin(prot));
-    return addr ? addr & ~0xFFFu : base;
+    return addr ? addr & ~gaddr(0xFFF) : base;
   }
   if (type & kMemCommit) {
     if (!vm.Commit(addr, size, ProtFromWin(prot))) {
       SetLastError(kErrorInvalidAddress);
       return 0;
     }
-    return addr & ~0xFFFu;
+    return addr & ~gaddr(0xFFF);
   }
   SetLastError(kErrorInvalidParameter);
   return 0;
 }
 
-HLE("kernel32.dll", VirtualFree, 3) {
-  uint32_t addr = Arg(c, 0), size = Arg(c, 1), type = Arg(c, 2);
+HLE64("kernel32.dll", VirtualFree, 3) {
+  gaddr addr = Arg(c, 0);
+  uint64_t size = Arg(c, 1);
+  uint32_t type = uint32_t(Arg(c, 2));
   if (type & kMemRelease) return g_proc->vm.Release(addr) ? 1 : 0;
   if (type & kMemDecommit) return g_proc->vm.Decommit(addr, size) ? 1 : 0;
   return 0;
@@ -651,44 +683,65 @@ HLE("kernel32.dll", VirtualProtect, 4) {
 
 HLE("kernel32.dll", VirtualLock, 2) { return 1; }
 
-uint32_t QueryMemory(uint32_t addr, uint32_t mbi) {
+// MEMORY_BASIC_INFORMATION: {base, allocation base, allocation protect,
+// region size, state, protect, type}, 28 bytes with 32-bit pointers and
+// sizes, 48 on x64. Returns its size.
+uint32_t QueryMemory(gaddr addr, gaddr mbi) {
   GuestMemory& mem = g_proc->mem;
   GuestAllocator::Region r;
-  uint32_t page = addr & ~0xFFFu;
-  std::memset(GPtr(mbi), 0, 28);
+  const bool x64 = g_proc->x64;
+  const uint32_t size = x64 ? 48 : 28;
+  auto put = [&](gaddr base, gaddr alloc_base, uint32_t alloc_prot, uint64_t region,
+                 uint32_t state, uint32_t prot, uint32_t type) {
+    std::memset(GPtr(mbi), 0, size);
+    if (x64) {
+      Wr64(mbi + 0, base);
+      Wr64(mbi + 8, alloc_base);
+      Wr32(mbi + 16, alloc_prot);
+      Wr64(mbi + 24, region);
+      Wr32(mbi + 32, state);
+      Wr32(mbi + 36, prot);
+      Wr32(mbi + 40, type);
+    } else {
+      Wr32(mbi + 0, uint32_t(base));
+      Wr32(mbi + 4, uint32_t(alloc_base));
+      Wr32(mbi + 8, alloc_prot);
+      Wr32(mbi + 12, uint32_t(region));
+      Wr32(mbi + 16, state);
+      Wr32(mbi + 20, prot);
+      Wr32(mbi + 24, type);
+    }
+  };
+  gaddr page = addr & ~gaddr(0xFFF);
   if (!g_proc->vm.Find(addr, &r)) {
-    uint64_t base, size;
-    g_proc->vm.FreeGap(addr, &base, &size);
-    Wr32(mbi + 0, base);
-    Wr32(mbi + 12, size);
-    Wr32(mbi + 16, kMemFree);
-    Wr32(mbi + 20, kPageNoAccess);
-    return 28;
+    uint64_t base, gap;
+    g_proc->vm.FreeGap(addr, &base, &gap);
+    put(base, 0, 0, gap, kMemFree, kPageNoAccess, 0);
+    return size;
   }
   // Extend over pages with the same state.
   bool committed = mem.IsCommitted(page);
   Prot prot = mem.QueryProt(page);
-  uint32_t end = page;
+  gaddr end = page;
   while (end < r.base + r.size && mem.IsCommitted(end) == committed &&
          (!committed || mem.QueryProt(end) == prot))
     end += 0x1000;
-  Wr32(mbi + 0, page);
-  Wr32(mbi + 4, r.base);
-  Wr32(mbi + 8, kPageReadWrite);
-  Wr32(mbi + 12, end - page);
-  Wr32(mbi + 16, committed ? kMemCommit : kMemReserve);
-  Wr32(mbi + 20, committed ? ProtToWin(prot) : 0);
   const PeImage* img = ImageAt(r.base);
-  Wr32(mbi + 24, img && img->image_base == r.base ? kMemImage : kMemPrivate);
-  return 28;
+  put(page, r.base, kPageReadWrite, end - page, committed ? kMemCommit : kMemReserve,
+      committed ? ProtToWin(prot) : 0,
+      img && img->image_base == r.base ? kMemImage : kMemPrivate);
+  return size;
 }
 
-HLE("kernel32.dll", VirtualQuery, 3) {
+// VirtualQuery(addr, mbi, length): 0 (ERROR_BAD_LENGTH) if the buffer is
+// smaller than the structure.
+HLE64("kernel32.dll", VirtualQuery, 3) {
+  if (Arg(c, 2) < (g_proc->x64 ? 48u : 28u)) {
+    SetLastError(24);  // ERROR_BAD_LENGTH
+    return 0;
+  }
   uint32_t r = QueryMemory(Arg(c, 0), Arg(c, 1));
-  uint32_t m = Arg(c, 1);
-  RECOMP_TRACE("  VirtualQuery(%X): base %X alloc %X size %X state %X prot %X\n",
-            uint32_t(Arg(c, 0)), Rd32(m), Rd32(m + 4), Rd32(m + 12), Rd32(m + 16),
-            Rd32(m + 20));
+  RECOMP_TRACE("  VirtualQuery(%llX) -> %u\n", (unsigned long long)Arg(c, 0), r);
   return r;
 }
 
@@ -1044,37 +1097,72 @@ HLE("kernel32.dll", GetCPInfo, 2) {
   return 1;
 }
 
-HLE("kernel32.dll", MultiByteToWideChar, 6) {
-  uint32_t src = Arg(c, 2), dst = Arg(c, 4);
+// CP_UTF8 is UTF-8; every other code page is treated as Windows-1252 (the
+// ANSI code page reported by GetACP).
+constexpr uint32_t kCpUtf8 = 65001;
+constexpr uint32_t kMbErrInvalidChars = 0x8, kWcErrInvalidChars = 0x80;
+constexpr uint32_t kErrorNoUnicodeTranslation = 1113;
+
+HLE64("kernel32.dll", MultiByteToWideChar, 6) {
+  uint32_t cp = uint32_t(Arg(c, 0)), flags = uint32_t(Arg(c, 1));
+  gaddr src = Arg(c, 2), dst = Arg(c, 4);
   int32_t n = int32_t(Arg(c, 3)), cap = int32_t(Arg(c, 5));
   if (n < 0) n = int32_t(std::strlen(g_proc->mem.ptr<const char>(src)) + 1);
-  if (!cap) return uint32_t(n);
-  if (n > cap) {
+  std::u16string w;
+  if (cp == kCpUtf8) {
+    bool bad;
+    w = Utf8ToUtf16(GPtr(src), size_t(n), &bad);
+    if (bad && (flags & kMbErrInvalidChars)) {
+      SetLastError(kErrorNoUnicodeTranslation);
+      return 0;
+    }
+  } else {
+    for (int32_t i = 0; i < n; i++) w.push_back(Cp1252ToUnicode(g_proc->mem.read<uint8_t>(src + i)));
+  }
+  if (!cap) return w.size();
+  if (w.size() > size_t(cap)) {
     SetLastError(kErrorInsufficientBuffer);
     return 0;
   }
-  for (int32_t i = 0; i < n; i++)
-    Wr16(dst + 2 * i, Cp1252ToUnicode(g_proc->mem.read<uint8_t>(src + i)));
-  return uint32_t(n);
+  std::memcpy(GPtr(dst), w.data(), 2 * w.size());
+  return w.size();
 }
 
-HLE("kernel32.dll", WideCharToMultiByte, 8) {
-  uint32_t src = Arg(c, 2), dst = Arg(c, 4), used_default = Arg(c, 7);
+HLE64("kernel32.dll", WideCharToMultiByte, 8) {
+  uint32_t cp = uint32_t(Arg(c, 0)), flags = uint32_t(Arg(c, 1));
+  gaddr src = Arg(c, 2), dst = Arg(c, 4), default_char = Arg(c, 6), used_default = Arg(c, 7);
   int32_t n = int32_t(Arg(c, 3)), cap = int32_t(Arg(c, 5));
   if (n < 0) n = int32_t(GWStr(src).size() + 1);
-  if (used_default) Wr32(used_default, 0);
-  if (!cap) return uint32_t(n);
-  if (n > cap) {
+  std::u16string w(size_t(n), u'\0');
+  std::memcpy(w.data(), GPtr(src), 2 * size_t(n));
+  std::string s;
+  if (cp == kCpUtf8) {
+    // UTF-8 has no default character.
+    if (default_char || used_default) {
+      SetLastError(kErrorInvalidParameter);
+      return 0;
+    }
+    bool bad;
+    s = Utf16ToUtf8(w.data(), w.size(), &bad);
+    if (bad && (flags & kWcErrInvalidChars)) {
+      SetLastError(kErrorNoUnicodeTranslation);
+      return 0;
+    }
+  } else {
+    if (used_default) Wr32(used_default, 0);
+    for (char16_t ch : w) {
+      bool ok = true;
+      s.push_back(char(UnicodeToCp1252(ch, &ok)));
+      if (!ok && used_default) Wr32(used_default, 1);
+    }
+  }
+  if (!cap) return s.size();
+  if (s.size() > size_t(cap)) {
     SetLastError(kErrorInsufficientBuffer);
     return 0;
   }
-  for (int32_t i = 0; i < n; i++) {
-    bool ok = true;
-    uint8_t ch = UnicodeToCp1252(Rd16(src + 2 * i), &ok);
-    if (!ok && used_default) Wr32(used_default, 1);
-    Wr8(dst + i, ch);
-  }
-  return uint32_t(n);
+  std::memcpy(GPtr(dst), s.data(), s.size());
+  return s.size();
 }
 
 HLE("kernel32.dll", GetStringTypeW, 4) {
@@ -1162,6 +1250,7 @@ std::string LocaleString(uint32_t type) {
     case 0x0051: return "-";               // LOCALE_SNEGATIVESIGN
     case 0x0059: return "en";              // LOCALE_SISO639LANGNAME
     case 0x005A: return "US";              // LOCALE_SISO3166CTRYNAME
+    case 0x005C: return "en-US";           // LOCALE_SNAME (Vista and later)
     case 0x1001: return "English";         // LOCALE_SENGLANGUAGE
     case 0x1002: return "United States";   // LOCALE_SENGCOUNTRY
     case 0x1004: return "1252";            // LOCALE_IDEFAULTANSICODEPAGE
@@ -1178,10 +1267,10 @@ uint32_t LocaleInfo(Ctx& c, bool wide) {
     SetLastError(kErrorInvalidParameter);
     return 0;
   }
-  return PutCounted(Arg(c, 2), Arg(c, 3), s, wide);
+  return PutCounted(Arg(c, 2), uint32_t(Arg(c, 3)), s, wide);
 }
 
-HLE("kernel32.dll", GetLocaleInfoA, 4) { return LocaleInfo(c, false); }
+HLE64("kernel32.dll", GetLocaleInfoA, 4) { return LocaleInfo(c, false); }
 HLE("kernel32.dll", GetLocaleInfoW, 4) { return LocaleInfo(c, true); }
 
 }  // namespace

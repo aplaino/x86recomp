@@ -177,6 +177,86 @@ inline std::string AnsiToUtf8(const std::string& s) {
   return u;
 }
 
+// UTF-8 -> UTF-16. Ill-formed input becomes U+FFFD, one per maximal
+// subpart (the Unicode-recommended practice); *bad tells whether any was.
+inline std::u16string Utf8ToUtf16(const uint8_t* s, size_t n, bool* bad) {
+  std::u16string w;
+  *bad = false;
+  for (size_t i = 0; i < n;) {
+    uint8_t b = s[i];
+    if (b < 0x80) {
+      w.push_back(b);
+      i++;
+      continue;
+    }
+    // The sequence length and the range of the second byte (Unicode table
+    // 3-7); later bytes are 80-BF.
+    int len = 0;
+    uint8_t lo = 0x80, hi = 0xBF;
+    if (b >= 0xC2 && b <= 0xDF) len = 2;
+    else if (b == 0xE0) len = 3, lo = 0xA0;
+    else if (b == 0xED) len = 3, hi = 0x9F;
+    else if (b >= 0xE1 && b <= 0xEF) len = 3;
+    else if (b == 0xF0) len = 4, lo = 0x90;
+    else if (b >= 0xF1 && b <= 0xF3) len = 4;
+    else if (b == 0xF4) len = 4, hi = 0x8F;
+    uint32_t cp = len == 2 ? b & 0x1F : len == 3 ? b & 0x0F : b & 0x07;
+    size_t k = 1;
+    for (; len && k < size_t(len); k++) {
+      if (i + k >= n) break;
+      uint8_t x = s[i + k];
+      if (x < (k == 1 ? lo : 0x80) || x > (k == 1 ? hi : 0xBF)) break;
+      cp = cp << 6 | (x & 0x3F);
+    }
+    if (!len || k < size_t(len)) {
+      w.push_back(0xFFFD);
+      *bad = true;
+      i += k;
+      continue;
+    }
+    if (cp >= 0x10000) {
+      w.push_back(char16_t(0xD800 + ((cp - 0x10000) >> 10)));
+      w.push_back(char16_t(0xDC00 + ((cp - 0x10000) & 0x3FF)));
+    } else {
+      w.push_back(char16_t(cp));
+    }
+    i += len;
+  }
+  return w;
+}
+
+// UTF-16 -> UTF-8. An unpaired surrogate becomes U+FFFD; *bad tells
+// whether there was one.
+inline std::string Utf16ToUtf8(const char16_t* w, size_t n, bool* bad) {
+  std::string s;
+  *bad = false;
+  for (size_t i = 0; i < n; i++) {
+    uint32_t cp = w[i];
+    if (cp >= 0xD800 && cp < 0xDC00 && i + 1 < n && w[i + 1] >= 0xDC00 && w[i + 1] < 0xE000) {
+      cp = 0x10000 + ((cp - 0xD800) << 10) + (w[++i] - 0xDC00);
+    } else if (cp >= 0xD800 && cp < 0xE000) {
+      cp = 0xFFFD;
+      *bad = true;
+    }
+    if (cp < 0x80) {
+      s.push_back(char(cp));
+    } else if (cp < 0x800) {
+      s.push_back(char(0xC0 | (cp >> 6)));
+      s.push_back(char(0x80 | (cp & 0x3F)));
+    } else if (cp < 0x10000) {
+      s.push_back(char(0xE0 | (cp >> 12)));
+      s.push_back(char(0x80 | ((cp >> 6) & 0x3F)));
+      s.push_back(char(0x80 | (cp & 0x3F)));
+    } else {
+      s.push_back(char(0xF0 | (cp >> 18)));
+      s.push_back(char(0x80 | ((cp >> 12) & 0x3F)));
+      s.push_back(char(0x80 | ((cp >> 6) & 0x3F)));
+      s.push_back(char(0x80 | (cp & 0x3F)));
+    }
+  }
+  return s;
+}
+
 // CT_CTYPE1 classification for Latin-1 + the CP1252 extras.
 inline uint16_t CharType1(uint16_t u) {
   enum { kUpper = 1, kLower = 2, kDigit = 4, kSpace = 8, kPunct = 0x10,

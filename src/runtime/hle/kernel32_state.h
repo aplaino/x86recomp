@@ -26,6 +26,12 @@ namespace hle {
 // (for the condition variables that release and retake one).
 void EnterCs(gaddr cs);
 void LeaveCs(gaddr cs);
+// A new guest thread running entry(param) (CreateThread, _beginthreadex):
+// its handle, and its id in *tid. stack 0 is the EXE's default.
+uint32_t NewThread(uint64_t stack, gaddr entry, uint64_t param, bool suspended, uint32_t* tid);
+// Waits for the thread behind handle h to finish: its exit code, or false
+// if h is not a thread.
+bool JoinThread(uint32_t h, uint32_t* exit_code);
 }  // namespace hle
 
 // QueryPerformanceCounter's clock: 100 ns ticks (QueryPerformanceFrequency
@@ -80,6 +86,10 @@ bool CloseHandleValue(uint32_t h);
 enum class PathAccess { kRead, kWrite, kUpdate };
 std::string HostPath(const std::string& guest_path,
                      PathAccess access = PathAccess::kRead);
+// A Unicode path (W functions, UTF-8 APIs) as the guest's narrow
+// Windows-1252 path, the form HostPath takes; fatal for a character
+// outside Windows-1252.
+std::string NarrowPath(const std::u16string& path);
 // The install and overlay directories behind a guest directory, for
 // merged listings (overlay first). One entry outside the install.
 std::vector<std::string> HostDirs(const std::string& guest_dir);
@@ -90,7 +100,7 @@ std::string GuestCurrentDir();
 struct GuestThreadExit {
   uint32_t code;
 };
-void OnGuestThreadFinished(uint32_t tid);
+void OnGuestThreadFinished(uint32_t tid, uint32_t exit_code);
 
 struct Thread;
 // SetEvent (or PulseEvent) on an event handle from host code (WinMM

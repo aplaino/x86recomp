@@ -989,6 +989,54 @@ void InjectTestStall() {
   std::this_thread::sleep_for(std::chrono::duration<double>(dur));
 }
 
+void (*g_host_event_sink)(const SDL_Event&) = nullptr;
+
+}  // namespace
+
+void SetHostEventSink(void (*sink)(const SDL_Event&)) { g_host_event_sink = sink; }
+
+uint32_t CreateSdl2Window(const std::string& title_utf8, int w, int h, SDL_WindowFlags flags,
+                          SDL_Window** sdl) {
+  EnsureSdlVideo();
+  Window win;
+  win.sdl = SDL_CreateWindow(title_utf8.c_str(), ToPoints(nullptr, w), ToPoints(nullptr, h),
+                             flags | SDL_WINDOW_HIGH_PIXEL_DENSITY | hle::GfxWindowFlags());
+  if (!win.sdl) return 0;
+  win.title = title_utf8;
+  win.w = w;
+  win.h = h;
+  win.visible = !(flags & SDL_WINDOW_HIDDEN);
+  win.tid = CurrentThread()->tid;
+  std::lock_guard<std::recursive_mutex> l(g_mu);
+  win.hwnd = g_next_hwnd;
+  g_next_hwnd += 0x10;
+  *sdl = win.sdl;
+  uint32_t hwnd = win.hwnd;
+  g_windows[hwnd] = std::move(win);
+  return hwnd;
+}
+
+void DestroySdl2Window(uint32_t hwnd) {
+  SDL_Window* sdl = nullptr;
+  {
+    std::lock_guard<std::recursive_mutex> l(g_mu);
+    auto it = g_windows.find(hwnd);
+    if (it == g_windows.end()) return;
+    sdl = it->second.sdl;
+    g_windows.erase(it);
+  }
+  if (sdl) SDL_DestroyWindow(sdl);
+}
+
+namespace {
+
+void DeliverHostEvent(const SDL_Event& e) {
+  if (g_host_event_sink)
+    g_host_event_sink(e);
+  else
+    HandleSdlEvent(e);
+}
+
 }  // namespace
 
 void PumpHostEvents() {
@@ -1007,7 +1055,7 @@ void PumpHostEvents() {
                          e.type == SDL_EVENT_WINDOW_FOCUS_LOST ||
                          e.type == SDL_EVENT_WINDOW_MOUSE_LEAVE))
       continue;
-    HandleSdlEvent(e);
+    DeliverHostEvent(e);
   }
   InjectTestFocus();
   InjectTestInput();
@@ -2058,13 +2106,14 @@ HLE("user32.dll", MsgWaitForMultipleObjects, 5) {
 // keys. Our input never produces system hotkeys, so the hook gets a handle
 // and is never called.
 
-HLE("user32.dll", SetWindowsHookExA, 4) {
+HLE64("user32.dll", SetWindowsHookExA, 4) {
   static uint32_t next = 0x00F00010;
-  RECOMP_TRACE("  SetWindowsHookExA(type %d, proc %08X): ignored\n",
-            int32_t(Arg(c, 0)), uint32_t(Arg(c, 1)));
-  return next += 0x10;
+  RECOMP_TRACE("  SetWindowsHookExA(type %d, proc %08llX): ignored\n", int32_t(Arg(c, 0)),
+               (unsigned long long)Arg(c, 1));
+  return HandleRet(next += 0x10);
 }
-HLE("user32.dll", CallNextHookEx, 4) { return 0; }
+HLE64("user32.dll", UnhookWindowsHookEx, 1) { return 1; }
+HLE64("user32.dll", CallNextHookEx, 4) { return 0; }
 
 // ---- cursor ------------------------------------------------------------------------
 

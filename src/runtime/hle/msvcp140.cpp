@@ -27,7 +27,7 @@ namespace {
 constexpr const char* kDll = "msvcp140.dll";
 
 // _Thrd_result.
-constexpr uint32_t kSuccess = 0, kTimedout = 2, kBusy = 3;
+constexpr uint32_t kSuccess = 0, kTimedout = 2, kBusy = 3, kError = 4;
 
 // An absolute xtime (system clock).
 std::chrono::system_clock::time_point XtimeAt(gaddr xt) {
@@ -245,6 +245,19 @@ HLE64(kDll, _Thrd_yield, kCdecl) {
   GuestSyncPoint sync;
   sched_yield();
   return 0;
+}
+// _Thrd_join(_Thrd_t, int* result) and _Thrd_detach(_Thrd_t): the 16-byte
+// _Thrd_t {HANDLE _Hnd; _Thrd_id_t _Id;} comes by reference (Win64 passes
+// larger aggregates as a pointer to a copy). Both close the handle.
+HLE64(kDll, _Thrd_join, kCdecl) {
+  uint32_t h = uint32_t(Rd64(Arg(c, 0))), code;
+  if (!JoinThread(h, &code)) return kError;
+  CloseHandleValue(h);
+  if (Arg(c, 1)) Wr32(Arg(c, 1), code);
+  return kSuccess;
+}
+HLE64(kDll, _Thrd_detach, kCdecl) {
+  return CloseHandleValue(uint32_t(Rd64(Arg(c, 0)))) ? kSuccess : kError;
 }
 // Sleeps until the absolute xtime.
 HLE64(kDll, _Thrd_sleep, kCdecl) {

@@ -274,7 +274,7 @@ static uint32_t RunGuestThread(Thread* t, gaddr entry,
   } catch (const GuestThreadExit& e) {
     r = e.code;
   }
-  OnGuestThreadFinished(t->tid);
+  OnGuestThreadFinished(t->tid, r);
   return r;
 }
 

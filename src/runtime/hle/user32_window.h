@@ -5,6 +5,7 @@
 #include <SDL3/SDL.h>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace recomp {
@@ -32,6 +33,18 @@ void EnsureSdlVideo();
 // Pumps SDL events into the guest message queues. Main thread only;
 // called from PeekMessage/GetMessage and long waits.
 void PumpHostEvents();
+
+// Games that link SDL2 themselves (recomp_sdl2): an SDL2 window is an
+// HWND too, so Win32 and DXGI calls on the HWND the game gets from
+// SDL_GetWindowWMInfo reach its SDL window. size is the client area in
+// pixels; flags are SDL3 window flags added to the runtime's own.
+uint32_t CreateSdl2Window(const std::string& title_utf8, int w, int h, SDL_WindowFlags flags,
+                          SDL_Window** sdl);
+void DestroySdl2Window(uint32_t hwnd);
+// An SDL2 game owns the host event stream: once a sink is set,
+// PumpHostEvents hands it every event instead of turning them into
+// window messages (input filtering for background runs still applies).
+void SetHostEventSink(void (*sink)(const SDL_Event&));
 
 // DirectDraw exclusive mode on hwnd: the SDL window's client area is the
 // display mode (w x h) and the game's own window placement (MoveWindow,

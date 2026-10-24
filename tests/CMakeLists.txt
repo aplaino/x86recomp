@@ -68,6 +68,13 @@ target_compile_features(pacing_test PRIVATE cxx_std_20)
 add_test(NAME pacing COMMAND pacing_test)
 set_tests_properties(pacing PROPERTIES RUN_SERIAL TRUE)
 
+# win32_text_test: UTF-8 <-> UTF-16 conversion (runtime/hle/win32.h);
+# portable.
+add_executable(win32_text_test win32_text_test.cpp)
+target_include_directories(win32_text_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_features(win32_text_test PRIVATE cxx_std_20)
+add_test(NAME win32_text COMMAND win32_text_test)
+
 # lazy_mem_test: lazily read-back images (DirectDraw Lock of GPU
 # surfaces) through real page faults; portable.
 add_executable(lazy_mem_test lazy_mem_test.cpp

@@ -174,12 +174,27 @@ HLE("kernel32.dll", CompareFileTime, 2) {
   return a < b ? 0xFFFFFFFF : a > b ? 1 : 0;
 }
 
-HLE("kernel32.dll", FileTimeToLocalFileTime, 2) {
+HLE64("kernel32.dll", FileTimeToLocalFileTime, 2) {
   time_t now = time(nullptr);
   std::tm lt{};
   localtime_r(&now, &lt);
   int64_t off = int64_t(lt.tm_gmtoff) * 10000000;
   Wr64(Arg(c, 1), uint64_t(int64_t(Rd64(Arg(c, 0))) + off));
+  return 1;
+}
+
+// FileTimeToDosDateTime(ft, &date, &time): the FILETIME's fields as
+// they are (no time zone conversion), DOS-packed; years 1980-2107 only.
+HLE64("kernel32.dll", FileTimeToDosDateTime, 3) {
+  uint64_t ft = Rd64(Arg(c, 0));
+  time_t secs = time_t(int64_t(ft - kFileTimeUnixEpoch) / 10000000);
+  std::tm t{};
+  if (ft < kFileTimeUnixEpoch || !gmtime_r(&secs, &t) || t.tm_year < 80 || t.tm_year > 207) {
+    SetLastError(kErrorInvalidParameter);
+    return 0;
+  }
+  Wr16(Arg(c, 1), uint16_t((t.tm_year - 80) << 9 | (t.tm_mon + 1) << 5 | t.tm_mday));
+  Wr16(Arg(c, 2), uint16_t(t.tm_hour << 11 | t.tm_min << 5 | t.tm_sec / 2));
   return 1;
 }
 
@@ -239,7 +254,11 @@ HLE("kernel32.dll", GetTimeFormatA, 6) {
 
 // ---- strings -------------------------------------------------------------------------
 
-HLE("kernel32.dll", lstrcpyA, 2) {
+HLE64("kernel32.dll", lstrlenA, 1) {
+  return Arg(c, 0) ? std::strlen(g_proc->mem.ptr<const char>(Arg(c, 0))) : 0;
+}
+
+HLE64("kernel32.dll", lstrcpyA, 2) {
   PutStr(Arg(c, 0), GStr(Arg(c, 1)));
   return Arg(c, 0);
 }
@@ -292,8 +311,8 @@ HLE("kernel32.dll", CreateProcessA, 10) {
 
 HLE("kernel32.dll", FlushInstructionCache, 3) { return 1; }
 
-HLE("kernel32.dll", DebugBreak, 0) {
-  FatalF("DebugBreak() called from %08X", Rd32(c.esp));
+HLE64("kernel32.dll", DebugBreak, 0) {
+  FatalF("DebugBreak() called from %08llX", (unsigned long long)RdPtr(c.rsp));
 }
 
 // ---- version.dll ------------------------------------------------------------

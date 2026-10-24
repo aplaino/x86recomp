@@ -71,6 +71,33 @@ HLE("shfolder.dll", SHGetFolderPathW, 5) {
   return 0;
 }
 
+// SHGetKnownFolderPath(id, flags, token, &path): Vista and later, so the
+// layout is Windows 10's (C:\Users\<user>). The path is CoTaskMemAlloc'd.
+// Like SHGetFolderPath it creates the folder whatever the flags say.
+HLE64("shell32.dll", SHGetKnownFolderPath, 4) {
+  struct Known {
+    uint8_t id[16];  // the GUID as stored
+    const char* path;
+  };
+  static const Known kKnown[] = {
+      {{0xFF, 0x32, 0x5C, 0x4C, 0x9D, 0xBB, 0xB0, 0x43, 0xB5, 0xB4, 0x2D, 0x72, 0xE5, 0x4E,
+        0xAA, 0xA4},
+       "C:\\Users\\Player\\Saved Games"},  // FOLDERID_SavedGames
+  };
+  gaddr id = Arg(c, 0), out = Arg(c, 3);
+  WrPtr(out, 0);
+  for (const Known& k : kKnown) {
+    if (std::memcmp(GPtr(id), k.id, 16)) continue;
+    MakeDirs(HostPath(k.path));
+    gaddr buf = HeapAllocProcess(2 * (std::strlen(k.path) + 1), false);
+    PutWStr(buf, k.path);
+    WrPtr(out, buf);
+    return 0;
+  }
+  WarnF("SHGetKnownFolderPath({%08X-...}): unknown folder\n", Rd32(id));
+  return 0x80070002;  // HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)
+}
+
 // SHCreateDirectoryExA(hwnd, path, security): the directory and any missing
 // parents. Returns a Win32 error code, not a BOOL.
 HLE("shell32.dll", SHCreateDirectoryExA, 3) {

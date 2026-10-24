@@ -13,6 +13,7 @@
 
 #include "runtime/hle/hle.h"
 #include "runtime/hle/kernel32_state.h"
+#include "runtime/hle/seh64.h"
 #include "runtime/lifted.h"
 #include "runtime/log.h"
 
@@ -106,7 +107,15 @@ bool DispatchException(Ctx& c, uint32_t code, uint32_t flags, uint32_t nparams,
   return false;
 }
 
-HLE("kernel32.dll", RaiseException, 4) {
+HLE64("kernel32.dll", RaiseException, 4) {
+  if (g_proc->x64) {  // table-based (seh64.h)
+    uint32_t code = uint32_t(Arg(c, 0)), flags = uint32_t(Arg(c, 1)), n = uint32_t(Arg(c, 2));
+    gaddr args = Arg(c, 3);
+    uint64_t params[15] = {};
+    for (uint32_t i = 0; i < std::min<uint32_t>(n, 15); i++) params[i] = Rd64(args + 8 * i);
+    seh64::Raise(c, code, flags, params, n, seh64::AtReturn(c));
+    return c.rax;
+  }
   uint32_t code = Arg(c, 0), flags = Arg(c, 1), n = Arg(c, 2), args = Arg(c, 3);
   uint32_t eip = Rd32(c.esp);  // return address: where Windows reports it
   uint32_t params[15] = {};

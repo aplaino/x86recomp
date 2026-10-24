@@ -99,6 +99,7 @@ add_library(recomp_runtime SHARED
   src/runtime/hle/kernel32_file.cpp
   src/runtime/hle/kernel32_sync.cpp
   src/runtime/hle/kernel32_seh.cpp
+  src/runtime/hle/seh64.cpp
   src/runtime/hle/kernel32_misc.cpp
   src/runtime/hle/advapi32.cpp
   src/runtime/hle/user32_input.cpp
@@ -279,9 +280,19 @@ target_link_libraries(recomp_opengl PUBLIC recomp_runtime recomp_gfx)
 # dbghelp (UnDecorateSymbolName) on LLVM's Microsoft demangler.
 # The x64 C and C++ runtime DLLs (UCRT, VCRUNTIME140, MSVCP140): x64 guests
 # import them, 32-bit ones link their CRT statically.
-add_library(recomp_ucrt SHARED src/runtime/hle/ucrt.cpp src/runtime/hle/vcruntime.cpp
+add_library(recomp_ucrt SHARED src/runtime/hle/ucrt.cpp src/runtime/hle/ucrt_stdio.cpp
+            src/runtime/hle/ucrt_time.cpp
+            src/runtime/hle/vcruntime.cpp src/runtime/hle/vcruntime_eh.cpp
             src/runtime/hle/msvcp140.cpp)
 target_link_libraries(recomp_ucrt PUBLIC recomp_runtime PRIVATE coremath)
+
+# Store and online service SDKs (GOG Galaxy, ...), answering as offline.
+add_library(recomp_online SHARED src/runtime/hle/galaxy64.cpp)
+target_link_libraries(recomp_online PUBLIC recomp_runtime)
+
+# SDL2.dll for x64 guests that link it themselves, on the host's SDL3.
+add_library(recomp_sdl2 SHARED src/runtime/hle/sdl2.cpp src/runtime/hle/sdl2_video.cpp)
+target_link_libraries(recomp_sdl2 PUBLIC recomp_runtime SDL3::SDL3)
 
 add_library(recomp_dbghelp SHARED src/runtime/hle/dbghelp.cpp)
 find_library(RECOMP_LLVM_DEMANGLE libLLVMDemangle.a

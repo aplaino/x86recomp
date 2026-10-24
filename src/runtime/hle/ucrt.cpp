@@ -11,11 +11,14 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "runtime/hle/hle.h"
 #include "runtime/hle/kernel32_state.h"
+#include "runtime/hle/ucrt.h"
 #include "runtime/hle/win32.h"
 #include "runtime/log.h"
 #include "runtime/runtime.h"
@@ -136,6 +139,8 @@ void SetErrno(uint32_t e) { Wr32(ErrnoSlot(), e); }
 
 }  // namespace
 
+gaddr GuestErrno() { return ErrnoSlot(); }
+
 // ---- startup and termination ---------------------------------------------
 
 // _initterm(first, last): every non-null function pointer in [first, last).
@@ -237,6 +242,19 @@ HLE64("ucrtbase.dll", _seh_filter_dll, kCdecl) { return 0; }
 // errno: an int per guest thread.
 HLE64("ucrtbase.dll", _errno, kCdecl) { return ErrnoSlot(); }
 
+// ---- threads ----------------------------------------------------------------
+
+// _beginthreadex(security, stack, start, arg, flags, &tid): a thread whose
+// exit code is start's result; the handle is the caller's to close.
+// Flags: CREATE_SUSPENDED, STACK_SIZE_PARAM_IS_A_RESERVATION.
+HLE64("ucrtbase.dll", _beginthreadex, kCdecl) {
+  uint32_t flags = uint32_t(Arg(c, 4));
+  if (flags & ~0x10004u) FatalF("_beginthreadex: flags %X not supported", flags);
+  uint32_t tid;
+  uint32_t h = NewThread(uint32_t(Arg(c, 1)), Arg(c, 2), Arg(c, 3), flags & 4, &tid);
+  if (Arg(c, 5)) Wr32(Arg(c, 5), tid);
+  return HandleRet(h);
+}
 
 // ---- heap ----------------------------------------------------------------
 // The UCRT allocates from the process heap since Visual Studio 2015.
@@ -506,6 +524,89 @@ HLE64("ucrtbase.dll", rand, kCdecl) {
   static thread_local uint32_t seed = 1;
   seed = seed * 214013u + 2531011u;
   return (seed >> 16) & 0x7FFF;
+}
+
+// qsort(base, n, width, compare): the MSVC CRT's algorithm, so elements
+// that compare equal end up in the order they do on Windows: quicksort on
+// the median of the first, middle and last elements, an explicit stack of
+// the larger partitions, and a selection sort (largest to the end) for
+// partitions of up to 8 elements.
+HLE64("ucrtbase.dll", qsort, kCdecl) {
+  gaddr base = Arg(c, 0), cmp = Arg(c, 3);
+  uint64_t n = Arg(c, 1), w = Arg(c, 2);
+  if (n < 2 || !w) return 0;
+  auto compare = [&](gaddr a, gaddr b) { return int32_t(CallGuest(c, cmp, {a, b})); };
+  auto swap = [&](gaddr a, gaddr b) {
+    if (a == b) return;
+    uint8_t* pa = GPtr(a);
+    uint8_t* pb = GPtr(b);
+    for (uint64_t i = 0; i < w; i++) std::swap(pa[i], pb[i]);
+  };
+  auto shortsort = [&](gaddr lo, gaddr hi) {
+    for (; hi > lo; hi -= w) {
+      gaddr max = lo;
+      for (gaddr p = lo + w; p <= hi; p += w)
+        if (compare(p, max) > 0) max = p;
+      swap(max, hi);
+    }
+  };
+  constexpr uint64_t kCutoff = 8;
+  std::vector<std::pair<gaddr, gaddr>> stack;
+  gaddr lo = base, hi = base + w * (n - 1);
+  for (;;) {
+    uint64_t size = (hi - lo) / w + 1;
+    if (size <= kCutoff) {
+      shortsort(lo, hi);
+    } else {
+      gaddr mid = lo + (size / 2) * w;
+      if (compare(lo, mid) > 0) swap(lo, mid);
+      if (compare(lo, hi) > 0) swap(lo, hi);
+      if (compare(mid, hi) > 0) swap(mid, hi);
+      gaddr loguy = lo, higuy = hi;
+      for (;;) {
+        if (mid > loguy) {
+          do loguy += w;
+          while (loguy < mid && compare(loguy, mid) <= 0);
+        }
+        if (mid <= loguy) {
+          do loguy += w;
+          while (loguy <= hi && compare(loguy, mid) <= 0);
+        }
+        do higuy -= w;
+        while (higuy > mid && compare(higuy, mid) > 0);
+        if (higuy < loguy) break;
+        swap(loguy, higuy);
+        if (mid == higuy) mid = loguy;  // the pivot moved
+      }
+      higuy += w;
+      if (mid < higuy) {
+        do higuy -= w;
+        while (higuy > mid && compare(higuy, mid) == 0);
+      }
+      if (mid >= higuy) {
+        do higuy -= w;
+        while (higuy > lo && compare(higuy, mid) == 0);
+      }
+      // [lo, higuy] and [loguy, hi] remain: the smaller one next, the
+      // larger one stacked.
+      if (higuy - lo >= hi - loguy) {
+        if (lo < higuy) stack.push_back({lo, higuy});
+        if (loguy < hi) {
+          lo = loguy;
+          continue;
+        }
+      } else {
+        if (loguy < hi) stack.push_back({loguy, hi});
+        if (lo < higuy) {
+          hi = higuy;
+          continue;
+        }
+      }
+    }
+    if (stack.empty()) return 0;
+    std::tie(lo, hi) = stack.back();
+    stack.pop_back();
+  }
 }
 
 // ---- environment -----------------------------------------------------------

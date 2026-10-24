@@ -1059,7 +1059,9 @@ Exceptions: x64 SEH is table-based, not an fs:[0] chain.
   separate .pdata functions that the language handler calls with the
   establisher frame; they are ordinary lifted functions. Continuation
   addresses (from FuncInfo3/4 metadata and C_SCOPE_TABLE targets) are
-  strong entries, read by the lifter from the handler data.
+  to be strong entries, read by the lifter from the handler data. Not
+  done yet: a resume to one that is not an entry for another reason is
+  the unlifted-address fatal, which names it.
 - Software exceptions (throw, RaiseException) arrive through an HLE call
   with the registers spilled, so their CONTEXT is exact. Open: hardware
   faults inside __try ranges, where the faulting function's RSP and RIP

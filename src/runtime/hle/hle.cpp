@@ -177,20 +177,31 @@ void CallThunk(Ctx& c, gaddr thunk) {
     TraceF("[%04X] %s!%s(%s) from %08llX\n", CurrentThread()->tid,
            s->dll.c_str(), s->name.c_str(), args.c_str(), ret);
   }
-  // For hang dumps: which import this thread is inside (innermost).
-  const char* saved_name = t_wd_hle_name;
-  uint64_t saved_ret = t_wd_hle_ret;
-  t_wd_hle_name = s->name.c_str();
-  t_wd_hle_ret = ret;
-  ++t_hle_depth;
-  static std::recursive_mutex graphics_mu;
-  std::unique_lock<std::recursive_mutex> gl;
-  if (s->graphics) gl = std::unique_lock<std::recursive_mutex>(graphics_mu);
-  uint64_t r = d.fn(c);
-  if (gl) gl.unlock();
-  --t_hle_depth;
-  t_wd_hle_name = saved_name;
-  t_wd_hle_ret = saved_ret;
+  // For hang dumps: which import this thread is inside (innermost). A
+  // guest exception's unwind (GuestResume) may leave through the handler,
+  // so this is undone on the way out either way.
+  struct Inside {
+    const char* saved_name = t_wd_hle_name;
+    uint64_t saved_ret = t_wd_hle_ret;
+    Inside(const char* name, uint64_t ret) {
+      t_wd_hle_name = name;
+      t_wd_hle_ret = ret;
+      ++t_hle_depth;
+    }
+    ~Inside() {
+      --t_hle_depth;
+      t_wd_hle_name = saved_name;
+      t_wd_hle_ret = saved_ret;
+    }
+  };
+  uint64_t r;
+  {
+    Inside inside(s->name.c_str(), ret);
+    static std::recursive_mutex graphics_mu;
+    std::unique_lock<std::recursive_mutex> gl;
+    if (s->graphics) gl = std::unique_lock<std::recursive_mutex>(graphics_mu);
+    r = d.fn(c);
+  }
   if (trace) TraceF("[%04X]   -> %llX\n", CurrentThread()->tid, (unsigned long long)r);
   if (x64) {
     c.rax = r;

@@ -211,6 +211,15 @@ std::vector<std::string> HostDirs(const std::string& guest_dir) {
   return {Resolve(OverlayRoot(), comps), Resolve(g_proc->game_dir, comps)};
 }
 
+std::string NarrowPath(const std::u16string& path) {
+  for (char16_t ch : path) {
+    bool ok;
+    win32::UnicodeToCp1252(ch, &ok);
+    if (!ok) FatalF("path with a character outside Windows-1252 (U+%04X): not supported", unsigned(ch));
+  }
+  return win32::Narrow(path);
+}
+
 uint32_t NewHandle(std::shared_ptr<KObject> obj) {
   std::lock_guard<std::mutex> l(g_handles_mu);
   uint32_t h = g_next_handle;
@@ -242,9 +251,10 @@ namespace {
 using namespace win32;
 
 constexpr uint32_t kInvalidHandle = 0xFFFFFFFF;
+constexpr uint32_t kVolumeSerial = 0x1DEADD51;  // drive C:
 
 // FILETIME from a POSIX time.
-void PutFileTime(uint32_t va, const timespec& ts) {
+void PutFileTime(gaddr va, const timespec& ts) {
   Wr64(va, uint64_t(ts.tv_sec) * 10000000ull + uint64_t(ts.tv_nsec) / 100 +
                kFileTimeUnixEpoch);
 }
@@ -268,13 +278,15 @@ uint32_t ErrnoToWin(int e) {
   }
 }
 
-HLE("kernel32.dll", GetStdHandle, 1) {
+std::string WidePath(gaddr p) { return NarrowPath(GWStr(p)); }
+
+HLE64("kernel32.dll", GetStdHandle, 1) {
   int32_t which = int32_t(Arg(c, 0));
   int idx = which == -10 ? 0 : which == -11 ? 1 : which == -12 ? 2 : -1;
-  if (idx < 0) return kInvalidHandle;
+  if (idx < 0) return HandleRet(kInvalidHandle);
   if (!g_std_handles[idx])
     g_std_handles[idx] = NewHandle(std::make_shared<StdIoObject>(idx));
-  return g_std_handles[idx];
+  return HandleRet(g_std_handles[idx]);
 }
 
 HLE("kernel32.dll", SetStdHandle, 2) { return 1; }
@@ -288,7 +300,7 @@ HLE("kernel32.dll", GetFileType, 1) {
   return o->type == KObject::Type::StdIo ? 2 : 1;  // CHAR : DISK
 }
 
-HLE("kernel32.dll", CloseHandle, 1) {
+HLE64("kernel32.dll", CloseHandle, 1) {
   if (!CloseHandleValue(Arg(c, 0))) {
     SetLastError(kErrorInvalidHandle);
     return 0;
@@ -306,9 +318,9 @@ HLE("kernel32.dll", DuplicateHandle, 7) {
   return 1;
 }
 
-HLE("kernel32.dll", CreateFileA, 7) {
-  std::string gpath = GStr(Arg(c, 0));
-  uint32_t access = Arg(c, 1), disp = Arg(c, 4);
+// CreateFile(path, access, share, security, disposition, flags, template).
+uint32_t CreateFile(Ctx& c, const std::string& gpath) {
+  uint32_t access = uint32_t(Arg(c, 1)), disp = uint32_t(Arg(c, 4));
   std::string path = HostPath(gpath);
   bool write = access & 0x40000000;  // GENERIC_WRITE
   bool read = access & 0x80000000;   // GENERIC_READ
@@ -338,26 +350,30 @@ HLE("kernel32.dll", CreateFileA, 7) {
   }
   int fd = open(path.c_str(), flags | O_CLOEXEC, 0644);
   if (fd < 0) {
-    RECOMP_TRACE("  CreateFileA(%s) -> %s: %s\n", gpath.c_str(), path.c_str(),
+    RECOMP_TRACE("  CreateFile(%s) -> %s: %s\n", gpath.c_str(), path.c_str(),
               std::strerror(errno));
     SetLastError(ErrnoToWin(errno));
     return kInvalidHandle;
   }
-  RECOMP_TRACE("  CreateFileA(%s) -> %s\n", gpath.c_str(), path.c_str());
+  RECOMP_TRACE("  CreateFile(%s) -> %s\n", gpath.c_str(), path.c_str());
   auto f = std::make_shared<FileObject>();
   f->fd = fd;
   SetLastError(exists && (disp == 2 || disp == 4) ? kErrorAlreadyExists : 0);
   return NewHandle(f);
 }
 
-int FdOf(uint32_t h) {
+HLE64("kernel32.dll", CreateFileA, 7) { return HandleRet(CreateFile(c, GStr(Arg(c, 0)))); }
+HLE64("kernel32.dll", CreateFileW, 7) { return HandleRet(CreateFile(c, WidePath(Arg(c, 0)))); }
+
+int FdOf(uint64_t h) {
   auto o = GetHandle(h);
   return o ? FileFd(o.get()) : -1;
 }
 
-HLE("kernel32.dll", ReadFile, 5) {
+HLE64("kernel32.dll", ReadFile, 5) {
   int fd = FdOf(Arg(c, 0));
-  uint32_t buf = Arg(c, 1), n = Arg(c, 2), out = Arg(c, 3);
+  gaddr buf = Arg(c, 1), out = Arg(c, 3);
+  uint32_t n = uint32_t(Arg(c, 2));
   if (fd < 0) {
     SetLastError(kErrorInvalidHandle);
     return 0;
@@ -373,9 +389,10 @@ HLE("kernel32.dll", ReadFile, 5) {
   return 1;
 }
 
-HLE("kernel32.dll", WriteFile, 5) {
+HLE64("kernel32.dll", WriteFile, 5) {
   int fd = FdOf(Arg(c, 0));
-  uint32_t buf = Arg(c, 1), n = Arg(c, 2), out = Arg(c, 3);
+  gaddr buf = Arg(c, 1), out = Arg(c, 3);
+  uint32_t n = uint32_t(Arg(c, 2));
   if (fd < 0) {
     SetLastError(kErrorInvalidHandle);
     return 0;
@@ -390,11 +407,12 @@ HLE("kernel32.dll", WriteFile, 5) {
   return 1;
 }
 
-HLE("kernel32.dll", SetFilePointer, 4) {
+HLE64("kernel32.dll", SetFilePointer, 4) {
   int fd = FdOf(Arg(c, 0));
   int64_t dist = int32_t(Arg(c, 1));
-  uint32_t hi = Arg(c, 2), method = Arg(c, 3);
-  if (hi) dist = int64_t((uint64_t(Rd32(hi)) << 32) | Arg(c, 1));
+  gaddr hi = Arg(c, 2);
+  uint32_t method = uint32_t(Arg(c, 3));
+  if (hi) dist = int64_t((uint64_t(Rd32(hi)) << 32) | uint32_t(Arg(c, 1)));
   if (fd < 0) {
     SetLastError(kErrorInvalidHandle);
     return 0xFFFFFFFF;
@@ -409,12 +427,16 @@ HLE("kernel32.dll", SetFilePointer, 4) {
   return uint32_t(r);
 }
 
-// (hFile, LARGE_INTEGER liDistanceToMove (two stack slots),
-// PLARGE_INTEGER lpNewFilePointer, dwMoveMethod)
-HLE("kernel32.dll", SetFilePointerEx, 5) {
+// (hFile, LARGE_INTEGER liDistanceToMove, PLARGE_INTEGER lpNewFilePointer,
+// dwMoveMethod). The LARGE_INTEGER takes two stack slots on x86, one
+// register on x64.
+HLE64("kernel32.dll", SetFilePointerEx, 5) {
   int fd = FdOf(Arg(c, 0));
-  int64_t dist = int64_t((uint64_t(Arg(c, 2)) << 32) | Arg(c, 1));
-  uint32_t out = Arg(c, 3), method = Arg(c, 4);
+  const int k = g_proc->x64 ? 0 : 1;
+  int64_t dist = g_proc->x64 ? int64_t(Arg(c, 1))
+                             : int64_t((uint64_t(Arg(c, 2)) << 32) | uint32_t(Arg(c, 1)));
+  gaddr out = Arg(c, 2 + k);
+  uint32_t method = uint32_t(Arg(c, 3 + k));
   if (fd < 0) {
     SetLastError(kErrorInvalidHandle);
     return 0;
@@ -465,24 +487,72 @@ HLE("kernel32.dll", GetFileTime, 4) {
   return 1;
 }
 
-HLE("kernel32.dll", FlushFileBuffers, 1) {
+HLE64("kernel32.dll", FlushFileBuffers, 1) {
   int fd = FdOf(Arg(c, 0));
   if (fd >= 0) fsync(fd);
   return 1;
 }
 
-HLE("kernel32.dll", GetFileAttributesA, 1) {
-  std::string g = GStr(Arg(c, 0));
+// The host file behind guest path g: false (last error set) if none.
+bool StatGuest(const std::string& g, struct stat* st, uint32_t* attrs) {
   std::string path = HostPath(g);
-  struct stat st;
-  if (stat(path.c_str(), &st) != 0) {
+  if (stat(path.c_str(), st) != 0) {
     SetLastError(ErrnoToWin(errno));
-    return 0xFFFFFFFF;
+    return false;
   }
-  return AttributesOf(st, path.substr(path.find_last_of('/') + 1));
+  *attrs = AttributesOf(*st, path.substr(path.find_last_of('/') + 1));
+  return true;
+}
+
+uint32_t GetFileAttributes(const std::string& g) {
+  struct stat st;
+  uint32_t a;
+  return StatGuest(g, &st, &a) ? a : 0xFFFFFFFF;
+}
+HLE64("kernel32.dll", GetFileAttributesA, 1) { return GetFileAttributes(GStr(Arg(c, 0))); }
+HLE64("kernel32.dll", GetFileAttributesW, 1) { return GetFileAttributes(WidePath(Arg(c, 0))); }
+
+// GetFileAttributesExW(path, GetFileExInfoStandard, WIN32_FILE_ATTRIBUTE_DATA*).
+HLE64("kernel32.dll", GetFileAttributesExW, 3) {
+  if (Arg(c, 1) != 0) FatalF("GetFileAttributesExW: info level %llu", (unsigned long long)Arg(c, 1));
+  struct stat st;
+  uint32_t a;
+  if (!StatGuest(WidePath(Arg(c, 0)), &st, &a)) return 0;
+  gaddr d = Arg(c, 2);
+  Wr32(d + 0, a);
+  PutFileTime(d + 4, platform::StatModifyTime(st));   // creation
+  PutFileTime(d + 12, platform::StatAccessTime(st));  // access
+  PutFileTime(d + 20, platform::StatModifyTime(st));  // write
+  Wr32(d + 28, uint32_t(uint64_t(st.st_size) >> 32));
+  Wr32(d + 32, uint32_t(st.st_size));
+  return 1;
+}
+
+// GetFileInformationByHandle(h, BY_HANDLE_FILE_INFORMATION*). The volume
+// serial is GetVolumeInformation's; the file index the host inode.
+HLE64("kernel32.dll", GetFileInformationByHandle, 2) {
+  auto o = GetHandle(Arg(c, 0));
+  struct stat st;
+  if (!o || o->type != KObject::Type::File || fstat(FileFd(o.get()), &st) != 0) {
+    SetLastError(kErrorInvalidHandle);
+    return 0;
+  }
+  gaddr d = Arg(c, 1);
+  Wr32(d + 0, AttributesOf(st, {}));
+  PutFileTime(d + 4, platform::StatModifyTime(st));
+  PutFileTime(d + 12, platform::StatAccessTime(st));
+  PutFileTime(d + 20, platform::StatModifyTime(st));
+  Wr32(d + 28, kVolumeSerial);
+  Wr32(d + 32, uint32_t(uint64_t(st.st_size) >> 32));
+  Wr32(d + 36, uint32_t(st.st_size));
+  Wr32(d + 40, uint32_t(st.st_nlink));
+  Wr32(d + 44, uint32_t(uint64_t(st.st_ino) >> 32));
+  Wr32(d + 48, uint32_t(st.st_ino));
+  return 1;
 }
 
 HLE("kernel32.dll", SetFileAttributesA, 2) { return 1; }
+HLE64("kernel32.dll", SetFileAttributesW, 2) { return 1; }
 
 // A file that exists only in the (read-only) install cannot be deleted
 // or moved away.
@@ -490,8 +560,7 @@ bool InstallOnly(const std::string& gpath) {
   return HostPath(gpath) != HostPath(gpath, PathAccess::kWrite);
 }
 
-HLE("kernel32.dll", DeleteFileA, 1) {
-  std::string g = GStr(Arg(c, 0));
+uint32_t DeleteFile(const std::string& g) {
   if (InstallOnly(g) && Exists(HostPath(g))) {
     SetLastError(kErrorAccessDenied);
     return 0;
@@ -502,6 +571,8 @@ HLE("kernel32.dll", DeleteFileA, 1) {
   }
   return 1;
 }
+HLE64("kernel32.dll", DeleteFileA, 1) { return DeleteFile(GStr(Arg(c, 0))); }
+HLE64("kernel32.dll", DeleteFileW, 1) { return DeleteFile(WidePath(Arg(c, 0))); }
 
 HLE("kernel32.dll", CopyFileA, 3) {
   std::string from = HostPath(GStr(Arg(c, 0)));
@@ -530,17 +601,16 @@ HLE("kernel32.dll", CopyFileA, 3) {
   return ok ? 1 : 0;
 }
 
-HLE("kernel32.dll", MoveFileA, 2) {
-  std::string gfrom = GStr(Arg(c, 0));
+uint32_t MoveFile(const std::string& gfrom, const std::string& gto, bool replace) {
   if (InstallOnly(gfrom) && Exists(HostPath(gfrom))) {
     SetLastError(kErrorAccessDenied);
     return 0;
   }
   std::string from = HostPath(gfrom, PathAccess::kWrite);
-  std::string to = HostPath(GStr(Arg(c, 1)), PathAccess::kWrite);
+  std::string to = HostPath(gto, PathAccess::kWrite);
   struct stat st;
-  if (stat(HostPath(GStr(Arg(c, 1))).c_str(), &st) == 0) {
-    SetLastError(kErrorAlreadyExists);
+  if (stat(HostPath(gto).c_str(), &st) == 0 && (!replace || S_ISDIR(st.st_mode))) {
+    SetLastError(replace ? kErrorAccessDenied : kErrorAlreadyExists);
     return 0;
   }
   if (rename(from.c_str(), to.c_str()) != 0) {
@@ -550,8 +620,18 @@ HLE("kernel32.dll", MoveFileA, 2) {
   return 1;
 }
 
-HLE("kernel32.dll", CreateDirectoryA, 2) {
-  std::string g = GStr(Arg(c, 0));
+HLE64("kernel32.dll", MoveFileA, 2) { return MoveFile(GStr(Arg(c, 0)), GStr(Arg(c, 1)), false); }
+
+// MoveFileExW(from, to, flags): MOVEFILE_REPLACE_EXISTING, and
+// MOVEFILE_COPY_ALLOWED / MOVEFILE_WRITE_THROUGH, which change nothing
+// here (one volume; host renames are durable once they return).
+HLE64("kernel32.dll", MoveFileExW, 3) {
+  uint32_t flags = uint32_t(Arg(c, 2));
+  if (flags & ~0xBu) FatalF("MoveFileExW: flags %X not supported", flags);
+  return MoveFile(WidePath(Arg(c, 0)), WidePath(Arg(c, 1)), flags & 1);
+}
+
+uint32_t CreateDirectory(const std::string& g) {
   if (Exists(HostPath(g))) {
     SetLastError(kErrorAlreadyExists);
     return 0;
@@ -564,14 +644,18 @@ HLE("kernel32.dll", CreateDirectoryA, 2) {
   }
   return 1;
 }
+HLE64("kernel32.dll", CreateDirectoryA, 2) { return CreateDirectory(GStr(Arg(c, 0))); }
+HLE64("kernel32.dll", CreateDirectoryW, 2) { return CreateDirectory(WidePath(Arg(c, 0))); }
 
-HLE("kernel32.dll", RemoveDirectoryA, 1) {
-  if (rmdir(HostPath(GStr(Arg(c, 0)), PathAccess::kWrite).c_str()) != 0) {
+uint32_t RemoveDirectory(const std::string& g) {
+  if (rmdir(HostPath(g, PathAccess::kWrite).c_str()) != 0) {
     SetLastError(ErrnoToWin(errno));
     return 0;
   }
   return 1;
 }
+HLE64("kernel32.dll", RemoveDirectoryA, 1) { return RemoveDirectory(GStr(Arg(c, 0))); }
+HLE64("kernel32.dll", RemoveDirectoryW, 1) { return RemoveDirectory(WidePath(Arg(c, 0))); }
 
 HLE("kernel32.dll", GetCurrentDirectoryA, 2) {
   uint32_t size = Arg(c, 0), buf = Arg(c, 1);
@@ -699,7 +783,7 @@ HLE("kernel32.dll", GetLogicalDriveStringsA, 2) {
 
 HLE("kernel32.dll", GetVolumeInformationA, 8) {
   if (Arg(c, 1) && Arg(c, 2)) PutStr(Arg(c, 1), win32::Upper(Game().id));
-  if (Arg(c, 3)) Wr32(Arg(c, 3), 0x1DEADD51);
+  if (Arg(c, 3)) Wr32(Arg(c, 3), kVolumeSerial);
   if (Arg(c, 4)) Wr32(Arg(c, 4), 255);
   if (Arg(c, 5)) Wr32(Arg(c, 5), 0x700FF);
   if (Arg(c, 6) && Arg(c, 7)) PutStr(Arg(c, 6), "NTFS");

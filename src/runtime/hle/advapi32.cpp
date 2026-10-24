@@ -220,6 +220,13 @@ HLE("ole32.dll", CoInitialize, 1) { return 0; }  // S_OK
 HLE("ole32.dll", CoInitializeEx, 2) { return 0; }
 HLE("ole32.dll", CoUninitialize, 0) { return 0; }
 
+// The COM task allocator: the process heap (a NULL free is a no-op).
+HLE64("ole32.dll", CoTaskMemAlloc, 1) { return HeapAllocProcess(Arg(c, 0), false); }
+HLE64("ole32.dll", CoTaskMemFree, 1) {
+  if (Arg(c, 0)) HeapFreeProcess(Arg(c, 0));
+  return 0;
+}
+
 // (rclsid, pUnkOuter, dwClsContext, riid, ppv): the classes HLE modules
 // register (com.h). The others games create are optional and
 // REGDB_E_CLASSNOTREG reads as "not installed", as on a system without
