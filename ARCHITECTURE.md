@@ -981,8 +981,10 @@ Context: the register slots become uint64_t rax..r15; the 32-bit names
 are the low halves of the first eight (an anonymous union), so 32-bit
 lifted code and the HLE keep using eax..edi with the same 32-bit
 accesses. XMM grows to 16 registers, with the upper ymm halves in an
-array of their own (legacy SSE code never touches it). x64 code reaches
-its TEB through gs (Ctx::gs_base; fs is unused).
+array of their own (legacy SSE code never touches it). Win64 code
+reaches its TEB through gs (Ctx::gs_base); System V code (FreeBSD,
+Linux) reaches its thread control block through fs (Ctx::fs_base, which
+32-bit guests use for their TEB).
 
 Lifter:
 - Zydis in long mode for PE32+; VAs are 64-bit throughout. Lifted
@@ -1015,6 +1017,16 @@ Lifter:
   a function's tables inside its range, after the code. Two adjacent
   tables then read as one, which only adds labels that are real case
   targets of the same function.
+- Clang's tables hold signed offsets from the table itself: `lea rB,
+  [table]` ... `movsxd rT, [rB + idx*4]; add rT, rB; jmp rT`. Both forms
+  are "target = B + entry", with B (and the load's base) the value a
+  RIP-relative lea gives the register on every path to the jmp (through
+  register copies; paths around a loop back to it do not count), else
+  the image base. The bounds check may sit in another block that
+  branches to the table code (a taken jbe/jb counts like a ja/jae
+  falling through), and the index may be a copy (mov, movsxd, movzx) of
+  the register that was compared. Tables outside .text are read from
+  the module's read-only data (an ELF's .rodata).
 - Clang's tables hold signed offsets from the table itself: `lea rB,
   [table]` ... `movsxd rT, [rB + idx*4]; add rT, rB; jmp rT`. Both forms
   are "target = B + entry", with B (and the load's base) the value a
@@ -1161,9 +1173,13 @@ The seams (core, generic):
   from .eh_frame), compiled into recomp_lift only when that platform is
   enabled (CMake option RECOMP_PLATFORM_<NAME>).
 - HLE ABI. Arg(), the return registers and float arguments follow the
-  process's ABI: 32-bit stdcall/cdecl, Win64, or System V AMD64 (rdi,
-  rsi, rdx, rcx, r8, r9, xmm0-7). System V is generic (it is also the
-  Linux and macOS x64 ABI), so it lives in the core.
+  process's ABI: 32-bit stdcall/cdecl, Win64, or System V AMD64
+  (Process::sysv). System V is generic (it is also the Linux and macOS
+  x64 ABI), so it lives in the core: Arg(c, i) is the i-th integer or
+  pointer argument (rdi, rsi, rdx, rcx, r8, r9, then the stack) and
+  ArgD/ArgF the i-th floating-point one (xmm0-7), counted apart; results
+  go to rax or xmm0 and the caller pops, as for Win64. Threads reach
+  their TCB through fs (Ctx::fs_base).
 - Address space. Where images, stacks, TLS and the thunk region go is
   the platform's choice ("nothing below 4 GiB" is Win64's rule; PS4
   executables are linked at 0x400000).

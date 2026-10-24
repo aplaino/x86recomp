@@ -126,6 +126,7 @@ struct Process {
   std::string game_dir;  // host path of the game install, no trailing '/'
   std::string game_args; // appended to the guest command line
   bool x64 = false;      // the EXE is a PE32+ AMD64 image (Win64 ABI)
+  bool sysv = false;     // x64 with the System V ABI (a console platform's)
   gaddr process_heap = 0;
   gaddr cmdline_a = 0, cmdline_w = 0;
   gaddr environ_a = 0, environ_w = 0;

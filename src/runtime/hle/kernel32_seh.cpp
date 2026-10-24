@@ -59,7 +59,7 @@ void FillContext(uint32_t ctx, const Ctx& c, uint32_t eip, uint32_t esp) {
 // __except block never returns here (GuestResume unwinds past us).
 bool DispatchException(Ctx& c, uint32_t code, uint32_t flags, uint32_t nparams,
                        const uint32_t* params, uint32_t eip) {
-  uint32_t teb = c.fs_base;
+  uint32_t teb = uint32_t(c.fs_base);
   uint32_t saved_esp = c.esp;
   // Scratch space for the records below the current stack.
   c.esp -= 0x800;
@@ -136,7 +136,7 @@ HLE("kernel32.dll", RtlUnwind, 4) {
   if (target_ip && target_ip != Rd32(c.esp))
     FatalF("RtlUnwind to %08X, not its return address %08X: unsupported",
            target_ip, Rd32(c.esp));
-  uint32_t teb = c.fs_base;
+  uint32_t teb = uint32_t(c.fs_base);
   uint32_t saved_esp = c.esp;
   c.esp -= 0x800;
   uint32_t rec = exc;

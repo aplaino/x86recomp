@@ -445,6 +445,7 @@ class InsnEmitter {
     }
     s = d_.address_width == 32 ? "uint64_t(uint32_t(" + s + "))" : "uint64_t(" + s + ")";
     if (segment && m.segment == ZYDIS_REGISTER_GS) s = "GS + " + s;
+    if (segment && m.segment == ZYDIS_REGISTER_FS) s = "FS + " + s;
     return s;
   }
 
@@ -459,7 +460,8 @@ class InsnEmitter {
       if (!gpr(m.index)) return false;
       return m.segment == ZYDIS_REGISTER_NONE || m.segment == ZYDIS_REGISTER_DS ||
              m.segment == ZYDIS_REGISTER_ES || m.segment == ZYDIS_REGISTER_SS ||
-             m.segment == ZYDIS_REGISTER_CS || m.segment == ZYDIS_REGISTER_GS;
+             m.segment == ZYDIS_REGISTER_CS || m.segment == ZYDIS_REGISTER_GS ||
+             m.segment == ZYDIS_REGISTER_FS;
     }
     if (m.base != ZYDIS_REGISTER_NONE && !Gpr32Name(m.base)) return false;
     if (m.index != ZYDIS_REGISTER_NONE && !Gpr32Name(m.index)) return false;
@@ -3427,16 +3429,16 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
   // reaches f_X, which the game project defines.
   o += "void " + FnName(f.entry) + (p_.replaced.count(f.entry) ? "_lifted" : "") +
        "(::recomp::Ctx& c) {\n  LIFT_ENTER\n";
-  // Functions that register an SEH frame (write fs:[0]) can be resumed into
-  // by their __except blocks, and setjmp callers by longjmp; see
-  // GuestResume.
+  // Functions that register an SEH frame (32-bit: write fs:[0]) can be
+  // resumed into by their __except blocks, and setjmp callers by longjmp;
+  // see GuestResume.
   bool resumable = !f.setjmp_returns.empty();
   // x64: a function with a language handler; its establisher frame (EF) is
   // known once its prologue has run.
   auto eh = p_.x64 ? p_.eh_frames.find(f.entry) : p_.eh_frames.end();
   if (eh != p_.eh_frames.end()) resumable = true;
   for (const auto& [va, in] : f.insns) {
-    if (!in.ok || in.d.mnemonic != ZYDIS_MNEMONIC_MOV) continue;
+    if (!in.ok || in.d.mnemonic != ZYDIS_MNEMONIC_MOV || p_.x64) continue;
     const auto& o0 = in.ops[0];
     if (o0.type == ZYDIS_OPERAND_TYPE_MEMORY &&
         o0.mem.segment == ZYDIS_REGISTER_FS &&

@@ -643,7 +643,7 @@ inline T* AtomicPtr(uint8_t* b, uint64_t a) {
            esp = c.esp, ebp = c.ebp, esi = c.esi, edi = c.edi;           \
   ::recomp::Flags F;                                                        \
   ::recomp::UnpackEFlags(F, c.eflags);                                   \
-  const uint32_t FS = c.fs_base;                                         \
+  const uint32_t FS = uint32_t(c.fs_base);                               \
   (void)FS;
 #else
 #define LIFT_ENTER                                                       \
@@ -654,8 +654,8 @@ inline T* AtomicPtr(uint8_t* b, uint64_t a) {
            r13 = c.r13, r14 = c.r14, r15 = c.r15;                        \
   ::recomp::Flags F;                                                        \
   ::recomp::UnpackEFlags(F, c.eflags);                                   \
-  const uint64_t GS = c.gs_base;                                         \
-  (void)GS;
+  const uint64_t FS = c.fs_base, GS = c.gs_base;                         \
+  (void)FS, (void)GS;
 #endif
 
 // Tail calls between lifted functions (all void(Ctx&)) are guaranteed
