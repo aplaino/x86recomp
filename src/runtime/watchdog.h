@@ -6,6 +6,8 @@
 // functions are named recomp::gen::f_<guest VA>) to a dump file in the
 // per-user data directory and to stderr. The process keeps running.
 
+#include <cstdint>
+
 namespace recomp {
 
 void StartWatchdog();
@@ -23,6 +25,6 @@ void WatchdogAppActive(bool active);
 // address, maintained by hle::CallThunk; null outside imports. Exception
 // unwinds through an import leave them stale, so dumps say "last".
 extern thread_local const char* t_wd_hle_name;
-extern thread_local unsigned t_wd_hle_ret;
+extern thread_local uint64_t t_wd_hle_ret;
 
 }  // namespace recomp

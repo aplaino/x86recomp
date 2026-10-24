@@ -45,7 +45,7 @@ HLE("gdi32.dll", GetDeviceCaps, 2) {
     case 6: return 240;                     // VERTSIZE
     case 38: return 0x7E99;                 // RASTERCAPS
     default:
-      WarnF("GetDeviceCaps(%u): returning 0\n", Arg(c, 1));
+      WarnF("GetDeviceCaps(%u): returning 0\n", uint32_t(Arg(c, 1)));
       return 0;
   }
 }

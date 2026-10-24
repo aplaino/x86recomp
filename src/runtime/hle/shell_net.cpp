@@ -1,5 +1,5 @@
-// shfolder and shell32 (special folders, directory trees) and wsock32 (by
-// ordinal).
+// shfolder and shell32 (special folders, directory trees, command lines)
+// and wsock32 (by ordinal).
 //
 // Special folders live in the per-user tree (see HostPath): a game that
 // saves under My Documents writes to $XDG_DATA_HOME/<id>/drive_c/
@@ -136,4 +136,22 @@ HLE_NAMED("wsock32.dll", "#10", ioctlsocket, 3) {  // ioctlsocket: no sockets ex
 }
 
 }  // namespace
+// CommandLineToArgvW(line, &argc): one LocalAlloc block holding the
+// pointer array (null-terminated) and the strings; LocalFree frees it.
+HLE64("shell32.dll", CommandLineToArgvW, 2) {
+  std::vector<std::u16string> args = win32::SplitCommandLine(GWStr(Arg(c, 0)));
+  const uint32_t ptr = g_proc->x64 ? 8 : 4;
+  uint64_t size = ptr * (args.size() + 1);
+  for (const auto& a : args) size += 2 * (a.size() + 1);
+  gaddr block = HeapAllocProcess(size, true);
+  gaddr str = block + ptr * (args.size() + 1);
+  for (size_t i = 0; i < args.size(); i++) {
+    WrPtr(block + ptr * i, str);
+    std::memcpy(GPtr(str), args[i].data(), 2 * args[i].size());
+    str += 2 * (args[i].size() + 1);
+  }
+  Wr32(Arg(c, 1), uint32_t(args.size()));
+  return block;
+}
+
 }  // namespace recomp::hle

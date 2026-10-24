@@ -39,7 +39,7 @@ namespace {
 thread_local Thread* t_current = nullptr;
 std::mutex g_threads_mu;
 std::map<uint32_t, std::unique_ptr<Thread>> g_threads;  // by tid
-uint32_t g_next_teb = kTebTop;
+gaddr g_next_teb = 0;  // the next TEB is below it (kTebTop, kTebTop64)
 
 // Host stack for each guest thread. Guest call depth maps 1:1 onto host
 // call depth, and lifted frames are larger than the originals, so be
@@ -92,12 +92,12 @@ std::string ReportPath(const char* kind) {
   return dir + name;
 }
 
-std::string GStr(uint32_t va) {
+std::string GStr(gaddr va) {
   if (!va) return {};
   return std::string(g_proc->mem.ptr<const char>(va));
 }
 
-std::u16string GWStr(uint32_t va) {
+std::u16string GWStr(gaddr va) {
   std::u16string s;
   if (!va) return s;
   for (;; va += 2) {
@@ -108,77 +108,133 @@ std::u16string GWStr(uint32_t va) {
   return s;
 }
 
-void PutStr(uint32_t va, const std::string& s) {
+void PutStr(gaddr va, const std::string& s) {
   std::memcpy(GPtr(va), s.c_str(), s.size() + 1);
 }
 
-void PutWStr(uint32_t va, const std::string& s) {
-  for (size_t i = 0; i <= s.size(); i++) Wr16(va + 2 * uint32_t(i), uint8_t(s.c_str()[i]));
+void PutWStr(gaddr va, const std::string& s) {
+  for (size_t i = 0; i <= s.size(); i++) Wr16(va + 2 * i, uint8_t(s.c_str()[i]));
 }
 
-uint32_t CallGuest(Ctx& c, uint32_t va, std::initializer_list<uint32_t> args) {
-  uint32_t saved = c.esp;
+uint64_t CallGuest(Ctx& c, gaddr va, std::initializer_list<uint64_t> args) {
   // Guest code runs here: faults are guest access violations again.
   struct DepthGuard {
     int saved = hle::t_hle_depth;
     DepthGuard() { hle::t_hle_depth = 0; }
     ~DepthGuard() { hle::t_hle_depth = saved; }
   } guard;
+  if (g_proc->x64) {
+    // Win64: the callee finds its stack arguments above the return
+    // address and 32 bytes of shadow space (homes for rcx..r9), and rsp
+    // is 16-byte aligned before the call.
+    const uint64_t saved = c.rsp;
+    const uint64_t n = std::max<uint64_t>(args.size(), 4);
+    uint64_t sp = ((c.rsp - 8 * n) & ~15ull) - 8;
+    uint64_t* regs[4] = {&c.rcx, &c.rdx, &c.r8, &c.r9};
+    size_t i = 0;
+    for (uint64_t a : args) {
+      if (i < 4) *regs[i] = a;
+      Wr64(sp + 8 + 8 * i, a);
+      i++;
+    }
+    Wr64(sp, kReturnToHost64);
+    c.rsp = sp;
+    Dispatch(c, va, kReturnToHost64);
+    c.rsp = saved;
+    return c.rax;
+  }
+  uint32_t saved = c.esp;
   for (auto it = std::rbegin(args); it != std::rend(args); ++it) {
     c.esp -= 4;
-    Wr32(c.esp, *it);
+    Wr32(c.esp, uint32_t(*it));
   }
   c.esp -= 4;
   Wr32(c.esp, kReturnToHost);
-  Dispatch(c, va, kReturnToHost);
+  Dispatch(c, uint32_t(va), kReturnToHost);
   c.esp = saved;  // stdcall callees popped their args, cdecl didn't
   return c.eax;
 }
 
-Thread* CreateGuestThread(uint32_t stack_size) {
+// The thread's TEB and TLS array, in the layout of the process's mode.
+static void InitTeb(Thread* t) {
+  Process& p = *g_proc;
+  const gaddr teb = t->teb;
+  // Static TLS of the image (__declspec(thread)): a per-thread copy of the
+  // template, found through the TEB's ThreadLocalStoragePointer
+  // [tls_index].
+  const uint32_t ptr = p.x64 ? 8 : 4;
+  gaddr tls_array = HeapAllocProcess(kTlsArraySlots * ptr, true);
+  if (p.x64) {  // NT_TIB64 and the x64 TEB
+    Wr64(teb + 0x08, t->stack_hi);  // StackBase
+    Wr64(teb + 0x10, t->stack_lo);  // StackLimit
+    Wr64(teb + 0x30, teb);          // Self
+    Wr64(teb + 0x40, kGuestPid);    // ClientId
+    Wr64(teb + 0x48, t->tid);
+    Wr64(teb + 0x58, tls_array);    // ThreadLocalStoragePointer
+    Wr64(teb + 0x60, kPebVa64);
+  } else {
+    Wr32(teb + 0x00, 0xFFFFFFFF);  // SEH chain: empty
+    Wr32(teb + 0x04, uint32_t(t->stack_hi));
+    Wr32(teb + 0x08, uint32_t(t->stack_lo));
+    Wr32(teb + 0x18, uint32_t(teb));  // Self
+    Wr32(teb + 0x20, kGuestPid);
+    Wr32(teb + 0x24, t->tid);
+    Wr32(teb + 0x2C, uint32_t(tls_array));
+    Wr32(teb + 0x30, kPebVa);
+  }
+  auto block = [&](const PeImage& img, int index) {
+    const PeTls& tls = img.tls;
+    uint64_t raw = tls.raw_end - tls.raw_start;
+    gaddr b = HeapAllocProcess(raw + tls.zero_fill + 16, true);
+    std::memcpy(GPtr(b), GPtr(tls.raw_start), raw);
+    WrPtr(tls_array + ptr * uint32_t(index), b);
+  };
+  if (p.img.has_tls) block(p.img, 0);
+  // Lifted DLLs with static TLS (x64 guests, as on Vista and later): every
+  // thread has their blocks, loaded or not, since all are mapped at start.
+  for (const Module& m : p.modules)
+    if (m.tls_index >= 0) block(m.img, m.tls_index);
+}
+
+// Static TLS callbacks are not run (no supported module has any).
+static void CheckNoTlsCallbacks(const PeImage& img, const std::string& name) {
+  if (img.has_tls && img.tls.callbacks && RdPtr(img.tls.callbacks))
+    FatalF("%s has TLS callbacks: not supported", name.c_str());
+}
+
+Thread* CreateGuestThread(uint64_t stack_size) {
   auto t = std::make_unique<Thread>();
   Process& p = *g_proc;
 
-  stack_size = std::max<uint32_t>(stack_size, 0x100000);
-  uint32_t stack = p.vm.Reserve(0, stack_size);
-  if (!stack) FatalF("cannot reserve a %u byte guest stack", stack_size);
+  stack_size = std::max<uint64_t>(stack_size, 0x100000);
+  gaddr stack = p.vm.Reserve(0, stack_size);
+  if (!stack) FatalF("cannot reserve a %llu byte guest stack", (unsigned long long)stack_size);
   p.vm.Commit(stack, stack_size, Prot::RW);
   t->stack_lo = stack;
   t->stack_hi = stack + stack_size;
 
+  const uint32_t stride = p.x64 ? kTebStride64 : kTebStride;
   {
     std::lock_guard<std::mutex> l(g_threads_mu);
-    g_next_teb -= kTebStride;
+    if (!g_next_teb) g_next_teb = p.x64 ? kTebTop64 : kTebTop;
+    g_next_teb -= stride;
+    if (p.x64 && g_next_teb < kTebLo64) FatalF("too many guest threads");
     t->teb = g_next_teb;
   }
   t->tid = p.next_tid.fetch_add(4);
-  p.mem.Commit(t->teb, kTebStride, Prot::RW);
-  uint32_t teb = t->teb;
-  Wr32(teb + 0x00, 0xFFFFFFFF);  // SEH chain: empty
-  Wr32(teb + 0x04, t->stack_hi);
-  Wr32(teb + 0x08, t->stack_lo);
-  Wr32(teb + 0x18, teb);         // Self
-  Wr32(teb + 0x20, kGuestPid);
-  Wr32(teb + 0x24, t->tid);
-  Wr32(teb + 0x30, kPebVa);
-
-  // Static TLS of the image (__declspec(thread)): a per-thread copy of the
-  // template, found through TEB+0x2C[tls_index].
-  uint32_t tls_array = HeapAllocProcess(kTlsArraySlots * 4, true);
-  Wr32(teb + 0x2C, tls_array);
-  if (p.img.has_tls) {
-    const PeTls& tls = p.img.tls;
-    uint32_t raw = tls.raw_end - tls.raw_start;
-    uint32_t block = HeapAllocProcess(raw + tls.zero_fill + 16, true);
-    std::memcpy(GPtr(block), GPtr(tls.raw_start), raw);
-    Wr32(tls_array + 4 * Rd32(tls.index_va), block);
-  }
+  p.mem.Commit(t->teb, stride, Prot::RW);
+  InitTeb(t.get());
 
   Ctx& c = t->ctx;
   std::memset(&c, 0, sizeof c);
   c.eflags = 0x202;
-  c.esp = t->stack_hi - 16;
-  c.fs_base = teb;
+  if (p.x64) {
+    c.rsp = t->stack_hi - 16;
+    c.gs_base = t->teb;
+  } else {
+    c.esp = uint32_t(t->stack_hi - 16);
+    c.fs_base = uint32_t(t->teb);
+  }
   c.thread = t.get();
   x87::Init(c.fpu);
   x87::SetControlWord(c.fpu, 0x027F);  // Windows default for new threads
@@ -201,8 +257,8 @@ static void CheckHostFp() {
 // Runs guest function `entry` (with no argument, as the process entry
 // point, or with `param`) on the calling host thread as guest thread t.
 // Returns its exit code.
-static uint32_t RunGuestThread(Thread* t, uint32_t entry,
-                               const uint32_t* param) {
+static uint32_t RunGuestThread(Thread* t, gaddr entry,
+                               const uint64_t* param) {
   // Thread start is a full barrier on Windows. pthread_create already
   // makes the creator's writes visible here; the fence states it for
   // weakly ordered hosts like every other guest sync point
@@ -214,7 +270,7 @@ static uint32_t RunGuestThread(Thread* t, uint32_t entry,
   RegisterGuestHostThread("guest", t->tid);
   uint32_t r;
   try {
-    r = param ? CallGuest(t->ctx, entry, {*param}) : CallGuest(t->ctx, entry, {});
+    r = uint32_t(param ? CallGuest(t->ctx, entry, {*param}) : CallGuest(t->ctx, entry, {}));
   } catch (const GuestThreadExit& e) {
     r = e.code;
   }
@@ -235,7 +291,8 @@ static void SpawnHostThread(void* (*fn)(void*), void* arg) {
 
 struct ThreadStart {
   Thread* t;
-  uint32_t entry, param;
+  gaddr entry;
+  uint64_t param;
 };
 
 static void* GuestThreadMain(void* arg) {
@@ -244,7 +301,7 @@ static void* GuestThreadMain(void* arg) {
   return nullptr;
 }
 
-void StartHostThread(Thread* t, uint32_t entry, uint32_t param) {
+void StartHostThread(Thread* t, gaddr entry, uint64_t param) {
   SpawnHostThread(GuestThreadMain, new ThreadStart{t, entry, param});
 }
 
@@ -276,14 +333,15 @@ void StartServiceThread(Thread* t, std::function<void()> fn) {
 // macOS, require UI calls there) but on a big private stack.
 namespace {
 Thread* g_main_thread = nullptr;
-uint32_t g_main_entry = 0, g_main_exit = 0;
+gaddr g_main_entry = 0;
+uint32_t g_main_exit = 0;
 
 void GuestMainTrampoline() {
   g_main_exit = RunGuestThread(g_main_thread, g_main_entry, nullptr);
 }
 }  // namespace
 
-static uint32_t RunOnMainThread(Thread* t, uint32_t entry) {
+static uint32_t RunOnMainThread(Thread* t, gaddr entry) {
   void* stack = mmap(nullptr, kHostStack, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
   if (stack == MAP_FAILED) FatalF("cannot allocate the main guest stack");
@@ -294,7 +352,7 @@ static uint32_t RunOnMainThread(Thread* t, uint32_t entry) {
   return g_main_exit;
 }
 
-const PeImage* ImageAt(uint32_t va) {
+const PeImage* ImageAt(gaddr va) {
   const Process& p = *g_proc;
   if (va - p.img.image_base < p.img.image_size) return &p.img;
   for (const Module& m : p.modules)
@@ -309,10 +367,20 @@ void MapModule(Module& m) {
   if (!m.img.Load(m.host_path, p.mem, &err, m.base, hle::ImportThunk))
     FatalF("lifted DLL %s: %s", m.name.c_str(), err.c_str());
   // Windows XP did not set up static TLS for LoadLibrary'd DLLs either,
-  // so DLLs of that era have none.
-  if (m.img.has_tls)
-    FatalF("lifted DLL %s has static TLS (__declspec(thread)): not supported",
-           m.name.c_str());
+  // so 32-bit DLLs of that era have none. x64 ones get a slot of their own
+  // after the EXE's (slot 0), kept across remaps.
+  if (m.img.has_tls) {
+    if (!p.x64)
+      FatalF("lifted DLL %s has static TLS (__declspec(thread)): not supported",
+             m.name.c_str());
+    CheckNoTlsCallbacks(m.img, m.name);
+    if (m.tls_index < 0) {
+      int next = 1;
+      for (const Module& o : p.modules) next = std::max(next, o.tls_index + 1);
+      m.tls_index = next;
+    }
+    Wr32(m.img.tls.index_va, uint32_t(m.tls_index));
+  }
   m.stale = false;
 }
 
@@ -328,12 +396,17 @@ int RunProcess(const GameConfig& game, const std::string& exe_path,
   x87::run::g_doubles = !(doubles && doubles[0] == '0');
   p.game_args = game_args;
   StartWatchdog();
-  if (!p.mem.Reserve()) FatalF("cannot reserve the guest arena");
+  p.x64 = PeImage::IsX64File(exe_path);
+  if (!p.mem.Reserve(p.x64 ? kArenaBits64 : 32)) FatalF("cannot reserve the guest arena");
   g_guest_base = p.mem.base();
   // Calls to import thunks go to HLE handlers (Dispatch); nothing runs
   // there, but the IAT values point at committed memory as on Windows.
-  if (!p.mem.Commit(kThunkBase, kThunkRegionSize, Prot::R))
+  const gaddr thunks = p.x64 ? kThunkBase64 : kThunkBase;
+  if (!p.mem.Commit(thunks, kThunkRegionSize, Prot::R))
     FatalF("cannot commit the thunk region");
+  // Its upper half holds the HLE's data exports, which are variables.
+  p.mem.Protect(thunks + hle::kDataExportOffset, kThunkRegionSize - hle::kDataExportOffset,
+                Prot::RW);
   std::string err;
   if (!p.img.Load(exe_path, p.mem, &err, 0, hle::ImportThunk))
     FatalF("%s", err.c_str());
@@ -345,23 +418,41 @@ int RunProcess(const GameConfig& game, const std::string& exe_path,
     MapModule(m);
   }
 
-  p.vm.Init(&p.mem, 0x00010000, kThunkBase);
+  if (p.x64) {
+    // Everything above 4 GiB, below the TEBs (runtime.h).
+    p.vm.Init(&p.mem, kUserLo64, kTebLo64);
+  } else {
+    p.vm.Init(&p.mem, 0x00010000, kThunkBase);
+    p.vm.MarkReserved(hle::kModuleRegion, hle::kModuleRegionSize);
+  }
   p.vm.MarkReserved(p.img.image_base, p.img.image_size);
   for (const Module& m : p.modules) p.vm.MarkReserved(m.img.image_base, m.img.image_size);
-  p.vm.MarkReserved(hle::kModuleRegion, hle::kModuleRegionSize);
 
-  // PEB: only the fields Win32 code commonly peeks at.
-  p.mem.Commit(kPebVa, 0x1000, Prot::RW);
-  Wr32(kPebVa + 0x08, p.img.image_base);
-  Wr32(kPebVa + 0x64, GuestProcessorCount());  // NumberOfProcessors
-  Wr32(kPebVa + 0xA4, 5);      // OSMajorVersion (Windows XP)
-  Wr32(kPebVa + 0xA8, 1);      // OSMinorVersion
-  Wr16(kPebVa + 0xAC, 2600);   // OSBuildNumber
-  Wr32(kPebVa + 0xB0, 2);      // OSPlatformId: VER_PLATFORM_WIN32_NT
+  // PEB: only the fields Win32 code commonly peeks at. x64 guests see
+  // Windows 10 (22H2), 32-bit ones Windows XP.
+  if (p.x64) {
+    p.mem.Commit(kPebVa64, 0x1000, Prot::RW);
+    Wr64(kPebVa64 + 0x10, p.img.image_base);
+    Wr32(kPebVa64 + 0xB8, GuestProcessorCount());  // NumberOfProcessors
+    Wr32(kPebVa64 + 0x118, 10);     // OSMajorVersion
+    Wr32(kPebVa64 + 0x11C, 0);      // OSMinorVersion
+    Wr16(kPebVa64 + 0x120, 19045);  // OSBuildNumber
+    Wr32(kPebVa64 + 0x124, 2);      // OSPlatformId: VER_PLATFORM_WIN32_NT
+  } else {
+    p.mem.Commit(kPebVa, 0x1000, Prot::RW);
+    Wr32(kPebVa + 0x08, uint32_t(p.img.image_base));
+    Wr32(kPebVa + 0x64, GuestProcessorCount());  // NumberOfProcessors
+    Wr32(kPebVa + 0xA4, 5);      // OSMajorVersion (Windows XP)
+    Wr32(kPebVa + 0xA8, 1);      // OSMinorVersion
+    Wr16(kPebVa + 0xAC, 2600);   // OSBuildNumber
+    Wr32(kPebVa + 0xB0, 2);      // OSPlatformId: VER_PLATFORM_WIN32_NT
+  }
 
-  // The image's TLS index: the only module with static TLS (MapModule),
-  // so slot 0.
-  if (p.img.has_tls) Wr32(p.img.tls.index_va, 0);
+  // The image's TLS index: slot 0 (lifted DLLs have theirs, MapModule).
+  if (p.img.has_tls) {
+    CheckNoTlsCallbacks(p.img, game.exe_name);
+    Wr32(p.img.tls.index_va, 0);
+  }
 
   InitDispatch();
   InitKernel32State();

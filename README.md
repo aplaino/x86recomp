@@ -13,7 +13,8 @@ Used by:
 - [CoD1-Reissued](https://github.com/JTM-rootstorm/CoD1-Reissued) (Call
   of Duty, 2003), in progress;
 - [LSWTCS_Rebricked](https://github.com/JTM-rootstorm/LSWTCS_Rebricked)
-  (LEGO Star Wars: The Complete Saga, 2009), started.
+  (LEGO Star Wars: The Complete Saga, 2009), started;
+- Q2E (Quake II Enhanced, 2023), the first x64 user, started.
 
 ## What is here
 

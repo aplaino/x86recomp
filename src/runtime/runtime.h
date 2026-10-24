@@ -91,6 +91,19 @@ inline constexpr uint32_t kTebStride = 0x1000;
 // means the guest function returned to us.
 inline constexpr uint32_t kReturnToHost = kThunkBase + kThunkRegionSize - 0x10;
 
+// x64 guests (ARCHITECTURE.md, "64-bit guests"): a 64 GiB arena with
+// nothing below 4 GiB. From the top: the thunks (pe_image.h), the pseudo
+// module handles (hle.h), the PEB, then TEBs growing down (two pages each:
+// the x64 TEB is 0x1838 bytes); the allocator hands out the rest above
+// 4 GiB.
+inline constexpr unsigned kArenaBits64 = 36;
+inline constexpr gaddr kUserLo64 = 0x100000000;
+inline constexpr gaddr kPebVa64 = 0xFFD000000;
+inline constexpr gaddr kTebTop64 = kPebVa64;
+inline constexpr uint32_t kTebStride64 = 0x2000;
+inline constexpr gaddr kTebLo64 = kTebTop64 - 0x1000000;  // room for 2048
+inline constexpr gaddr kReturnToHost64 = kThunkBase64 + kThunkRegionSize - 0x10;
+
 // A lifted DLL (GameConfig::lifted_dlls). All of them are mapped at
 // startup, so their address ranges stay free; LoadLibrary makes one
 // visible and runs its DllMain.
@@ -101,6 +114,7 @@ struct Module {
   PeImage img;
   int refs = 0;        // LoadLibrary count (under kernel32's loader lock)
   bool stale = false;  // has run since it was mapped: map afresh on load
+  int tls_index = -1;  // its static TLS slot (x64 guests), -1: none
 };
 
 struct Process {
@@ -111,9 +125,10 @@ struct Process {
   GuestAllocator vm;     // VirtualAlloc-style regions
   std::string game_dir;  // host path of the game install, no trailing '/'
   std::string game_args; // appended to the guest command line
-  uint32_t process_heap = 0;
-  uint32_t cmdline_a = 0, cmdline_w = 0;
-  uint32_t environ_a = 0, environ_w = 0;
+  bool x64 = false;      // the EXE is a PE32+ AMD64 image (Win64 ABI)
+  gaddr process_heap = 0;
+  gaddr cmdline_a = 0, cmdline_w = 0;
+  gaddr environ_a = 0, environ_w = 0;
   std::atomic<uint32_t> next_tid{0x100};
 };
 
@@ -122,37 +137,52 @@ extern Process* g_proc;
 struct Thread {
   Ctx ctx;
   uint32_t tid = 0;
-  uint32_t teb = 0;
-  uint32_t stack_lo = 0, stack_hi = 0;
+  gaddr teb = 0;
+  gaddr stack_lo = 0, stack_hi = 0;
 };
 
 // Per-host-thread pointer to the guest thread running on it.
 Thread* CurrentThread();
 
 // Guest memory helpers for HLE code.
-inline uint8_t* GPtr(uint32_t va) { return g_proc->mem.ptr(va); }
-inline uint32_t Rd32(uint32_t va) { return g_proc->mem.read<uint32_t>(va); }
-inline uint16_t Rd16(uint32_t va) { return g_proc->mem.read<uint16_t>(va); }
-inline void Wr32(uint32_t va, uint32_t v) { g_proc->mem.write<uint32_t>(va, v); }
-inline uint64_t Rd64(uint32_t va) { return g_proc->mem.read<uint64_t>(va); }
-inline void Wr64(uint32_t va, uint64_t v) { g_proc->mem.write<uint64_t>(va, v); }
-inline void Wr16(uint32_t va, uint16_t v) { g_proc->mem.write<uint16_t>(va, v); }
-inline void Wr8(uint32_t va, uint8_t v) { g_proc->mem.write<uint8_t>(va, v); }
-std::string GStr(uint32_t va);                  // NUL-terminated char*
-std::u16string GWStr(uint32_t va);              // NUL-terminated WCHAR*
-void PutStr(uint32_t va, const std::string& s); // writes s + NUL
-void PutWStr(uint32_t va, const std::string& s); // ASCII s as WCHARs + NUL
+inline uint8_t* GPtr(gaddr va) { return g_proc->mem.ptr(va); }
+inline uint32_t Rd32(gaddr va) { return g_proc->mem.read<uint32_t>(va); }
+inline uint16_t Rd16(gaddr va) { return g_proc->mem.read<uint16_t>(va); }
+inline uint8_t Rd8(gaddr va) { return g_proc->mem.read<uint8_t>(va); }
+inline void Wr32(gaddr va, uint32_t v) { g_proc->mem.write<uint32_t>(va, v); }
+inline uint64_t Rd64(gaddr va) { return g_proc->mem.read<uint64_t>(va); }
+inline void Wr64(gaddr va, uint64_t v) { g_proc->mem.write<uint64_t>(va, v); }
+inline void Wr16(gaddr va, uint16_t v) { g_proc->mem.write<uint16_t>(va, v); }
+inline void Wr8(gaddr va, uint8_t v) { g_proc->mem.write<uint8_t>(va, v); }
+// A guest pointer stored in guest memory: 4 bytes in 32-bit guests, 8 in
+// x64 ones.
+inline gaddr RdPtr(gaddr va) { return g_proc->x64 ? Rd64(va) : Rd32(va); }
+inline void WrPtr(gaddr va, gaddr v) {
+  if (g_proc->x64)
+    Wr64(va, v);
+  else
+    Wr32(va, uint32_t(v));
+}
+std::string GStr(gaddr va);                  // NUL-terminated char*
+std::u16string GWStr(gaddr va);              // NUL-terminated WCHAR*
+void PutStr(gaddr va, const std::string& s); // writes s + NUL
+void PutWStr(gaddr va, const std::string& s); // ASCII s as WCHARs + NUL
 
 // The EXE's or a lifted DLL's image containing va, or null.
-const PeImage* ImageAt(uint32_t va);
+const PeImage* ImageAt(gaddr va);
 
 // (Re)maps lifted DLL m from its file: fresh data, imports bound.
 void MapModule(Module& m);
 
 // Calls guest function `va` with stdcall/cdecl arguments from the host
 // (WndProc, enumeration callbacks, thread start routines). Returns eax.
-// Handles both conventions: the stack pointer is restored afterwards.
-uint32_t CallGuest(Ctx& c, uint32_t va, std::initializer_list<uint32_t> args);
+// Handles both conventions: the stack pointer is restored afterwards. In
+// x64 processes the Win64 convention: rcx, rdx, r8, r9, then the stack
+// above 32 bytes of shadow space; returns rax.
+uint64_t CallGuest(Ctx& c, gaddr va, std::initializer_list<uint64_t> args);
+
+// Dispatch for x64 guests (lifted.h declares it to x64 lifted code only).
+void Dispatch(Ctx& c, uint64_t target, uint64_t va);
 
 // Sets up the process (arena, image, PEB, heaps, command line) and runs
 // the guest entry point on a new guest thread. exe_path is the host file
@@ -163,7 +193,7 @@ int RunProcess(const GameConfig& game, const std::string& exe_path,
 
 // Creates the guest-side structures of a thread (TEB, TLS, stack) and
 // initialises its Ctx. Does not start it.
-Thread* CreateGuestThread(uint32_t stack_size);
+Thread* CreateGuestThread(uint64_t stack_size);
 
 // Per-user data directory: $XDG_DATA_HOME/<id>, else ~/.local/share/<id>
 // (~/Library/Application Support/<id> on macOS) (settings, saves, the guest's C: drive, crash and hang reports).

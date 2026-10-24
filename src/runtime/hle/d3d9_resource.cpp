@@ -97,7 +97,7 @@ uint32_t QueryVtable() {
 template <typename T>
 T* Obj(Ctx& c, const char* iface) {
   T* o = com::As<T>(hle::Arg(c, 0));
-  if (!o) FatalF("%s call on unknown object %08X", iface, hle::Arg(c, 0));
+  if (!o) FatalF("%s call on unknown object %08X", iface, uint32_t(hle::Arg(c, 0)));
   return o;
 }
 
@@ -822,7 +822,7 @@ uint32_t SetPriority(Ctx& c) {
 uint32_t SetLOD(Ctx& c) {
   Texture* t = Tex(c);
   uint32_t old = t->lod;
-  if (t->pool == D3DPOOL_MANAGED) t->lod = std::min(Arg(c, 1), t->levels - 1);
+  if (t->pool == D3DPOOL_MANAGED) t->lod = std::min(uint32_t(Arg(c, 1)), t->levels - 1);
   return old;
 }
 

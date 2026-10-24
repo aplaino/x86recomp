@@ -199,7 +199,7 @@ uint32_t DeviceVtable() {
 
 InputDevice* Dev(Ctx& c) {
   InputDevice* d = com::As<InputDevice>(Arg(c, 0));
-  if (!d) FatalF("IDirectInputDevice8A call on unknown object %08X", Arg(c, 0));
+  if (!d) FatalF("IDirectInputDevice8A call on unknown object %08X", uint32_t(Arg(c, 0)));
   return d;
 }
 
@@ -243,7 +243,7 @@ HLE("dinput8.dll", DirectInput8Create, 5) {
     Wr32(out, 0);
     return DIERR_NOINTERFACE;
   }
-  RECOMP_TRACE("  DirectInput8Create version %X\n", Arg(c, 1));
+  RECOMP_TRACE("  DirectInput8Create version %X\n", uint32_t(Arg(c, 1)));
   Wr32(out, com::Publish(std::make_shared<Direct8>(), DirectInputVtable()));
   return DI_OK;
 }

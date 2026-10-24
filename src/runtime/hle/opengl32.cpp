@@ -119,7 +119,7 @@ Exports g_gl_exports{"opengl32.dll", {
     "wglUseFontOutlinesA", "wglUseFontOutlinesW",
 }};
 
-float F(const Ctx& c, int i) { return std::bit_cast<float>(Arg(c, i)); }
+float F(const Ctx& c, int i) { return std::bit_cast<float>(uint32_t(Arg(c, i))); }
 double D(const Ctx& c, int i) {
   return std::bit_cast<double>(uint64_t(Arg(c, i)) | uint64_t(Arg(c, i + 1)) << 32);
 }

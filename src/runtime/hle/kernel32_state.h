@@ -21,11 +21,29 @@ std::string GuestExePath();
 
 void InitKernel32State();
 
+namespace hle {
+// EnterCriticalSection / LeaveCriticalSection on a guest CRITICAL_SECTION
+// (for the condition variables that release and retake one).
+void EnterCs(gaddr cs);
+void LeaveCs(gaddr cs);
+}  // namespace hle
+
+// QueryPerformanceCounter's clock: 100 ns ticks (QueryPerformanceFrequency
+// is 10 MHz) since the process started.
+uint64_t PerfCounter();
+
+// The process environment, as NAME=value strings.
+std::vector<std::string> EnvironmentVars();
+
 // SYSTEMTIME at guest address st from a broken-down time and milliseconds.
 void WriteSystemTime(uint32_t st, const std::tm& t, int ms);
 
-uint32_t HeapAllocProcess(uint32_t size, bool zero);
-void HeapFreeProcess(uint32_t p);
+gaddr HeapAllocProcess(uint64_t size, bool zero);
+void HeapFreeProcess(gaddr p);
+// HeapReAlloc on the process heap (0 if p is not a live block or the
+// size cannot be had); HeapSize, UINT64_MAX if p is not a live block.
+gaddr HeapReAllocProcess(gaddr p, uint64_t size);
+uint64_t HeapSizeProcess(gaddr p);
 
 // Milliseconds since the process started: GetTickCount, timeGetTime and
 // message times.
@@ -33,11 +51,11 @@ uint32_t TickCount();
 
 // FILETIME (100 ns units since 1601) of the Unix epoch.
 inline constexpr uint64_t kFileTimeUnixEpoch = 116444736000000000ull;
-GuestHeap* FindHeap(uint32_t handle);
+GuestHeap* FindHeap(gaddr handle);
 
 // Kernel object handles. Values are small multiples of 4, as on Windows.
 struct KObject {
-  enum class Type { File, Event, Mutex, Thread, Mapping, Find, StdIo };
+  enum class Type { File, Event, Mutex, Semaphore, Thread, Mapping, Find, StdIo, Socket };
   explicit KObject(Type t) : type(t) {}
   virtual ~KObject() = default;
   Type type;
@@ -81,7 +99,7 @@ bool SignalEventHandle(uint32_t h, bool pulse);
 
 // Runs guest function entry(param) on a new detached host thread bound to
 // guest thread t.
-void StartHostThread(Thread* t, uint32_t entry, uint32_t param);
+void StartHostThread(Thread* t, gaddr entry, uint64_t param);
 
 // Memory ordering of guest synchronisation calls. On Windows every one of
 // them (critical sections, waits, events, mutexes, Interlocked*, thread

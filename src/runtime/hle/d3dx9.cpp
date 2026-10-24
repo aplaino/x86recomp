@@ -375,7 +375,7 @@ uint32_t NewXBuffer(const void* data, uint32_t size) {
 
 XBuffer* XBuf(Ctx& c) {
   auto* b = com::As<XBuffer>(Arg(c, 0));
-  if (!b) FatalF("ID3DXBuffer call on unknown object %08X", Arg(c, 0));
+  if (!b) FatalF("ID3DXBuffer call on unknown object %08X", uint32_t(Arg(c, 0)));
   return b;
 }
 
@@ -442,7 +442,7 @@ uint32_t NewConstantTable(const hlsl::Program& p, uint32_t version) {
 
 ConstantTable* Table(Ctx& c) {
   auto* t = com::As<ConstantTable>(Arg(c, 0));
-  if (!t) FatalF("ID3DXConstantTable call on unknown object %08X", Arg(c, 0));
+  if (!t) FatalF("ID3DXConstantTable call on unknown object %08X", uint32_t(Arg(c, 0)));
   return t;
 }
 

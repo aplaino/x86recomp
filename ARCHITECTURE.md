@@ -899,7 +899,7 @@ generated/ (lifted C++ is derived from the EXE), symbols/, Ghidra
 projects, memory dumps, extracted archives.
 
 Licence hygiene: dxvk (zlib), SDL3 (zlib), SoftFloat 3e (BSD-3), Zydis
-(MIT) are fine to vendor or link. ffmpeg is LGPL (built without GPL
+(MIT), CORE-MATH (MIT) are fine to vendor or link. ffmpeg is LGPL (built without GPL
 parts): link dynamically. Wine and Bochs (LGPL) and GPL engine source
 releases are references only: read them to learn behaviour, do not copy
 code from them.
@@ -962,7 +962,15 @@ Guest address space:
   module handles live above it, as on Windows with high-entropy ASLR. A
   pointer truncated to 32 bits anywhere (in the HLE above all, which
   kept pointers in uint32_t) then faults at once instead of aliasing
-  other memory.
+  other memory. From the top of the 64 GiB arena (runtime.h): the thunk
+  region (its upper half holds the HLE's data exports), the pseudo
+  module handles, the PEB, 16 MiB of TEBs (two pages each) growing down;
+  the allocator hands out [4 GiB, TEBs).
+- The PEB and TEBs have the x64 layouts (TEB Self +0x30, TLS array
+  +0x58, PEB +0x60, LastErrorValue +0x68, TlsSlots +0x1480); x64 guests
+  see Windows 10 22H2. Lifted x64 DLLs may have static TLS (Vista and
+  later set it up for LoadLibrary'd DLLs): each gets a TLS index after
+  the EXE's, and every thread a block for each.
 - Lifted code adds A to the base without masking. A wild pointer outside
   the window would reach host memory instead of faulting; guest pointers
   come from the guest's own image, stack and allocator, so this needs a
@@ -1012,13 +1020,17 @@ Win64 ABI in the HLE:
   registers. Handlers return uint64_t (rax); 32-bit thunks keep the low
   half in EAX.
 - Existing handlers keep guest pointers and structure fields in
-  uint32_t. A handler is marked 64-bit clean once audited; an x64 image
-  that imports one that is not is refused at load, naming it, the same
-  rule as "every import needs an explicit handler". Mirror types of
-  structures with pointers or handles (8 bytes in Win64) get an x64
-  layout next to the 32-bit one.
+  uint32_t. A handler is declared with HLE64 once audited (pointers in
+  gaddr, x64 structure layouts); calling one that is not from x64 code
+  is fatal and names it, like calling an unimplemented import. Mirror
+  types of structures with pointers or handles (8 bytes in Win64) get an
+  x64 layout next to the 32-bit one.
 - Kernel handles stay small integers (Win64 handles are pointer-sized
-  but their values fit in 32 bits, sign-extended).
+  but their values fit in 32 bits, sign-extended: HandleRet; arguments
+  are read as their low half).
+- Data exports (C++ static members such as std::locale::id, globals a
+  DLL exports) are guest memory the import binder points IAT slots at
+  (hle::DataExport).
 
 Exceptions: x64 SEH is table-based, not an fs:[0] chain.
 - Each function's .pdata entry and UNWIND_INFO describe its prologue
@@ -1049,10 +1061,18 @@ Exceptions: x64 SEH is table-based, not an fs:[0] chain.
 
 CRT and C++ runtime: VCRUNTIME140, MSVCP140 and the UCRT api sets are
 DLL imports in these games and get explicit handlers like any other
-(vcruntime's C++ exception handlers parse MSVC's metadata, above).
-Open: UCRT's math functions are not correctly rounded; whether to
-reproduce its results bit for bit or use one deterministic
-implementation on every host.
+(vcruntime's C++ exception handlers parse MSVC's metadata, above), in
+the recomp_ucrt library; the api-ms-win-crt-* sets resolve to
+ucrtbase.dll as on Windows. The CRT's process data (argv, environment,
+onexit tables, errno) is guest memory the guest reads through the
+pointers it gets. MSVCP140 is HLE too, not Microsoft's DLL: objects the
+guest constructs (mutexes, condition variables, streams, locale facets)
+keep MSVC's layouts, with host state keyed by their address and, for
+classes with virtual functions, guest vtables of thunks. The elementary functions (sin, pow, atan2f...)
+are correctly rounded (CORE-MATH, cmake/coremath.cmake): the same on
+every host, where the UCRT's own are not correctly rounded and the host
+libms differ; they may differ from Windows in the last bit. Functions
+with exact results (sqrt, floor, fmod, ldexp...) are the host's.
 
 AVX: games test CPUID and XGETBV and take AVX paths when they are
 offered, and console targets on x86-64 are AVX CPUs, so VEX code is

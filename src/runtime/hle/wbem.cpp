@@ -88,7 +88,7 @@ uint32_t InstanceVtable() {
 template <typename T>
 T* Self(Ctx& c, const char* iface) {
   T* o = com::As<T>(Arg(c, 0));
-  if (!o) FatalF("%s call on unknown object %08X", iface, Arg(c, 0));
+  if (!o) FatalF("%s call on unknown object %08X", iface, uint32_t(Arg(c, 0)));
   return o;
 }
 

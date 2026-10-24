@@ -218,6 +218,7 @@ bool PeImage::Load(const std::string& path, GuestMemory& mem,
     tls.raw_start = rd_ptr(t);
     tls.raw_end = rd_ptr(t + ptr_size);
     tls.index_va = rd_ptr(t + 2 * ptr_size);
+    tls.callbacks = rd_ptr(t + 3 * ptr_size);
     tls.zero_fill = mem.read<uint32_t>(t + 4 * ptr_size);
     has_tls = true;
   }

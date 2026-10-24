@@ -63,6 +63,7 @@ target_compile_features(recomp_image PUBLIC cxx_std_20)
 
 # --- x87 and SSE models (SoftFloat 3e) ---------------------------------
 include(cmake/softfloat.cmake)  # defines target `softfloat`
+include(cmake/coremath.cmake)  # defines target `coremath`
 add_library(recomp_x87 SHARED src/runtime/x87.cpp src/runtime/sse.cpp)
 target_include_directories(recomp_x87 PUBLIC src)
 target_compile_features(recomp_x87 PUBLIC cxx_std_20)
@@ -103,6 +104,7 @@ add_library(recomp_runtime SHARED
   src/runtime/hle/user32_window.cpp
   src/runtime/hle/gdi32.cpp
   src/runtime/hle/shell_net.cpp
+  src/runtime/hle/ws2_32.cpp
   src/runtime/hle/com.cpp
   src/runtime/hle/present.cpp)
 target_link_libraries(recomp_runtime PUBLIC recomp_image recomp_x87
@@ -274,6 +276,12 @@ add_library(recomp_opengl SHARED
 target_link_libraries(recomp_opengl PUBLIC recomp_runtime recomp_gfx)
 
 # dbghelp (UnDecorateSymbolName) on LLVM's Microsoft demangler.
+# The x64 C and C++ runtime DLLs (UCRT, VCRUNTIME140, MSVCP140): x64 guests
+# import them, 32-bit ones link their CRT statically.
+add_library(recomp_ucrt SHARED src/runtime/hle/ucrt.cpp src/runtime/hle/vcruntime.cpp
+            src/runtime/hle/msvcp140.cpp)
+target_link_libraries(recomp_ucrt PUBLIC recomp_runtime PRIVATE coremath)
+
 add_library(recomp_dbghelp SHARED src/runtime/hle/dbghelp.cpp)
 find_library(RECOMP_LLVM_DEMANGLE libLLVMDemangle.a
   PATHS "${RECOMP_LLVM_ROOT}/lib64" "${RECOMP_LLVM_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)

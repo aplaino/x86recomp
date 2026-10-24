@@ -139,7 +139,7 @@ uint32_t VertexBufferVtable() {
 
 Device* Dev(Ctx& c) {
   Device* d = com::As<Device>(hle::Arg(c, 0));
-  if (!d) FatalF("IDirect3DDevice7 call on unknown object %08X", hle::Arg(c, 0));
+  if (!d) FatalF("IDirect3DDevice7 call on unknown object %08X", uint32_t(hle::Arg(c, 0)));
   return d;
 }
 

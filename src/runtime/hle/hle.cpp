@@ -48,7 +48,7 @@ std::deque<Slot> g_slots;  // under g_slots_mu; stable refs
 // CallThunk's view of g_slots, read without a lock (it runs on every
 // import call): index = (thunk - kThunkBase) / kThunkStride. AddSlot
 // stores each pointer with release once its Slot is complete.
-constexpr size_t kMaxSlots = (kReturnToHost - kThunkBase) / kThunkStride;
+constexpr size_t kMaxSlots = kDataExportOffset / kThunkStride;
 std::atomic<const Slot*> g_slot_table[kMaxSlots];
 
 // Pseudo HMODULEs for DLLs we provide. Real modules are guest pointers to
@@ -63,13 +63,17 @@ const std::vector<std::string>& KnownDlls() {
   return dlls;
 }
 
-uint32_t AddSlot(const std::string& dll, const std::string& name) {
+// The thunk region of this process's mode.
+gaddr ThunkBase() { return g_proc->x64 ? kThunkBase64 : kThunkBase; }
+gaddr ModuleRegion() { return g_proc->x64 ? kModuleRegion64 : kModuleRegion; }
+
+gaddr AddSlot(const std::string& dll, const std::string& name) {
   std::lock_guard<std::mutex> l(g_slots_mu);
   for (size_t i = 0; i < g_slots.size(); i++)
     if (g_slots[i].dll == dll && g_slots[i].name == name)
-      return kThunkBase + uint32_t(i) * kThunkStride;
-  uint32_t thunk = kThunkBase + uint32_t(g_slots.size()) * kThunkStride;
-  if (thunk >= kReturnToHost) FatalF("thunk region exhausted");
+      return ThunkBase() + uint32_t(i) * kThunkStride;
+  if (g_slots.size() >= kMaxSlots) FatalF("thunk region exhausted");
+  gaddr thunk = ThunkBase() + uint32_t(g_slots.size()) * kThunkStride;
   auto it = Registry().find({dll, name});
   g_slots.push_back({dll, name, it == Registry().end() ? nullptr : &it->second,
                      dll == "ddraw.dll"});
@@ -78,10 +82,42 @@ uint32_t AddSlot(const std::string& dll, const std::string& name) {
   return thunk;
 }
 
+struct DataDef {
+  uint32_t size;
+  void (*init)(gaddr);
+};
+std::map<std::pair<std::string, std::string>, DataDef>& DataRegistry() {
+  static std::map<std::pair<std::string, std::string>, DataDef> r;
+  return r;
+}
+
+// The guest address of a data export (allocated and initialised on first
+// use), or 0 if dll!name is not one.
+gaddr DataAddress(const std::string& dll, const std::string& name) {
+  static std::mutex mu;
+  static std::map<std::pair<std::string, std::string>, gaddr> placed;
+  static gaddr next = 0;
+  auto it = DataRegistry().find({dll, name});
+  if (it == DataRegistry().end()) return 0;
+  std::lock_guard<std::mutex> l(mu);
+  gaddr& a = placed[{dll, name}];
+  if (a) return a;
+  if (!next) next = ThunkBase() + kDataExportOffset;
+  a = next;
+  next = (next + it->second.size + 15) & ~15ull;
+  if (next > ThunkBase() + kThunkRegionSize - 0x1000) FatalF("data export region exhausted");
+  if (it->second.init) it->second.init(a);
+  return a;
+}
+
 }  // namespace
 
-Registrar::Registrar(const char* dll, const char* name, int nargs, Fn fn) {
-  Registry()[{dll, name}] = Def{nargs, fn};
+Registrar::Registrar(const char* dll, const char* name, int nargs, Fn fn, bool x64) {
+  Registry()[{dll, name}] = Def{nargs, fn, x64};
+}
+
+DataExport::DataExport(const char* dll, const char* name, uint32_t size, void (*init)(gaddr)) {
+  DataRegistry()[{dll, name}] = DataDef{size, init};
 }
 
 Exports::Exports(const char* dll, std::initializer_list<const char*> names) {
@@ -94,27 +130,38 @@ std::string NormaliseDll(std::string dll) {
   size_t slash = dll.find_last_of("\\/");
   if (slash != std::string::npos) dll = dll.substr(slash + 1);
   if (dll.find('.') == std::string::npos) dll += ".dll";
+  // The UCRT's API sets (api-ms-win-crt-runtime-l1-1-0.dll, ...) are all
+  // ucrtbase.dll, as Windows' API set map resolves them.
+  if (dll.rfind("api-ms-win-crt-", 0) == 0) return "ucrtbase.dll";
   return dll;
 }
 
-uint32_t ImportThunk(const std::string& dll, const std::string& name) {
+gaddr ImportThunk(const std::string& dll, const std::string& name) {
   std::string n = NormaliseDll(dll);
+  if (gaddr data = DataAddress(n, name)) return data;
   if (!Registry().count({n, name}))
     RECOMP_TRACE("hle: import %s!%s has no handler\n", n.c_str(), name.c_str());
   return AddSlot(n, name);
 }
 
-void CallThunk(Ctx& c, uint32_t thunk) {
-  size_t idx = (thunk - kThunkBase) / kThunkStride;
+void CallThunk(Ctx& c, gaddr thunk) {
+  const bool x64 = g_proc->x64;
+  const gaddr off = thunk - ThunkBase();
+  size_t idx = off / kThunkStride;
   const Slot* s = nullptr;
-  if ((thunk - kThunkBase) % kThunkStride == 0 && idx < kMaxSlots)
+  if (off % kThunkStride == 0 && idx < kMaxSlots)
     s = g_slot_table[idx].load(std::memory_order_acquire);
+  const unsigned long long ret = x64 ? Rd64(c.rsp) : Rd32(c.esp);
   if (!s)
-    FatalF("call to unknown thunk %08X (return address %08X)", thunk,
-           Rd32(c.esp));
+    FatalF("call to unknown thunk %08llX (return address %08llX)",
+           (unsigned long long)thunk, ret);
   if (!s->def)
-    FatalF("unimplemented import %s!%s called (return address %08X)",
-           s->dll.c_str(), s->name.c_str(), Rd32(c.esp));
+    FatalF("unimplemented import %s!%s called (return address %08llX)",
+           s->dll.c_str(), s->name.c_str(), ret);
+  if (x64 && !s->def->x64)
+    FatalF("import %s!%s called from x64 code: its handler is not audited for "
+           "x64 guests (HLE64) (return address %08llX)",
+           s->dll.c_str(), s->name.c_str(), ret);
   const Def& d = *s->def;
   // <ID>_TRACE_FILTER=mss32 (substring of "dll!name") narrows the trace.
   static const char* filter = Env("TRACE_FILTER");
@@ -123,44 +170,50 @@ void CallThunk(Ctx& c, uint32_t thunk) {
   if (trace) {
     std::string args;
     for (int i = 0; i < std::max(d.nargs, 0) && i < 8; i++) {
-      char buf[16];
-      std::snprintf(buf, sizeof buf, i ? ", %X" : "%X", Arg(c, i));
+      char buf[24];
+      std::snprintf(buf, sizeof buf, i ? ", %llX" : "%llX", (unsigned long long)Arg(c, i));
       args += buf;
     }
-    TraceF("[%04X] %s!%s(%s) from %08X\n", CurrentThread()->tid,
-           s->dll.c_str(), s->name.c_str(), args.c_str(), Rd32(c.esp));
+    TraceF("[%04X] %s!%s(%s) from %08llX\n", CurrentThread()->tid,
+           s->dll.c_str(), s->name.c_str(), args.c_str(), ret);
   }
   // For hang dumps: which import this thread is inside (innermost).
   const char* saved_name = t_wd_hle_name;
-  uint32_t saved_ret = t_wd_hle_ret;
+  uint64_t saved_ret = t_wd_hle_ret;
   t_wd_hle_name = s->name.c_str();
-  t_wd_hle_ret = Rd32(c.esp);
+  t_wd_hle_ret = ret;
   ++t_hle_depth;
   static std::recursive_mutex graphics_mu;
   std::unique_lock<std::recursive_mutex> gl;
   if (s->graphics) gl = std::unique_lock<std::recursive_mutex>(graphics_mu);
-  uint32_t r = d.fn(c);
+  uint64_t r = d.fn(c);
   if (gl) gl.unlock();
   --t_hle_depth;
   t_wd_hle_name = saved_name;
   t_wd_hle_ret = saved_ret;
-  if (trace) TraceF("[%04X]   -> %X\n", CurrentThread()->tid, r);
-  c.eax = r;
-  c.esp += 4 + (d.nargs > 0 ? 4 * uint32_t(d.nargs) : 0);
+  if (trace) TraceF("[%04X]   -> %llX\n", CurrentThread()->tid, (unsigned long long)r);
+  if (x64) {
+    c.rax = r;
+    c.rsp += 8;  // the caller pops its own arguments
+  } else {
+    c.eax = uint32_t(r);
+    c.esp += 4 + (d.nargs > 0 ? 4 * uint32_t(d.nargs) : 0);
+  }
 }
 
-uint32_t ModuleHandle(const std::string& dll) {
+gaddr ModuleHandle(const std::string& dll) {
   std::string n = NormaliseDll(dll);
   const auto& k = KnownDlls();
   auto it = std::find(k.begin(), k.end(), n);
   if (it == k.end()) return 0;
-  return kModuleRegion + uint32_t(it - k.begin()) * 0x10000;
+  return ModuleRegion() + uint32_t(it - k.begin()) * 0x10000;
 }
 
-uint32_t ProcAddress(uint32_t hmodule, const std::string& name) {
+gaddr ProcAddress(gaddr hmodule, const std::string& name) {
   const auto& k = KnownDlls();
-  uint32_t idx = (hmodule - kModuleRegion) / 0x10000;
-  if (hmodule < kModuleRegion || idx >= k.size()) return 0;
+  gaddr idx = (hmodule - ModuleRegion()) / 0x10000;
+  if (hmodule < ModuleRegion() || idx >= k.size()) return 0;
+  if (gaddr data = DataAddress(k[idx], name)) return data;
   const std::string& dll = k[idx];
   if (!Registry().count({dll, name})) {
     auto ex = DeclaredExports().find(dll);
@@ -173,19 +226,22 @@ uint32_t ProcAddress(uint32_t hmodule, const std::string& name) {
   return AddSlot(dll, name);
 }
 
-uint32_t ThunkFor(const std::string& dll, const std::string& name) {
+gaddr ThunkFor(const std::string& dll, const std::string& name) {
   return AddSlot(dll, name);
 }
 
-void SetLastError(uint32_t e) { Wr32(CurrentThread()->teb + 0x34, e); }
+// TEB LastErrorValue: +0x34 (32-bit), +0x68 (x64).
+void SetLastError(uint32_t e) {
+  Wr32(CurrentThread()->teb + (g_proc->x64 ? 0x68 : 0x34), e);
+}
 
-uint32_t CopyOut(uint32_t buf, uint32_t size, const std::string& s) {
+uint32_t CopyOut(gaddr buf, uint32_t size, const std::string& s) {
   if (s.size() + 1 > size) return uint32_t(s.size() + 1);
   PutStr(buf, s);
   return uint32_t(s.size());
 }
 
-uint32_t PutCounted(uint32_t buf, uint32_t cap, const std::string& s, bool wide) {
+uint32_t PutCounted(gaddr buf, uint32_t cap, const std::string& s, bool wide) {
   if (!cap) return uint32_t(s.size() + 1);
   if (s.size() + 1 > cap) {
     SetLastError(win32::kErrorInsufficientBuffer);

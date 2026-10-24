@@ -1676,7 +1676,8 @@ HLE("user32.dll", PostMessageA, 4) {
   uint32_t hwnd = Arg(c, 0);
   if (!hwnd) {
     PostTo(CurrentThread()->tid,
-           Msg{0, Arg(c, 1), Arg(c, 2), Arg(c, 3), TickCount(), g_mouse_x, g_mouse_y});
+           Msg{0, uint32_t(Arg(c, 1)), uint32_t(Arg(c, 2)), uint32_t(Arg(c, 3)), TickCount(),
+               g_mouse_x, g_mouse_y});
     return 1;
   }
   {
@@ -2060,7 +2061,7 @@ HLE("user32.dll", MsgWaitForMultipleObjects, 5) {
 HLE("user32.dll", SetWindowsHookExA, 4) {
   static uint32_t next = 0x00F00010;
   RECOMP_TRACE("  SetWindowsHookExA(type %d, proc %08X): ignored\n",
-            int32_t(Arg(c, 0)), Arg(c, 1));
+            int32_t(Arg(c, 0)), uint32_t(Arg(c, 1)));
   return next += 0x10;
 }
 HLE("user32.dll", CallNextHookEx, 4) { return 0; }

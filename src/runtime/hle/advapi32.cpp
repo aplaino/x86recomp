@@ -193,7 +193,7 @@ HLE("advapi32.dll", RegSetValueExA, 6) {
   LoadOnce();
   std::string key = RootName(Arg(c, 0));
   if (!g_reg.count(key)) return kErrorInvalidHandle;
-  RegValue v{Arg(c, 3), {}};
+  RegValue v{uint32_t(Arg(c, 3)), {}};
   uint8_t* p = GPtr(Arg(c, 4));
   v.data.assign(p, p + Arg(c, 5));
   g_reg[key][Lower(GStr(Arg(c, 1)))] = v;

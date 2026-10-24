@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace recomp::win32 {
 
@@ -23,9 +24,11 @@ inline constexpr uint32_t kErrorProcNotFound = 127;
 inline constexpr uint32_t kErrorAlreadyExists = 183;
 inline constexpr uint32_t kErrorEnvVarNotFound = 203;
 inline constexpr uint32_t kErrorMoreData = 234;
+inline constexpr uint32_t kErrorTooManyPosts = 298;
 inline constexpr uint32_t kErrorInvalidAddress = 487;
 inline constexpr uint32_t kErrorDllInitFailed = 1114;
 inline constexpr uint32_t kErrorClassAlreadyExists = 1410;
+inline constexpr uint32_t kErrorTimeout = 1460;
 inline constexpr uint32_t kErrorCannotFindWndClass = 1407;
 inline constexpr uint32_t kErrorResourceNameNotFound = 1814;
 inline constexpr uint32_t kErrorBufferOverflow = 111;
@@ -99,6 +102,58 @@ inline std::string Narrow(const std::u16string& w) {
   bool ok;
   for (char16_t ch : w) s.push_back(char(UnicodeToCp1252(ch, &ok)));
   return s;
+}
+
+// A command line split into arguments as the MSVC CRT and
+// CommandLineToArgvW do. The program name runs to the closing quote or the
+// first blank, with no escapes. In the other arguments 2n backslashes
+// before a quote are n backslashes and the quote toggles quoting, 2n+1 are
+// n and a literal quote, "" inside quotes is a quote, and other
+// backslashes are literal.
+template <typename S>
+std::vector<S> SplitCommandLine(const S& cmd) {
+  using Ch = typename S::value_type;
+  std::vector<S> args;
+  size_t i = 0, n = cmd.size();
+  auto blank = [&](size_t k) { return k < n && (cmd[k] == Ch(' ') || cmd[k] == Ch('\t')); };
+  S prog;
+  if (i < n && cmd[i] == Ch('"')) {
+    for (i++; i < n && cmd[i] != Ch('"'); i++) prog.push_back(cmd[i]);
+    if (i < n) i++;
+  } else {
+    for (; i < n && !blank(i); i++) prog.push_back(cmd[i]);
+  }
+  args.push_back(prog);
+  while (blank(i)) i++;
+  while (i < n) {
+    S a;
+    bool quoted = false;
+    while (i < n && (quoted || !blank(i))) {
+      if (cmd[i] == Ch('\\')) {
+        size_t k = 0;
+        while (i < n && cmd[i] == Ch('\\')) i++, k++;
+        if (i < n && cmd[i] == Ch('"')) {
+          a.append(k / 2, Ch('\\'));
+          if (k % 2) a.push_back(cmd[i++]);
+        } else {
+          a.append(k, Ch('\\'));
+        }
+      } else if (cmd[i] == Ch('"')) {
+        if (quoted && i + 1 < n && cmd[i + 1] == Ch('"')) {
+          a.push_back(Ch('"'));
+          i += 2;
+        } else {
+          quoted = !quoted;
+          i++;
+        }
+      } else {
+        a.push_back(cmd[i++]);
+      }
+    }
+    args.push_back(a);
+    while (blank(i)) i++;
+  }
+  return args;
 }
 
 // Windows-1252 text as UTF-8, for host APIs that take UTF-8 (SDL window

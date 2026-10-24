@@ -48,6 +48,7 @@ struct PeExport {
 struct PeTls {
   gaddr raw_start = 0, raw_end = 0;  // template for each thread's block
   gaddr index_va = 0;                // where the loader stores the TLS index
+  gaddr callbacks = 0;               // null-terminated array of callbacks
   uint32_t zero_fill = 0;
 };
 

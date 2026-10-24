@@ -21,7 +21,7 @@
 namespace recomp {
 
 thread_local const char* t_wd_hle_name = nullptr;
-thread_local unsigned t_wd_hle_ret = 0;
+thread_local uint64_t t_wd_hle_ret = 0;
 
 namespace {
 
@@ -71,8 +71,8 @@ void OnDumpSignal(int) {
   if (fd >= 0) {
     if (const char* n = t_wd_hle_name) {
       char buf[160];
-      std::snprintf(buf, sizeof buf, "in import (last entered): %s, called from guest %08X\n",
-                    n, t_wd_hle_ret);
+      std::snprintf(buf, sizeof buf, "in import (last entered): %s, called from guest %08llX\n",
+                    n, (unsigned long long)t_wd_hle_ret);
       WriteAll(fd, buf);
     }
     void* frames[512];

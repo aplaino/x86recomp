@@ -283,7 +283,7 @@ std::shared_ptr<Surface> NewSurface(Surface::Kind kind, int w, int h,
 
 Surface* Self(Ctx& c) {
   Surface* s = com::As<Surface>(hle::Arg(c, 0));
-  if (!s) FatalF("IDirectDrawSurface7 call on unknown object %08X", hle::Arg(c, 0));
+  if (!s) FatalF("IDirectDrawSurface7 call on unknown object %08X", uint32_t(hle::Arg(c, 0)));
   return s;
 }
 
@@ -630,7 +630,7 @@ HLE_NAMED("ddraw.dll", "IDirectDraw7::SetCooperativeLevel", DD7_SetCooperativeLe
   State& s = St();
   if (Arg(c, 1)) s.hwnd = Arg(c, 1);
   s.coop_flags = Arg(c, 2);
-  RECOMP_TRACE("  SetCooperativeLevel(hwnd %X, flags %X)\n", Arg(c, 1), Arg(c, 2));
+  RECOMP_TRACE("  SetCooperativeLevel(hwnd %X, flags %X)\n", uint32_t(Arg(c, 1)), uint32_t(Arg(c, 2)));
   return DD_OK;
 }
 

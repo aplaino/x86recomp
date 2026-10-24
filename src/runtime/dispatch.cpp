@@ -36,7 +36,7 @@ namespace {
 // One per image: the EXE's first, then the lifted DLLs'. Built before any
 // guest code runs and never changed afterwards.
 struct CodeRange {
-  uint32_t lo = 0, size = 0;
+  uint64_t lo = 0, size = 0;
   std::vector<GuestFn> table;  // by va - lo
 };
 CodeRange g_exe;
@@ -59,7 +59,42 @@ CodeRange TextOf(const PeImage& img) {
   return r;
 }
 
+void DumpGuestState64(const Ctx& c) {
+  Flags f;
+  UnpackEFlags(f, c.eflags);
+  std::fprintf(stderr,
+               "  rax=%016llX rcx=%016llX rdx=%016llX rbx=%016llX\n"
+               "  rsp=%016llX rbp=%016llX rsi=%016llX rdi=%016llX\n"
+               "  r8 =%016llX r9 =%016llX r10=%016llX r11=%016llX\n"
+               "  r12=%016llX r13=%016llX r14=%016llX r15=%016llX\n"
+               "  flags: cf=%d zf=%d sf=%d of=%d df=%d  mxcsr=%04X\n",
+               (unsigned long long)c.rax, (unsigned long long)c.rcx,
+               (unsigned long long)c.rdx, (unsigned long long)c.rbx,
+               (unsigned long long)c.rsp, (unsigned long long)c.rbp,
+               (unsigned long long)c.rsi, (unsigned long long)c.rdi,
+               (unsigned long long)c.r8, (unsigned long long)c.r9,
+               (unsigned long long)c.r10, (unsigned long long)c.r11,
+               (unsigned long long)c.r12, (unsigned long long)c.r13,
+               (unsigned long long)c.r14, (unsigned long long)c.r15, f.cf, f.zf, f.sf,
+               f.of, f.df, c.mxcsr);
+  if (!g_proc) return;
+  // x64 code keeps no frame chain: show the stack's qwords that point
+  // into an image (return addresses, mostly).
+  std::fprintf(stderr, "  stack (image addresses):\n");
+  int shown = 0;
+  for (uint64_t a = c.rsp; shown < 24 && a < c.rsp + 0x2000; a += 8) {
+    if (!g_proc->mem.IsCommitted(a)) break;
+    uint64_t v = Rd64(a);
+    if (ImageAt(v)) {
+      std::fprintf(stderr, "    [rsp+%04llX] %016llX\n", (unsigned long long)(a - c.rsp),
+                   (unsigned long long)v);
+      shown++;
+    }
+  }
+}
+
 void DumpGuestState(const Ctx& c) {
+  if (g_proc && g_proc->x64) return DumpGuestState64(c);
   Flags f;
   UnpackEFlags(f, c.eflags);
   std::fprintf(stderr,
@@ -160,10 +195,13 @@ void FaultHandler(int sig, siginfo_t* si, void* uc) {
   char buf[256];
   uintptr_t a = reinterpret_cast<uintptr_t>(si->si_addr);
   uintptr_t base = reinterpret_cast<uintptr_t>(g_guest_base);
-  if (a - base < (1ull << 32) && lazy::HandleFault(uint32_t(a - base)))
+  // x64 guests: no guest exception dispatch yet (ARCHITECTURE.md, "64-bit
+  // guests"), so their faults are reported below.
+  const bool guest32 = a - base < (1ull << 32) && g_proc && !g_proc->x64;
+  if (guest32 && lazy::HandleFault(uint32_t(a - base)))
     return;  // filled: retry the faulting instruction
   platform::FaultContext fc = platform::ReadFaultContext(uc);
-  if (a - base < (1ull << 32) && CurrentThread() &&
+  if (guest32 && CurrentThread() &&
       t_fault_depth < kMaxFaultDepth && hle::t_hle_depth == 0) {
     ++t_fault_depth;
     bool cont;
@@ -188,7 +226,7 @@ void FaultHandler(int sig, siginfo_t* si, void* uc) {
     if (cont) return;  // retry the faulting instruction
   }
   int n;
-  if (a - base < (1ull << 32))
+  if (g_proc && a - base < g_proc->mem.size() * (g_proc->x64 ? 2 : 1))
     n = std::snprintf(buf, sizeof buf,
                       "FATAL: %s: guest memory fault at guest %08lX\n",
                       sig == SIGSEGV ? "SIGSEGV" : "SIGBUS",
@@ -263,6 +301,29 @@ void InitDispatch() {
   }
 }
 
+void Dispatch(Ctx& c, uint64_t target, uint64_t va) {
+  const CodeRange* r = &g_exe;
+  if (target - r->lo >= r->size) {
+    if (target - kThunkBase64 < kThunkRegionSize) {
+      hle::CallThunk(c, target);
+      return;
+    }
+    r = nullptr;
+    for (const CodeRange& d : g_dlls)
+      if (target - d.lo < d.size) r = &d;
+    if (!r)
+      FatalF("indirect branch to %08llX from %08llX: not code", (unsigned long long)target,
+             (unsigned long long)va);
+  }
+  if (GuestFn fn = r->table[target - r->lo]) {
+    fn(c);
+    return;
+  }
+  FatalF("indirect branch to unlifted address %08llX from %08llX "
+         "(add it to the manifest as a function entry)",
+         (unsigned long long)target, (unsigned long long)va);
+}
+
 void Dispatch(Ctx& c, uint32_t target, uint32_t va) {
   const CodeRange* r = &g_exe;
   if (target - r->lo >= r->size) {
@@ -297,6 +358,29 @@ void Resume(Ctx& c, GuestResume r) {
   }
 }
 
+// x64 lifted code's fatal paths (64-bit VAs).
+void Unimplemented(Ctx& c, uint64_t va, const char* what) {
+  (void)c;
+  FatalF("unimplemented instruction at %08llX: %s", (unsigned long long)va, what);
+}
+void BadJump(Ctx& c, uint64_t va, uint64_t target) {
+  (void)c;
+  FatalF("branch at %08llX to %08llX outside lifted code", (unsigned long long)va,
+         (unsigned long long)target);
+}
+void Unreachable(Ctx& c, uint64_t va) {
+  (void)c;
+  FatalF("returned from a no-return call at %08llX", (unsigned long long)va);
+}
+void Trap(Ctx& c, uint64_t va) {
+  (void)c;
+  FatalF("breakpoint/trap instruction at %08llX", (unsigned long long)va);
+}
+void RaiseDivideError(Ctx& c, uint64_t va) {
+  (void)c;
+  FatalF("integer divide error (#DE) at %08llX", (unsigned long long)va);
+}
+
 void Unimplemented(Ctx& c, uint32_t va, const char* what) {
   (void)c;
   FatalF("unimplemented instruction at %08X: %s", va, what);
@@ -324,7 +408,58 @@ void RaiseDivideError(Ctx& c, uint32_t va) {
   FatalF("integer divide error (#DE) at %08X", va);
 }
 
+// The x64 guest CPU (ARCHITECTURE.md, "64-bit guests"): AMD family 16h
+// model 0 (the Jaguar class), with only what the lifter implements
+// claimed: the x86-64 baseline up to SSE2, LAHF/SAHF in long mode and
+// LZCNT. SSE3 and later, CMPXCHG16B, POPCNT, XSAVE and AVX are not (yet)
+// claimed: the lifter has the forms the supported games contain, not
+// those whole instruction sets.
+static void Cpuid64(Ctx& c) {
+  const uint32_t leaf = c.eax;
+  uint32_t a = 0, b = 0, cx = 0, d = 0;
+  switch (leaf) {
+    case 0:
+      a = 1;
+      b = 0x68747541;  // "AuthenticAMD"
+      d = 0x69746E65;
+      cx = 0x444D4163;
+      break;
+    case 1:
+      a = 0x00700F01;  // family 16h (0Fh + 07h), model 0, stepping 1
+      b = (GuestProcessorCount() << 16) | (8u << 8);  // CLFLUSH: 64 bytes
+      cx = 0;
+      d = 0x0783F9FF;  // fpu tsc cx8 cmov mmx fxsr sse sse2 (as 32-bit)
+      break;
+    case 0x80000000:
+      a = 0x80000001;
+      b = 0x68747541;
+      d = 0x69746E65;
+      cx = 0x444D4163;
+      break;
+    case 0x80000001:
+      a = 0x00700F01;
+      cx = (1u << 0) | (1u << 5);   // LahfSahf, ABM (LZCNT)
+      d = (1u << 11) | (1u << 20) | (1u << 29);  // SYSCALL, NX, long mode
+      break;
+    default:
+      break;
+  }
+  c.rax = a;
+  c.rbx = b;
+  c.rcx = cx;
+  c.rdx = d;
+}
+
+// XGETBV: XCR0 = x87 | SSE state (AVX state once AVX is claimed). Only
+// reached by code that ignores the OSXSAVE bit, which is clear.
+void Xgetbv(Ctx& c) {
+  if (uint32_t(c.rcx) != 0) FatalF("xgetbv of XCR%u", uint32_t(c.rcx));
+  c.rax = 0x3;
+  c.rdx = 0;
+}
+
 void Cpuid(Ctx& c) {
+  if (g_proc && g_proc->x64) return Cpuid64(c);
   // A fixed CPU, never the host's: lifted code behaves the same on every
   // machine (Apple Silicon has no CPUID), and nothing beyond SSE2 is
   // claimed. SSE and SSE2 are reported because every PC these games still
@@ -360,6 +495,12 @@ uint64_t Rdtsc(Ctx& c) {
   return 3 * uint64_t(
       duration_cast<nanoseconds>(steady_clock::now().time_since_epoch())
           .count());
+}
+
+void Probe(Ctx& c, uint64_t va, const char* name) {
+  FatalF("probe %s at %08llX: probes are not supported in x64 guests yet", name,
+         (unsigned long long)va);
+  (void)c;
 }
 
 void Probe(Ctx& c, uint32_t va, const char* name) {

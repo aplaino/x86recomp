@@ -90,11 +90,20 @@ struct MutexObject : Waitable {
   uint32_t count = 0;
 };
 
+struct SemaphoreObject : Waitable {
+  SemaphoreObject(int32_t initial, int32_t maximum)
+      : Waitable(Type::Semaphore), count(initial), max(maximum) {}
+  bool Signalled(uint32_t) const override { return count > 0; }
+  void Acquire(uint32_t) override { count--; }
+  int32_t count, max;
+};
+
 struct ThreadObject : Waitable {
   ThreadObject() : Waitable(Type::Thread) {}
   bool Signalled(uint32_t) const override { return finished; }
   Thread* thread = nullptr;
-  uint32_t entry = 0, param = 0;
+  gaddr entry = 0;
+  uint64_t param = 0;
   std::atomic<bool> started{false};  // CreateThread vs ResumeThread races
   bool finished = false;  // under g_wait_mu
 };
@@ -175,12 +184,14 @@ bool SignalEventHandle(uint32_t h, bool pulse) {
 
 namespace {
 
-std::string NameOf(uint32_t va) { return va ? GStr(va) : std::string(); }
+std::string NameOf(gaddr va, bool wide = false) {
+  if (!va) return std::string();
+  return wide ? win32::Narrow(GWStr(va)) : GStr(va);
+}
 
 // Registers a named object or returns the existing one (ERROR_ALREADY_EXISTS).
 template <typename Make>
-uint32_t CreateNamed(uint32_t name_va, Make make) {
-  std::string name = NameOf(name_va);
+uint32_t CreateNamed(const std::string& name, Make make) {
   std::shared_ptr<KObject> obj;
   bool existed = false;
   {
@@ -210,24 +221,26 @@ using namespace win32;
 
 // ---- events -----------------------------------------------------------------
 
-HLE("kernel32.dll", CreateEventA, 4) {
-  bool manual = Arg(c, 1), initial = Arg(c, 2);
-  return CreateNamed(Arg(c, 3), [&] {
+uint64_t CreateEvent(const Ctx& c, bool wide) {
+  bool manual = uint32_t(Arg(c, 1)), initial = uint32_t(Arg(c, 2));
+  return HandleRet(CreateNamed(NameOf(Arg(c, 3), wide), [&] {
     return std::make_shared<EventObject>(manual, initial);
-  });
+  }));
 }
+HLE64("kernel32.dll", CreateEventA, 4) { return CreateEvent(c, false); }
+HLE64("kernel32.dll", CreateEventW, 4) { return CreateEvent(c, true); }
 
-HLE("kernel32.dll", SetEvent, 1) {
+HLE64("kernel32.dll", SetEvent, 1) {
   GuestSyncPoint sync;
-  return SignalEventHandle(Arg(c, 0), false) ? 1 : 0;
+  return SignalEventHandle(uint32_t(Arg(c, 0)), false) ? 1 : 0;
 }
 
-HLE("kernel32.dll", PulseEvent, 1) {
+HLE64("kernel32.dll", PulseEvent, 1) {
   GuestSyncPoint sync;
-  return SignalEventHandle(Arg(c, 0), true) ? 1 : 0;
+  return SignalEventHandle(uint32_t(Arg(c, 0)), true) ? 1 : 0;
 }
 
-HLE("kernel32.dll", ResetEvent, 1) {
+HLE64("kernel32.dll", ResetEvent, 1) {
   GuestSyncPoint sync;
   auto e = std::dynamic_pointer_cast<EventObject>(GetHandle(Arg(c, 0)));
   if (!e) return 0;
@@ -242,7 +255,7 @@ HLE("kernel32.dll", CreateMutexA, 3) {
   GuestSyncPoint sync;
   bool own = Arg(c, 1);
   uint32_t tid = CurrentThread()->tid;
-  uint32_t h = CreateNamed(Arg(c, 2), [] {
+  uint32_t h = CreateNamed(NameOf(Arg(c, 2)), [] {
     return std::make_shared<MutexObject>();
   });
   if (own) {
@@ -255,7 +268,7 @@ HLE("kernel32.dll", CreateMutexA, 3) {
 
 // OpenMutexA/OpenFileMappingA(access, inherit, name): a new handle to an
 // existing named object of that type.
-uint32_t OpenNamed(uint32_t name_va, KObject::Type type) {
+uint32_t OpenNamed(gaddr name_va, KObject::Type type) {
   std::string name = NameOf(name_va);
   std::lock_guard<std::mutex> l(g_wait_mu);
   auto it = g_named.find(name);
@@ -281,24 +294,65 @@ HLE("kernel32.dll", ReleaseMutex, 1) {
   return 1;
 }
 
-// ---- waits ------------------------------------------------------------------
+// ---- semaphores -------------------------------------------------------------
 
-HLE("kernel32.dll", WaitForSingleObject, 2) {
+uint64_t CreateSemaphore(const Ctx& c, bool wide) {
+  int32_t initial = int32_t(Arg(c, 1)), maximum = int32_t(Arg(c, 2));
+  if (maximum <= 0 || initial < 0 || initial > maximum) {
+    SetLastError(kErrorInvalidParameter);
+    return 0;
+  }
+  return HandleRet(CreateNamed(NameOf(Arg(c, 3), wide), [&] {
+    return std::make_shared<SemaphoreObject>(initial, maximum);
+  }));
+}
+HLE64("kernel32.dll", CreateSemaphoreA, 4) { return CreateSemaphore(c, false); }
+HLE64("kernel32.dll", CreateSemaphoreW, 4) { return CreateSemaphore(c, true); }
+
+HLE64("kernel32.dll", ReleaseSemaphore, 3) {
   GuestSyncPoint sync;
-  auto w = AsWaitable(Arg(c, 0));
+  auto s = std::dynamic_pointer_cast<SemaphoreObject>(GetHandle(uint32_t(Arg(c, 0))));
+  int32_t n = int32_t(Arg(c, 1));
+  if (!s) {
+    SetLastError(kErrorInvalidHandle);
+    return 0;
+  }
+  {
+    std::lock_guard<std::mutex> l(g_wait_mu);
+    if (n <= 0 || n > s->max - s->count) {
+      SetLastError(kErrorTooManyPosts);
+      return 0;
+    }
+    if (gaddr prev = Arg(c, 2)) Wr32(prev, uint32_t(s->count));
+    s->count += n;
+  }
+  SignalChanged();
+  return 1;
+}
+
+// ---- waits ------------------------------------------------------------------
+// Alertable waits (the Ex forms) are never alerted: no APCs are queued.
+
+uint64_t WaitOne(const Ctx& c) {
+  GuestSyncPoint sync;
+  auto w = AsWaitable(uint32_t(Arg(c, 0)));
   if (!w) {
     SetLastError(kErrorInvalidHandle);
     return kWaitFailed;
   }
-  return WaitObjects({w}, false, Arg(c, 1));
+  return WaitObjects({w}, false, uint32_t(Arg(c, 1)));
 }
+HLE64("kernel32.dll", WaitForSingleObject, 2) { return WaitOne(c); }
+HLE64("kernel32.dll", WaitForSingleObjectEx, 3) { return WaitOne(c); }
 
-HLE("kernel32.dll", WaitForMultipleObjects, 4) {
+HLE64("kernel32.dll", WaitForMultipleObjects, 4) {
   GuestSyncPoint sync;
-  uint32_t n = Arg(c, 0), arr = Arg(c, 1);
+  uint32_t n = uint32_t(Arg(c, 0));
+  gaddr arr = Arg(c, 1);
+  const uint32_t ptr = g_proc->x64 ? 8 : 4;  // HANDLE[]
   std::vector<std::shared_ptr<Waitable>> objs;
   for (uint32_t i = 0; i < n; i++) {
-    auto w = AsWaitable(Rd32(arr + 4 * i));
+    auto w = AsWaitable(uint32_t(RdPtr(arr + ptr * i)));
     if (!w) {
       SetLastError(kErrorInvalidHandle);
       return kWaitFailed;
@@ -306,6 +360,143 @@ HLE("kernel32.dll", WaitForMultipleObjects, 4) {
     objs.push_back(w);
   }
   return WaitObjects(objs, Arg(c, 2) != 0, Arg(c, 3));
+}
+
+// ---- slim reader/writer locks and condition variables ------------------------
+// Host objects keyed by the guest SRWLOCK / CONDITION_VARIABLE address (the
+// guest's pointer-sized word stays as the guest initialised it, zero).
+// Every call is a full barrier like the other waits (GuestSyncPoint).
+// Acquisition is not fair, as on Windows; condition variables may wake
+// spuriously, as there.
+
+struct SrwLock {
+  std::mutex m;
+  std::condition_variable cv;
+  int readers = 0;
+  bool writer = false;
+};
+struct CondVar {
+  std::mutex m;
+  std::condition_variable cv;
+  uint32_t waiting = 0, released = 0;  // sleepers; wakes not yet taken
+};
+
+template <typename T>
+T& ObjectAt(gaddr va) {
+  static std::mutex mu;
+  static std::map<gaddr, std::unique_ptr<T>> objs;
+  std::lock_guard<std::mutex> l(mu);
+  auto& o = objs[va];
+  if (!o) o = std::make_unique<T>();
+  return *o;
+}
+
+HLE64("kernel32.dll", InitializeSRWLock, 1) {
+  WrPtr(Arg(c, 0), 0);  // SRWLOCK_INIT
+  return 0;
+}
+HLE64("kernel32.dll", AcquireSRWLockExclusive, 1) {
+  GuestSyncPoint sync;
+  SrwLock& s = ObjectAt<SrwLock>(Arg(c, 0));
+  std::unique_lock<std::mutex> l(s.m);
+  s.cv.wait(l, [&] { return !s.writer && !s.readers; });
+  s.writer = true;
+  return 0;
+}
+HLE64("kernel32.dll", TryAcquireSRWLockExclusive, 1) {
+  GuestSyncPoint sync;
+  SrwLock& s = ObjectAt<SrwLock>(Arg(c, 0));
+  std::lock_guard<std::mutex> l(s.m);
+  if (s.writer || s.readers) return 0;
+  s.writer = true;
+  return 1;
+}
+HLE64("kernel32.dll", AcquireSRWLockShared, 1) {
+  GuestSyncPoint sync;
+  SrwLock& s = ObjectAt<SrwLock>(Arg(c, 0));
+  std::unique_lock<std::mutex> l(s.m);
+  s.cv.wait(l, [&] { return !s.writer; });
+  s.readers++;
+  return 0;
+}
+HLE64("kernel32.dll", ReleaseSRWLockExclusive, 1) {
+  GuestSyncPoint sync;
+  SrwLock& s = ObjectAt<SrwLock>(Arg(c, 0));
+  {
+    std::lock_guard<std::mutex> l(s.m);
+    s.writer = false;
+  }
+  s.cv.notify_all();
+  return 0;
+}
+HLE64("kernel32.dll", ReleaseSRWLockShared, 1) {
+  GuestSyncPoint sync;
+  SrwLock& s = ObjectAt<SrwLock>(Arg(c, 0));
+  bool last;
+  {
+    std::lock_guard<std::mutex> l(s.m);
+    last = --s.readers == 0;
+  }
+  if (last) s.cv.notify_all();
+  return 0;
+}
+
+HLE64("kernel32.dll", InitializeConditionVariable, 1) {
+  WrPtr(Arg(c, 0), 0);  // CONDITION_VARIABLE_INIT
+  return 0;
+}
+
+// Releases the critical section, sleeps until a Wake (or the timeout) and
+// takes it again. The CondVar's mutex is held across the Leave, so a Wake
+// right after it still finds this thread counted as waiting.
+HLE64("kernel32.dll", SleepConditionVariableCS, 3) {
+  GuestSyncPoint sync;
+  CondVar& v = ObjectAt<CondVar>(Arg(c, 0));
+  gaddr cs = Arg(c, 1);
+  uint32_t ms = uint32_t(Arg(c, 2));
+  bool woken;
+  {
+    std::unique_lock<std::mutex> l(v.m);
+    v.waiting++;
+    LeaveCs(cs);
+    auto pred = [&] { return v.released > 0; };
+    if (ms == kInfinite) {
+      v.cv.wait(l, pred);
+      woken = true;
+    } else {
+      woken = v.cv.wait_for(l, std::chrono::milliseconds(ms), pred);
+    }
+    v.waiting--;
+    if (woken) v.released--;
+  }
+  EnterCs(cs);
+  if (!woken) {
+    SetLastError(kErrorTimeout);
+    return 0;
+  }
+  return 1;
+}
+
+HLE64("kernel32.dll", WakeConditionVariable, 1) {
+  GuestSyncPoint sync;
+  CondVar& v = ObjectAt<CondVar>(Arg(c, 0));
+  {
+    std::lock_guard<std::mutex> l(v.m);
+    if (v.released < v.waiting) v.released++;
+  }
+  v.cv.notify_one();
+  return 0;
+}
+
+HLE64("kernel32.dll", WakeAllConditionVariable, 1) {
+  GuestSyncPoint sync;
+  CondVar& v = ObjectAt<CondVar>(Arg(c, 0));
+  {
+    std::lock_guard<std::mutex> l(v.m);
+    v.released = v.waiting;
+  }
+  v.cv.notify_all();
+  return 0;
 }
 
 // ---- threads ----------------------------------------------------------------
@@ -357,7 +548,7 @@ HLE("kernel32.dll", TerminateThread, 2) {
 
 HLE("kernel32.dll", ExitThread, 1) {
   GuestSyncFence();  // OnGuestThreadFinished fences again after unwinding
-  throw GuestThreadExit{Arg(c, 0)};
+  throw GuestThreadExit{uint32_t(Arg(c, 0))};
 }
 
 // Thread priorities are not applied: host threads keep the default
@@ -470,7 +661,7 @@ HLE("kernel32.dll", CreateFileMappingA, 6) {
     g_proc->vm.Commit(base, uint32_t(m->size), Prot::RW);
     m->anon_base = base;
   }
-  return CreateNamed(name, [&] { return m; });
+  return CreateNamed(NameOf(name), [&] { return m; });
 }
 
 HLE("kernel32.dll", OpenFileMappingA, 3) {

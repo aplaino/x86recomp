@@ -260,7 +260,7 @@ HLE("user32.dll", GetSystemMetrics, 1) {
     case 79: return uint32_t(g_display_h);
     case 80: return 1;    // SM_CMONITORS
     default:
-      WarnF("GetSystemMetrics(%u): returning 0\n", Arg(c, 0));
+      WarnF("GetSystemMetrics(%u): returning 0\n", uint32_t(Arg(c, 0)));
       return 0;
   }
 }

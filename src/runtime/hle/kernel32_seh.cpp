@@ -171,7 +171,7 @@ void CompleteHostPage(Ctx& c, uint32_t addr) {
   if (host <= GuestMemory::kPageSize) return;
   GuestAllocator::Region region;
   if (!g_proc->vm.Find(addr, &region)) return;
-  const uint32_t first = std::max(addr & ~(host - 1), region.base);
+  const uint32_t first = uint32_t(std::max<uint64_t>(addr & ~(host - 1), region.base));
   const uint64_t end = std::min<uint64_t>(uint64_t(addr & ~(host - 1)) + host,
                                           uint64_t(region.base) + region.size);
   for (uint64_t p = first; p < end; p += GuestMemory::kPageSize) {
@@ -206,7 +206,7 @@ bool RaiseAccessViolation(Ctx& c, bool write, uint32_t addr) {
   Thread* t = CurrentThread();
   if (c.esp < t->stack_lo + kGap + 0x4000)
     FatalF("guest stack exhausted delivering an access violation at %08X "
-           "(esp %08X, stack %08X-%08X)", addr, c.esp, t->stack_lo, t->stack_hi);
+           "(esp %08X, stack %08X-%08X)", addr, c.esp, uint32_t(t->stack_lo), uint32_t(t->stack_hi));
   c.esp -= kGap;
   uint32_t params[2] = {write ? 1u : 0u, addr};
   bool cont = DispatchException(c, 0xC0000005, 0, 2, params, 0);
@@ -215,18 +215,19 @@ bool RaiseAccessViolation(Ctx& c, bool write, uint32_t addr) {
   return cont;
 }
 
-bool EnsureReadable(Ctx& c, uint32_t va, uint32_t len) {
+bool EnsureReadable(Ctx& c, gaddr va, uint64_t len) {
   if (!len) return true;
   GuestMemory& mem = g_proc->mem;
-  uint32_t end = va + len - 1;
+  gaddr end = va + len - 1;
   if (end < va) return false;
-  for (uint32_t p = va & ~0xFFFu;; p += 0x1000) {
+  for (gaddr p = va & ~0xFFFull;; p += 0x1000) {
     // A guest handler may commit the page and continue; anything else
     // (a second fault on the same page, no handler) is a failure.
     if (!mem.IsCommitted(p) &&
-        (!RaiseAccessViolation(c, false, std::max(p, va)) || !mem.IsCommitted(p)))
+        (g_proc->x64 || !RaiseAccessViolation(c, false, uint32_t(std::max(p, va))) ||
+         !mem.IsCommitted(p)))
       return false;
-    if (p >= (end & ~0xFFFu)) break;
+    if (p >= (end & ~0xFFFull)) break;
   }
   return true;
 }

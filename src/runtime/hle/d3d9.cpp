@@ -496,7 +496,7 @@ HLE_NAMED("d3d9.dll", "IDirect3D9::CheckDeviceType", D3D9_CheckDeviceType, 6) {
   bool ok = Arg(c, 1) == 0 && Arg(c, 2) == 1 && IsDisplayFormat(adapter_fmt) &&
             (bb_fmt == D3DFMT_UNKNOWN || IsBackBufferFormat(bb_fmt));
   RECOMP_TRACE("  CheckDeviceType(%u, %u, %u) -> %s\n", adapter_fmt, bb_fmt,
-               Arg(c, 5), ok ? "ok" : "not available");
+               uint32_t(Arg(c, 5)), ok ? "ok" : "not available");
   return ok ? D3D_OK : D3DERR_NOTAVAILABLE;
 }
 

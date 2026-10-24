@@ -25,7 +25,7 @@ namespace recomp {
 namespace {
 
 std::mutex g_heaps_mu;
-std::map<uint32_t, std::unique_ptr<GuestHeap>> g_heaps;
+std::map<gaddr, std::unique_ptr<GuestHeap>> g_heaps;
 GuestHeap* g_process_heap = nullptr;
 
 const auto g_start = std::chrono::steady_clock::now();
@@ -41,11 +41,22 @@ GuestHeap* NewHeap(uint32_t initial, uint32_t max) {
 
 }  // namespace
 
-uint32_t HeapAllocProcess(uint32_t size, bool zero) {
+uint64_t PerfCounter() {
+  using namespace std::chrono;
+  return uint64_t(duration_cast<nanoseconds>(steady_clock::now() - g_start).count() / 100);
+}
+
+gaddr HeapAllocProcess(uint64_t size, bool zero) {
   return g_process_heap->Alloc(size, zero);
 }
 
-void HeapFreeProcess(uint32_t p) { g_process_heap->Free(p); }
+void HeapFreeProcess(gaddr p) { g_process_heap->Free(p); }
+
+gaddr HeapReAllocProcess(gaddr p, uint64_t size) {
+  return g_process_heap->ReAlloc(p, size, false, false);
+}
+
+uint64_t HeapSizeProcess(gaddr p) { return g_process_heap->Size(p); }
 
 uint32_t TickCount() {
   using namespace std::chrono;
@@ -63,7 +74,7 @@ void WriteSystemTime(uint32_t st, const std::tm& t, int ms) {
   Wr16(st + 14, uint16_t(ms));
 }
 
-GuestHeap* FindHeap(uint32_t handle) {
+GuestHeap* FindHeap(gaddr handle) {
   std::lock_guard<std::mutex> l(g_heaps_mu);
   auto it = g_heaps.find(handle);
   return it == g_heaps.end() ? nullptr : it->second.get();
@@ -76,7 +87,10 @@ void InitKernel32State() {
   g_process_heap = NewHeap(1u << 20, 0);
   if (!g_process_heap) FatalF("cannot create the process heap");
   p.process_heap = g_process_heap->handle();
-  Wr32(kPebVa + 0x18, p.process_heap);
+  if (p.x64)
+    Wr64(kPebVa64 + 0x30, p.process_heap);  // PEB ProcessHeap
+  else
+    Wr32(kPebVa + 0x18, uint32_t(p.process_heap));
 
   std::string exe = GuestExePath();
   std::string cmd = "\"" + exe + "\"";
@@ -156,7 +170,7 @@ Module* LiftedDll(const std::string& name) {
   return nullptr;
 }
 
-Module* LoadedDllAt(uint32_t hmodule) {
+Module* LoadedDllAt(gaddr hmodule) {
   for (Module& m : g_proc->modules)
     if (m.refs && m.img.image_base == hmodule) return &m;
   return nullptr;
@@ -169,13 +183,15 @@ bool CallDllMain(Ctx& c, Module& m, uint32_t reason) {
   if (!m.img.entry) return true;
   m.stale = true;
   RECOMP_TRACE("  %s: DllMain(%u)\n", m.name.c_str(), reason);
-  return CallGuest(c, uint32_t(m.img.entry), {uint32_t(m.img.image_base), reason, 0}) != 0;
+  return uint32_t(CallGuest(c, m.img.entry, {m.img.image_base, reason, 0})) != 0;
 }
 
-HLE("kernel32.dll", GetModuleHandleA, 1) {
-  uint32_t name = Arg(c, 0);
+// A guest string argument, ANSI or UTF-16.
+std::string GArg(gaddr p, bool wide) { return wide ? Narrow(GWStr(p)) : GStr(p); }
+
+gaddr ModuleHandleOf(gaddr name, bool wide) {
   if (!name) return g_proc->img.image_base;
-  std::string n = GStr(name);
+  std::string n = GArg(name, wide);
   std::string exe = Lower(Game().exe_name);
   if (NormaliseDll(n) == exe || Lower(n) == exe.substr(0, exe.rfind('.')))
     return g_proc->img.image_base;
@@ -185,13 +201,17 @@ HLE("kernel32.dll", GetModuleHandleA, 1) {
     SetLastError(kErrorModNotFound);
     return 0;
   }
-  uint32_t h = ModuleHandle(n);
+  gaddr h = ModuleHandle(n);
   if (!h) SetLastError(kErrorModNotFound);
   return h;
 }
 
-HLE("kernel32.dll", GetModuleFileNameA, 3) {
-  uint32_t mod = Arg(c, 0), buf = Arg(c, 1), size = Arg(c, 2);
+HLE64("kernel32.dll", GetModuleHandleA, 1) { return ModuleHandleOf(Arg(c, 0), false); }
+HLE64("kernel32.dll", GetModuleHandleW, 1) { return ModuleHandleOf(Arg(c, 0), true); }
+
+HLE64("kernel32.dll", GetModuleFileNameA, 3) {
+  gaddr mod = Arg(c, 0), buf = Arg(c, 1);
+  uint32_t size = uint32_t(Arg(c, 2));
   std::string path = GuestExePath();
   if (mod && mod != g_proc->img.image_base) {
     std::lock_guard<std::recursive_mutex> l(g_loader_mu);
@@ -209,9 +229,8 @@ HLE("kernel32.dll", GetModuleFileNameA, 3) {
   return uint32_t(s.size());
 }
 
-// LoadLibraryA/ExA: lifted DLLs, and the HLE modules.
-uint32_t LoadModule(Ctx& c, const char* api, uint32_t name) {
-  std::string n = GStr(name);
+// LoadLibrary(Ex)A/W: lifted DLLs, and the HLE modules.
+gaddr LoadModule(Ctx& c, const char* api, const std::string& n) {
   if (Module* m = LiftedDll(n)) {
     std::lock_guard<std::recursive_mutex> l(g_loader_mu);
     if (m->refs++) return m->img.image_base;
@@ -224,7 +243,7 @@ uint32_t LoadModule(Ctx& c, const char* api, uint32_t name) {
     }
     return m->img.image_base;
   }
-  uint32_t h = ModuleHandle(n);
+  gaddr h = ModuleHandle(n);
   if (!h) {
     WarnF("%s(%s): not provided\n", api, n.c_str());
     SetLastError(kErrorModNotFound);
@@ -232,18 +251,29 @@ uint32_t LoadModule(Ctx& c, const char* api, uint32_t name) {
   return h;
 }
 
-HLE("kernel32.dll", LoadLibraryA, 1) { return LoadModule(c, "LoadLibraryA", Arg(c, 0)); }
-HLE("kernel32.dll", LoadLibraryExA, 3) { return LoadModule(c, "LoadLibraryExA", Arg(c, 0)); }
+HLE64("kernel32.dll", LoadLibraryA, 1) { return LoadModule(c, "LoadLibraryA", GStr(Arg(c, 0))); }
+HLE64("kernel32.dll", LoadLibraryW, 1) {
+  return LoadModule(c, "LoadLibraryW", Narrow(GWStr(Arg(c, 0))));
+}
+HLE64("kernel32.dll", LoadLibraryExA, 3) {
+  return LoadModule(c, "LoadLibraryExA", GStr(Arg(c, 0)));
+}
+HLE64("kernel32.dll", LoadLibraryExW, 3) {
+  return LoadModule(c, "LoadLibraryExW", Narrow(GWStr(Arg(c, 0))));
+}
 
-HLE("kernel32.dll", FreeLibrary, 1) {
+HLE64("kernel32.dll", FreeLibrary, 1) {
   std::lock_guard<std::recursive_mutex> l(g_loader_mu);
   if (Module* m = LoadedDllAt(Arg(c, 0)); m && --m->refs == 0)
     CallDllMain(c, *m, kDllProcessDetach);
   return 1;
 }
 
-HLE("kernel32.dll", GetProcAddress, 2) {
-  uint32_t mod = Arg(c, 0), name = Arg(c, 1);
+// DLL_THREAD_ATTACH/DETACH are never sent, so there is nothing to disable.
+HLE64("kernel32.dll", DisableThreadLibraryCalls, 1) { return 1; }
+
+HLE64("kernel32.dll", GetProcAddress, 2) {
+  gaddr mod = Arg(c, 0), name = Arg(c, 1);
   {
     std::lock_guard<std::recursive_mutex> l(g_loader_mu);
     if (Module* m = LoadedDllAt(mod)) {
@@ -255,23 +285,28 @@ HLE("kernel32.dll", GetProcAddress, 2) {
     }
   }
   if (name < 0x10000) {
-    WarnF("GetProcAddress by ordinal %u: not supported\n", name);
+    WarnF("GetProcAddress by ordinal %u: not supported\n", uint32_t(name));
     return 0;
   }
   std::string n = GStr(name);
-  uint32_t a = ProcAddress(mod, n);
+  gaddr a = ProcAddress(mod, n);
   if (!a) SetLastError(kErrorProcNotFound);
   return a;
 }
 
-HLE("kernel32.dll", GetCommandLineA, 0) { return g_proc->cmdline_a; }
+HLE64("kernel32.dll", GetCommandLineA, 0) { return g_proc->cmdline_a; }
+HLE64("kernel32.dll", GetCommandLineW, 0) { return g_proc->cmdline_w; }
 
-HLE("kernel32.dll", GetStartupInfoA, 1) {
-  uint32_t si = Arg(c, 0);
-  std::memset(GPtr(si), 0, 68);
-  Wr32(si, 68);
+// STARTUPINFOA/W: 68 bytes in 32-bit guests, 104 in x64 ones (its handles
+// and string pointers are pointer-sized); nothing set but cb.
+uint64_t StartupInfo(gaddr si) {
+  const uint32_t size = g_proc->x64 ? 104 : 68;
+  std::memset(GPtr(si), 0, size);
+  Wr32(si, size);
   return 0;
 }
+HLE64("kernel32.dll", GetStartupInfoA, 1) { return StartupInfo(Arg(c, 0)); }
+HLE64("kernel32.dll", GetStartupInfoW, 1) { return StartupInfo(Arg(c, 0)); }
 
 HLE("kernel32.dll", GetEnvironmentStrings, 0) { return g_proc->environ_a; }
 HLE("kernel32.dll", GetEnvironmentStringsW, 0) { return g_proc->environ_w; }
@@ -347,10 +382,10 @@ HLE("kernel32.dll", GetSystemDirectoryA, 2) {
   return CopyOut(Arg(c, 0), Arg(c, 1), "C:\\WINDOWS\\system32");
 }
 
-HLE("kernel32.dll", GetCurrentProcess, 0) { return 0xFFFFFFFF; }
-HLE("kernel32.dll", GetCurrentProcessId, 0) { return kGuestPid; }
-HLE("kernel32.dll", GetCurrentThread, 0) { return 0xFFFFFFFE; }
-HLE("kernel32.dll", GetCurrentThreadId, 0) { return CurrentThread()->tid; }
+HLE64("kernel32.dll", GetCurrentProcess, 0) { return HandleRet(0xFFFFFFFF); }
+HLE64("kernel32.dll", GetCurrentProcessId, 0) { return kGuestPid; }
+HLE64("kernel32.dll", GetCurrentThread, 0) { return HandleRet(0xFFFFFFFE); }
+HLE64("kernel32.dll", GetCurrentThreadId, 0) { return CurrentThread()->tid; }
 
 HLE("kernel32.dll", ExitProcess, 1) {
   uint32_t code = Arg(c, 0);
@@ -360,9 +395,9 @@ HLE("kernel32.dll", ExitProcess, 1) {
   std::_Exit(int(code));
 }
 
-HLE("kernel32.dll", TerminateProcess, 2) {
-  if (Arg(c, 0) == 0xFFFFFFFF) {
-    std::fprintf(stderr, "TerminateProcess(self, %u)\n", Arg(c, 1));
+HLE64("kernel32.dll", TerminateProcess, 2) {
+  if (uint32_t(Arg(c, 0)) == 0xFFFFFFFF) {
+    std::fprintf(stderr, "TerminateProcess(self, %u)\n", uint32_t(Arg(c, 1)));
     std::_Exit(int(Arg(c, 1)));
   }
   return 0;
@@ -376,14 +411,14 @@ HLE("kernel32.dll", SetLastError, 1) {
   return 0;
 }
 
-HLE("kernel32.dll", SetUnhandledExceptionFilter, 1) {
-  static uint32_t filter = 0;
-  uint32_t old = filter;
+HLE64("kernel32.dll", SetUnhandledExceptionFilter, 1) {
+  static gaddr filter = 0;
+  gaddr old = filter;
   filter = Arg(c, 0);
   return old;
 }
 
-HLE("kernel32.dll", IsDebuggerPresent, 0) { return 0; }
+HLE64("kernel32.dll", IsDebuggerPresent, 0) { return 0; }
 
 HLE("kernel32.dll", OutputDebugStringA, 1) {
   std::fprintf(stderr, "[guest] %s", GStr(Arg(c, 0)).c_str());
@@ -394,7 +429,7 @@ HLE("kernel32.dll", SetHandleCount, 1) { return Arg(c, 0); }
 
 // Looked up dynamically by the CRT (Pentium FDIV check). Matches the CPU
 // that Cpuid() reports: MMX yes, no SSE/3DNow!, no FDIV erratum.
-HLE("kernel32.dll", IsProcessorFeaturePresent, 1) {
+HLE64("kernel32.dll", IsProcessorFeaturePresent, 1) {
   switch (Arg(c, 0)) {
     case 3: return 1;   // PF_MMX_INSTRUCTIONS_AVAILABLE
     case 6: return 1;   // PF_XMMI_INSTRUCTIONS_AVAILABLE (SSE)
@@ -499,7 +534,7 @@ HLE("kernel32.dll", HeapDestroy, 1) {
 
 HLE("kernel32.dll", HeapAlloc, 3) {
   GuestHeap* h = FindHeap(Arg(c, 0));
-  if (!h) FatalF("HeapAlloc on unknown heap %08X", Arg(c, 0));
+  if (!h) FatalF("HeapAlloc on unknown heap %08X", uint32_t(Arg(c, 0)));
   return h->Alloc(Arg(c, 2), Arg(c, 1) & kHeapZeroMemory);
 }
 
@@ -508,7 +543,7 @@ HLE("kernel32.dll", HeapFree, 3) {
   if (!p) return 1;
   GuestHeap* h = FindHeap(Arg(c, 0));
   if (!h || !h->Free(p)) {
-    WarnF("HeapFree(%08X, %08X): not a live block\n", Arg(c, 0), p);
+    WarnF("HeapFree(%08X, %08X): not a live block\n", uint32_t(Arg(c, 0)), p);
     return 0;
   }
   return 1;
@@ -543,7 +578,7 @@ HLE("kernel32.dll", GlobalFree, 1) {
   return 0;
 }
 
-HLE("kernel32.dll", LocalFree, 1) {
+HLE64("kernel32.dll", LocalFree, 1) {
   if (Arg(c, 0)) g_process_heap->Free(Arg(c, 0));
   return 0;
 }
@@ -622,7 +657,7 @@ uint32_t QueryMemory(uint32_t addr, uint32_t mbi) {
   uint32_t page = addr & ~0xFFFu;
   std::memset(GPtr(mbi), 0, 28);
   if (!g_proc->vm.Find(addr, &r)) {
-    uint32_t base, size;
+    uint64_t base, size;
     g_proc->vm.FreeGap(addr, &base, &size);
     Wr32(mbi + 0, base);
     Wr32(mbi + 12, size);
@@ -652,7 +687,7 @@ HLE("kernel32.dll", VirtualQuery, 3) {
   uint32_t r = QueryMemory(Arg(c, 0), Arg(c, 1));
   uint32_t m = Arg(c, 1);
   RECOMP_TRACE("  VirtualQuery(%X): base %X alloc %X size %X state %X prot %X\n",
-            Arg(c, 0), Rd32(m), Rd32(m + 4), Rd32(m + 12), Rd32(m + 16),
+            uint32_t(Arg(c, 0)), Rd32(m), Rd32(m + 4), Rd32(m + 12), Rd32(m + 16),
             Rd32(m + 20));
   return r;
 }
@@ -678,15 +713,21 @@ HLE("kernel32.dll", IsBadCodePtr, 1) {
   return ImageAt(Arg(c, 0)) ? 0 : 1;
 }
 
-// ---- TLS (TlsAlloc slots live in the TEB at +0xE10, as on Windows) -------
-// TlsGetValue/TlsSetValue touch only the calling thread's TEB and are plain
-// accesses on Windows too; TlsAlloc/TlsFree take a process lock there, so
-// they are sync points here.
+// ---- TLS (TlsAlloc slots live in the TEB, as on Windows) -----------------
+// TlsSlots: TEB+0xE10 (4-byte slots) in 32-bit guests, TEB+0x1480 (8-byte)
+// in x64 ones. TlsGetValue/TlsSetValue touch only the calling thread's TEB
+// and are plain accesses on Windows too; TlsAlloc/TlsFree take a process
+// lock there, so they are sync points here.
 
 std::mutex g_tls_mu;
 uint64_t g_tls_used = 0;
 
-HLE("kernel32.dll", TlsAlloc, 0) {
+gaddr TlsSlot(uint32_t i) {
+  return g_proc->x64 ? CurrentThread()->teb + 0x1480 + 8 * i
+                     : CurrentThread()->teb + 0xE10 + 4 * i;
+}
+
+HLE64("kernel32.dll", TlsAlloc, 0) {
   GuestSyncPoint sync;
   std::lock_guard<std::mutex> l(g_tls_mu);
   for (uint32_t i = 0; i < 64; i++)
@@ -697,40 +738,45 @@ HLE("kernel32.dll", TlsAlloc, 0) {
   return 0xFFFFFFFF;
 }
 
-HLE("kernel32.dll", TlsFree, 1) {
+HLE64("kernel32.dll", TlsFree, 1) {
   GuestSyncPoint sync;
   std::lock_guard<std::mutex> l(g_tls_mu);
   g_tls_used &= ~(1ull << (Arg(c, 0) & 63));
   return 1;
 }
 
-HLE("kernel32.dll", TlsGetValue, 1) {
-  uint32_t i = Arg(c, 0);
+HLE64("kernel32.dll", TlsGetValue, 1) {
+  uint32_t i = uint32_t(Arg(c, 0));
   if (i >= 64) return 0;
   SetLastError(0);
-  return Rd32(CurrentThread()->teb + 0xE10 + 4 * i);
+  return RdPtr(TlsSlot(i));
 }
 
-HLE("kernel32.dll", TlsSetValue, 2) {
-  uint32_t i = Arg(c, 0);
+HLE64("kernel32.dll", TlsSetValue, 2) {
+  uint32_t i = uint32_t(Arg(c, 0));
   if (i >= 64) return 0;
-  Wr32(CurrentThread()->teb + 0xE10 + 4 * i, Arg(c, 1));
+  WrPtr(TlsSlot(i), Arg(c, 1));
   return 1;
 }
 
 // ---- critical sections ---------------------------------------------------
 // Windows XP's algorithm on the guest CRITICAL_SECTION itself, so the
-// fields games may read hold what they hold there: LockCount (+4) is -1
-// when free and counts the Enters past the first (recursions and
-// waiters), RecursionCount (+8), OwningThread (+12) the owner's thread
-// id. An uncontended Enter or Leave is one atomic on LockCount with no
-// global lock. A thread that finds the section owned by another waits on
-// a host semaphore keyed by the section's address (Windows' LockSemaphore,
-// also created on first contention), signalled by the Leave that sees a
-// waiter in LockCount. Enter and Leave are full barriers (ARCHITECTURE.md,
-// memory ordering) through their seq_cst read-modify-write of LockCount:
-// a lock-prefixed instruction on x86-64, LDADDAL on arm64 (LSE); no
-// separate fence.
+// fields games may read hold what they hold there: LockCount is -1 when
+// free and counts the Enters past the first (recursions and waiters),
+// RecursionCount, OwningThread the owner's thread id. An uncontended Enter
+// or Leave is one atomic on LockCount with no global lock. A thread that
+// finds the section owned by another waits on a host semaphore keyed by
+// the section's address (Windows' LockSemaphore, also created on first
+// contention), signalled by the Leave that sees a waiter in LockCount.
+// Enter and Leave are full barriers (ARCHITECTURE.md, memory ordering)
+// through their seq_cst read-modify-write of LockCount: a lock-prefixed
+// instruction on x86-64, LDADDAL on arm64 (LSE); no separate fence.
+//
+// Layouts: 32-bit {DebugInfo, LockCount +4, RecursionCount +8,
+// OwningThread +12, LockSemaphore, SpinCount +20}, 24 bytes; x64 with
+// pointer-sized DebugInfo, handles and SpinCount: LockCount +8,
+// RecursionCount +0xC, OwningThread +0x10, SpinCount +0x20, 40 bytes (the
+// thread id in OwningThread's low half).
 
 struct CsSemaphore {
   std::mutex m;
@@ -739,51 +785,65 @@ struct CsSemaphore {
 };
 
 std::mutex g_cs_mu;
-std::map<uint32_t, std::shared_ptr<CsSemaphore>> g_cs;  // under g_cs_mu
+std::map<gaddr, std::shared_ptr<CsSemaphore>> g_cs;  // under g_cs_mu
 
-std::shared_ptr<CsSemaphore> CsSemaphoreFor(uint32_t cs) {
+std::shared_ptr<CsSemaphore> CsSemaphoreFor(gaddr cs) {
   std::lock_guard<std::mutex> l(g_cs_mu);
   auto& s = g_cs[cs];
   if (!s) s = std::make_shared<CsSemaphore>();
   return s;
 }
 
-uint32_t* CsField(uint32_t cs, uint32_t off) {
+struct CsLayout {
+  uint32_t lock_count, recursion, owner, spin, size;
+};
+const CsLayout& Cs() {
+  static const CsLayout k32{4, 8, 12, 20, 24}, k64{8, 0xC, 0x10, 0x20, 40};
+  return g_proc->x64 ? k64 : k32;
+}
+
+uint32_t* CsField(gaddr cs, uint32_t off) {
   return reinterpret_cast<uint32_t*>(GPtr(cs + off));
 }
 
-HLE("kernel32.dll", InitializeCriticalSection, 1) {
-  uint32_t cs = Arg(c, 0);
-  std::memset(GPtr(cs), 0, 24);
-  Wr32(cs + 4, 0xFFFFFFFF);  // LockCount: -1 = free
-  return 0;
+void InitCs(gaddr cs, uint32_t spin) {
+  std::memset(GPtr(cs), 0, Cs().size);
+  Wr32(cs + Cs().lock_count, 0xFFFFFFFF);  // -1 = free
+  Wr32(cs + Cs().spin, spin);              // no effect here
 }
 
-HLE("kernel32.dll", InitializeCriticalSectionAndSpinCount, 2) {
-  uint32_t cs = Arg(c, 0);
-  std::memset(GPtr(cs), 0, 24);
-  Wr32(cs + 4, 0xFFFFFFFF);
-  Wr32(cs + 20, Arg(c, 1));  // SpinCount (no effect here)
-  return 1;
+// TryEnterCriticalSection: takes a free section or one this thread owns.
+bool TryEnterCs(gaddr cs) {
+  uint32_t tid = CurrentThread()->tid;
+  uint32_t* lock_count = CsField(cs, Cs().lock_count);
+  uint32_t* recursion = CsField(cs, Cs().recursion);
+  uint32_t* owner = CsField(cs, Cs().owner);
+  uint32_t free = 0xFFFFFFFF;
+  if (__atomic_compare_exchange_n(lock_count, &free, 0, false, __ATOMIC_SEQ_CST,
+                                  __ATOMIC_SEQ_CST)) {
+    __atomic_store_n(owner, tid, __ATOMIC_RELAXED);
+    __atomic_store_n(recursion, 1, __ATOMIC_RELAXED);
+    return true;
+  }
+  if (__atomic_load_n(owner, __ATOMIC_RELAXED) != tid) return false;
+  __atomic_add_fetch(lock_count, 1, __ATOMIC_SEQ_CST);
+  __atomic_store_n(recursion, *recursion + 1, __ATOMIC_RELAXED);
+  return true;
 }
 
-HLE("kernel32.dll", DeleteCriticalSection, 1) {
-  std::lock_guard<std::mutex> l(g_cs_mu);
-  g_cs.erase(Arg(c, 0));
-  return 0;
-}
+}  // namespace
 
-HLE("kernel32.dll", EnterCriticalSection, 1) {
-  uint32_t cs = Arg(c, 0), tid = CurrentThread()->tid;
-  uint32_t* lock_count = CsField(cs, 4);
-  uint32_t* recursion = CsField(cs, 8);
-  uint32_t* owner = CsField(cs, 12);
+void EnterCs(gaddr cs) {
+  uint32_t tid = CurrentThread()->tid;
+  uint32_t* lock_count = CsField(cs, Cs().lock_count);
+  uint32_t* recursion = CsField(cs, Cs().recursion);
+  uint32_t* owner = CsField(cs, Cs().owner);
   if (__atomic_add_fetch(lock_count, 1, __ATOMIC_SEQ_CST) != 0) {
     // Only the owner writes OwningThread, so it reads its own tid here
     // exactly when it already holds the section.
     if (__atomic_load_n(owner, __ATOMIC_RELAXED) == tid) {
       __atomic_store_n(recursion, *recursion + 1, __ATOMIC_RELAXED);
-      return 0;
+      return;
     }
     // Owned by another thread: wait for a Leave to hand it over.
     auto s = CsSemaphoreFor(cs);
@@ -793,28 +853,26 @@ HLE("kernel32.dll", EnterCriticalSection, 1) {
   }
   __atomic_store_n(owner, tid, __ATOMIC_RELAXED);
   __atomic_store_n(recursion, 1, __ATOMIC_RELAXED);
-  return 0;
 }
 
-HLE("kernel32.dll", LeaveCriticalSection, 1) {
-  uint32_t cs = Arg(c, 0);
-  uint32_t* lock_count = CsField(cs, 4);
-  uint32_t* recursion = CsField(cs, 8);
-  uint32_t* owner = CsField(cs, 12);
+void LeaveCs(gaddr cs) {
+  uint32_t* lock_count = CsField(cs, Cs().lock_count);
+  uint32_t* recursion = CsField(cs, Cs().recursion);
+  uint32_t* owner = CsField(cs, Cs().owner);
   if (__atomic_load_n(owner, __ATOMIC_RELAXED) != CurrentThread()->tid) {
     // Windows would corrupt the section (and usually hang the next
     // Enter); leave it as it is.
     static std::atomic<bool> warned{false};
     if (!warned.exchange(true))
-      WarnF("LeaveCriticalSection(%08X) by a thread that does not own it; "
-            "ignored\n", cs);
-    return 0;
+      WarnF("LeaveCriticalSection(%08llX) by a thread that does not own it; "
+            "ignored\n", (unsigned long long)cs);
+    return;
   }
   uint32_t rc = *recursion - 1;
   __atomic_store_n(recursion, rc, __ATOMIC_RELAXED);
   if (rc) {
     __atomic_sub_fetch(lock_count, 1, __ATOMIC_SEQ_CST);
-    return 0;
+    return;
   }
   __atomic_store_n(owner, 0, __ATOMIC_RELAXED);
   if (int32_t(__atomic_sub_fetch(lock_count, 1, __ATOMIC_SEQ_CST)) >= 0) {
@@ -826,6 +884,41 @@ HLE("kernel32.dll", LeaveCriticalSection, 1) {
     }
     s->cv.notify_one();
   }
+}
+
+namespace {
+
+HLE64("kernel32.dll", InitializeCriticalSection, 1) {
+  InitCs(Arg(c, 0), 0);
+  return 0;
+}
+
+HLE64("kernel32.dll", InitializeCriticalSectionAndSpinCount, 2) {
+  InitCs(Arg(c, 0), uint32_t(Arg(c, 1)));
+  return 1;
+}
+
+HLE64("kernel32.dll", DeleteCriticalSection, 1) {
+  std::lock_guard<std::mutex> l(g_cs_mu);
+  g_cs.erase(Arg(c, 0));
+  return 0;
+}
+
+HLE64("kernel32.dll", EnterCriticalSection, 1) {
+  EnterCs(Arg(c, 0));
+  return 0;
+}
+
+HLE64("kernel32.dll", TryEnterCriticalSection, 1) { return TryEnterCs(Arg(c, 0)); }
+
+HLE64("kernel32.dll", LeaveCriticalSection, 1) {
+  LeaveCs(Arg(c, 0));
+  return 0;
+}
+
+// x64 SLIST_HEADER: 16 bytes, empty when zero.
+HLE64("kernel32.dll", InitializeSListHead, 1) {
+  std::memset(GPtr(Arg(c, 0)), 0, g_proc->x64 ? 16 : 8);
   return 0;
 }
 
@@ -855,19 +948,17 @@ HLE("kernel32.dll", InterlockedExchange, 2) {
 
 HLE("kernel32.dll", GetTickCount, 0) { return TickCount(); }
 
-HLE("kernel32.dll", QueryPerformanceFrequency, 1) {
+HLE64("kernel32.dll", QueryPerformanceFrequency, 1) {
   Wr64(Arg(c, 0), 10000000);
   return 1;
 }
 
-HLE("kernel32.dll", QueryPerformanceCounter, 1) {
-  using namespace std::chrono;
-  Wr64(Arg(c, 0), uint64_t(
-      duration_cast<nanoseconds>(steady_clock::now() - g_start).count() / 100));
+HLE64("kernel32.dll", QueryPerformanceCounter, 1) {
+  Wr64(Arg(c, 0), PerfCounter());
   return 1;
 }
 
-HLE("kernel32.dll", GetSystemTimeAsFileTime, 1) {
+HLE64("kernel32.dll", GetSystemTimeAsFileTime, 1) {
   using namespace std::chrono;
   auto ns = duration_cast<nanoseconds>(system_clock::now().time_since_epoch()).count();
   Wr64(Arg(c, 0), uint64_t(ns / 100) + kFileTimeUnixEpoch);
@@ -1082,8 +1173,8 @@ std::string LocaleString(uint32_t type) {
 uint32_t LocaleInfo(Ctx& c, bool wide) {
   std::string s = LocaleString(Arg(c, 1));
   if (s.empty() && (Arg(c, 1) & 0xFFFF) != 0x0050) {
-    WarnF("GetLocaleInfo%c(%X, %X): unknown type\n", wide ? 'W' : 'A', Arg(c, 0),
-          Arg(c, 1));
+    WarnF("GetLocaleInfo%c(%X, %X): unknown type\n", wide ? 'W' : 'A', uint32_t(Arg(c, 0)),
+          uint32_t(Arg(c, 1)));
     SetLastError(kErrorInvalidParameter);
     return 0;
   }
