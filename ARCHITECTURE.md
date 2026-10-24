@@ -980,9 +980,14 @@ Lifter:
 - Zydis in long mode for PE32+; VAs are 64-bit throughout. Lifted
   functions are still f_<VA> (eight hex digits or more), so 32-bit
   output does not change.
-- Registers are uint64_t locals. 32-bit writes zero-extend, 8/16-bit
-  writes merge (with REX: spl, bpl, sil, dil and r8b-r15b; no ah). The
-  flag helpers gain an 8-byte width.
+- Registers are uint64_t locals (lifted files define RECOMP_LIFT_X64,
+  which switches lifted.h's register caching and the runtime entry
+  points to 64-bit addresses). 32-bit writes zero-extend, 8/16-bit
+  writes merge (with REX: spl, bpl, sil, dil and r8b-r15b; no ah), and
+  a zero bsf/bsr source leaves even a 32-bit destination's upper half
+  alone, as the CPU does. The flag helpers gain an 8-byte width, in
+  `if constexpr` branches of their own so the 1-4 byte forms compile as
+  before.
 - RIP-relative operands resolve to absolute VAs at lift time.
 - push, pop, call and ret move 8 bytes; the real return address is
   still written to the guest stack (stack walks and unwinding read it).
@@ -993,7 +998,11 @@ Lifter:
   as before (calls, pointer scans, exports, Ghidra).
 - Jump tables in the x64 MSVC form (`lea rB, [__ImageBase]; mov(sxd)
   eT, [rB + idx*4 + table_rva]; add rT, rB; jmp rT`, plus the byte-index
-  variant) hold 32-bit RVAs and are recovered like the 32-bit forms.
+  variant) hold 32-bit RVAs and are recovered like the 32-bit forms, the
+  index widened (movsxd, cdqe) between the bounds check and the load.
+- Function pointers in x64 code are RIP-relative leas into .text (weak
+  entries, like the immediates of 32-bit code); data pointers are
+  8-byte aligned qwords.
 
 Win64 ABI in the HLE:
 - Arguments in rcx, rdx, r8, r9 (xmm0-3 for float ones), the rest at
@@ -1051,12 +1060,24 @@ lifted, not avoided:
 - VEX-encoded 128-bit forms and 256-bit AVX lift onto runtime/sse lanes
   (SoftFloat with the SSE NaN rules, exact MXCSR flags). A VEX.128 write
   zeroes bits 255:128 of the destination; legacy SSE leaves them alone.
-- CPUID for x64 processes is a fixed CPU of its own: the x86-64 baseline
-  plus what the lifter implements bit-exactly with oracle tests, up to
-  AVX (OSXSAVE, XCR0 = 7 through XGETBV) once that holds; never the
-  host's. Until then games keep taking their SSE paths.
-- Oracle tests run every 64-bit form found in a game natively on an
-  x86-64 host from random states, as for 32-bit.
+- The YMM upper halves live in Ctx::ymm_hi; VEX instructions are lifted
+  one 128-bit half at a time on the same lane functions (AVX has almost
+  no operation that crosses halves; vperm2f128, vinsertf128 and
+  vextractf128 move whole halves).
+- CPUID for x64 processes is a fixed CPU of its own, never the host's:
+  AMD family 16h (the Jaguar class, which the console targets also
+  have), with only the feature bits the lifter implements bit-exactly
+  with oracle tests set, growing towards that part's set (SSE3, SSSE3,
+  SSE4.1/4.2, POPCNT, LZCNT, AVX, F16C, BMI1, MOVBE, AES, PCLMUL; no
+  AVX2 or FMA). AVX is claimed (OSXSAVE, XCR0 = 7 through XGETBV) once
+  its forms hold. Games read CPUID themselves (MSVC's CRT fills
+  __isa_available from it), so which paths they take follows from this
+  table.
+- Oracle tests (tests/lift_x64_test.cpp) run every integer and SSE/AVX
+  form found in an x64 image natively and lifted from random states:
+  all 16 general registers, the full YMM registers, flags, MXCSR and a
+  memory buffer. The native stub keeps its state pointer in a
+  RIP-relative slot, so forms may use any register but rsp.
 
 Graphics, audio, platform: Direct3D 11 / DXGI (and D3DCompiler_47) as
 HLE over gfx::Device; XAudio2 on the mixer; SDL2 imports on host SDL3;

@@ -515,6 +515,33 @@ template <int N>
     return src ? uint32_t(31 - __builtin_clz(src)) : dst;
 }
 
+// LZCNT / TZCNT (ABM, BMI1): CF = zero source, ZF = zero result; the other
+// flags are undefined (left alone).
+template <int N>
+[[gnu::always_inline]] inline U<N> Lzcnt(Flags& f, U<N> src) {
+  src &= W<N>::kMask;
+  U<N> r;
+  if constexpr (N == 8)
+    r = src ? U<N>(__builtin_clzll(src)) : 64;
+  else
+    r = src ? U<N>(__builtin_clz(src) - (32 - W<N>::kBits)) : W<N>::kBits;
+  f.cf = src == 0;
+  f.zf = r == 0;
+  return r;
+}
+template <int N>
+[[gnu::always_inline]] inline U<N> Tzcnt(Flags& f, U<N> src) {
+  src &= W<N>::kMask;
+  U<N> r;
+  if constexpr (N == 8)
+    r = src ? U<N>(__builtin_ctzll(src)) : 64;
+  else
+    r = src ? U<N>(__builtin_ctz(src)) : W<N>::kBits;
+  f.cf = src == 0;
+  f.zf = r == 0;
+  return r;
+}
+
 // ---- partial registers --------------------------------------------------
 inline uint32_t SetLo8(uint32_t r, uint32_t v) {
   return (r & ~0xFFu) | (v & 0xFFu);

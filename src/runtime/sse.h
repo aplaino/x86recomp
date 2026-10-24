@@ -20,6 +20,8 @@
 
 #include <cstdint>
 #include <cstring>
+#include <limits>
+#include <type_traits>
 
 #include "runtime/ctx.h"
 
@@ -50,6 +52,8 @@ inline void St(uint8_t* B, uint64_t a, const Xmm& x, int bytes) {
 // Legacy-SSE m128 operands other than movups/movupd/movdqu must be 16-byte
 // aligned (#GP otherwise): fatal, naming the instruction.
 void CheckAligned(Ctx& c, uint64_t a, uint64_t va);
+// The same for VEX moves that require `align` (16 or 32) bytes.
+void CheckAligned(Ctx& c, uint64_t a, uint64_t va, unsigned align);
 
 // ---- floating point ---------------------------------------------------
 enum Op : uint8_t { kAdd, kSub, kMul, kDiv };
@@ -104,6 +108,16 @@ void CvtFloat(Ctx& c, bool to_dbl, int lanes, Xmm& d, const Xmm& s, uint64_t va)
 // inexact).
 void CvtIntToF(Ctx& c, bool dbl, bool src64, uint64_t v, Xmm& d, uint64_t va);
 
+// CVTTPS2DQ / CVTPS2DQ (truncate false) and CVTTPD2DQ / CVTPD2DQ (dbl,
+// two lanes into the low half, the upper one zeroed): float lanes to
+// int32, 0x80000000 for NaN and out of range (invalid).
+void CvtToDq(Ctx& c, bool dbl, bool truncate, Xmm& d, const Xmm& s, uint64_t va);
+
+// RSQRTSS: the low lane of d = 1/sqrt(the low lane of s), as RsqrtLane.
+inline void RsqrtSs(Xmm& d, const Xmm& s) {
+  SetLane<uint32_t>(d, 0, RsqrtLane(Lane<uint32_t>(s, 0)));
+}
+
 // CVTDQ2PS: four int32 lanes to float, rounded by MXCSR.
 void Cvtdq2ps(Ctx& c, Xmm& d, const Xmm& s, uint64_t va);
 
@@ -152,6 +166,143 @@ inline void Sub(Xmm& d, const Xmm& s) {
   for (int i = 0; i < int(16 / sizeof(T)); i++)
     SetLane<T>(d, i, T(Lane<T>(d, i) - Lane<T>(s, i)));
 }
+// PCMPGTB/W/D (signed lanes of type T).
+template <typename T>
+inline void CmpGt(Xmm& d, const Xmm& s) {
+  using U = std::make_unsigned_t<T>;
+  for (int i = 0; i < int(16 / sizeof(T)); i++)
+    SetLane<U>(d, i, Lane<T>(d, i) > Lane<T>(s, i) ? U(~U(0)) : U(0));
+}
+// PMAXUB/UW/UD, PMAXSB/SW/SD, PMINxx: lane-wise, by T's order.
+template <typename T>
+inline void Max(Xmm& d, const Xmm& s) {
+  for (int i = 0; i < int(16 / sizeof(T)); i++) {
+    T a = Lane<T>(d, i), b = Lane<T>(s, i);
+    SetLane<T>(d, i, a > b ? a : b);
+  }
+}
+template <typename T>
+inline void Min(Xmm& d, const Xmm& s) {
+  for (int i = 0; i < int(16 / sizeof(T)); i++) {
+    T a = Lane<T>(d, i), b = Lane<T>(s, i);
+    SetLane<T>(d, i, a < b ? a : b);
+  }
+}
+// PABSB/W/D (SSSE3): the minimum value stays itself (as unsigned, its
+// absolute value).
+template <typename T>
+inline void Abs(Xmm& d, const Xmm& s) {
+  using U = std::make_unsigned_t<T>;
+  for (int i = 0; i < int(16 / sizeof(T)); i++) {
+    T v = Lane<T>(s, i);
+    SetLane<U>(d, i, v < 0 ? U(-U(v)) : U(v));
+  }
+}
+// PSLLW/D/Q, PSRLW/D/Q, PSRAW/D: every lane of type T by `count` (the
+// immediate, or the low quadword of the register/memory operand). Counts
+// past the lane width clear the lane (logical) or fill it with its sign.
+enum ShiftKind : uint8_t { kShl, kShr, kSar };
+template <typename T>
+inline void Shift(Xmm& d, uint64_t count, ShiftKind k) {
+  using S = std::make_signed_t<T>;
+  constexpr uint64_t kBits = sizeof(T) * 8;
+  for (int i = 0; i < int(16 / sizeof(T)); i++) {
+    T v = Lane<T>(d, i);
+    if (k == kSar)
+      v = T(S(v) >> (count >= kBits ? kBits - 1 : count));
+    else if (count >= kBits)
+      v = 0;
+    else
+      v = k == kShl ? T(v << count) : T(v >> count);
+    SetLane<T>(d, i, v);
+  }
+}
+// PUNPCKLBW/WD/DQ/QDQ (high: PUNPCKH..): the low (high) halves of d and s
+// interleaved, d's lane first.
+template <typename T>
+inline void Unpck(Xmm& d, const Xmm& s, bool high) {
+  constexpr int n = int(16 / sizeof(T));
+  Xmm r;
+  int b = high ? n / 2 : 0;
+  for (int i = 0; i < n / 2; i++) {
+    SetLane<T>(r, 2 * i, Lane<T>(d, b + i));
+    SetLane<T>(r, 2 * i + 1, Lane<T>(s, b + i));
+  }
+  d = r;
+}
+// PSHUFLW / PSHUFHW: the four words of the low (high) quadword of s
+// picked by imm; the other quadword copied.
+inline void ShufW(Xmm& d, const Xmm& s, uint8_t imm, bool high) {
+  Xmm r = s;
+  int b = high ? 4 : 0;
+  for (int i = 0; i < 4; i++)
+    SetLane<uint16_t>(r, b + i, Lane<uint16_t>(s, b + ((imm >> (2 * i)) & 3)));
+  d = r;
+}
+// PMULUDQ / PMULDQ (SSE4.1): the even 32-bit lanes multiplied into
+// 64-bit products.
+inline void MulUDq(Xmm& d, const Xmm& s) {
+  for (int i = 0; i < 2; i++)
+    SetLane<uint64_t>(d, i, uint64_t(Lane<uint32_t>(d, 2 * i)) * Lane<uint32_t>(s, 2 * i));
+}
+inline void MulDq(Xmm& d, const Xmm& s) {
+  for (int i = 0; i < 2; i++)
+    SetLane<int64_t>(d, i, int64_t(Lane<int32_t>(d, 2 * i)) * Lane<int32_t>(s, 2 * i));
+}
+// PMULLW / PMULLD (SSE4.1): the low half of each lane's product.
+template <typename T>
+inline void MulLo(Xmm& d, const Xmm& s) {
+  for (int i = 0; i < int(16 / sizeof(T)); i++)
+    SetLane<T>(d, i, T(uint64_t(Lane<T>(d, i)) * Lane<T>(s, i)));
+}
+// PACKSSDW / PACKSSWB / PACKUSWB / PACKUSDW: d's lanes then s's,
+// narrowed with saturation (signed From to To).
+template <typename From, typename To>
+inline void Pack(Xmm& d, const Xmm& s) {
+  constexpr int n = int(16 / sizeof(From));
+  auto sat = [](From v) {
+    constexpr From lo = From(std::numeric_limits<To>::min()),
+                   hi = From(std::numeric_limits<To>::max());
+    return To(v < lo ? lo : v > hi ? hi : v);
+  };
+  Xmm r;
+  for (int i = 0; i < n; i++) SetLane<To>(r, i, sat(Lane<From>(d, i)));
+  for (int i = 0; i < n; i++) SetLane<To>(r, n + i, sat(Lane<From>(s, i)));
+  d = r;
+}
+// PMOVSX/PMOVZX (SSE4.1): the low lanes of s widened from From to To.
+template <typename From, typename To>
+inline void Extend(Xmm& d, const Xmm& s) {
+  Xmm r;
+  for (int i = 0; i < int(16 / sizeof(To)); i++) SetLane<To>(r, i, To(Lane<From>(s, i)));
+  d = r;
+}
+// PALIGNR (SSSE3): bytes n.. of the 32-byte d:s (d high), zero past it.
+inline void Alignr(Xmm& d, const Xmm& s, uint8_t n) {
+  uint8_t t[32];
+  std::memcpy(t, s.b, 16);
+  std::memcpy(t + 16, d.b, 16);
+  Xmm r;
+  for (int i = 0; i < 16; i++) r.b[i] = n + i < 32 ? t[n + i] : 0;
+  d = r;
+}
+// MOVMSKPS / MOVMSKPD: the sign bits of the float (double) lanes.
+inline uint32_t MovMskPs(const Xmm& s) {
+  uint32_t m = 0;
+  for (int i = 0; i < 4; i++) m |= (Lane<uint32_t>(s, i) >> 31) << i;
+  return m;
+}
+inline uint32_t MovMskPd(const Xmm& s) {
+  return uint32_t(Lane<uint64_t>(s, 0) >> 63) | uint32_t(Lane<uint64_t>(s, 1) >> 63) << 1;
+}
+// BLENDVPS/PD (SSE4.1): lanes of s where the mask lane's sign bit is set.
+template <typename T>
+inline void BlendV(Xmm& d, const Xmm& s, const Xmm& mask) {
+  constexpr int kTop = int(sizeof(T) * 8 - 1);
+  for (int i = 0; i < int(16 / sizeof(T)); i++)
+    if (Lane<T>(mask, i) >> kTop) SetLane<T>(d, i, Lane<T>(s, i));
+}
+
 // PMAXSW.
 inline void MaxS16(Xmm& d, const Xmm& s) {
   for (int i = 0; i < 8; i++) {

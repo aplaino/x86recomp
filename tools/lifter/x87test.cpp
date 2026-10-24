@@ -229,8 +229,8 @@ bool Excluded(const Insn& in) {
   for (int i = 0; i < in.d.operand_count; i++)
     if (in.ops[i].type == ZYDIS_OPERAND_TYPE_REGISTER) {
       ZydisRegisterClass rc = ZydisRegisterGetClass(in.ops[i].reg.value);
-      if (rc == ZYDIS_REGCLASS_XMM || rc == ZYDIS_REGCLASS_MMX ||
-          rc == ZYDIS_REGCLASS_X87)
+      if (rc == ZYDIS_REGCLASS_XMM || rc == ZYDIS_REGCLASS_YMM ||
+          rc == ZYDIS_REGCLASS_MMX || rc == ZYDIS_REGCLASS_X87)
         return true;
     }
   // SSE/SSE2 forms without an XMM operand (CVTTSD2SI r32, m64) too: they
@@ -238,6 +238,8 @@ bool Excluded(const Insn& in) {
   switch (in.d.meta.isa_set) {
     case ZYDIS_ISA_SET_SSE: case ZYDIS_ISA_SET_SSE2:
     case ZYDIS_ISA_SET_SSEMXCSR: case ZYDIS_ISA_SET_SSE_PREFETCH:
+    case ZYDIS_ISA_SET_SSE3: case ZYDIS_ISA_SET_SSSE3: case ZYDIS_ISA_SET_SSE4:
+    case ZYDIS_ISA_SET_AVX:
       return true;
     default:
       break;
@@ -316,13 +318,17 @@ bool BadOperands(const Insn& in) {
 bool SseCandidate(const Insn& in) {
   switch (in.d.meta.isa_set) {
     case ZYDIS_ISA_SET_SSE: case ZYDIS_ISA_SET_SSE2: case ZYDIS_ISA_SET_SSEMXCSR:
+    case ZYDIS_ISA_SET_SSE3: case ZYDIS_ISA_SET_SSSE3: case ZYDIS_ISA_SET_SSE4:
+    case ZYDIS_ISA_SET_AVX:
       break;
     default:
       return false;
   }
-  if (in.d.mnemonic == ZYDIS_MNEMONIC_LDMXCSR) return false;
+  if (in.d.mnemonic == ZYDIS_MNEMONIC_LDMXCSR || in.d.mnemonic == ZYDIS_MNEMONIC_VLDMXCSR)
+    return false;
   // Approximate: no host result to match (tests/sse_rsqrt_test instead).
-  if (in.d.mnemonic == ZYDIS_MNEMONIC_RSQRTPS) return false;
+  if (in.d.mnemonic == ZYDIS_MNEMONIC_RSQRTPS || in.d.mnemonic == ZYDIS_MNEMONIC_RSQRTSS)
+    return false;
   for (int i = 0; i < in.d.operand_count; i++)
     if (in.ops[i].type == ZYDIS_OPERAND_TYPE_REGISTER &&
         ZydisRegisterGetClass(in.ops[i].reg.value) == ZYDIS_REGCLASS_MMX)
@@ -415,9 +421,11 @@ int WriteFormTest(const Program& p, const Decoder& dec, const std::string& out,
         if (base < 0) continue;
         CopyNoSegPrefixes(raw, in.d, in.d.raw.modrm.offset, &b);
         // x64: [base] without SIB, so REX.X and REX.B go (REX.R keeps the
-        // reg field's register).
+        // reg field's register); in a 3-byte VEX prefix they are inverted.
         if (in.d.attributes & ZYDIS_ATTRIB_HAS_REX)
           b[CopiedIndex(raw, in.d, in.d.raw.rex.offset)] &= 0xFC;
+        if ((in.d.attributes & ZYDIS_ATTRIB_HAS_VEX) && in.d.raw.vex.size == 3)
+          b[CopiedIndex(raw, in.d, in.d.raw.vex.offset) + 1] |= 0x60;
         b.push_back(uint8_t((reg << 3) | base));
         // Immediates follow ModRM/SIB/displacement: keep them.
         int imm_off = in.d.raw.imm[0].size ? in.d.raw.imm[0].offset : in.d.length;

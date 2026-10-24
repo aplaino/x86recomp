@@ -301,16 +301,39 @@ function(recomp_add_lifted target dir)
                          ${RECOMP_FAULT_FRAME_FLAGS})
 endfunction()
 
-# recomp_add_lift_tests(EXE <exe> SYMBOLS <dir> MANIFEST <file>): oracle
-# tests that run every x87, integer and SSE instruction form found in the
-# EXE lifted and natively (x86-64 hosts only).
+# recomp_add_lift_tests(EXE <exe> SYMBOLS <dir> MANIFEST <file> [X64]):
+# oracle tests that run every x87, integer and SSE instruction form found
+# in the EXE lifted and natively (x86-64 hosts only). X64: the EXE is an
+# x64 image; its integer and SSE/AVX forms go to tests/lift_x64_test.cpp
+# (lift_int64, lift_sse64; the latter needs an AVX host).
 function(recomp_add_lift_tests)
-  cmake_parse_arguments(A "" "EXE;SYMBOLS;MANIFEST" "" ${ARGN})
+  cmake_parse_arguments(A "X64" "EXE;SYMBOLS;MANIFEST" "" ${ARGN})
   if(NOT EXISTS "${A_EXE}" OR
      NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
     return()
   endif()
   set(_tests "${RECOMP_ROOT}/tests")
+  if(A_X64)
+    foreach(_kind int sse)
+      set(_forms "${CMAKE_CURRENT_BINARY_DIR}/lift_${_kind}64_forms.cpp")
+      add_custom_command(OUTPUT "${_forms}"
+        COMMAND recomp_lift --exe "${A_EXE}" --symbols "${A_SYMBOLS}"
+                --manifest "${A_MANIFEST}" --${_kind}-test "${_forms}"
+        DEPENDS recomp_lift "${A_MANIFEST}"
+        COMMENT "Lifting the EXE's ${_kind} instruction forms for lift_${_kind}64_test")
+      add_executable(lift_${_kind}64_test "${_tests}/lift_x64_test.cpp" "${_forms}")
+      target_include_directories(lift_${_kind}64_test PRIVATE "${RECOMP_ROOT}/src" "${_tests}")
+      target_link_libraries(lift_${_kind}64_test PRIVATE recomp_x87 recomp_image)
+      target_compile_options(lift_${_kind}64_test PRIVATE -O1 -fno-strict-aliasing
+                             ${RECOMP_X87_FP_FLAGS})
+      if(_kind STREQUAL "sse")
+        target_compile_definitions(lift_${_kind}64_test PRIVATE LIFT_X64_SSE)
+      endif()
+      add_test(NAME lift_${_kind}64 COMMAND lift_${_kind}64_test)
+      set_tests_properties(lift_${_kind}64 PROPERTIES TIMEOUT 1800)
+    endforeach()
+    return()
+  endif()
   foreach(_kind x87 int sse)
     set(_forms "${CMAKE_CURRENT_BINARY_DIR}/lift_${_kind}_forms.cpp")
     add_custom_command(OUTPUT "${_forms}"

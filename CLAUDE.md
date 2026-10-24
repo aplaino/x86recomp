@@ -49,11 +49,14 @@ a game is where it came up.
   Only in the host's default floating-point environment (never change
   the rounding mode), and code that runs such a path is built with
   RECOMP_X87_FP_FLAGS (-ffp-contract=off, no fast-math).
-- SSE/SSE2: lanes through runtime/sse.cpp (SoftFloat + x86 NaN
+- SSE and AVX: lanes through runtime/sse.cpp (SoftFloat + x86 NaN
   rules + exact MXCSR flags), never host float/double arithmetic.
-  Changes must keep tests/lift_sse_test passing.
-- CPUID is a fixed SSE2-class CPU, never the host's. Claim a feature only
-  once the lifter implements it bit-exactly and an oracle test covers it.
+  Changes must keep tests/lift_sse_test and (for x64 images)
+  tests/lift_x64_test passing.
+- CPUID is a fixed CPU, never the host's: SSE2-class for 32-bit guests,
+  AMD family 16h for x64 ones (ARCHITECTURE.md, "64-bit guests"). Claim
+  a feature only once the lifter implements it bit-exactly and an oracle
+  test covers it.
 - The recompilation is scaffolding for a native port: keep lifted code
   exact (it is the reference for hand-written replacements) and keep
   scaffold-only mechanisms out of replacement code.
@@ -86,8 +89,9 @@ a game is where it came up.
 - Another session may be working in the main checkout: do parallel work
   in a separate git worktree (e.g. ../x86recomp-<topic>) and build games
   against it in their own build dirs (-DX86RECOMP_DIR=...).
-- Guest addresses stay below 0x80000000 unless a game has done the
-  large-address audit (ARCHITECTURE.md), and then only behind its flag.
+- 32-bit guests: addresses stay below 0x80000000 unless a game has done
+  the large-address audit (ARCHITECTURE.md), and then only behind its
+  flag. x64 guests get nothing below 4 GiB.
 - The guest arena base is chosen at startup and is not a compile-time
   constant. Do not hand host pointers to guest code; convert with
   GuestMemory::to_guest.

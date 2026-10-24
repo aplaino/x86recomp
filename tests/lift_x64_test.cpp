@@ -1,9 +1,9 @@
 // End-to-end oracle test for x64 lifting: every distinct integer form
-// (recomp_lift --int-test on an x64 image) or SSE form (--sse-test, built
-// with LIFT_X64_SSE) runs lifted and natively on this CPU from the same
-// random state: all 16 general registers, flags, the 16 XMM registers,
-// MXCSR (SSE: any rounding mode, random sticky flags, all exceptions
-// masked) and memory. Everything except rsp must match bit for bit, flags
+// (recomp_lift --int-test on an x64 image) or SSE/AVX form (--sse-test,
+// built with LIFT_X64_SSE; needs an AVX host) runs lifted and natively on
+// this CPU from the same random state: all 16 general registers, flags,
+// the 16 XMM registers (SSE: the whole YMM registers), MXCSR (SSE: any
+// rounding mode, random sticky flags, all exceptions masked) and memory. Everything except rsp must match bit for bit, flags
 // the instruction leaves undefined excepted. x86-64 hosts only; dev-time.
 //
 // The native stub keeps the Regs pointer in a RIP-relative slot of its own
@@ -81,8 +81,9 @@ struct Regs {
   uint32_t mxcsr;       // 0x88
   uint32_t host_mxcsr;  // 0x8C: the test's own, restored after the form
   uint8_t xmm[16][16];  // 0x90
+  uint8_t ymm_hi[16][16];  // 0x190: bits 255:128 (SSE test)
 };
-static_assert(offsetof(Regs, xmm) == 0x90);
+static_assert(offsetof(Regs, xmm) == 0x90 && offsetof(Regs, ymm_hi) == 0x190);
 
 using NativeFn = void (*)(Regs*);
 
@@ -116,6 +117,14 @@ void Stub(uint8_t* page, const Form& f) {
     a.Put({0x0F, 0x6F, uint8_t(0x80 | ((i & 7) << 3))});
     a.D32(0x90 + 16 * i);
   }
+#ifdef LIFT_X64_SSE
+  for (int i = 0; i < 16; i++) {  // vinsertf128 ymmi, ymmi, [rax+..], 1
+    a.Put({0xC4, uint8_t(i < 8 ? 0xE3 : 0x63), uint8_t(((~i & 15) << 3) | 0x05), 0x18,
+           uint8_t(0x80 | ((i & 7) << 3))});
+    a.D32(0x190 + 16 * i);
+    a.Put({0x01});
+  }
+#endif
   a.Put({0xFF, 0xB0}); a.D32(0x80);                        // push [rax+80]
   a.Put({0x9D});                                           // popfq
   for (int i = 1; i < 16; i++) {                           // mov ri, [rax+8i]
@@ -143,6 +152,14 @@ void Stub(uint8_t* page, const Form& f) {
     a.Put({0x0F, 0x7F, uint8_t(0x80 | ((i & 7) << 3))});
     a.D32(0x90 + 16 * i);
   }
+#ifdef LIFT_X64_SSE
+  for (int i = 0; i < 16; i++) {  // vextractf128 [rax+..], ymmi, 1
+    a.Put({0xC4, uint8_t(i < 8 ? 0xE3 : 0x63), 0x7D, 0x19, uint8_t(0x80 | ((i & 7) << 3))});
+    a.D32(0x190 + 16 * i);
+    a.Put({0x01});
+  }
+  a.Put({0xC5, 0xF8, 0x77});  // vzeroupper
+#endif
   a.Put({0x0F, 0xAE, 0x98}); a.D32(0x88);                  // stmxcsr [rax+88]
   a.Put({0x0F, 0xAE, 0x90}); a.D32(0x8C);                  // ldmxcsr [rax+8C]
   a.Put({0xFC, 0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5D, 0x5B, 0xC3});
@@ -339,6 +356,7 @@ int main(int argc, char** argv) {
 #ifdef LIFT_X64_SSE
       in.mxcsr |= uint32_t(g() % 4) << 13 | (g() % 4 == 0 ? uint32_t(g()) & 0x3F : 0);
       for (int i = 0; i < 16; i++) Fill16(g, in.xmm[i]);
+      for (int i = 0; i < 16; i++) Fill16(g, in.ymm_hi[i]);
       for (uint32_t o = 0; o < kBufSize; o += 16) Fill16(g, &init[o]);
 #else
       for (int i = 0; i < 16; i++)
@@ -368,6 +386,9 @@ int main(int argc, char** argv) {
       c.rsp = kStackVa;
       c.eflags = uint32_t(in.flags);
       std::memcpy(c.xmm, in.xmm, sizeof in.xmm);
+#ifdef LIFT_X64_SSE
+      std::memcpy(c.ymm_hi, in.ymm_hi, sizeof in.ymm_hi);
+#endif
       c.mxcsr = in.mxcsr;
       f.fn(c);
       checks++;
@@ -384,6 +405,10 @@ int main(int argc, char** argv) {
       }
       for (int i = 0; i < 16; i++)
         if (std::memcmp(c.xmm[i].b, hw.xmm[i], 16)) why += " xmm" + std::to_string(i);
+#ifdef LIFT_X64_SSE
+      for (int i = 0; i < 16; i++)
+        if (std::memcmp(c.ymm_hi[i].b, hw.ymm_hi[i], 16)) why += " ymm_hi" + std::to_string(i);
+#endif
       if (c.mxcsr != hw.mxcsr) why += " mxcsr";
       if (std::memcmp(native_buf, mem.ptr(kBuf), kBufSize)) why += " mem";
       if (why.empty()) continue;
@@ -402,6 +427,13 @@ int main(int argc, char** argv) {
           if (std::memcmp(c.xmm[i].b, hw.xmm[i], 16) || std::memcmp(in.xmm[i], hw.xmm[i], 16))
             std::printf("   xmm%-2d in %s hw %s lift %s\n", i, Hex16(in.xmm[i]).c_str(),
                         Hex16(hw.xmm[i]).c_str(), Hex16(c.xmm[i].b).c_str());
+#ifdef LIFT_X64_SSE
+        for (int i = 0; i < 16; i++)
+          if (std::memcmp(c.ymm_hi[i].b, hw.ymm_hi[i], 16) ||
+              std::memcmp(in.ymm_hi[i], hw.ymm_hi[i], 16))
+            std::printf("   ymm%-2d hi in %s hw %s lift %s\n", i, Hex16(in.ymm_hi[i]).c_str(),
+                        Hex16(hw.ymm_hi[i]).c_str(), Hex16(c.ymm_hi[i].b).c_str());
+#endif
         if (f.base >= 0) std::printf("   mem in %s\n", Hex16(&init[0x1000]).c_str());
       }
     }

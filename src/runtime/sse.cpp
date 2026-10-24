@@ -299,6 +299,13 @@ void CheckAligned(Ctx& c, uint64_t a, uint64_t va) {
            (unsigned long long)a, (unsigned long long)va);
 }
 
+void CheckAligned(Ctx& c, uint64_t a, uint64_t va, unsigned align) {
+  (void)c;
+  if (a & (align - 1))
+    FatalF("sse: misaligned %u-byte operand %08llX at %08llX (#GP)", align,
+           (unsigned long long)a, (unsigned long long)va);
+}
+
 void Arith(Ctx& c, Op op, bool dbl, int lanes, Xmm& d, const Xmm& s,
            uint64_t va) {
   if (dbl)
@@ -438,6 +445,25 @@ void CvtIntToF(Ctx& c, bool dbl, bool src64, uint64_t v, Xmm& d, uint64_t va) {
     SetLane<uint32_t>(d, 0, src64 ? i64_to_f32(int64_t(v)).v : i32_to_f32(int32_t(v)).v);
   sc.End();
   sc.Finish();
+}
+
+void CvtToDq(Ctx& c, bool dbl, bool truncate, Xmm& d, const Xmm& s, uint64_t va) {
+  Scope sc(c, va);
+  const uint8_t mode = truncate ? uint8_t(softfloat_round_minMag) : RoundingMode(c.mxcsr);
+  Xmm r{};
+  sc.Begin();
+  for (int i = 0; i < (dbl ? 2 : 4); i++) {
+    bool den = dbl ? IsDenormal<true>(Lane<uint64_t>(s, i)) : IsDenormal<false>(Lane<uint32_t>(s, i));
+    if (den && (c.mxcsr & kDAZ))
+      FatalF("sse: DAZ with a denormal operand at %08llX (not modelled)",
+             (unsigned long long)va);
+    int32_t v = dbl ? f64_to_i32(float64_t{Lane<uint64_t>(s, i)}, mode, true)
+                    : f32_to_i32(float32_t{Lane<uint32_t>(s, i)}, mode, true);
+    SetLane<int32_t>(r, i, v);
+  }
+  sc.End();
+  sc.Finish();
+  d = r;
 }
 
 void Cvtdq2ps(Ctx& c, Xmm& d, const Xmm& s, uint64_t va) {
