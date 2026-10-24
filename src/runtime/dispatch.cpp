@@ -44,19 +44,22 @@ std::vector<CodeRange> g_dlls;
 const LiftedFn* g_lifted = nullptr;
 uint32_t g_lifted_count = 0;
 
-CodeRange TextOf(const PeImage& img) {
+CodeRange RangeOf(uint64_t lo, uint64_t size) {
   CodeRange r;
-  for (const auto& s : img.sections)
-    if (s.name == ".text") {
-      r.lo = s.va;
-      r.size = s.vsize;
-    }
+  r.lo = lo;
+  r.size = size;
   r.table.assign(r.size, nullptr);
   for (uint32_t i = 0; i < g_lifted_count; i++) {
     const LiftedFn& f = g_lifted[i];
     if (f.va - r.lo < r.size) r.table[f.va - r.lo] = f.fn;
   }
   return r;
+}
+
+CodeRange TextOf(const PeImage& img) {
+  for (const auto& s : img.sections)
+    if (s.name == ".text") return RangeOf(s.va, s.vsize);
+  return RangeOf(0, 0);
 }
 
 void DumpGuestState64(const Ctx& c) {
@@ -298,6 +301,13 @@ void InitDispatch() {
              "recomp_lift --module, at the same --base)",
              m.name.c_str(), (unsigned long long)m.img.image_base,
              (unsigned long long)m.img.entry);
+  }
+  // A platform's images (no PE EXE): the first is the fast path.
+  for (const auto& [lo, size] : g_proc->code) {
+    if (!g_exe.size)
+      g_exe = RangeOf(lo, size);
+    else
+      g_dlls.push_back(RangeOf(lo, size));
   }
 }
 

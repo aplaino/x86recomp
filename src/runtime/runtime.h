@@ -117,6 +117,8 @@ struct Module {
   int tls_index = -1;  // its static TLS slot (x64 guests), -1: none
 };
 
+struct Thread;
+
 struct Process {
   GameConfig game;
   GuestMemory mem;
@@ -127,6 +129,13 @@ struct Process {
   std::string game_args; // appended to the guest command line
   bool x64 = false;      // the EXE is a PE32+ AMD64 image (Win64 ABI)
   bool sysv = false;     // x64 with the System V ABI (a console platform's)
+  // A console platform's per-thread setup (its TCB, Ctx::fs_base), run by
+  // CreateGuestThread instead of making a TEB.
+  void (*thread_init)(Thread* t) = nullptr;
+  uint16_t fpu_control = 0x027F;  // x87 control word of new threads (Windows')
+  // Code ranges [lo, lo + size) of a platform's images, which dispatch
+  // looks lifted functions up in (PE images give their .text).
+  std::vector<std::pair<gaddr, uint64_t>> code;
   gaddr process_heap = 0;
   gaddr cmdline_a = 0, cmdline_w = 0;
   gaddr environ_a = 0, environ_w = 0;
@@ -195,6 +204,16 @@ int RunProcess(const GameConfig& game, const std::string& exe_path,
 // Creates the guest-side structures of a thread (TEB, TLS, stack) and
 // initialises its Ctx. Does not start it.
 Thread* CreateGuestThread(uint64_t stack_size);
+
+// For a console platform's process bring-up (RunProcess does all of it
+// for PE games). StartProcess creates g_proc with its arena and thunk
+// region; InitDispatch registers the code ranges once the images are
+// mapped; RunMainThread runs body (its guest calls) as guest thread t on
+// the process main thread, with a big host stack, and returns its exit
+// code.
+Process& StartProcess(const GameConfig& game, const std::string& game_dir, bool x64);
+void InitDispatch();
+uint32_t RunMainThread(Thread* t, const std::function<uint64_t(Ctx&)>& body);
 
 // Per-user data directory: $XDG_DATA_HOME/<id>, else ~/.local/share/<id>
 // (~/Library/Application Support/<id> on macOS) (settings, saves, the guest's C: drive, crash and hang reports).
