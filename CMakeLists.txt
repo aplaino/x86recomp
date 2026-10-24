@@ -60,6 +60,13 @@ endif()
 # Consoles with a PowerPC CPU.
 option(RECOMP_PPC "PowerPC core: lifter and CPU model (a PowerPC platform turns it on)" OFF)
 
+# The PS4, an x86-64 guest: on the x86 core too. Off unless a game project
+# for it turns it on.
+option(RECOMP_PLATFORM_ORBIS "PS4 (Orbis OS) platform module" OFF)
+if(RECOMP_PLATFORM_ORBIS AND NOT RECOMP_X86)
+  message(FATAL_ERROR "RECOMP_PLATFORM_ORBIS needs RECOMP_X86")
+endif()
+
 # The host layer (cmake/host.cmake): what a native program needs on its
 # host, whatever its guest CPU. SDL3 (windows, input, audio output),
 # ffmpeg (movies, compressed audio), LLVM's demanglers (Microsoft and
@@ -276,6 +283,9 @@ endfunction()
 add_subdirectory(tests/x86)
 if(RECOMP_PLATFORM_WIN32)
   add_subdirectory(platforms/win32)
+endif()
+if(RECOMP_PLATFORM_ORBIS)
+  add_subdirectory(platforms/orbis)
 endif()
 
 # --- base tests and tools --------------------------------------------------

@@ -828,7 +828,7 @@ late-frame rule; on an idle host wake-ups land 15-30 us (Linux) or
 - mss32 (Miles): our own mixer on an SDL3 audio stream (runtime/audio):
   resampling, loop counts, gain ramps, the "Miles Fast 2D Positional
   Audio" model of the game's Miles version (6.1c or 6.5;
-  platforms/win32/platforms/win32/docs/miles.md), MP3 through libavcodec. Miles' EAX
+  platforms/win32/platforms/win32/platforms/win32/docs/miles.md), MP3 through libavcodec. Miles' EAX
   providers (EAX 1.0, 2.0, 3.0, with
   Msseax.m3d's attribute names and struct layouts): voices pan like
   DirectSound3D hardware and get an LF level and a 5 kHz level
@@ -843,7 +843,7 @@ late-frame rule; on an idle host wake-ups land 15-30 us (Linux) or
   master reverb (room types, reverb time/predelay/damping, driver and
   sample/stream wet levels) is our Miles-compatible Schroeder reverb
   (runtime/audio/digital_reverb), written from a behavioural description
-  of mss32 6.5e's (platforms/win32/platforms/win32/docs/miles.md) and bit-exact with it:
+  of mss32 6.5e's (platforms/win32/platforms/win32/platforms/win32/docs/miles.md) and bit-exact with it:
   recomp_add_digital_reverb_test lifts the original routines from the
   user's installed DLL at build time (`recomp_lift --only`) and compares;
   tests/digital_reverb_test checks a hash of our output on every host.
@@ -1025,16 +1025,6 @@ Lifter:
   a function's tables inside its range, after the code. Two adjacent
   tables then read as one, which only adds labels that are real case
   targets of the same function.
-- Clang's tables hold signed offsets from the table itself: `lea rB,
-  [table]` ... `movsxd rT, [rB + idx*4]; add rT, rB; jmp rT`. Both forms
-  are "target = B + entry", with B (and the load's base) the value a
-  RIP-relative lea gives the register on every path to the jmp (through
-  register copies; paths around a loop back to it do not count), else
-  the image base. The bounds check may sit in another block that
-  branches to the table code (a taken jbe/jb counts like a ja/jae
-  falling through), and the index may be a copy (mov, movsxd, movzx) of
-  the register that was compared. Tables outside .text are read from
-  the module's read-only data (an ELF's .rodata).
 - Clang's tables hold signed offsets from the table itself: `lea rB,
   [table]` ... `movsxd rT, [rB + idx*4]; add rT, rB; jmp rT`. Both forms
   are "target = B + entry", with B (and the load's base) the value a
