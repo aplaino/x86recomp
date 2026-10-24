@@ -57,6 +57,7 @@ endif()
 add_library(recomp_image SHARED
   src/runtime/guest_memory.cpp
   src/runtime/pe_image.cpp
+  src/runtime/unwind.cpp
   src/runtime/log.cpp)
 target_include_directories(recomp_image PUBLIC src)
 target_compile_features(recomp_image PUBLIC cxx_std_20)

@@ -234,7 +234,7 @@ bool PeImage::Load(const std::string& path, GuestMemory& mem,
       uint32_t u = mem.read<uint32_t>(e + 8);
       if (!b) continue;
       uint8_t fl = (u & 1) ? 4 : mem.read<uint8_t>(image_base + u) >> 3;
-      functions.push_back({image_base + b, image_base + en, image_base + (u & ~1u), fl});
+      functions.push_back({e, image_base + b, image_base + en, image_base + (u & ~1u), fl});
     }
 
   mem.Protect(image_base, headers_size, Prot::R);

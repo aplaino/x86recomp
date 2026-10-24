@@ -2953,6 +2953,10 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
   // by their __except blocks, and setjmp callers by longjmp; see
   // GuestResume.
   bool resumable = !f.setjmp_returns.empty();
+  // x64: a function with a language handler; its establisher frame (EF) is
+  // known once its prologue has run.
+  auto eh = p_.x64 ? p_.eh_frames.find(f.entry) : p_.eh_frames.end();
+  if (eh != p_.eh_frames.end()) resumable = true;
   for (const auto& [va, in] : f.insns) {
     if (!in.ok || in.d.mnemonic != ZYDIS_MNEMONIC_MOV) continue;
     const auto& o0 = in.ops[0];
@@ -2963,6 +2967,7 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
       resumable = true;
   }
   t_in_try = resumable;
+  if (eh != p_.eh_frames.end()) o += "  uint64_t EF = 0;\n";
   if (resumable) o += "  try {\n";
   // Instructions are emitted in address order, so if the function also
   // reaches code below its entry (shared tails, e.g. strstr jumping into
@@ -2990,6 +2995,13 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
   for (auto it = f.insns.begin(); it != f.insns.end(); ++it) {
     const Insn& in = it->second;
     if (labels.count(in.va)) o += Fmt("L_%08llX:\n", U(in.va));
+    if (eh != p_.eh_frames.end() && in.va == eh->second.prolog_end) {
+      const auto& e = eh->second;
+      static const char* kRegs[16] = {"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+                                      "r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15"};
+      o += e.frame_reg ? Fmt("  EF = %s - 0x%Xu;\n", kRegs[e.frame_reg], 16u * e.frame_off)
+                       : std::string("  EF = rsp;\n");
+    }
     auto run = runs.find(in.va);
     if (run != runs.end()) {
       auto last = f.insns.find(run->second);
@@ -3028,8 +3040,9 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
     }
   }
   if (resumable)
-    o += "  } catch (const ::recomp::GuestResume& r) {\n"
-         "    if (r.ebp != ebp) throw;  // another activation's frame\n"
+    o += std::string("  } catch (const ::recomp::GuestResume& r) {\n") +
+         (p_.x64 ? "    if (r.ebp != EF) throw;  // another activation's frame\n"
+                 : "    if (r.ebp != ebp) throw;  // another activation's frame\n") +
          "    ::recomp::Resume(c, r);\n"
          "    return;\n"
          "  }\n";

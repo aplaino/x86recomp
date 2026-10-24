@@ -54,6 +54,7 @@ struct PeTls {
 
 // An x64 .pdata entry (RUNTIME_FUNCTION) with its UNWIND_INFO flags.
 struct PeFunction {
+  gaddr entry;       // the RUNTIME_FUNCTION itself
   gaddr begin, end;  // [begin, end)
   gaddr unwind;      // UNWIND_INFO, or the parent's RUNTIME_FUNCTION if chained
   uint8_t flags;     // UNW_FLAG_EHANDLER 1, UHANDLER 2, CHAININFO 4

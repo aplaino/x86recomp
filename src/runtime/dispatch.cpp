@@ -349,7 +349,10 @@ void Dispatch(Ctx& c, uint32_t target, uint32_t va) {
 void Resume(Ctx& c, GuestResume r) {
   for (;;) {
     try {
-      Dispatch(c, r.target, r.from);
+      if (g_proc->x64)
+        Dispatch(c, uint64_t(r.target), uint64_t(r.from));
+      else
+        Dispatch(c, uint32_t(r.target), uint32_t(r.from));
       return;
     } catch (const GuestResume& again) {
       if (again.ebp != r.ebp) throw;

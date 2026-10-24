@@ -1,5 +1,7 @@
 #include "program.h"
 
+#include "runtime/unwind.h"
+
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -102,9 +104,15 @@ bool Program::Load(const std::string& path, const std::string& symdir,
     return false;
 
   // x64: every .pdata entry that is not a chained fragment starts a
-  // function (ARCHITECTURE.md, "64-bit guests").
-  for (const auto& fn : img.functions)
-    if (!fn.chained() && in_text(fn.begin)) entries.insert(fn.begin);
+  // function (ARCHITECTURE.md, "64-bit guests"); those with a language
+  // handler can be resumed into.
+  for (const auto& fn : img.functions) {
+    if (fn.chained() || !in_text(fn.begin)) continue;
+    entries.insert(fn.begin);
+    recomp::unwind::Info u = recomp::unwind::Read(mem, img.image_base, fn.unwind);
+    if (u.flags & (recomp::unwind::kEHandler | recomp::unwind::kUHandler))
+      eh_frames[fn.begin] = {fn.begin + u.prolog, u.frame_reg, u.frame_off};
+  }
 
   if (img.entry) {
     entries.insert(img.entry);

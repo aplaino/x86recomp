@@ -1008,6 +1008,13 @@ Lifter:
   eT, [rB + idx*4 + table_rva]; add rT, rB; jmp rT`, plus the byte-index
   variant) hold 32-bit RVAs and are recovered like the 32-bit forms, the
   index widened (movsxd, cdqe) between the bounds check and the load.
+  MSVC drops the bounds check when it knows the index is in range (a
+  state machine's state variable). Such a table is read while its
+  entries target the jmp's own function (by .pdata, chained fragments
+  included), up to the end of the .pdata range that holds it: MSVC puts
+  a function's tables inside its range, after the code. Two adjacent
+  tables then read as one, which only adds labels that are real case
+  targets of the same function.
 - Function pointers in x64 code are RIP-relative leas into .text (weak
   entries, like the immediates of 32-bit code); data pointers are
   8-byte aligned qwords.

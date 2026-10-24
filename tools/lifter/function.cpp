@@ -4,6 +4,8 @@
 #include <cstdio>
 #include <deque>
 
+#include "runtime/unwind.h"
+
 namespace lifter {
 
 Decoder::Decoder(bool x64) {
@@ -151,12 +153,39 @@ const Insn* Before(const Function& f, uint64_t va) {
 
 namespace {
 
+// The .pdata entry whose range holds va, or null.
+const recomp::PeFunction* PdataAt(const recomp::PeImage& img, uint64_t va) {
+  const auto& f = img.functions;
+  auto it = std::upper_bound(f.begin(), f.end(), va,
+                             [](uint64_t v, const recomp::PeFunction& e) { return v < e.begin; });
+  if (it == f.begin()) return nullptr;
+  --it;
+  return va < it->end ? &*it : nullptr;
+}
+
+// The start of the function a .pdata range belongs to: chained fragments
+// (code the compiler moved out of line) lead to their parent, in short
+// form (unwind RVA with bit 0 set) or through the UNWIND_INFO.
+uint64_t PrimaryOf(const Program& p, const recomp::PeImage& img, const recomp::PeFunction* f) {
+  for (int depth = 0; f && f->chained() && depth < 32; depth++) {
+    uint64_t parent = p.mem.read<uint32_t>(f->entry + 8) & 1
+                          ? f->unwind
+                          : recomp::unwind::Read(p.mem, img.image_base, f->unwind).chained;
+    f = PdataAt(img, img.image_base + p.mem.read<uint32_t>(parent));
+  }
+  return f ? f->begin : 0;
+}
+
 // x64 MSVC switches: a table of 32-bit RVAs indexed off the image base
 // (which some register holds), sometimes through a byte index table, with
 // the index widened between the bounds check and the load:
 //   cmp eI, N; ja default; [movsxd rI, eJ | cdqe] [lea rB, [__ImageBase]]
-//   [movzx eI, byte [rB + rK + index_rva]] mov eT, [rB + rI*4 + table_rva]
+//   [movzx eI, byte [rK + rB + index_rva]] mov eT, [rB + rI*4 + table_rva]
 //   add rT, rB; jmp rT
+// Without a bounds check (an index the compiler knows is in range, such as
+// a state variable), the table runs while its entries target the jmp's own
+// function, to the end of the .pdata range that holds it (MSVC places a
+// function's tables inside its range, after the code).
 bool RecoverJumpTable64(const Program& p, const Function& f, const Insn& jmp,
                         std::vector<uint64_t>* targets) {
   const auto& j0 = jmp.ops[0];
@@ -173,13 +202,28 @@ bool RecoverJumpTable64(const Program& p, const Function& f, const Insn& jmp,
   };
   const ZydisRegister t = Full(j0.reg.value);
   enum { kAdd, kLoad, kJa, kCmp } state = kAdd;
-  ZydisRegister idx = ZYDIS_REGISTER_NONE;
+  ZydisRegister idx = ZYDIS_REGISTER_NONE, base = ZYDIS_REGISTER_NONE;
   uint64_t table = 0, index = 0;
   bool two_level = false;
+  auto unbounded = [&]() {
+    if (state < kJa || two_level) return false;
+    const recomp::PeImage& img = mod->img;
+    const uint64_t home = PrimaryOf(p, img, PdataAt(img, jmp.va));
+    const recomp::PeFunction* holder = PdataAt(img, table);
+    if (!home || !holder || PrimaryOf(p, img, holder) != home) return false;
+    targets->clear();
+    for (uint64_t a = table; a + 4 <= holder->end; a += 4) {
+      uint64_t tv = image + p.mem.read<uint32_t>(a);
+      if (p.TextOf(tv) != mod || PrimaryOf(p, img, PdataAt(img, tv)) != home) break;
+      if (std::find(targets->begin(), targets->end(), tv) == targets->end())
+        targets->push_back(tv);
+    }
+    return !targets->empty();
+  };
   const Insn* in = &jmp;
   for (int steps = 0; steps < 16; steps++) {
     in = Before(f, in->va);
-    if (!in) return false;
+    if (!in) return unbounded();
     const auto& d = in->d;
     const auto& o0 = in->ops[0];
     const auto& o1 = in->ops[1];
@@ -198,6 +242,7 @@ bool RecoverJumpTable64(const Program& p, const Function& f, const Insn& jmp,
             o1.mem.base != ZYDIS_REGISTER_NONE && o1.mem.base != ZYDIS_REGISTER_RIP &&
             o1.mem.index != ZYDIS_REGISTER_NONE && o1.mem.scale == 4) {
           idx = Full(o1.mem.index);
+          base = Full(o1.mem.base);
           table = image + uint64_t(o1.mem.disp.value);
           state = kJa;
         } else if (WritesReg(*in, t) || d.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE) {
@@ -209,10 +254,12 @@ bool RecoverJumpTable64(const Program& p, const Function& f, const Insn& jmp,
           state = kCmp;
         } else if (!two_level && d.mnemonic == ZYDIS_MNEMONIC_MOVZX && reg(o0) == idx &&
                    o1.type == ZYDIS_OPERAND_TYPE_MEMORY && o1.size == 8 &&
-                   o1.mem.index != ZYDIS_REGISTER_NONE && o1.mem.scale == 1) {
+                   o1.mem.index != ZYDIS_REGISTER_NONE && o1.mem.scale == 1 &&
+                   (Full(o1.mem.base) == base || Full(o1.mem.index) == base)) {
+          // The image base register is either operand of the byte load.
           two_level = true;
           index = image + uint64_t(o1.mem.disp.value);
-          idx = Full(o1.mem.index);
+          idx = Full(o1.mem.base) == base ? Full(o1.mem.index) : Full(o1.mem.base);
         } else if ((d.mnemonic == ZYDIS_MNEMONIC_MOVSXD ||
                     (d.mnemonic == ZYDIS_MNEMONIC_MOV && o0.size == 32)) &&
                    reg(o0) == idx && o1.type == ZYDIS_OPERAND_TYPE_REGISTER) {
@@ -220,17 +267,17 @@ bool RecoverJumpTable64(const Program& p, const Function& f, const Insn& jmp,
         } else if (d.mnemonic == ZYDIS_MNEMONIC_CDQE && idx == ZYDIS_REGISTER_RAX) {
           // rax from eax: same register
         } else if (WritesReg(*in, idx) || d.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE) {
-          return false;
+          return unbounded();
         }
         break;
       case kCmp:
         if (!WritesFlags(*in)) {
-          if (WritesReg(*in, idx)) return false;
+          if (WritesReg(*in, idx)) return unbounded();
           break;
         }
         if (d.mnemonic != ZYDIS_MNEMONIC_CMP || reg(o0) != idx ||
             o1.type != ZYDIS_OPERAND_TYPE_IMMEDIATE || o1.imm.value.u >= 4096)
-          return false;
+          return unbounded();
         uint32_t cases = static_cast<uint32_t>(o1.imm.value.u) + 1;
         if (two_level) {
           if (!in_text(index, cases)) return false;
@@ -250,7 +297,7 @@ bool RecoverJumpTable64(const Program& p, const Function& f, const Insn& jmp,
         return true;
     }
   }
-  return false;
+  return unbounded();
 }
 
 }  // namespace

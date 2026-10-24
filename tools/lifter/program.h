@@ -54,6 +54,14 @@ struct Program {
   std::set<uint64_t> setjmps;                 // manifest: setjmp functions
                                               // (their callers can be
                                               // resumed by longjmp)
+  // x64 functions with a language handler (their exceptions' unwinds end
+  // in them): where the prologue ends and the frame register (0: rsp) and
+  // its offset, which give the establisher frame there.
+  struct EhFrame {
+    uint64_t prolog_end;
+    uint8_t frame_reg, frame_off;
+  };
+  std::map<uint64_t, EhFrame> eh_frames;      // by function entry
 
   // Maps an image (at `base`, 0 for its preferred base) and reads its
   // symbols. The first one is the EXE.

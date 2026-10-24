@@ -32,9 +32,11 @@ void RegisterLiftedFunctions(const LiftedFn* fns, uint32_t count);
 // Thrown at manifest `resume` sites: the guest abandons the current call
 // chain and continues at `target` in the frame whose EBP is `ebp` (SEH
 // __except blocks, longjmp to a setjmp return point). Caught by the lifted
-// function owning that frame, which continues there with Resume().
+// function owning that frame, which continues there with Resume(). In x64
+// guests `ebp` is the frame's establisher frame (ARCHITECTURE.md, "64-bit
+// guests"), thrown by the unwinder at the end of an exception's unwind.
 struct GuestResume {
-  uint32_t target, ebp, from;
+  uint64_t target, ebp, from;
 };
 
 // Runtime services called from lifted code (runtime/dispatch.cpp).
