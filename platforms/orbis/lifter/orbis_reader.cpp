@@ -2,8 +2,6 @@
 // entries from .eh_frame, the entry point, DT_INIT/DT_FINI, exports and
 // PLT stubs (named by library and NID); noreturn imports by NID.
 
-#include <algorithm>
-
 #include "orbis/elf_image.h"
 #include "orbis/nid.h"
 #include "program.h"
@@ -21,23 +19,11 @@ bool Load(Program& p, Module& m, const std::string& path, uint64_t base, std::st
   if (!img.Load(path, p.mem, err, base)) return false;
   m.base = img.image_base + img.link_base;
   m.preferred_base = img.link_base;
-  // The executable segment also holds .rodata and .eh_frame, after the
-  // code: .text ends with the last FDE's function or PLT stub.
-  for (const auto& s : img.segments) {
-    if (!(s.flags & 1)) {
-      m.data.push_back({s.va, s.va + s.size});
-    } else if (m.text_hi) {
-      *err = "more than one executable segment";
-      return false;
-    } else {
-      m.text_lo = s.va;
-      for (const auto& fn : img.functions)
-        if (fn.begin >= s.va && fn.end <= s.va + s.size) m.text_hi = std::max(m.text_hi, fn.end);
-      for (const auto& imp : img.imports)
-        if (imp.plt) m.text_hi = std::max(m.text_hi, imp.plt + 16);
-      m.rodata.push_back({m.text_hi, s.va + s.size});
-    }
-  }
+  m.text_lo = img.text_lo;
+  m.text_hi = img.text_hi;
+  m.rodata = img.rodata;
+  for (const auto& s : img.segments)
+    if (!(s.flags & 1)) m.data.push_back({s.va, s.va + s.size});
   auto in_text = [&](uint64_t va) { return va >= m.text_lo && va < m.text_hi; };
   for (const auto& fn : img.functions)
     if (in_text(fn.begin)) p.entries.insert(fn.begin);

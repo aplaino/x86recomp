@@ -56,9 +56,13 @@ struct ElfFunction {
   gaddr begin, end;  // [begin, end)
 };
 
+// PT_TLS, and the module's place in the static TLS layout (FreeBSD's
+// variant II: blocks below the thread pointer): its index in the DTV and
+// the distance from its block's start up to the thread pointer.
 struct ElfTls {
   gaddr init_va = 0;  // template for each thread's block
   uint64_t init_size = 0, mem_size = 0, align = 0;
+  uint64_t module = 0, offset = 0;
 };
 
 using ElfImportBinder = std::function<gaddr(const ElfImport&)>;
@@ -70,6 +74,11 @@ struct ElfImage {
   gaddr entry = 0;
   gaddr init = 0, fini = 0;  // DT_INIT / DT_FINI, 0 if absent
   std::vector<ElfSegment> segments;
+  // The code: the executable segment up to its last .eh_frame function or
+  // PLT stub (the segment also holds .rodata and .eh_frame); and the
+  // read-only data, there and in read-only segments (set by Link).
+  gaddr text_lo = 0, text_hi = 0;
+  std::vector<std::pair<gaddr, gaddr>> rodata;
   std::vector<ElfImport> imports;
   std::vector<ElfExport> exports;
   std::vector<ElfFunction> functions;  // in .eh_frame order
@@ -79,12 +88,36 @@ struct ElfImage {
   // True if the file is a little-endian x86-64 ELF.
   static bool IsElfFile(const std::string& path);
 
-  // Reads the file and maps it into mem at `base` (0: the link address,
-  // or kExecBase for ET_SCE_DYNEXEC; a PRX needs one). Fails if any page
-  // of the range is already committed. Returns false and fills err on
-  // failure.
+  // Map reads the file and maps it into mem at `base` (0: the link
+  // address, or kExecBase for ET_SCE_DYNEXEC; a PRX needs one), and reads
+  // its imports (not yet bound) and exports. It fails if any page of the
+  // range is already committed. Link then binds the imports, applies the
+  // relocations and reads .eh_frame. In between, a loader reads other
+  // modules' exports and gives the module its TLS slot (tls.module and
+  // tls.offset; Map sets a main executable's: module 1, its block right
+  // below the thread pointer). Load does both. Each returns false and
+  // fills err on failure.
+  bool Map(const std::string& path, GuestMemory& mem, std::string* err, gaddr base = 0);
+  bool Link(GuestMemory& mem, std::string* err, const ElfImportBinder& bind = nullptr);
   bool Load(const std::string& path, GuestMemory& mem, std::string* err,
             gaddr base = 0, const ElfImportBinder& bind = nullptr);
+
+ private:
+  struct Ph {
+    uint32_t type, flags;
+    uint64_t off, va, filesz, memsz, align;
+  };
+  struct Sym {
+    uint8_t info;
+    uint16_t shndx;
+    uint64_t value;
+    int import = -1;  // index into imports
+  };
+  std::vector<uint8_t> file_;
+  std::vector<Ph> phs_;
+  std::vector<Sym> syms_;
+  size_t rela_ = 0, rela_size_ = 0, jmprel_ = 0, jmprel_size_ = 0;
+  gaddr map_lo_ = 0, map_hi_ = 0;
 };
 
 }  // namespace recomp::orbis
