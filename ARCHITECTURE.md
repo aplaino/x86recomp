@@ -1117,6 +1117,45 @@ Order: lifter first (PE32+, .pdata, long-mode emission, oracle tests),
 proven on a DLL with few imports; then the 2^N arena, Ctx and the Win64
 HLE ABI; then the unwinder and CRT; then graphics and audio.
 
+### Console platforms: modules on the shared core (planned)
+Consoles whose CPU the lifter already models (the PS4: x86-64, AMD
+family 16h) are platform modules on the same lifter and runtime, not
+forks, and not mixed into the PC path. A PC game's build never compiles
+or links a console module; another console (later: the Switch, on its
+own lifter base) plugs into the same interfaces.
+
+What belongs to the core: the CPU (every ISA extension the model
+claims, e.g. VEX SSE and BMI1, is core lifter work, tested by
+tests/x64_isa), the guest arena, lifted.h, the SSE/x87 models, the
+unwinder's mechanics, gfx::Device, the audio mixer, input, and the
+generic seams below. What belongs to a platform: its executable format,
+its calling convention for HLE, its process and thread bring-up, its
+system libraries (HLE) and its GPU front end.
+
+The seams (core, generic):
+- Images. The lifter's Program takes modules from an image reader:
+  sections, the text ranges, function starts with their unwind ranges,
+  relocations, imports (a slot address and a name or hash) and exports.
+  PE is the built-in reader; a platform registers its own (the PS4:
+  SELF/ELF with SCE dynamic tables and NID imports, function starts
+  from .eh_frame), compiled into recomp_lift only when that platform is
+  enabled (CMake option RECOMP_PLATFORM_<NAME>).
+- HLE ABI. Arg(), the return registers and float arguments follow the
+  process's ABI: 32-bit stdcall/cdecl, Win64, or System V AMD64 (rdi,
+  rsi, rdx, rcx, r8, r9, xmm0-7). System V is generic (it is also the
+  Linux and macOS x64 ABI), so it lives in the core.
+- Address space. Where images, stacks, TLS and the thunk region go is
+  the platform's choice ("nothing below 4 GiB" is Win64's rule; PS4
+  executables are linked at 0x400000).
+- Process bring-up: a platform entry that loads the modules, binds
+  imports to its HLE, sets up TLS (Windows' TEB through gs; FreeBSD's
+  TCB through fs) and starts the main thread.
+
+Layout: platforms/<name>/ (its loader, ABI glue, process bring-up and HLE
+libraries as recomp_<name>_* shared libraries, its docs and tests), with
+its own CMakeLists.txt that the top level includes only when the option
+is on. Game projects for that platform turn it on; nothing else does.
+
 ## Roadmap
 - 64-bit guests (above).
 - EAX for games on DirectSound3D (IDirectSound3DBuffer property sets),
