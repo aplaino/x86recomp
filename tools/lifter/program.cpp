@@ -17,8 +17,8 @@ std::vector<std::string> Split(const std::string& s, char sep) {
   return out;
 }
 
-uint32_t Hex(const std::string& s) {
-  return static_cast<uint32_t>(std::stoul(s, nullptr, 16));
+uint64_t Hex(const std::string& s) {
+  return std::stoull(s, nullptr, 16);
 }
 
 // Reads a TSV with a header row; calls fn(columns) per data row.
@@ -39,9 +39,16 @@ bool ReadTsv(const std::string& path, Fn fn, std::string* err) {
 }  // namespace
 
 bool Program::Load(const std::string& path, const std::string& symdir,
-                   uint32_t base, std::string* err) {
-  if (!mem.base() && !mem.Reserve()) {
-    *err = "cannot reserve guest arena";
+                   uint64_t base, std::string* err) {
+  const bool image_x64 = recomp::PeImage::IsX64File(path);
+  if (!mem.base()) {
+    x64 = image_x64;
+    if (!mem.Reserve(x64 ? 36 : 32)) {
+      *err = "cannot reserve guest arena";
+      return false;
+    }
+  } else if (image_x64 != x64) {
+    *err = "cannot lift 32-bit and x64 modules together";
     return false;
   }
   Module& m = modules.emplace_back();
@@ -62,13 +69,13 @@ bool Program::Load(const std::string& path, const std::string& symdir,
   }
   // Symbol files hold VAs at the preferred base; a moved module's are
   // shifted by the same delta as its relocations.
-  const uint32_t delta = img.image_base - img.preferred_base;
-  auto in_text = [&](uint32_t va) { return va >= m.text_lo && va < m.text_hi; };
+  const uint64_t delta = img.image_base - img.preferred_base;
+  auto in_text = [&](uint64_t va) { return va >= m.text_lo && va < m.text_hi; };
 
   // Ghidra's function list: entry, min, max, chunks, thunk, noreturn,
   // callconv, name.
   if (!ReadTsv(symdir + "/functions.tsv", [&](const auto& c) {
-        uint32_t entry = Hex(c[0]) + delta;
+        uint64_t entry = Hex(c[0]) + delta;
         if (!in_text(entry)) return;
         entries.insert(entry);
         if (c.size() > 5 && c[5] == "1") noreturn.insert(entry);
@@ -80,7 +87,7 @@ bool Program::Load(const std::string& path, const std::string& symdir,
   // its own exports by address), and its demangled name beats Ghidra's.
   if (!ReadTsv(symdir + "/exports.tsv", [&](const auto& c) {
         if (c.size() < 4 || c[1] != "func") return;
-        uint32_t va = Hex(c[0]) + delta;
+        uint64_t va = Hex(c[0]) + delta;
         if (!in_text(va)) return;
         entries.insert(va);
         if (!c[3].empty()) names[va] = c[3];
@@ -93,6 +100,11 @@ bool Program::Load(const std::string& path, const std::string& symdir,
         for (const auto& s : Split(c[1], ',')) t.push_back(Hex(s) + delta);
       }, err))
     return false;
+
+  // x64: every .pdata entry that is not a chained fragment starts a
+  // function (ARCHITECTURE.md, "64-bit guests").
+  for (const auto& fn : img.functions)
+    if (!fn.chained() && in_text(fn.begin)) entries.insert(fn.begin);
 
   if (img.entry) {
     entries.insert(img.entry);
@@ -127,7 +139,7 @@ bool Program::LoadManifest(const std::string& path, std::string* err) {
     }
     std::getline(in >> std::ws, name);
     const recomp::PeImage& img = modules.back().img;
-    uint32_t va = Hex(va_s) + (img.image_base - img.preferred_base);
+    uint64_t va = Hex(va_s) + (img.image_base - img.preferred_base);
     if (kind == "entry") {
       entries.insert(va);
       if (!name.empty()) names[va] = name;

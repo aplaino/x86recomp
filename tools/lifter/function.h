@@ -18,11 +18,11 @@
 namespace lifter {
 
 struct Insn {
-  uint32_t va;
+  uint64_t va;
   ZydisDecodedInstruction d;
   ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT];
   bool ok;  // false: undecodable bytes, lifted as a fatal trap
-  uint32_t next() const { return va + (ok ? d.length : 1); }
+  uint64_t next() const { return va + (ok ? d.length : 1); }
 };
 
 enum class Flow : uint8_t {
@@ -37,20 +37,20 @@ enum class Flow : uint8_t {
 };
 
 struct Function {
-  uint32_t entry = 0;
-  std::map<uint32_t, Insn> insns;
-  std::set<uint32_t> labels;            // addresses needing a goto label
-  std::set<uint32_t> direct_calls;      // call targets (for discovery)
-  std::set<uint32_t> tail_calls;        // jmp/fallthrough to other entries
-  std::set<uint32_t> setjmp_returns;    // return addresses of setjmp calls:
+  uint64_t entry = 0;
+  std::map<uint64_t, Insn> insns;
+  std::set<uint64_t> labels;            // addresses needing a goto label
+  std::set<uint64_t> direct_calls;      // call targets (for discovery)
+  std::set<uint64_t> tail_calls;        // jmp/fallthrough to other entries
+  std::set<uint64_t> setjmp_returns;    // return addresses of setjmp calls:
                                         // entries longjmp resumes at
   std::vector<std::string> warnings;
 };
 
 class Decoder {
  public:
-  Decoder();
-  bool Decode(const Program& p, uint32_t va, Insn* out) const;
+  explicit Decoder(bool x64 = false);
+  bool Decode(const Program& p, uint64_t va, Insn* out) const;
   std::string Format(const Insn& in) const;
 
  private:
@@ -61,9 +61,9 @@ class Decoder {
 // Classifies an instruction's control flow; `target` gets the direct branch
 // target where there is one.
 Flow Classify(const Program& p, const Function& f, const Insn& in,
-              uint32_t* target);
+              uint64_t* target);
 
-void BuildFunction(const Program& p, const Decoder& dec, uint32_t entry,
+void BuildFunction(const Program& p, const Decoder& dec, uint64_t entry,
                    Function* out);
 
 // Targets of a switch jump table that Ghidra did not export, recognised
@@ -73,13 +73,13 @@ void BuildFunction(const Program& p, const Decoder& dec, uint32_t entry,
 //   cmp r, N; ja default; movzx r2, byte [r+index]; jmp [r2*4+table]
 // False if `jmp` is not one of them or a target leaves its module's .text.
 bool RecoverJumpTable(const Program& p, const Function& f, const Insn& jmp,
-                      std::vector<uint32_t>* targets);
+                      std::vector<uint64_t>* targets);
 
 // A direct branch target that is another (strong) function entry: reached
 // by a tail call, not lifted into f. See Program::weak.
-bool IsOtherEntry(const Program& p, const Function& f, uint32_t t);
+bool IsOtherEntry(const Program& p, const Function& f, uint64_t t);
 
 // Absolute target of a relative branch/call operand.
-uint32_t RelTarget(const Insn& in);
+uint64_t RelTarget(const Insn& in);
 
 }  // namespace lifter

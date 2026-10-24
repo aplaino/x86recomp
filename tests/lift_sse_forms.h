@@ -11,7 +11,7 @@ struct SseForm {
   int base;           // GPR holding the memory operand's address, -1: none
   uint32_t undef;     // EFLAGS bits the instruction leaves undefined
   const char* text;   // disassembly of the original instruction
-  uint32_t example_va;
+  uint64_t example_va;
 };
 extern const SseForm kSseForms[];
 extern const int kSseFormCount;

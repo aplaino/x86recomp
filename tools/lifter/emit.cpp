@@ -16,7 +16,7 @@ thread_local bool t_in_try = false;
 // iteration).
 const char* TailAttr() { return t_in_try ? "" : "LIFT_MUSTTAIL "; }
 
-std::string Fmt(const char* f, ...) {
+__attribute__((format(printf, 1, 2))) std::string Fmt(const char* f, ...) {
   char buf[512];
   va_list ap;
   va_start(ap, f);
@@ -25,7 +25,10 @@ std::string Fmt(const char* f, ...) {
   return buf;
 }
 
-std::string Hex(uint32_t v) { return Fmt("0x%Xu", v); }
+// printf's %llX for a VA (uint64_t is unsigned long on LP64 Linux).
+unsigned long long U(uint64_t v) { return v; }
+
+std::string Hex(uint64_t v) { return Fmt("0x%llXu", U(v)); }
 
 const char* Gpr32Name(ZydisRegister r) {
   switch (r) {
@@ -37,6 +40,30 @@ const char* Gpr32Name(ZydisRegister r) {
     case ZYDIS_REGISTER_EBP: return "ebp";
     case ZYDIS_REGISTER_ESI: return "esi";
     case ZYDIS_REGISTER_EDI: return "edi";
+    default: return nullptr;
+  }
+}
+
+// x64 general-purpose registers, by their 64-bit name (lifted code keeps
+// all of them in uint64_t locals).
+const char* Gpr64Name(ZydisRegister r) {
+  switch (r) {
+    case ZYDIS_REGISTER_RAX: return "rax";
+    case ZYDIS_REGISTER_RCX: return "rcx";
+    case ZYDIS_REGISTER_RDX: return "rdx";
+    case ZYDIS_REGISTER_RBX: return "rbx";
+    case ZYDIS_REGISTER_RSP: return "rsp";
+    case ZYDIS_REGISTER_RBP: return "rbp";
+    case ZYDIS_REGISTER_RSI: return "rsi";
+    case ZYDIS_REGISTER_RDI: return "rdi";
+    case ZYDIS_REGISTER_R8: return "r8";
+    case ZYDIS_REGISTER_R9: return "r9";
+    case ZYDIS_REGISTER_R10: return "r10";
+    case ZYDIS_REGISTER_R11: return "r11";
+    case ZYDIS_REGISTER_R12: return "r12";
+    case ZYDIS_REGISTER_R13: return "r13";
+    case ZYDIS_REGISTER_R14: return "r14";
+    case ZYDIS_REGISTER_R15: return "r15";
     default: return nullptr;
   }
 }
@@ -55,6 +82,19 @@ const char* SegValue(ZydisRegister r) {
     case ZYDIS_REGISTER_SS: return "0x23u";
     case ZYDIS_REGISTER_FS: return "0x3Bu";
     case ZYDIS_REGISTER_GS: return "0x0u";
+    default: return nullptr;
+  }
+}
+
+// The selectors an x64 Windows process sees.
+const char* SegValue64(ZydisRegister r) {
+  switch (r) {
+    case ZYDIS_REGISTER_CS: return "0x33u";
+    case ZYDIS_REGISTER_DS:
+    case ZYDIS_REGISTER_ES:
+    case ZYDIS_REGISTER_SS:
+    case ZYDIS_REGISTER_GS: return "0x2Bu";
+    case ZYDIS_REGISTER_FS: return "0x53u";
     default: return nullptr;
   }
 }
@@ -301,7 +341,7 @@ class X87Sim {
 class InsnEmitter {
  public:
   InsnEmitter(const Program& p, const Function& f, const Insn& in,
-              std::string* out, std::set<uint32_t>* refs, EmitStats* stats)
+              std::string* out, std::set<uint64_t>* refs, EmitStats* stats)
       : p_(p), f_(f), in_(in), d_(in.d), ops_(in.ops), out_(*out),
         refs_(*refs), stats_(*stats) {}
 
@@ -328,6 +368,10 @@ class InsnEmitter {
   }
 
   // ---- operands -----------------------------------------------------------
+  // x64 images: registers are uint64_t locals rax..r15, addresses 64-bit.
+  bool X64() const { return p_.x64; }
+  // The C++ type holding an operand of `bytes` (see lift::W<N>::T).
+  static const char* VT(int bytes) { return bytes == 8 ? "uint64_t" : "uint32_t"; }
   int Nvis() const { return d_.operand_count_visible; }
   const ZydisDecodedOperand& Op(int i) const { return ops_[i]; }
   int Bytes(int i) const { return Op(i).size / 8; }
@@ -346,14 +390,18 @@ class InsnEmitter {
   std::string RdMem(int mem, int bytes) const {
     return Fmt("::recomp::lift::Rd<%s>(B, m%d)", MemType(bytes), mem);
   }
-  // The accumulator (al/ax/eax) for an operand size.
+  // The accumulator (al/ax/eax/rax) for an operand size.
   static ZydisRegister Acc(int bytes) {
-    return bytes == 4 ? ZYDIS_REGISTER_EAX : bytes == 2 ? ZYDIS_REGISTER_AX : ZYDIS_REGISTER_AL;
+    return bytes == 8   ? ZYDIS_REGISTER_RAX
+           : bytes == 4 ? ZYDIS_REGISTER_EAX
+           : bytes == 2 ? ZYDIS_REGISTER_AX
+                        : ZYDIS_REGISTER_AL;
   }
 
   // Effective address of a memory operand (segment base included, except
   // for LEA, which never adds one).
   std::string AddrExpr(int i, bool segment = true) const {
+    if (X64()) return AddrExpr64(i, segment);
     const auto& m = Op(i).mem;
     std::string s;
     auto add = [&](const std::string& t) {
@@ -370,8 +418,46 @@ class InsnEmitter {
     return "uint32_t(" + s + ")";
   }
 
+  // x64: RIP-relative operands are absolute at lift time; gs is the TEB.
+  // With an address-size prefix the sum wraps at 32 bits.
+  std::string AddrExpr64(int i, bool segment) const {
+    const auto& m = Op(i).mem;
+    if (m.base == ZYDIS_REGISTER_RIP)
+      return Hex(in_.next() + uint64_t(m.disp.value));
+    std::string s;
+    auto add = [&](const std::string& t) {
+      if (!s.empty()) s += " + ";
+      s += t;
+    };
+    if (m.base != ZYDIS_REGISTER_NONE) add(ReadReg(m.base));
+    if (m.index != ZYDIS_REGISTER_NONE)
+      add(m.scale > 1 ? Fmt("%s * %du", ReadReg(m.index).c_str(), m.scale)
+                      : ReadReg(m.index));
+    if (s.empty()) {
+      s = Hex(uint64_t(m.disp.value));
+    } else if (m.disp.value < 0) {
+      s += " - " + Hex(uint64_t(-m.disp.value));
+    } else if (m.disp.value > 0) {
+      s += " + " + Hex(uint64_t(m.disp.value));
+    }
+    s = d_.address_width == 32 ? "uint64_t(uint32_t(" + s + "))" : "uint64_t(" + s + ")";
+    if (segment && m.segment == ZYDIS_REGISTER_GS) s = "GS + " + s;
+    return s;
+  }
+
   bool AddrOk(int i) const {
     const auto& m = Op(i).mem;
+    if (X64()) {
+      auto gpr = [](ZydisRegister r) {
+        return r == ZYDIS_REGISTER_NONE ||
+               Gpr64Name(ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LONG_64, r));
+      };
+      if (m.base != ZYDIS_REGISTER_RIP && !gpr(m.base)) return false;
+      if (!gpr(m.index)) return false;
+      return m.segment == ZYDIS_REGISTER_NONE || m.segment == ZYDIS_REGISTER_DS ||
+             m.segment == ZYDIS_REGISTER_ES || m.segment == ZYDIS_REGISTER_SS ||
+             m.segment == ZYDIS_REGISTER_CS || m.segment == ZYDIS_REGISTER_GS;
+    }
     if (m.base != ZYDIS_REGISTER_NONE && !Gpr32Name(m.base)) return false;
     if (m.index != ZYDIS_REGISTER_NONE && !Gpr32Name(m.index)) return false;
     return m.segment == ZYDIS_REGISTER_NONE || m.segment == ZYDIS_REGISTER_DS ||
@@ -384,12 +470,13 @@ class InsnEmitter {
     for (int i = 0; i < Nvis(); i++) {
       if (!IsMem(i)) continue;
       if (!AddrOk(i)) return false;
-      L(Fmt("const uint32_t m%d = %s;", i, AddrExpr(i).c_str()));
+      L(Fmt("const %s m%d = %s;", X64() ? "uint64_t" : "uint32_t", i, AddrExpr(i).c_str()));
     }
     return true;
   }
 
   std::string ReadReg(ZydisRegister r) const {
+    if (X64()) return ReadReg64(r);
     if (const char* n = Gpr32Name(r)) return n;
     if (const char* sv = SegValue(r)) return sv;
     ZydisRegister big =
@@ -402,7 +489,40 @@ class InsnEmitter {
     return Fmt("(%s & 0xFFu)", n);
   }
 
+  // x64: reads of 8/16/32-bit registers are uint32_t, of 64-bit ones
+  // uint64_t; 32-bit writes zero-extend, 8/16-bit ones merge.
+  std::string ReadReg64(ZydisRegister r) const {
+    if (const char* sv = SegValue64(r)) return sv;
+    const char* n =
+        Gpr64Name(ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LONG_64, r));
+    if (!n) return "/*bad reg*/0u";
+    switch (ZydisRegisterGetWidth(ZYDIS_MACHINE_MODE_LONG_64, r)) {
+      case 64: return n;
+      case 32: return Fmt("uint32_t(%s)", n);
+      case 16: return Fmt("(uint32_t(%s) & 0xFFFFu)", n);
+      default:
+        return IsHi8(r) ? Fmt("((uint32_t(%s) >> 8) & 0xFFu)", n)
+                        : Fmt("(uint32_t(%s) & 0xFFu)", n);
+    }
+  }
+  std::string WriteReg64(ZydisRegister r, const std::string& v) const {
+    if (SegValue64(r)) return "/* segment register write ignored */";
+    const char* n =
+        Gpr64Name(ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LONG_64, r));
+    if (!n) return "/*bad reg*/;";
+    switch (ZydisRegisterGetWidth(ZYDIS_MACHINE_MODE_LONG_64, r)) {
+      case 64: return Fmt("%s = uint64_t(%s);", n, v.c_str());
+      case 32: return Fmt("%s = uint64_t(uint32_t(%s));", n, v.c_str());
+      case 16:
+        return Fmt("%s = ::recomp::lift::SetLo16(%s, uint64_t(%s));", n, n, v.c_str());
+      default:
+        return Fmt("%s = ::recomp::lift::Set%s8(%s, uint64_t(%s));", n,
+                   IsHi8(r) ? "Hi" : "Lo", n, v.c_str());
+    }
+  }
+
   std::string WriteReg(ZydisRegister r, const std::string& v) const {
+    if (X64()) return WriteReg64(r, v);
     if (const char* n = Gpr32Name(r)) return Fmt("%s = uint32_t(%s);", n, v.c_str());
     if (SegValue(r)) return "/* segment register write ignored */";
     ZydisRegister big =
@@ -424,9 +544,11 @@ class InsnEmitter {
       case ZYDIS_OPERAND_TYPE_REGISTER:
         return ReadReg(o.reg.value);
       case ZYDIS_OPERAND_TYPE_MEMORY:
+        if (bytes == 8 && X64()) return Fmt("::recomp::lift::Rd<uint64_t>(B, m%d)", i);
         return Fmt("uint32_t(::recomp::lift::Rd<%s>(B, m%d))", MemType(bytes), i);
       case ZYDIS_OPERAND_TYPE_IMMEDIATE: {
         uint64_t v = o.imm.value.u;
+        if (bytes == 8 && X64()) return Hex(v);  // sign-extended by Zydis
         if (bytes == 1) v &= 0xFF;
         if (bytes == 2) v &= 0xFFFF;
         return Hex(static_cast<uint32_t>(v));
@@ -445,25 +567,28 @@ class InsnEmitter {
   }
 
   // ---- control flow -------------------------------------------------------
-  std::string TailCall(uint32_t t) {
+  std::string TailCall(uint64_t t) {
     refs_.insert(t);
     return Fmt("{ LIFT_SPILL; %sreturn %s(c); }", TailAttr(), FnName(t).c_str());
   }
-  std::string GotoOrTail(uint32_t t) {
+  std::string GotoOrTail(uint64_t t) {
     if (IsOtherEntry(p_, f_, t)) return TailCall(t);
     if (!f_.insns.count(t))  // target outside .text: never decoded
       return Fmt("{ LIFT_SPILL; ::recomp::BadJump(c, %s, %s); }",
                  Hex(in_.va).c_str(), Hex(t).c_str());
-    return Fmt("goto L_%08X;", t);
+    return Fmt("goto L_%08llX;", U(t));
   }
   void Push32(const std::string& v) {
     L(Fmt("esp -= 4; ::recomp::lift::Wr<uint32_t>(B, esp, %s);", v.c_str()));
   }
+  void Push64(const std::string& v) {
+    L(Fmt("rsp -= 8; ::recomp::lift::Wr<uint64_t>(B, rsp, uint64_t(%s));", v.c_str()));
+  }
 
   // ---- SSE -----------------------------------------------------------------
   static int XmmIndex(ZydisRegister r) {
-    return r >= ZYDIS_REGISTER_XMM0 && r <= ZYDIS_REGISTER_XMM7 ? r - ZYDIS_REGISTER_XMM0
-                                                                : -1;
+    return r >= ZYDIS_REGISTER_XMM0 && r <= ZYDIS_REGISTER_XMM15 ? r - ZYDIS_REGISTER_XMM0
+                                                                 : -1;
   }
   bool IsXmm(int i) const { return IsReg(i) && XmmIndex(Op(i).reg.value) >= 0; }
   std::string XmmRef(int i) const {
@@ -482,10 +607,13 @@ class InsnEmitter {
 
   void EmitAlu();
   void EmitShift();
+  enum StringKind { Movs, Stos, Lods, Scas, Cmps };
   void EmitString();
+  void EmitString64(int n, StringKind kind);
   void EmitX87();
   void EmitSse();
   void EmitLocked();
+  void Emit64();
 
   const Program& p_;
   const Function& f_;
@@ -493,7 +621,7 @@ class InsnEmitter {
   const ZydisDecodedInstruction& d_;
   const ZydisDecodedOperand* ops_;
   std::string& out_;
-  std::set<uint32_t>& refs_;
+  std::set<uint64_t>& refs_;
   EmitStats& stats_;
 };
 
@@ -530,7 +658,7 @@ void InsnEmitter::EmitAlu() {
   }
   if (fn) r = Fmt("::recomp::lift::%s<%d>(F, %s, %s)", fn, n, a.c_str(), b.c_str());
   if (store) {
-    L("const uint32_t r = " + r + ";");
+    L(std::string("const ") + VT(n) + " r = " + r + ";");
     L(Write(0, "r"));
   } else {
     L("(void)" + r + ";");
@@ -551,14 +679,14 @@ void InsnEmitter::EmitShift() {
     case ZYDIS_MNEMONIC_RCR: fn = "Rcr"; break;
     default: break;
   }
-  L(Fmt("const uint32_t r = ::recomp::lift::%s<%d>(F, %s, %s);", fn, n,
+  L(Fmt("const %s r = ::recomp::lift::%s<%d>(F, %s, %s);", VT(n), fn, n,
         Read(0).c_str(), cnt.c_str()));
   L(Write(0, "r"));
 }
 
 void InsnEmitter::EmitString() {
   int n = 0;
-  enum { Movs, Stos, Lods, Scas, Cmps } kind = Movs;
+  StringKind kind = Movs;
   switch (d_.mnemonic) {
     case ZYDIS_MNEMONIC_MOVSB: n = 1; kind = Movs; break;
     case ZYDIS_MNEMONIC_MOVSW: n = 2; kind = Movs; break;
@@ -575,8 +703,15 @@ void InsnEmitter::EmitString() {
     case ZYDIS_MNEMONIC_CMPSB: n = 1; kind = Cmps; break;
     case ZYDIS_MNEMONIC_CMPSW: n = 2; kind = Cmps; break;
     case ZYDIS_MNEMONIC_CMPSD: n = 4; kind = Cmps; break;
+    case ZYDIS_MNEMONIC_MOVSQ: n = 8; kind = Movs; break;
+    case ZYDIS_MNEMONIC_STOSQ: n = 8; kind = Stos; break;
+    case ZYDIS_MNEMONIC_LODSQ: n = 8; kind = Lods; break;
+    case ZYDIS_MNEMONIC_SCASQ: n = 8; kind = Scas; break;
+    case ZYDIS_MNEMONIC_CMPSQ: n = 8; kind = Cmps; break;
     default: break;
   }
+  if (!n) return Unimpl();
+  if (X64()) return EmitString64(n, kind);
   const char* t = MemType(n);
   std::string acc = ReadReg(Acc(n));
   std::string step = Fmt("const uint32_t d = F.df ? uint32_t(-%d) : %du;", n, n);
@@ -624,6 +759,52 @@ void InsnEmitter::EmitString() {
   }
 }
 
+// x64 string instructions: rsi, rdi and rcx (64-bit addressing; the
+// 32-bit form with an address-size prefix is not supported).
+void InsnEmitter::EmitString64(int n, StringKind kind) {
+  if (d_.address_width != 64) return Unimpl();
+  const char* t = MemType(n);
+  std::string acc = ReadReg(Acc(n));
+  std::string body;
+  switch (kind) {
+    case Movs:
+      body = Fmt("::recomp::lift::Wr<%s>(B, rdi, ::recomp::lift::Rd<%s>(B, rsi)); "
+                 "rsi += d; rdi += d;", t, t);
+      break;
+    case Stos:
+      body = Fmt("::recomp::lift::Wr<%s>(B, rdi, %s(%s)); rdi += d;", t, t, acc.c_str());
+      break;
+    case Lods:
+      body = Fmt("{ const %s v = ::recomp::lift::Rd<%s>(B, rsi); %s } rsi += d;", VT(n), t,
+                 WriteReg(Acc(n), "v").c_str());
+      break;
+    case Scas:
+      body = Fmt("(void)::recomp::lift::Sub<%d>(F, %s, ::recomp::lift::Rd<%s>(B, rdi)); "
+                 "rdi += d;", n, acc.c_str(), t);
+      break;
+    case Cmps:
+      body = Fmt("(void)::recomp::lift::Sub<%d>(F, ::recomp::lift::Rd<%s>(B, rsi), "
+                 "::recomp::lift::Rd<%s>(B, rdi)); rsi += d; rdi += d;", n, t, t);
+      break;
+  }
+  bool rep = d_.attributes & ZYDIS_ATTRIB_HAS_REP;
+  bool repe = d_.attributes & ZYDIS_ATTRIB_HAS_REPE;
+  bool repne = d_.attributes & ZYDIS_ATTRIB_HAS_REPNE;
+  L(Fmt("const uint64_t d = F.df ? uint64_t(-%d) : %du;", n, n));
+  if (kind == Scas || kind == Cmps) {
+    if (repe)
+      L("while (rcx) { " + body + " rcx--; if (!F.zf) break; }");
+    else if (repne)
+      L("while (rcx) { " + body + " rcx--; if (F.zf) break; }");
+    else
+      L(body);
+  } else if (rep || repe || repne) {
+    L("while (rcx) { " + body + " rcx--; }");
+  } else {
+    L(body);
+  }
+}
+
 // lock-prefixed read-modify-write on memory: compare-and-swap loop so the
 // update is atomic on any host (and ordered: seq_cst, see ARCHITECTURE.md
 // memory-ordering notes).
@@ -645,12 +826,24 @@ void InsnEmitter::EmitLocked() {
     case ZYDIS_MNEMONIC_DEC: calc = Fmt("::recomp::lift::Dec<%d>(G, a)", n); break;
     case ZYDIS_MNEMONIC_NEG: calc = Fmt("::recomp::lift::Neg<%d>(G, a)", n); break;
     case ZYDIS_MNEMONIC_NOT: calc = Fmt("(%s)(~a)", t); break;
+    case ZYDIS_MNEMONIC_CMPXCHG: {
+      // One compare-exchange: on a match it stores the source, otherwise
+      // the accumulator gets the old value; flags as cmp acc, old.
+      L(Fmt("%s* p = ::recomp::lift::AtomicPtr<%s>(B, m0);", t, t));
+      L(Fmt("%s a = %s(%s);", t, t, ReadReg(Acc(n)).c_str()));
+      L(Fmt("const %s e = a;", t));
+      L(Fmt("const bool ok = __atomic_compare_exchange_n(p, &a, %s(%s), false, "
+            "__ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);", t, src.c_str()));
+      L(Fmt("(void)::recomp::lift::Sub<%d>(F, e, a);", n));
+      L("if (!ok) { " + WriteReg(Acc(n), "a") + " }");
+      return;
+    }
     default:
       Unimpl();
       return;
   }
   L(Fmt("%s* p = ::recomp::lift::AtomicPtr<%s>(B, m0);", t, t));
-  L(Fmt("const uint32_t b = %s;", src.c_str()));
+  L(Fmt("const %s b = %s;", VT(n), src.c_str()));
   L(Fmt("%s a = __atomic_load_n(p, __ATOMIC_SEQ_CST);", t));
   L(Fmt("%s r; ::recomp::Flags G;", t));
   L(Fmt("do { G = F; r = %s(%s); } while (!__atomic_compare_exchange_n("
@@ -1382,6 +1575,17 @@ void InsnEmitter::EmitSse() {
       }
       return;
     case ZYDIS_MNEMONIC_MOVQ:
+      // x64: movq between an XMM and a 64-bit register.
+      if (IsXmm(0) && IsReg(1) && !IsXmm(1)) {
+        L(Fmt("const uint64_t v = %s;", Read(1).c_str()));
+        L(XmmRef(0) + " = ::recomp::Xmm{};");
+        L(Fmt("::recomp::sse::SetLane<uint64_t>(%s, 0, v);", XmmRef(0).c_str()));
+        return;
+      }
+      if (IsReg(0) && !IsXmm(0)) {
+        L(Write(0, Fmt("::recomp::sse::Lane<uint64_t>(%s, 0)", XmmRef(1).c_str())));
+        return;
+      }
       if (IsXmm(0)) {
         std::string s = src(1);
         L(Fmt("const uint64_t v = ::recomp::sse::Lane<uint64_t>(%s, 0);", s.c_str()));
@@ -1397,10 +1601,52 @@ void InsnEmitter::EmitSse() {
       bool dbl = m == ZYDIS_MNEMONIC_CVTSD2SI || m == ZYDIS_MNEMONIC_CVTTSD2SI;
       bool trunc = m == ZYDIS_MNEMONIC_CVTTSS2SI || m == ZYDIS_MNEMONIC_CVTTSD2SI;
       std::string s = src(1);
-      L(Write(0, Fmt("::recomp::sse::CvtToI32(c, %s, %s, %s, %s)", b(dbl), s.c_str(),
-                     b(trunc), va.c_str())));
+      L(Write(0, Fmt("::recomp::sse::CvtToI%d(c, %s, %s, %s, %s)", Bytes(0) == 8 ? 64 : 32,
+                     b(dbl), s.c_str(), b(trunc), va.c_str())));
       return;
     }
+    case ZYDIS_MNEMONIC_CVTSI2SS:
+      if (!IsXmm(0) || IsXmm(1)) return Unimpl();
+      L(Fmt("::recomp::sse::CvtIntToF(c, false, %s, %s, %s, %s);", b(Bytes(1) == 8),
+            Read(1).c_str(), XmmRef(0).c_str(), va.c_str()));
+      return;
+    case ZYDIS_MNEMONIC_CVTDQ2PS: {
+      if (!IsXmm(0)) return Unimpl();
+      std::string s = src(1);
+      L(Fmt("::recomp::sse::Cvtdq2ps(c, %s, %s, %s);", XmmRef(0).c_str(), s.c_str(),
+            va.c_str()));
+      return;
+    }
+    case ZYDIS_MNEMONIC_CVTSS2SD: case ZYDIS_MNEMONIC_CVTPS2PD:
+    case ZYDIS_MNEMONIC_CVTSD2SS: case ZYDIS_MNEMONIC_CVTPD2PS: {
+      if (!IsXmm(0)) return Unimpl();
+      bool to_dbl = m == ZYDIS_MNEMONIC_CVTSS2SD || m == ZYDIS_MNEMONIC_CVTPS2PD;
+      int lanes = m == ZYDIS_MNEMONIC_CVTPS2PD || m == ZYDIS_MNEMONIC_CVTPD2PS ? 2 : 1;
+      std::string s = src(1);
+      L(Fmt("::recomp::sse::CvtFloat(c, %s, %d, %s, %s, %s);", b(to_dbl), lanes,
+            XmmRef(0).c_str(), s.c_str(), va.c_str()));
+      return;
+    }
+    case ZYDIS_MNEMONIC_MINSS: case ZYDIS_MNEMONIC_MINSD: case ZYDIS_MNEMONIC_MINPS:
+    case ZYDIS_MNEMONIC_MINPD: case ZYDIS_MNEMONIC_MAXSS: case ZYDIS_MNEMONIC_MAXSD:
+    case ZYDIS_MNEMONIC_MAXPS: case ZYDIS_MNEMONIC_MAXPD: {
+      if (!IsXmm(0)) return Unimpl();
+      bool max = m == ZYDIS_MNEMONIC_MAXSS || m == ZYDIS_MNEMONIC_MAXSD ||
+                 m == ZYDIS_MNEMONIC_MAXPS || m == ZYDIS_MNEMONIC_MAXPD;
+      bool dbl = m == ZYDIS_MNEMONIC_MINSD || m == ZYDIS_MNEMONIC_MINPD ||
+                 m == ZYDIS_MNEMONIC_MAXSD || m == ZYDIS_MNEMONIC_MAXPD;
+      bool packed = m == ZYDIS_MNEMONIC_MINPS || m == ZYDIS_MNEMONIC_MINPD ||
+                    m == ZYDIS_MNEMONIC_MAXPS || m == ZYDIS_MNEMONIC_MAXPD;
+      std::string s = src(1);
+      L(Fmt("::recomp::sse::MinMax(c, %s, %s, %d, %s, %s, %s);", b(max), b(dbl),
+            packed ? (dbl ? 2 : 4) : 1, XmmRef(0).c_str(), s.c_str(), va.c_str()));
+      return;
+    }
+    case ZYDIS_MNEMONIC_PSRLDQ: case ZYDIS_MNEMONIC_PSLLDQ:
+      if (!IsXmm(0) || !IsImm(1)) return Unimpl();
+      L(Fmt("::recomp::sse::%s(%s, %s);", m == ZYDIS_MNEMONIC_PSRLDQ ? "ShrDq" : "ShlDq",
+            XmmRef(0).c_str(), imm8(1).c_str()));
+      return;
     case ZYDIS_MNEMONIC_CVTDQ2PD: {
       if (!IsXmm(0)) return Unimpl();
       std::string s = src(1);
@@ -1409,13 +1655,21 @@ void InsnEmitter::EmitSse() {
     }
     case ZYDIS_MNEMONIC_CVTSI2SD:
       if (!IsXmm(0) || IsXmm(1)) return Unimpl();
+      if (Bytes(1) == 8) {  // int64 -> double can be inexact
+        L(Fmt("::recomp::sse::CvtIntToF(c, true, true, %s, %s, %s);", Read(1).c_str(),
+              XmmRef(0).c_str(), va.c_str()));
+        return;
+      }
       L(Fmt("::recomp::sse::Cvtsi2sd(%s, int32_t(%s));", XmmRef(0).c_str(), Read(1).c_str()));
       return;
-    case ZYDIS_MNEMONIC_SQRTSD: {
+    case ZYDIS_MNEMONIC_SQRTSD: case ZYDIS_MNEMONIC_SQRTSS: case ZYDIS_MNEMONIC_SQRTPS:
+    case ZYDIS_MNEMONIC_SQRTPD: {
       if (!IsXmm(0)) return Unimpl();
+      bool dbl = m == ZYDIS_MNEMONIC_SQRTSD || m == ZYDIS_MNEMONIC_SQRTPD;
+      int lanes = m == ZYDIS_MNEMONIC_SQRTPS ? 4 : m == ZYDIS_MNEMONIC_SQRTPD ? 2 : 1;
       std::string s = src(1);
-      L(Fmt("::recomp::sse::Sqrt(c, true, 1, %s, %s, %s);", XmmRef(0).c_str(), s.c_str(),
-            va.c_str()));
+      L(Fmt("::recomp::sse::Sqrt(c, %s, %d, %s, %s, %s);", b(dbl), lanes, XmmRef(0).c_str(),
+            s.c_str(), va.c_str()));
       return;
     }
     case ZYDIS_MNEMONIC_RSQRTPS: {
@@ -1522,9 +1776,350 @@ void InsnEmitter::EmitSse() {
   }
 }
 
+
+// x64 images. Everything that does not depend on the register model is
+// shared with 32-bit code (EmitAlu, EmitShift, EmitLocked, SSE, x87);
+// what differs is here: 8-byte stack slots, the 64-bit forms and the
+// x64-only instructions, and the rule that 32-bit writes zero-extend.
+void InsnEmitter::Emit64() {
+  const auto m = d_.mnemonic;
+  const uint64_t next = in_.next();
+  const std::string va = Hex(in_.va);
+  bool locked = (d_.attributes & ZYDIS_ATTRIB_HAS_LOCK) && Nvis() && IsMem(0);
+
+  switch (m) {
+    case ZYDIS_MNEMONIC_CALL: {
+      if (IsImm(0)) {
+        uint64_t t = RelTarget(in_);
+        Push64(Hex(next));
+        if (t == next) return;
+        if (!p_.InText(t)) {
+          L(Fmt("LIFT_SPILL; ::recomp::BadJump(c, %s, %s);", va.c_str(), Hex(t).c_str()));
+          return;
+        }
+        refs_.insert(t);
+        L(Fmt("LIFT_SPILL; %s(c); LIFT_RELOAD;", FnName(t).c_str()));
+      } else {
+        if (!PrepareMem()) return Unimpl();
+        L("const uint64_t t = " + Read(0) + ";");
+        Push64(Hex(next));
+        L(Fmt("LIFT_SPILL; ::recomp::Dispatch(c, t, %s); LIFT_RELOAD;", va.c_str()));
+      }
+      uint64_t tt;
+      if (Classify(p_, f_, in_, &tt) == Flow::Stop)
+        L(Fmt("::recomp::Unreachable(c, %s);", va.c_str()));
+      return;
+    }
+    case ZYDIS_MNEMONIC_JMP: {
+      if (IsImm(0)) {
+        L(GotoOrTail(RelTarget(in_)));
+        return;
+      }
+      if (!PrepareMem()) return Unimpl();
+      L("const uint64_t t = " + Read(0) + ";");
+      auto jt = p_.jumptables.find(in_.va);
+      if (jt != p_.jumptables.end()) {
+        L("switch (t) {");
+        for (uint64_t tgt : jt->second)
+          L(Fmt("  case %s: %s", Hex(tgt).c_str(), GotoOrTail(tgt).c_str()));
+        L(Fmt("  default: LIFT_SPILL; ::recomp::BadJump(c, %s, t);", va.c_str()));
+        L("}");
+      } else {
+        L(Fmt("LIFT_SPILL; ::recomp::Dispatch(c, t, %s); return;", va.c_str()));
+      }
+      return;
+    }
+    case ZYDIS_MNEMONIC_RET: {
+      uint64_t extra = Nvis() ? Op(0).imm.value.u : 0;
+      L(Fmt("rsp += %lluu; LIFT_SPILL; return;", U(8 + extra)));
+      return;
+    }
+    case ZYDIS_MNEMONIC_JRCXZ:
+      L(Fmt("if (rcx == 0) %s", GotoOrTail(RelTarget(in_)).c_str()));
+      return;
+    case ZYDIS_MNEMONIC_JECXZ:
+      L(Fmt("if (uint32_t(rcx) == 0) %s", GotoOrTail(RelTarget(in_)).c_str()));
+      return;
+    case ZYDIS_MNEMONIC_LOOP:
+    case ZYDIS_MNEMONIC_LOOPE:
+    case ZYDIS_MNEMONIC_LOOPNE: {
+      if (d_.address_width != 64) return Unimpl();
+      const char* cond = m == ZYDIS_MNEMONIC_LOOPE    ? " && F.zf"
+                         : m == ZYDIS_MNEMONIC_LOOPNE ? " && !F.zf"
+                                                      : "";
+      L(Fmt("rcx -= 1; if (rcx != 0%s) %s", cond, GotoOrTail(RelTarget(in_)).c_str()));
+      return;
+    }
+    case ZYDIS_MNEMONIC_INT3:
+    case ZYDIS_MNEMONIC_INT:
+    case ZYDIS_MNEMONIC_INT1:
+    case ZYDIS_MNEMONIC_HLT:
+    case ZYDIS_MNEMONIC_UD2:
+      L(Fmt("LIFT_SPILL; ::recomp::Trap(c, %s); LIFT_RELOAD;", va.c_str()));
+      return;
+    default:
+      break;
+  }
+
+  if (const char* cond = CondExpr(m)) {
+    if (d_.meta.category == ZYDIS_CATEGORY_COND_BR) {
+      L(Fmt("if (%s) %s", cond, GotoOrTail(RelTarget(in_)).c_str()));
+      return;
+    }
+    if (!PrepareMem()) return Unimpl();
+    if (d_.meta.category == ZYDIS_CATEGORY_SETCC) {
+      L(Write(0, Fmt("(%s) ? 1u : 0u", cond)));
+      return;
+    }
+    // CMOVcc: the source is read even when the condition is false, and a
+    // 32-bit destination is zero-extended either way.
+    int n = Bytes(0);
+    L(Fmt("const %s v = %s;", VT(n), Read(1).c_str()));
+    if (n == 4)
+      L(Write(0, Fmt("(%s) ? v : %s", cond, Read(0).c_str())));
+    else
+      L(Fmt("if (%s) { %s }", cond, Write(0, "v").c_str()));
+    return;
+  }
+
+  if (!PrepareMem()) return Unimpl();
+  if (locked) return EmitLocked();
+
+  const int n = Nvis() ? Bytes(0) : 0;
+  switch (m) {
+    case ZYDIS_MNEMONIC_NOP:
+    case ZYDIS_MNEMONIC_PAUSE:
+      return;
+    case ZYDIS_MNEMONIC_MOV:
+      L(Write(0, Read(1, n)));
+      return;
+    case ZYDIS_MNEMONIC_MOVZX:
+      L(Write(0, Read(1)));
+      return;
+    case ZYDIS_MNEMONIC_MOVSX:
+    case ZYDIS_MNEMONIC_MOVSXD:
+      if (n == 8)
+        L(Write(0, Fmt("uint64_t(int64_t(::recomp::lift::Sext<%d>(%s)))", Bytes(1),
+                       Read(1).c_str())));
+      else
+        L(Write(0, Fmt("uint32_t(::recomp::lift::Sext<%d>(%s))", Bytes(1), Read(1).c_str())));
+      return;
+    case ZYDIS_MNEMONIC_LEA:
+      L(Write(0, AddrExpr(1, false)));
+      return;
+    case ZYDIS_MNEMONIC_PUSH:
+      if (n == 2 && !IsImm(0)) {
+        L("const uint32_t v = " + Read(0) + ";");
+        L("rsp -= 2; ::recomp::lift::Wr<uint16_t>(B, rsp, uint16_t(v));");
+      } else {
+        L("const uint64_t v = " + Read(0, 8) + ";");
+        Push64("v");
+      }
+      return;
+    case ZYDIS_MNEMONIC_POP:
+      if (n == 2) return Unimpl();
+      // A memory destination's address uses RSP after the increment.
+      L("const uint64_t v = ::recomp::lift::Rd<uint64_t>(B, rsp); rsp += 8;");
+      if (IsMem(0))
+        L(Fmt("::recomp::lift::Wr<uint64_t>(B, %s, v);", AddrExpr(0).c_str()));
+      else
+        L(Write(0, "v"));
+      return;
+    case ZYDIS_MNEMONIC_PUSHFQ:
+      Push64("::recomp::PackEFlags(F)");
+      return;
+    case ZYDIS_MNEMONIC_POPFQ:
+      L("::recomp::UnpackEFlags(F, uint32_t(::recomp::lift::Rd<uint64_t>(B, rsp))); rsp += 8;");
+      return;
+    case ZYDIS_MNEMONIC_XCHG:
+      if (IsMem(0) || IsMem(1)) {
+        int mi = IsMem(0) ? 0 : 1, ri = 1 - mi;
+        const char* t = MemType(Bytes(mi));
+        L(Fmt("const %s v = __atomic_exchange_n(::recomp::lift::AtomicPtr<%s>(B, m%d), "
+              "%s(%s), __ATOMIC_SEQ_CST);", VT(n), t, mi, t, Read(ri).c_str()));
+        L(Write(ri, "v"));
+      } else {
+        L(Fmt("const %s a = %s, b = %s;", VT(n), Read(0).c_str(), Read(1).c_str()));
+        L(Write(0, "b"));
+        L(Write(1, "a"));
+      }
+      return;
+    case ZYDIS_MNEMONIC_ADD: case ZYDIS_MNEMONIC_ADC: case ZYDIS_MNEMONIC_SUB:
+    case ZYDIS_MNEMONIC_SBB: case ZYDIS_MNEMONIC_CMP: case ZYDIS_MNEMONIC_AND:
+    case ZYDIS_MNEMONIC_OR: case ZYDIS_MNEMONIC_XOR: case ZYDIS_MNEMONIC_TEST:
+    case ZYDIS_MNEMONIC_INC: case ZYDIS_MNEMONIC_DEC: case ZYDIS_MNEMONIC_NEG:
+    case ZYDIS_MNEMONIC_NOT:
+      return EmitAlu();
+    case ZYDIS_MNEMONIC_SHL: case ZYDIS_MNEMONIC_SHR: case ZYDIS_MNEMONIC_SAR:
+    case ZYDIS_MNEMONIC_ROL: case ZYDIS_MNEMONIC_ROR: case ZYDIS_MNEMONIC_RCL:
+    case ZYDIS_MNEMONIC_RCR:
+      return EmitShift();
+    case ZYDIS_MNEMONIC_SHLD:
+    case ZYDIS_MNEMONIC_SHRD:
+      L(Fmt("const %s r = ::recomp::lift::%s<%d>(F, %s, %s, %s);", VT(n),
+            m == ZYDIS_MNEMONIC_SHLD ? "Shld" : "Shrd", n, Read(0).c_str(), Read(1).c_str(),
+            Read(2, 1).c_str()));
+      L(Write(0, "r"));
+      return;
+    case ZYDIS_MNEMONIC_IMUL:
+      if (Nvis() > 1) {
+        std::string a = Nvis() == 3 ? Read(1) : Read(0);
+        std::string b = Nvis() == 3 ? Read(2, n) : Read(1, n);
+        L(Fmt("const %s r = ::recomp::lift::Imul2<%d>(F, %s, %s);", VT(n), n, a.c_str(),
+              b.c_str()));
+        L(Write(0, "r"));
+        return;
+      }
+      [[fallthrough]];
+    case ZYDIS_MNEMONIC_MUL: {  // one operand: rdx:rax (edx:eax, ax) = acc * r/m
+      const char* fn = m == ZYDIS_MNEMONIC_MUL ? "Mul1" : "Imul1";
+      L(Fmt("%s lo, hi; ::recomp::lift::%s<%d>(F, %s, %s, lo, hi);", VT(n), fn, n,
+            ReadReg(Acc(n)).c_str(), Read(0).c_str()));
+      if (n == 1) {
+        L(WriteReg(ZYDIS_REGISTER_AX, "lo | (hi << 8)"));
+      } else {
+        L(WriteReg(Acc(n), "lo"));
+        L(WriteReg(n == 8 ? ZYDIS_REGISTER_RDX : n == 4 ? ZYDIS_REGISTER_EDX
+                                                         : ZYDIS_REGISTER_DX,
+                   "hi"));
+      }
+      return;
+    }
+    case ZYDIS_MNEMONIC_DIV:
+    case ZYDIS_MNEMONIC_IDIV: {
+      const char* fn = m == ZYDIS_MNEMONIC_DIV ? "Div" : "Idiv";
+      std::string fail =
+          Fmt("{ LIFT_SPILL; ::recomp::RaiseDivideError(c, %s); LIFT_RELOAD; }", va.c_str());
+      if (n == 1) {
+        L("uint32_t lo = uint32_t(rax) & 0xFFu, hi = (uint32_t(rax) >> 8) & 0xFFu;");
+        L(Fmt("if (::recomp::lift::%s<1>(lo, hi, %s)) { %s } else %s", fn, Read(0).c_str(),
+              WriteReg(ZYDIS_REGISTER_AX, "lo | (hi << 8)").c_str(), fail.c_str()));
+      } else {
+        ZydisRegister hreg = n == 8   ? ZYDIS_REGISTER_RDX
+                             : n == 4 ? ZYDIS_REGISTER_EDX
+                                      : ZYDIS_REGISTER_DX;
+        L(Fmt("%s lo = %s, hi = %s;", VT(n), ReadReg(Acc(n)).c_str(), ReadReg(hreg).c_str()));
+        L(Fmt("if (::recomp::lift::%s<%d>(lo, hi, %s)) { %s %s } else %s", fn, n,
+              Read(0).c_str(), WriteReg(Acc(n), "lo").c_str(), WriteReg(hreg, "hi").c_str(),
+              fail.c_str()));
+      }
+      return;
+    }
+    case ZYDIS_MNEMONIC_CBW:
+      L(WriteReg(ZYDIS_REGISTER_AX, "uint32_t(int32_t(int8_t(rax)))"));
+      return;
+    case ZYDIS_MNEMONIC_CWDE:
+      L(WriteReg(ZYDIS_REGISTER_EAX, "uint32_t(int32_t(int16_t(rax)))"));
+      return;
+    case ZYDIS_MNEMONIC_CDQE:
+      L("rax = uint64_t(int64_t(int32_t(rax)));");
+      return;
+    case ZYDIS_MNEMONIC_CWD:
+      L(WriteReg(ZYDIS_REGISTER_DX, "(rax & 0x8000u) ? 0xFFFFu : 0u"));
+      return;
+    case ZYDIS_MNEMONIC_CDQ:
+      L(WriteReg(ZYDIS_REGISTER_EDX, "uint32_t(int32_t(rax) >> 31)"));
+      return;
+    case ZYDIS_MNEMONIC_CQO:
+      L("rdx = uint64_t(int64_t(rax) >> 63);");
+      return;
+    case ZYDIS_MNEMONIC_LEAVE:
+      L("rsp = rbp; rbp = ::recomp::lift::Rd<uint64_t>(B, rsp); rsp += 8;");
+      return;
+    case ZYDIS_MNEMONIC_ENTER: {
+      uint64_t size = Op(0).imm.value.u;
+      if (Op(1).imm.value.u & 31) return Unimpl();
+      Push64("rbp");
+      L(Fmt("rbp = rsp; rsp -= %lluu;", U(size)));
+      return;
+    }
+    case ZYDIS_MNEMONIC_CLD: L("F.df = false;"); return;
+    case ZYDIS_MNEMONIC_STD: L("F.df = true;"); return;
+    case ZYDIS_MNEMONIC_CLC: L("F.cf = false;"); return;
+    case ZYDIS_MNEMONIC_STC: L("F.cf = true;"); return;
+    case ZYDIS_MNEMONIC_CMC: L("F.cf = !F.cf;"); return;
+    case ZYDIS_MNEMONIC_SAHF: L("::recomp::lift::Sahf(F, (uint32_t(rax) >> 8) & 0xFFu);"); return;
+    case ZYDIS_MNEMONIC_LAHF: L(WriteReg(ZYDIS_REGISTER_AH, "::recomp::lift::Lahf(F)")); return;
+    case ZYDIS_MNEMONIC_BSWAP:
+      L(Write(0, Fmt("__builtin_bswap%d(%s)", n * 8, Read(0).c_str())));
+      return;
+    case ZYDIS_MNEMONIC_BSF:
+    case ZYDIS_MNEMONIC_BSR:
+      L(Fmt("const %s r = ::recomp::lift::%s<%d>(F, %s, %s);", VT(n),
+            m == ZYDIS_MNEMONIC_BSF ? "Bsf" : "Bsr", n, Read(0).c_str(), Read(1).c_str()));
+      // An all-zero source (ZF) leaves the whole destination unchanged: a
+      // 32-bit one is not zero-extended then.
+      if (n == 4)
+        L("if (!F.zf) { " + Write(0, "r") + " }");
+      else
+        L(Write(0, "r"));
+      return;
+    case ZYDIS_MNEMONIC_BT: case ZYDIS_MNEMONIC_BTS: case ZYDIS_MNEMONIC_BTR:
+    case ZYDIS_MNEMONIC_BTC: {
+      const char* one = n == 8 ? "1ull" : "1u";
+      // A memory operand with a register bit offset can address outside
+      // the operand: the offset is signed and selects a byte relative to it.
+      if (IsMem(0) && IsReg(1)) {
+        L(Fmt("const int64_t off = int64_t(%s(%s));", n == 8 ? "int64_t" : "int32_t",
+              Read(1).c_str()));
+        L("const uint64_t a = m0 + uint64_t(off >> 3);");
+        L("const uint32_t bit = uint32_t(off) & 7u;");
+        L("uint32_t v = ::recomp::lift::Rd<uint8_t>(B, a);");
+        one = "1u";
+      } else {
+        L(Fmt("const uint32_t bit = %s & %du;", Read(1).c_str(), n * 8 - 1));
+        L(Fmt("%s v = %s;", VT(n), Read(0).c_str()));
+      }
+      L("F.cf = (v >> bit) & 1u;");
+      std::string upd = m == ZYDIS_MNEMONIC_BTS   ? Fmt("v |= %s << bit;", one)
+                        : m == ZYDIS_MNEMONIC_BTR ? Fmt("v &= ~(%s << bit);", one)
+                        : m == ZYDIS_MNEMONIC_BTC ? Fmt("v ^= %s << bit;", one)
+                                                  : "";
+      if (!upd.empty()) {
+        L(upd);
+        if (IsMem(0) && IsReg(1))
+          L("::recomp::lift::Wr<uint8_t>(B, a, uint8_t(v));");
+        else
+          L(Write(0, "v"));
+      }
+      return;
+    }
+    case ZYDIS_MNEMONIC_CMPXCHG:
+      // Not locked: one compare, then either store (the destination) or
+      // load (the accumulator).
+      L(Fmt("const %s d = %s;", VT(n), Read(0).c_str()));
+      L(Fmt("(void)::recomp::lift::Sub<%d>(F, %s, d);", n, ReadReg(Acc(n)).c_str()));
+      L("if (F.zf) { " + Write(0, Read(1)) + " } else { " + WriteReg(Acc(n), "d") + " }");
+      return;
+    case ZYDIS_MNEMONIC_XADD:
+      L(Fmt("const %s a = %s, b = %s;", VT(n), Read(0).c_str(), Read(1).c_str()));
+      L(Fmt("const %s r = ::recomp::lift::Add<%d>(F, a, b);", VT(n), n));
+      L(Write(1, "a"));
+      L(Write(0, "r"));
+      return;
+    case ZYDIS_MNEMONIC_XLAT:
+      L(WriteReg(ZYDIS_REGISTER_AL,
+                 "::recomp::lift::Rd<uint8_t>(B, rbx + (rax & 0xFFu))"));
+      return;
+    case ZYDIS_MNEMONIC_CPUID:
+      L("LIFT_SPILL; ::recomp::Cpuid(c); LIFT_RELOAD;");
+      return;
+    case ZYDIS_MNEMONIC_XGETBV:
+      L("LIFT_SPILL; ::recomp::Xgetbv(c); LIFT_RELOAD;");
+      return;
+    case ZYDIS_MNEMONIC_RDTSC:
+      L("{ LIFT_SPILL; const uint64_t t = ::recomp::Rdtsc(c); rax = uint32_t(t); "
+        "rdx = t >> 32; }");
+      return;
+    default:
+      break;
+  }
+  Unimpl();
+}
+
 void InsnEmitter::Emit() {
   const auto m = d_.mnemonic;
-  const uint32_t next = in_.next();
+  const uint64_t next = in_.next();
 
   if (IsX87(d_)) {
     if (!PrepareMem()) return Unimpl();
@@ -1540,6 +2135,8 @@ void InsnEmitter::Emit() {
       return Unimpl();
 
   bool locked = (d_.attributes & ZYDIS_ATTRIB_HAS_LOCK) && Nvis() && IsMem(0);
+
+  if (X64()) return Emit64();
 
   if ((m == ZYDIS_MNEMONIC_CALL || m == ZYDIS_MNEMONIC_JMP) &&
       p_.resume_sites.count(in_.va)) {
@@ -1558,7 +2155,7 @@ void InsnEmitter::Emit() {
     // ---- control flow ---------------------------------------------------
     case ZYDIS_MNEMONIC_CALL: {
       if (IsImm(0)) {
-        uint32_t t = RelTarget(in_);
+        uint64_t t = RelTarget(in_);
         Push32(Hex(next));
         if (t == next) return;  // call $+5; pop reg: reads EIP
         if (!p_.InText(t)) {
@@ -1575,7 +2172,7 @@ void InsnEmitter::Emit() {
         L(Fmt("LIFT_SPILL; ::recomp::Dispatch(c, t, %s); LIFT_RELOAD;",
               Hex(in_.va).c_str()));
       }
-      uint32_t tt;
+      uint64_t tt;
       if (Classify(p_, f_, in_, &tt) == Flow::Stop)
         L(Fmt("::recomp::Unreachable(c, %s);", Hex(in_.va).c_str()));
       return;
@@ -1590,7 +2187,7 @@ void InsnEmitter::Emit() {
       auto jt = p_.jumptables.find(in_.va);
       if (jt != p_.jumptables.end()) {
         L("switch (t) {");
-        for (uint32_t tgt : jt->second)
+        for (uint64_t tgt : jt->second)
           L(Fmt("  case %s: %s", Hex(tgt).c_str(), GotoOrTail(tgt).c_str()));
         L(Fmt("  default: LIFT_SPILL; ::recomp::BadJump(c, %s, t);",
               Hex(in_.va).c_str()));
@@ -1899,10 +2496,10 @@ void InsnEmitter::Emit() {
 
 }  // namespace
 
-std::string FnName(uint32_t va) { return Fmt("f_%08X", va); }
+std::string FnName(uint64_t va) { return Fmt("f_%08llX", U(va)); }
 
 void Emitter::EmitFunction(const Function& f, std::string* out,
-                           std::set<uint32_t>* refs, EmitStats* stats) {
+                           std::set<uint64_t>* refs, EmitStats* stats) {
   std::string& o = *out;
   auto nm = p_.names.find(f.entry);
   o += "// " + (nm != p_.names.end() ? nm->second : FnName(f.entry)) + "\n";
@@ -1930,17 +2527,17 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
   // reaches code below its entry (shared tails, e.g. strstr jumping into
   // strchr), execution must start with a jump to the entry.
   if (!f.insns.empty() && f.insns.begin()->first != f.entry)
-    o += Fmt("  goto L_%08X;\n", f.entry);
+    o += Fmt("  goto L_%08llX;\n", U(f.entry));
   auto pr = p_.probes.find(f.entry);
   if (pr != p_.probes.end())
-    o += Fmt("  LIFT_SPILL; ::recomp::Probe(c, 0x%Xu, \"%s\"); LIFT_RELOAD;\n",
-             f.entry, pr->second.c_str());
+    o += Fmt("  LIFT_SPILL; ::recomp::Probe(c, 0x%llXu, \"%s\"); LIFT_RELOAD;\n",
+             U(f.entry), pr->second.c_str());
 
   // Labels: branch targets plus non-contiguous fallthroughs.
-  std::set<uint32_t> labels = f.labels;
+  std::set<uint64_t> labels = f.labels;
   for (auto it = f.insns.begin(); it != f.insns.end(); ++it) {
     auto nx = std::next(it);
-    uint32_t t;
+    uint64_t t;
     Flow fl = Classify(p_, f, it->second, &t);
     if ((fl == Flow::Fall || fl == Flow::Branch) &&
         (nx == f.insns.end() || nx->first != it->second.next()))
@@ -1951,7 +2548,7 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
 
   for (auto it = f.insns.begin(); it != f.insns.end(); ++it) {
     const Insn& in = it->second;
-    if (labels.count(in.va)) o += Fmt("L_%08X:\n", in.va);
+    if (labels.count(in.va)) o += Fmt("L_%08llX:\n", U(in.va));
     auto run = runs.find(in.va);
     if (run != runs.end()) {
       auto last = f.insns.find(run->second);
@@ -1959,10 +2556,10 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
       it = last;
     } else {
       stats->insns++;
-      o += Fmt("  { // %08X %s\n", in.va, dec_.Format(in).c_str());
+      o += Fmt("  { // %08llX %s\n", U(in.va), dec_.Format(in).c_str());
       if (!in.ok) {
-        o += Fmt("    LIFT_SPILL; ::recomp::Unimplemented(c, 0x%Xu, \"undecodable\");\n",
-                 in.va);
+        o += Fmt("    LIFT_SPILL; ::recomp::Unimplemented(c, 0x%llXu, \"undecodable\");\n",
+                 U(in.va));
         stats->unimplemented["(undecodable)"]++;
       } else {
         InsnEmitter(p_, f, in, &o, refs, stats).Emit();
@@ -1972,10 +2569,10 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
 
     // Continue to the next instruction if it isn't laid out next.
     const Insn& done = it->second;
-    uint32_t t;
+    uint64_t t;
     Flow fl = Classify(p_, f, done, &t);
     if (fl == Flow::Fall || fl == Flow::Branch) {
-      uint32_t nx = done.next();
+      uint64_t nx = done.next();
       auto ni = std::next(it);
       if (IsOtherEntry(p_, f, nx)) {
         refs->insert(nx);
@@ -1983,9 +2580,9 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
                  FnName(nx).c_str());
       } else if (ni == f.insns.end() || ni->first != nx) {
         o += f.insns.count(nx)
-                 ? Fmt("  goto L_%08X;\n", nx)
-                 : Fmt("  LIFT_SPILL; ::recomp::BadJump(c, 0x%Xu, 0x%Xu);\n",
-                       done.va, nx);
+                 ? Fmt("  goto L_%08llX;\n", U(nx))
+                 : Fmt("  LIFT_SPILL; ::recomp::BadJump(c, 0x%llXu, 0x%llXu);\n",
+                       U(done.va), U(nx));
       }
     }
   }
@@ -2011,22 +2608,22 @@ static bool RunNeutral(const Insn& in) {
   }
 }
 
-std::map<uint32_t, uint32_t> Emitter::FindX87Runs(const Function& f,
-                                                  const std::set<uint32_t>& labels) const {
-  std::map<uint32_t, uint32_t> runs;  // first -> last instruction
+std::map<uint64_t, uint64_t> Emitter::FindX87Runs(const Function& f,
+                                                  const std::set<uint64_t>& labels) const {
+  std::map<uint64_t, uint64_t> runs;  // first -> last instruction
   for (auto it = f.insns.begin(); it != f.insns.end(); ++it) {
     const Insn& first = it->second;
     if (!first.ok || first.d.meta.category != ZYDIS_CATEGORY_X87_ALU) continue;
     X87Sim sim;
     std::string scratch;
-    std::set<uint32_t> refs;
+    std::set<uint64_t> refs;
     EmitStats st;
     int count = 0;
     auto last = f.insns.end();
     for (auto j = it; j != f.insns.end(); ++j) {
       const Insn& in = j->second;
       if (!in.ok || (j != it && labels.count(in.va))) break;
-      uint32_t t;
+      uint64_t t;
       if (Classify(p_, f, in, &t) != Flow::Fall) break;
       if (IsX87(in.d)) {
         X87Sim trial = sim;
@@ -2048,12 +2645,12 @@ std::map<uint32_t, uint32_t> Emitter::FindX87Runs(const Function& f,
   return runs;
 }
 
-void Emitter::EmitX87Run(const Function& f, std::map<uint32_t, Insn>::const_iterator first,
-                         std::map<uint32_t, Insn>::const_iterator last, std::string* out,
-                         std::set<uint32_t>* refs, EmitStats* stats) const {
+void Emitter::EmitX87Run(const Function& f, std::map<uint64_t, Insn>::const_iterator first,
+                         std::map<uint64_t, Insn>::const_iterator last, std::string* out,
+                         std::set<uint64_t>* refs, EmitStats* stats) const {
   std::string& o = *out;
   auto end = std::next(last);
-  const uint32_t id = first->first;
+  const uint64_t id = first->first;
   EmitStats fast_stats;  // the slow branch below counts the instructions
 
   // The run on host doubles, for runs with arithmetic: an instruction that
@@ -2063,7 +2660,7 @@ void Emitter::EmitX87Run(const Function& f, std::map<uint32_t, Insn>::const_iter
   // exact path. The instructions before it are done by then.
   X87Sim dsim('d');
   std::string dbody;
-  std::vector<uint32_t> resume;
+  std::vector<uint64_t> resume;
   bool doubles = false;
   for (auto j = first; j != end; ++j)
     if (IsX87(j->second.d) && (X87OpName(j->second.d.mnemonic) ||
@@ -2071,8 +2668,8 @@ void Emitter::EmitX87Run(const Function& f, std::map<uint32_t, Insn>::const_iter
       doubles = true;
   for (auto j = first; doubles && j != end; ++j) {
     const Insn& in = j->second;
-    dbody += Fmt("  { // %08X %s\n", in.va, dec_.Format(in).c_str());
-    std::string fail = Fmt("{ rk = %zu; goto XS_%08X; }", resume.size(), id);
+    dbody += Fmt("  { // %08llX %s\n", U(in.va), dec_.Format(in).c_str());
+    std::string fail = Fmt("{ rk = %zu; goto XS_%08llX; }", resume.size(), U(id));
     bool can_fail;
     if (!InsnEmitter(p_, f, in, &dbody, refs, &fast_stats).EmitInRunDouble(dsim, fail, &can_fail))
       doubles = false;
@@ -2085,12 +2682,12 @@ void Emitter::EmitX87Run(const Function& f, std::map<uint32_t, Insn>::const_iter
   for (auto j = first; j != end; ++j) {
     const Insn& in = j->second;
     if (doubles && std::find(resume.begin(), resume.end(), in.va) != resume.end())
-      body += Fmt("  XR_%08X:;\n", in.va);
-    body += Fmt("  { // %08X %s\n", in.va, dec_.Format(in).c_str());
+      body += Fmt("  XR_%08llX:;\n", U(in.va));
+    body += Fmt("  { // %08llX %s\n", U(in.va), dec_.Format(in).c_str());
     InsnEmitter(p_, f, in, &body, refs, &fast_stats).EmitInRun(sim);
     body += "  }\n";
   }
-  o += Fmt("  { // x87 run %08X..%08X\n", first->first, last->first);
+  o += Fmt("  { // x87 run %08llX..%08llX\n", U(first->first), U(last->first));
   o += Fmt("  if (::recomp::x87::run::Guard(c.fpu, 0x%02Xu, 0x%02Xu)) {\n", sim.need_valid,
            sim.need_empty);
   o += "  const uint32_t rcw = c.fpu.cw, rtop = c.fpu.top;\n";
@@ -2126,20 +2723,20 @@ void Emitter::EmitX87Run(const Function& f, std::map<uint32_t, Insn>::const_iter
     if (!resume.empty()) o += "  int rk;\n";
     o += dbody;
     o += back;
-    o += Fmt("  goto XE_%08X;\n", id);
+    o += Fmt("  goto XE_%08llX;\n", U(id));
     if (!resume.empty()) {
-      o += Fmt("  XS_%08X:\n", id);
+      o += Fmt("  XS_%08llX:\n", U(id));
       o += back;
       o += "  switch (rk) {\n";
       for (size_t i = 0; i < resume.size(); ++i)
-        o += i + 1 < resume.size() ? Fmt("    case %zu: goto XR_%08X;\n", i, resume[i])
-                                   : Fmt("    default: goto XR_%08X;\n", resume[i]);
+        o += i + 1 < resume.size() ? Fmt("    case %zu: goto XR_%08llX;\n", i, U(resume[i]))
+                                   : Fmt("    default: goto XR_%08llX;\n", U(resume[i]));
       o += "  }\n";
     }
     o += "  }\n  }\n";
   }
   o += body;
-  if (doubles) o += Fmt("  XE_%08X:\n", id);
+  if (doubles) o += Fmt("  XE_%08llX:\n", U(id));
   // Write back: registers assigned in the run, the empty bits of the
   // slots it touched, TOP, and the status word (sticky flags, C1,
   // C3/C2/C0).
@@ -2159,7 +2756,7 @@ void Emitter::EmitX87Run(const Function& f, std::map<uint32_t, Insn>::const_iter
   for (auto j = first; j != end; ++j) {
     const Insn& in = j->second;
     stats->insns++;
-    o += Fmt("  { // %08X %s\n", in.va, dec_.Format(in).c_str());
+    o += Fmt("  { // %08llX %s\n", U(in.va), dec_.Format(in).c_str());
     InsnEmitter(p_, f, in, &o, refs, stats).Emit();
     o += "  }\n";
   }

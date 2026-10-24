@@ -29,24 +29,29 @@ struct Ctx {
   // compiler merges spills and reloads of neighbours into 64-bit or vector
   // accesses, which the CPU cannot forward from or to the 32-bit accesses
   // of the function on the other side of the call (see ARCHITECTURE.md,
-  // "Registers in Ctx").
-  alignas(8) uint32_t eax;
-  alignas(8) uint32_t ecx;
-  alignas(8) uint32_t edx;
-  alignas(8) uint32_t ebx;
-  alignas(8) uint32_t esp;
-  alignas(8) uint32_t ebp;
-  alignas(8) uint32_t esi;
-  alignas(8) uint32_t edi;
+  // "Registers in Ctx"). x64 guests use the whole slot (rax..r15); 32-bit
+  // ones only its low half (eax..edi), both hosts being little-endian.
+  union { uint64_t rax; uint32_t eax; };
+  union { uint64_t rcx; uint32_t ecx; };
+  union { uint64_t rdx; uint32_t edx; };
+  union { uint64_t rbx; uint32_t ebx; };
+  union { uint64_t rsp; uint32_t esp; };
+  union { uint64_t rbp; uint32_t ebp; };
+  union { uint64_t rsi; uint32_t esi; };
+  union { uint64_t rdi; uint32_t edi; };
+  uint64_t r8, r9, r10, r11, r12, r13, r14, r15;
   // Flags as one EFLAGS word (PackEFlags), not as the Flags bytes lifted
   // code keeps in locals: a spill is one 32-bit store and a reload one
   // 32-bit load, which the CPU forwards (see ARCHITECTURE.md, "Flags").
   alignas(8) uint32_t eflags = 0x202;
-  uint32_t fs_base;  // guest VA of this thread's TEB
+  uint32_t fs_base;  // guest VA of this thread's TEB (32-bit guests)
+  uint64_t gs_base;  // guest VA of this thread's TEB (x64 guests)
   x87::State fpu;
   // SSE state. Unlike the integer registers these are never cached in
-  // locals: lifted code operates on them in place (runtime/sse.h).
-  Xmm xmm[8];
+  // locals: lifted code operates on them in place (runtime/sse.h). 32-bit
+  // guests have xmm0-7; ymm_hi holds bits 255:128 of the AVX registers.
+  Xmm xmm[16];
+  Xmm ymm_hi[16];
   uint32_t mxcsr;
   Thread* thread;    // runtime-owned per-thread data
 };

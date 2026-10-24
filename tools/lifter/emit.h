@@ -17,7 +17,7 @@ struct EmitStats {
   std::map<std::string, uint64_t> unimplemented;  // mnemonic -> count
 };
 
-std::string FnName(uint32_t va);
+std::string FnName(uint64_t va);
 
 class Emitter {
  public:
@@ -26,14 +26,14 @@ class Emitter {
   // Appends the function definition to *out. Every function it references
   // (calls, tail calls) is added to *refs for forward declarations.
   void EmitFunction(const Function& f, std::string* out,
-                    std::set<uint32_t>* refs, EmitStats* stats);
+                    std::set<uint64_t>* refs, EmitStats* stats);
 
  private:
-  std::map<uint32_t, uint32_t> FindX87Runs(const Function& f,
-                                           const std::set<uint32_t>& labels) const;
-  void EmitX87Run(const Function& f, std::map<uint32_t, Insn>::const_iterator first,
-                  std::map<uint32_t, Insn>::const_iterator last, std::string* out,
-                  std::set<uint32_t>* refs, EmitStats* stats) const;
+  std::map<uint64_t, uint64_t> FindX87Runs(const Function& f,
+                                           const std::set<uint64_t>& labels) const;
+  void EmitX87Run(const Function& f, std::map<uint64_t, Insn>::const_iterator first,
+                  std::map<uint64_t, Insn>::const_iterator last, std::string* out,
+                  std::set<uint64_t>* refs, EmitStats* stats) const;
   const Program& p_;
   const Decoder& dec_;
 };

@@ -39,17 +39,17 @@ inline void SetLane(Xmm& x, int i, T v) {
 }
 
 // `bytes` of guest memory at a, zero-extended to a register.
-inline Xmm Ld(const uint8_t* B, uint32_t a, int bytes) {
+inline Xmm Ld(const uint8_t* B, uint64_t a, int bytes) {
   Xmm x{};
   std::memcpy(x.b, B + a, bytes);
   return x;
 }
-inline void St(uint8_t* B, uint32_t a, const Xmm& x, int bytes) {
+inline void St(uint8_t* B, uint64_t a, const Xmm& x, int bytes) {
   std::memcpy(B + a, x.b, bytes);
 }
 // Legacy-SSE m128 operands other than movups/movupd/movdqu must be 16-byte
 // aligned (#GP otherwise): fatal, naming the instruction.
-void CheckAligned(Ctx& c, uint32_t a, uint32_t va);
+void CheckAligned(Ctx& c, uint64_t a, uint64_t va);
 
 // ---- floating point ---------------------------------------------------
 enum Op : uint8_t { kAdd, kSub, kMul, kDiv };
@@ -57,22 +57,22 @@ enum Op : uint8_t { kAdd, kSub, kMul, kDiv };
 // d = d op s, lane-wise: `lanes` lanes of double (dbl) or float. Scalar
 // forms pass lanes = 1 and keep the upper lanes of d.
 void Arith(Ctx& c, Op op, bool dbl, int lanes, Xmm& d, const Xmm& s,
-           uint32_t va);
+           uint64_t va);
 
 // CMPPS/PD/SS/SD: each lane of d becomes all ones if `d pred s` holds,
 // else zero. pred is the imm8 (0 EQ, 1 LT, 2 LE, 3 UNORD, 4 NEQ, 5 NLT,
 // 6 NLE, 7 ORD).
 void Cmp(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s, uint8_t pred,
-         uint32_t va);
+         uint64_t va);
 
 // (U)COMISS/SD of the low lanes: 0 greater, 1 less, 2 equal, 3 unordered
 // (the caller sets ZF/PF/CF). `ordered` = COMIS (invalid on QNaN too).
 int Comi(Ctx& c, bool dbl, bool ordered, const Xmm& a, const Xmm& b,
-         uint32_t va);
+         uint64_t va);
 
 // SQRTSD/SQRTSS/SQRTPD/SQRTPS: d = sqrt(s), lane-wise; scalar forms keep
 // the upper lanes of d.
-void Sqrt(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s, uint32_t va);
+void Sqrt(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s, uint64_t va);
 
 // RSQRTPS: d = 1/sqrt(s) in all four float lanes (see above). No flags:
 // ±0 and denormals give ±inf, negative values the default NaN, +inf +0,
@@ -84,7 +84,28 @@ uint32_t RsqrtLane(uint32_t x);
 void Cvtsi2sd(Xmm& d, int32_t v);
 
 // CVT(T)SS2SI / CVT(T)SD2SI of the low lane of s.
-uint32_t CvtToI32(Ctx& c, bool dbl, const Xmm& s, bool truncate, uint32_t va);
+uint32_t CvtToI32(Ctx& c, bool dbl, const Xmm& s, bool truncate, uint64_t va);
+
+// CVT(T)SS2SI / CVT(T)SD2SI to a 64-bit register.
+uint64_t CvtToI64(Ctx& c, bool dbl, const Xmm& s, bool truncate, uint64_t va);
+
+// MINSS/SD/PS/PD (max = false) and MAXSS/SD/PS/PD, lane-wise: d op s ? d : s.
+// A NaN in either operand (invalid, quiet ones too) or equal values,
+// zeros of either sign included, give s. Scalar forms keep d's upper lanes.
+void MinMax(Ctx& c, bool max, bool dbl, int lanes, Xmm& d, const Xmm& s,
+            uint64_t va);
+
+// CVTSS2SD / CVTPS2PD (to_dbl, 1 or 2 lanes) and CVTSD2SS / CVTPD2PS.
+// Scalar forms keep d's other lanes; CVTPD2PS zeroes its upper half.
+void CvtFloat(Ctx& c, bool to_dbl, int lanes, Xmm& d, const Xmm& s, uint64_t va);
+
+// CVTSI2SS / CVTSI2SD of a 32-bit or 64-bit (src64) integer into the low
+// lane, rounded by MXCSR (only int64 -> double and int -> float can be
+// inexact).
+void CvtIntToF(Ctx& c, bool dbl, bool src64, uint64_t v, Xmm& d, uint64_t va);
+
+// CVTDQ2PS: four int32 lanes to float, rounded by MXCSR.
+void Cvtdq2ps(Ctx& c, Xmm& d, const Xmm& s, uint64_t va);
 
 // CVTDQ2PD: the two low int32 lanes of s as doubles (always exact).
 inline Xmm Cvtdq2pd(const Xmm& s) {
@@ -97,7 +118,7 @@ inline Xmm Cvtdq2pd(const Xmm& s) {
 }
 
 // LDMXCSR: reserved bits set would #GP: fatal.
-void Ldmxcsr(Ctx& c, uint32_t v, uint32_t va);
+void Ldmxcsr(Ctx& c, uint32_t v, uint64_t va);
 
 // ---- bitwise and integer ----------------------------------------------
 inline void And(Xmm& d, const Xmm& s) {
@@ -153,6 +174,18 @@ inline void ShlQ(Xmm& d, uint64_t count) {
 inline void ShrQ(Xmm& d, uint64_t count) {
   for (int i = 0; i < 2; i++)
     SetLane<uint64_t>(d, i, count > 63 ? 0 : Lane<uint64_t>(d, i) >> count);
+}
+// PSRLDQ / PSLLDQ: the whole register shifted by `n` bytes (more than 15
+// clears it).
+inline void ShrDq(Xmm& d, uint8_t n) {
+  Xmm r{};
+  for (int i = 0; i + n < 16; i++) r.b[i] = d.b[i + n];
+  d = r;
+}
+inline void ShlDq(Xmm& d, uint8_t n) {
+  Xmm r{};
+  for (int i = n; i < 16; i++) r.b[i] = d.b[i - n];
+  d = r;
 }
 // PSHUFD.
 inline void ShufD(Xmm& d, const Xmm& s, uint8_t imm) {

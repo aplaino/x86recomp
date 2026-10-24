@@ -14,12 +14,14 @@ namespace {
 // Linux and clear of macOS's 4 GiB __PAGEZERO and main image. Any other
 // address works too; lifted code reads the base at runtime.
 constexpr uintptr_t kPreferredBase = 0x1000000000ull;
+// Larger arenas (x64 guests) and their guard go above that.
+constexpr uintptr_t kPreferredBaseLarge = 0x20000000000ull;
 
 constexpr int kReserveFlags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
 
 }  // namespace
 
-bool GuestMemory::Reserve() {
+bool GuestMemory::Reserve(unsigned bits) {
   host_page_ = static_cast<size_t>(sysconf(_SC_PAGESIZE));
   if (host_page_ < kPageSize || host_page_ % kPageSize) {
     std::fprintf(stderr, "GuestMemory: unsupported host page size %zu\n",
@@ -27,25 +29,28 @@ bool GuestMemory::Reserve() {
     return false;
   }
 
-  void* hint = reinterpret_cast<void*>(kPreferredBase);
+  const uint64_t size = 1ull << bits;
+  const uint64_t span = bits > 32 ? 2 * size : size;  // with the guard
+  void* hint = reinterpret_cast<void*>(bits > 32 ? kPreferredBaseLarge : kPreferredBase);
 #ifdef MAP_FIXED_NOREPLACE
-  void* p = mmap(hint, kSize, PROT_NONE, kReserveFlags | MAP_FIXED_NOREPLACE,
+  void* p = mmap(hint, span, PROT_NONE, kReserveFlags | MAP_FIXED_NOREPLACE,
                  -1, 0);
-  if (p == MAP_FAILED) p = mmap(nullptr, kSize, PROT_NONE, kReserveFlags, -1, 0);
+  if (p == MAP_FAILED) p = mmap(nullptr, span, PROT_NONE, kReserveFlags, -1, 0);
 #else
   // Without MAP_FIXED_NOREPLACE the hint is advisory; take what we get.
-  void* p = mmap(hint, kSize, PROT_NONE, kReserveFlags, -1, 0);
+  void* p = mmap(hint, span, PROT_NONE, kReserveFlags, -1, 0);
 #endif
   if (p == MAP_FAILED) {
     std::perror("GuestMemory::Reserve mmap");
     return false;
   }
   base_ = static_cast<uint8_t*>(p);
-  pages_.assign(kSize / kPageSize, 0);
+  size_ = size;
+  pages_.assign(size / kPageSize, 0);
   return true;
 }
 
-void GuestMemory::HostRange(gaddr va, uint32_t size, uint64_t* start,
+void GuestMemory::HostRange(gaddr va, uint64_t size, uint64_t* start,
                             uint64_t* end) const {
   uint64_t mask = host_page_ - 1;
   *start = uint64_t(va) & ~mask;
@@ -58,8 +63,9 @@ bool GuestMemory::HostPageInUse(uint64_t host_off) const {
   return false;
 }
 
-bool GuestMemory::Commit(gaddr va, uint32_t size, Prot prot) {
+bool GuestMemory::Commit(gaddr va, uint64_t size, Prot prot) {
   if (!size) return true;
+  if (!InRange(va, size)) return false;
   uint64_t s, e;
   HostRange(va, size, &s, &e);
   // Host pages are only ever "accessible" or not; guest protection is
@@ -74,8 +80,9 @@ bool GuestMemory::Commit(gaddr va, uint32_t size, Prot prot) {
   return true;
 }
 
-bool GuestMemory::Protect(gaddr va, uint32_t size, Prot prot) {
+bool GuestMemory::Protect(gaddr va, uint64_t size, Prot prot) {
   if (!size) return true;
+  if (!InRange(va, size)) return false;
   uint64_t first = va / kPageSize, last = (uint64_t(va) + size - 1) / kPageSize;
   for (uint64_t g = first; g <= last; g++)
     if (!(pages_[g] & kCommitted)) return false;
@@ -84,8 +91,8 @@ bool GuestMemory::Protect(gaddr va, uint32_t size, Prot prot) {
   return true;
 }
 
-void GuestMemory::Decommit(gaddr va, uint32_t size, bool zero) {
-  if (!size) return;
+void GuestMemory::Decommit(gaddr va, uint64_t size, bool zero) {
+  if (!size || !InRange(va, size)) return;
   uint64_t first = va / kPageSize, last = (uint64_t(va) + size - 1) / kPageSize;
   for (uint64_t g = first; g <= last; g++) {
     if (zero && (pages_[g] & kCommitted))
@@ -103,11 +110,11 @@ void GuestMemory::Decommit(gaddr va, uint32_t size, bool zero) {
 }
 
 bool GuestMemory::IsCommitted(gaddr va) const {
-  return pages_[va / kPageSize] & kCommitted;
+  return va < size_ && (pages_[va / kPageSize] & kCommitted);
 }
 
 Prot GuestMemory::QueryProt(gaddr va) const {
-  return static_cast<Prot>(pages_[va / kPageSize] & 0x7);
+  return va < size_ ? static_cast<Prot>(pages_[va / kPageSize] & 0x7) : Prot::None;
 }
 
 }  // namespace recomp

@@ -87,16 +87,16 @@ const char* kFilePrologue =
 
 struct ModuleArgs {
   std::string path, symdir, manifest;
-  uint32_t base = 0;
+  uint64_t base = 0;
 };
 
 int main(int argc, char** argv) {
   std::vector<ModuleArgs> mods{{"", "symbols", "lifter.manifest", 0}};
   std::string outdir = "generated";
   uint64_t per_file = 12000;
-  uint32_t dump = 0;
+  uint64_t dump = 0;
   std::string x87_test, int_test, sse_test;
-  std::set<uint32_t> only;
+  std::set<uint64_t> only;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     auto val = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -104,10 +104,10 @@ int main(int argc, char** argv) {
     else if (a == "--module") mods.push_back({val(), "", "", 0});
     else if (a == "--symbols") mods.back().symdir = val();
     else if (a == "--manifest") mods.back().manifest = val();
-    else if (a == "--base") mods.back().base = std::stoul(val(), nullptr, 16);
+    else if (a == "--base") mods.back().base = std::stoull(val(), nullptr, 16);
     else if (a == "--out") outdir = val();
     else if (a == "--insns-per-file") per_file = std::stoull(val());
-    else if (a == "--dump") dump = std::stoul(val(), nullptr, 16);
+    else if (a == "--dump") dump = std::stoull(val(), nullptr, 16);
     else if (a == "--x87-test") x87_test = val();
     else if (a == "--int-test") int_test = val();
     else if (a == "--sse-test") sse_test = val();
@@ -116,7 +116,7 @@ int main(int argc, char** argv) {
       for (size_t pos = 0; pos < list.size();) {
         size_t end = list.find(',', pos);
         if (end == std::string::npos) end = list.size();
-        only.insert(std::stoul(list.substr(pos, end - pos), nullptr, 16));
+        only.insert(std::stoull(list.substr(pos, end - pos), nullptr, 16));
         pos = end + 1;
       }
     }
@@ -148,13 +148,17 @@ int main(int argc, char** argv) {
       return 1;
     }
   }
-  lifter::Decoder dec;
+  lifter::Decoder dec(p.x64);
+  // Files lifted from x64 images see lifted.h's x64 register model.
+  std::string prologue = kFilePrologue;
+  if (p.x64)
+    prologue.insert(prologue.find("#include"), "#define RECOMP_LIFT_X64 1\n");
 
   // --int-test / --x87-test / --sse-test OUT: lifted instruction forms for
   // tests/lift_{int,x87,sse}_test.cpp.
-  if (!int_test.empty()) return lifter::WriteIntTest(p, dec, int_test, kFilePrologue);
-  if (!sse_test.empty()) return lifter::WriteSseTest(p, dec, sse_test, kFilePrologue);
-  if (!x87_test.empty()) return lifter::WriteX87Test(p, dec, x87_test, kFilePrologue);
+  if (!int_test.empty()) return lifter::WriteIntTest(p, dec, int_test, prologue.c_str());
+  if (!sse_test.empty()) return lifter::WriteSseTest(p, dec, sse_test, prologue.c_str());
+  if (!x87_test.empty()) return lifter::WriteX87Test(p, dec, x87_test, prologue.c_str());
 
   // --dump VA: show decoded operands of one function, for debugging the
   // emitter against Zydis' operand model.
@@ -162,7 +166,7 @@ int main(int argc, char** argv) {
     lifter::Function f;
     lifter::BuildFunction(p, dec, dump, &f);
     for (const auto& [va, in] : f.insns) {
-      std::printf("%08X  %-40s", va, dec.Format(in).c_str());
+      std::printf("%08llX  %-40s", (unsigned long long)va, dec.Format(in).c_str());
       for (int i = 0; i < in.d.operand_count; i++) {
         const auto& o = in.ops[i];
         std::printf(" [%d:%s%s sz%d]", i,
@@ -176,7 +180,7 @@ int main(int argc, char** argv) {
     }
     lifter::Emitter em(p, dec);
     std::string code;
-    std::set<uint32_t> refs;
+    std::set<uint64_t> refs;
     lifter::EmitStats st;
     em.EmitFunction(f, &code, &refs, &st);
     Shorten(code);
@@ -197,10 +201,10 @@ int main(int argc, char** argv) {
     p.weak.clear();
   }
   size_t initial = p.entries.size();
-  std::deque<uint32_t> work(p.entries.begin(), p.entries.end());
-  std::set<uint32_t> done;
+  std::deque<uint64_t> work(p.entries.begin(), p.entries.end());
+  std::set<uint64_t> done;
   size_t from_code_ptrs = 0, from_data_ptrs = 0;
-  auto candidate = [&](const lifter::Module* m, uint32_t t, size_t* counter) {
+  auto candidate = [&](const lifter::Module* m, uint64_t t, size_t* counter) {
     if (p.TextOf(t) != m || p.entries.count(t)) return;
     lifter::Insn in;
     if (!dec.Decode(p, t, &in)) return;
@@ -213,12 +217,16 @@ int main(int argc, char** argv) {
     for (const auto& sec : m.img.sections) {
       if (!only.empty()) break;
       if (sec.name != ".rdata" && sec.name != ".data") continue;
-      for (uint32_t a = sec.va; a + 4 <= sec.va + sec.vsize; a += 4)
-        candidate(&m, p.mem.read<uint32_t>(a), &from_data_ptrs);
+      if (p.x64)  // pointers are 8 bytes, 8-aligned
+        for (uint64_t a = sec.va; a + 8 <= sec.va + sec.vsize; a += 8)
+          candidate(&m, p.mem.read<uint64_t>(a), &from_data_ptrs);
+      else
+        for (uint64_t a = sec.va; a + 4 <= sec.va + sec.vsize; a += 4)
+          candidate(&m, p.mem.read<uint32_t>(a), &from_data_ptrs);
     }
   size_t recovered_tables = 0;
   while (!work.empty()) {
-    uint32_t e = work.front();
+    uint64_t e = work.front();
     work.pop_front();
     if (!done.insert(e).second) continue;
     lifter::Function f;
@@ -228,7 +236,7 @@ int main(int argc, char** argv) {
     for (bool more = true; more;) {
       more = false;
       for (const auto& [va, in] : f.insns) {
-        std::vector<uint32_t> targets;
+        std::vector<uint64_t> targets;
         if (p.jumptables.count(va) ||
             !lifter::RecoverJumpTable(p, f, in, &targets))
           continue;
@@ -242,7 +250,7 @@ int main(int argc, char** argv) {
       }
     }
     for (const auto* s : {&f.direct_calls, &f.tail_calls, &f.setjmp_returns})
-      for (uint32_t t : *s) {
+      for (uint64_t t : *s) {
         if (!p.InText(t)) continue;
         p.weak.erase(t);  // really entered as a function
         if (p.entries.insert(t).second) work.push_back(t);
@@ -251,11 +259,16 @@ int main(int argc, char** argv) {
     if (!only.empty()) continue;
     for (const auto& [va, in] : f.insns) {
       if (!in.ok) continue;
-      for (int i = 0; i < in.d.operand_count_visible; i++)
-        if (in.ops[i].type == ZYDIS_OPERAND_TYPE_IMMEDIATE &&
-            !in.ops[i].imm.is_relative)
-          candidate(fm, static_cast<uint32_t>(in.ops[i].imm.value.u),
+      for (int i = 0; i < in.d.operand_count_visible; i++) {
+        const auto& o = in.ops[i];
+        if (o.type == ZYDIS_OPERAND_TYPE_IMMEDIATE && !o.imm.is_relative)
+          candidate(fm, p.x64 ? o.imm.value.u : static_cast<uint32_t>(o.imm.value.u),
                     &from_code_ptrs);
+        // x64 code takes a function's address with a RIP-relative lea.
+        if (o.type == ZYDIS_OPERAND_TYPE_MEMORY && o.mem.base == ZYDIS_REGISTER_RIP &&
+            in.d.mnemonic == ZYDIS_MNEMONIC_LEA)
+          candidate(fm, in.next() + o.mem.disp.value, &from_code_ptrs);
+      }
     }
   }
   std::printf("functions: %zu (%zu from Ghidra/exports, %zu discovered: "
@@ -271,7 +284,7 @@ int main(int argc, char** argv) {
   lifter::EmitStats stats;
   std::map<std::string, std::string> files;
   std::string body, report_warnings;
-  std::set<uint32_t> refs;
+  std::set<uint64_t> refs;
   uint64_t file_insns = 0;
   int file_no = 0;
   // Output file names and per-module totals.
@@ -283,10 +296,10 @@ int main(int argc, char** argv) {
   std::map<const lifter::Module*, ModuleStats> per_module;
   auto flush = [&]() {
     if (body.empty()) return;
-    std::string text = kFilePrologue;
+    std::string text = prologue;
     // Declare every referenced function, including ones defined later in
     // this file.
-    for (uint32_t r : refs)
+    for (uint64_t r : refs)
       text += "void " + lifter::FnName(r) + "(::recomp::Ctx& c);\n";
     text += "\n" + body + "}  // namespace recomp::gen\n";
     Shorten(text);
@@ -298,7 +311,7 @@ int main(int argc, char** argv) {
     file_insns = 0;
   };
 
-  for (uint32_t e : p.entries) {
+  for (uint64_t e : p.entries) {
     if (const lifter::Module* m = p.TextOf(e); m && m != cur) {
       flush();
       cur = m;
@@ -313,7 +326,7 @@ int main(int argc, char** argv) {
     lifter::BuildFunction(p, dec, e, &f);
     for (const auto& w : f.warnings) {
       char buf[32];
-      std::snprintf(buf, sizeof buf, "%08X: ", e);
+      std::snprintf(buf, sizeof buf, "%08llX: ", (unsigned long long)e);
       report_warnings += buf + w + "\n";
     }
     uint64_t before = stats.insns;
@@ -329,13 +342,14 @@ int main(int argc, char** argv) {
   std::string table =
       "// Generated by recomp_lift. Do not edit.\n"
       "#include \"runtime/lifted.h\"\nnamespace recomp::gen {\n";
-  for (uint32_t e : p.entries)
+  for (uint64_t e : p.entries)
     table += "void " + lifter::FnName(e) + "(::recomp::Ctx& c);\n";
   table += "}  // namespace recomp::gen\nnamespace recomp {\n"
            "extern const LiftedFn kLiftedFunctions[] = {\n";
-  for (uint32_t e : p.entries) {
+  for (uint64_t e : p.entries) {
     char buf[64];
-    std::snprintf(buf, sizeof buf, "  {0x%08Xu, &gen::f_%08X},\n", e, e);
+    std::snprintf(buf, sizeof buf, "  {0x%08llXu, &gen::f_%08llX},\n",
+                  (unsigned long long)e, (unsigned long long)e);
     table += buf;
   }
   table += "};\nextern const uint32_t kLiftedFunctionCount = " +
@@ -369,8 +383,8 @@ int main(int argc, char** argv) {
     report += "modules:\n";
     for (const auto& m : p.modules) {
       char buf[160];
-      std::snprintf(buf, sizeof buf, "  %s at %08X: %llu functions, %llu instructions\n",
-                    m.name.c_str(), m.img.image_base,
+      std::snprintf(buf, sizeof buf, "  %s at %08llX: %llu functions, %llu instructions\n",
+                    m.name.c_str(), (unsigned long long)m.img.image_base,
                     (unsigned long long)per_module[&m].functions,
                     (unsigned long long)per_module[&m].insns);
       report += buf;

@@ -48,7 +48,7 @@ std::atomic<int> g_failures{0};
 void OnFault(int, siginfo_t* si, void*) {
   uintptr_t a = reinterpret_cast<uintptr_t>(si->si_addr);
   uintptr_t base = reinterpret_cast<uintptr_t>(g_mem.base());
-  if (a - base < GuestMemory::kSize && lazy::HandleFault(uint32_t(a - base))) return;
+  if (a - base < g_mem.size() && lazy::HandleFault(uint32_t(a - base))) return;
   const char m[] = "unexpected fault\n";
   (void)!write(2, m, sizeof m - 1);
   _exit(2);

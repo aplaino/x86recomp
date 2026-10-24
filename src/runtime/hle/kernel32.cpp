@@ -169,7 +169,7 @@ bool CallDllMain(Ctx& c, Module& m, uint32_t reason) {
   if (!m.img.entry) return true;
   m.stale = true;
   RECOMP_TRACE("  %s: DllMain(%u)\n", m.name.c_str(), reason);
-  return CallGuest(c, m.img.entry, {m.img.image_base, reason, 0}) != 0;
+  return CallGuest(c, uint32_t(m.img.entry), {uint32_t(m.img.image_base), reason, 0}) != 0;
 }
 
 HLE("kernel32.dll", GetModuleHandleA, 1) {

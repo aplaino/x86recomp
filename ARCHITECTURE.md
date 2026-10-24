@@ -946,7 +946,129 @@ Still open: a lock-free hand-off in a game's own threads (a plain flag
 polled without any of the calls above) needs explicit barriers via the
 manifest once one is found.
 
+### 64-bit guests (x86-64, PE32+) — in progress
+A mode of the same lifter, runtime and HLE, not a second codebase. The
+mode is the image's machine (0x14C or 0x8664); one process is one mode.
+Everything above holds unless this section says otherwise.
+
+Guest address space:
+- x64 images have fixed bases above 4 GiB (0x140000000 for EXEs, which
+  usually have their relocations stripped, 0x180000000 for DLLs), so
+  guest addresses are 64-bit. The arena is one reservation of 2^N bytes,
+  N per process: 32 for 32-bit guests (unchanged), 36 (64 GiB) for x64
+  by default, raised through GameConfig if a game needs more. Guest VA A
+  is still host `base + A`; `gaddr` is uint64_t.
+- x64 guests get nothing below 4 GiB: heap, stacks, TEBs, thunks and
+  module handles live above it, as on Windows with high-entropy ASLR. A
+  pointer truncated to 32 bits anywhere (in the HLE above all, which
+  kept pointers in uint32_t) then faults at once instead of aliasing
+  other memory.
+- Lifted code adds A to the base without masking. A wild pointer outside
+  the window would reach host memory instead of faulting; guest pointers
+  come from the guest's own image, stack and allocator, so this needs a
+  guest bug that would also crash on Windows. The reservation is
+  followed by a PROT_NONE guard of the same size to catch overruns.
+
+Context: the register slots become uint64_t rax..r15; the 32-bit names
+are the low halves of the first eight (an anonymous union), so 32-bit
+lifted code and the HLE keep using eax..edi with the same 32-bit
+accesses. XMM grows to 16 registers, with the upper ymm halves in an
+array of their own (legacy SSE code never touches it). x64 code reaches
+its TEB through gs (Ctx::gs_base; fs is unused).
+
+Lifter:
+- Zydis in long mode for PE32+; VAs are 64-bit throughout. Lifted
+  functions are still f_<VA> (eight hex digits or more), so 32-bit
+  output does not change.
+- Registers are uint64_t locals. 32-bit writes zero-extend, 8/16-bit
+  writes merge (with REX: spl, bpl, sil, dil and r8b-r15b; no ah). The
+  flag helpers gain an 8-byte width.
+- RIP-relative operands resolve to absolute VAs at lift time.
+- push, pop, call and ret move 8 bytes; the real return address is
+  still written to the guest stack (stack walks and unwinding read it).
+- Function list: every .pdata (RUNTIME_FUNCTION) entry without
+  UNW_FLAG_CHAININFO starts a function; chained entries are fragments of
+  their parent (cold code split off by the compiler), reached by jumps,
+  and lifted into it. Leaf functions have no .pdata entry and are found
+  as before (calls, pointer scans, exports, Ghidra).
+- Jump tables in the x64 MSVC form (`lea rB, [__ImageBase]; mov(sxd)
+  eT, [rB + idx*4 + table_rva]; add rT, rB; jmp rT`, plus the byte-index
+  variant) hold 32-bit RVAs and are recovered like the 32-bit forms.
+
+Win64 ABI in the HLE:
+- Arguments in rcx, rdx, r8, r9 (xmm0-3 for float ones), the rest at
+  [rsp+0x28] onwards at the thunk; the caller owns the 32-byte shadow
+  space and pops, so a handler's nargs means nothing for x64. Arg(c, i)
+  follows the process's ABI and returns uint64_t, ArgF the float
+  registers. Handlers return uint64_t (rax); 32-bit thunks keep the low
+  half in EAX.
+- Existing handlers keep guest pointers and structure fields in
+  uint32_t. A handler is marked 64-bit clean once audited; an x64 image
+  that imports one that is not is refused at load, naming it, the same
+  rule as "every import needs an explicit handler". Mirror types of
+  structures with pointers or handles (8 bytes in Win64) get an x64
+  layout next to the 32-bit one.
+- Kernel handles stay small integers (Win64 handles are pointer-sized
+  but their values fit in 32 bits, sign-extended).
+
+Exceptions: x64 SEH is table-based, not an fs:[0] chain.
+- Each function's .pdata entry and UNWIND_INFO describe its prologue
+  and name a language handler (__C_specific_handler, __CxxFrameHandler4
+  and 3, __GSHandlerCheck*). The runtime implements the unwinder
+  (RtlLookupFunctionEntry, RtlVirtualUnwind, RtlUnwindEx,
+  RtlCaptureContext, RaiseException's dispatch) over the guest's unwind
+  data and guest stack. The stack holds real return addresses and the
+  prologues' pushes of non-volatile registers, so unwinding through
+  lifted frames recovers them exactly.
+- After an x64 prologue RSP does not move (pushes happen only there;
+  alloca functions use a frame register), so a frame is identified by
+  its establisher frame (RSP after the prologue, or the frame register's
+  value). A resume (catch continuation, __except block) throws
+  GuestResume keyed by that value instead of EBP, caught by the lifted
+  function that owns the frame. Only functions with a handler in their
+  unwind info get the try/catch.
+- Catch funclets, __except filters and termination handlers are
+  separate .pdata functions that the language handler calls with the
+  establisher frame; they are ordinary lifted functions. Continuation
+  addresses (from FuncInfo3/4 metadata and C_SCOPE_TABLE targets) are
+  strong entries, read by the lifter from the handler data.
+- Software exceptions (throw, RaiseException) arrive through an HLE call
+  with the registers spilled, so their CONTEXT is exact. Open: hardware
+  faults inside __try ranges, where the faulting function's RSP and RIP
+  are in locals; the scope tables say exactly which instruction ranges
+  need them published.
+
+CRT and C++ runtime: VCRUNTIME140, MSVCP140 and the UCRT api sets are
+DLL imports in these games and get explicit handlers like any other
+(vcruntime's C++ exception handlers parse MSVC's metadata, above).
+Open: UCRT's math functions are not correctly rounded; whether to
+reproduce its results bit for bit or use one deterministic
+implementation on every host.
+
+AVX: games test CPUID and XGETBV and take AVX paths when they are
+offered, and console targets on x86-64 are AVX CPUs, so VEX code is
+lifted, not avoided:
+- VEX-encoded 128-bit forms and 256-bit AVX lift onto runtime/sse lanes
+  (SoftFloat with the SSE NaN rules, exact MXCSR flags). A VEX.128 write
+  zeroes bits 255:128 of the destination; legacy SSE leaves them alone.
+- CPUID for x64 processes is a fixed CPU of its own: the x86-64 baseline
+  plus what the lifter implements bit-exactly with oracle tests, up to
+  AVX (OSXSAVE, XCR0 = 7 through XGETBV) once that holds; never the
+  host's. Until then games keep taking their SSE paths.
+- Oracle tests run every 64-bit form found in a game natively on an
+  x86-64 host from random states, as for 32-bit.
+
+Graphics, audio, platform: Direct3D 11 / DXGI (and D3DCompiler_47) as
+HLE over gfx::Device; XAudio2 on the mixer; SDL2 imports on host SDL3;
+online services (store and multiplayer SDKs) get explicit handlers that
+report being offline.
+
+Order: lifter first (PE32+, .pdata, long-mode emission, oracle tests),
+proven on a DLL with few imports; then the 2^N arena, Ctx and the Win64
+HLE ABI; then the unwinder and CRT; then graphics and audio.
+
 ## Roadmap
+- 64-bit guests (above).
 - EAX for games on DirectSound3D (IDirectSound3DBuffer property sets),
   on the same EAX model and reverb buses as the Miles providers.
 - SDL_GPU backend: matched image for image against the d3d9 backend;

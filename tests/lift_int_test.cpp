@@ -200,7 +200,8 @@ int main(int argc, char** argv) {
       if (std::memcmp(native_buf, mem.ptr(kBuf), kBufSize)) why += " mem";
       if (why.empty()) continue;
       if (++fails <= 2) {
-        std::printf("FAIL %-36s (e.g. %08X, base %d):%s\n", f.text, f.example_va, f.base,
+        std::printf("FAIL %-36s (e.g. %08llX, base %d):%s\n", f.text,
+                    (unsigned long long)f.example_va, f.base,
                     why.c_str());
         std::printf("   in  ");
         for (int r = 0; r < 8; r++) if (r != 4) std::printf(" %s=%08X", names[r], uint32_t(in.r[r]));

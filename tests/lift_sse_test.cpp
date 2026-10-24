@@ -282,7 +282,8 @@ int main(int argc, char** argv) {
       if (std::memcmp(native_buf, mem.ptr(kBuf), kBufSize)) why += " mem";
       if (why.empty()) continue;
       if (++fails <= 3) {
-        std::printf("FAIL %-40s (e.g. %08X):%s\n", f.text, f.example_va, why.c_str());
+        std::printf("FAIL %-40s (e.g. %08llX):%s\n", f.text,
+                    (unsigned long long)f.example_va, why.c_str());
         std::printf("   in   mxcsr=%04X fl=%03X\n", in.mxcsr, uint32_t(in.flags) & 0x8D5);
         std::printf("   hw   mxcsr=%04X fl=%03X\n", hw.mxcsr, uint32_t(hw.flags) & 0x8D5);
         std::printf("   lift mxcsr=%04X fl=%03X\n", c.mxcsr, lf & 0x8D5);

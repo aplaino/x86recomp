@@ -256,9 +256,10 @@ void InitDispatch() {
     CodeRange& r = g_dlls.emplace_back(TextOf(m.img));
     // A DLL lifted at another base, or not at all, has no functions here.
     if (m.img.entry && !r.table[m.img.entry - r.lo])
-      FatalF("%s at %08X: its entry point %08X is not lifted (lift it with "
+      FatalF("%s at %08llX: its entry point %08llX is not lifted (lift it with "
              "recomp_lift --module, at the same --base)",
-             m.name.c_str(), m.img.image_base, m.img.entry);
+             m.name.c_str(), (unsigned long long)m.img.image_base,
+             (unsigned long long)m.img.entry);
   }
 }
 
