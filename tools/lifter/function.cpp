@@ -27,6 +27,12 @@ bool Decoder::Decode(const Program& p, uint64_t va, Insn* out) const {
   return out->ok;
 }
 
+bool Decoder::DecodeRaw(const uint8_t* bytes, size_t n, uint64_t va, Insn* out) const {
+  out->va = va;
+  out->ok = ZYAN_SUCCESS(ZydisDecoderDecodeFull(&dec_, bytes, n, &out->d, out->ops));
+  return out->ok;
+}
+
 std::string Decoder::Format(const Insn& in) const {
   if (!in.ok) return "(bad)";
   char buf[256];

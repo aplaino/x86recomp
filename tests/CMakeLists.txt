@@ -97,6 +97,34 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
   set_tests_properties(lift_semantics PROPERTIES TIMEOUT 300)
 endif()
 
+# lift_isa64_int, lift_isa64_sse: tests/lift_x64_test.cpp on the forms in
+# x64_isa/forms.txt (recomp_lift --forms): the x64 CPU model's extensions
+# beyond what the x64 test images cover. They run natively too, so the
+# host needs those extensions (BMI1, ABM, MOVBE, SSE4.2, AES, PCLMULQDQ,
+# F16C, AVX), as every AMD family 16h or later and Intel Haswell or later
+# has.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$" AND TARGET recomp_lift)
+  foreach(_kind int sse)
+    set(_forms "${CMAKE_CURRENT_BINARY_DIR}/lift_isa64_${_kind}_forms.cpp")
+    add_custom_command(OUTPUT "${_forms}"
+      COMMAND recomp_lift --forms "${CMAKE_CURRENT_SOURCE_DIR}/x64_isa/forms.txt" --x64
+              --${_kind}-test "${_forms}"
+      DEPENDS recomp_lift "${CMAKE_CURRENT_SOURCE_DIR}/x64_isa/forms.txt"
+      COMMENT "Lifting the x64 extension forms for lift_isa64_${_kind}_test")
+    add_executable(lift_isa64_${_kind}_test lift_x64_test.cpp "${_forms}")
+    target_include_directories(lift_isa64_${_kind}_test PRIVATE ${PROJECT_SOURCE_DIR}/src
+                               ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(lift_isa64_${_kind}_test PRIVATE recomp_x87 recomp_image)
+    target_compile_options(lift_isa64_${_kind}_test PRIVATE -O1 -fno-strict-aliasing
+                           ${RECOMP_X87_FP_FLAGS})
+    if(_kind STREQUAL "sse")
+      target_compile_definitions(lift_isa64_${_kind}_test PRIVATE LIFT_X64_SSE)
+    endif()
+    add_test(NAME lift_isa64_${_kind} COMMAND lift_isa64_${_kind}_test)
+    set_tests_properties(lift_isa64_${_kind} PROPERTIES TIMEOUT 1800)
+  endforeach()
+endif()
+
 # HLSL translator: each shader in hlsl/ through recomp_hlslc, then
 # glslangValidator (the GLSL must compile for Vulkan), with the reflection
 # (constant table, inputs, varyings, samplers) compared with its

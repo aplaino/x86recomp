@@ -8,6 +8,7 @@
 //            [--module <game.dll> --symbols DIR [--manifest FILE]
 //             [--base HEX]]...
 //            [--only VA[,VA...]]   (just these functions and their callees)
+//   recomp_lift --forms LIST [--x64] (--int-test | --sse-test) OUT.cpp
 //
 // Each --module adds a DLL the game loads itself, lifted into the same
 // output; --symbols/--manifest/--base after it apply to that DLL. DLLs
@@ -15,6 +16,10 @@
 // two modules overlap; the game's GameConfig must then give the same
 // base). Their functions go into gen_<module>_NNN.cpp, the EXE's into
 // gen_NNN.cpp, and table.cpp lists them all.
+//
+// --forms takes the instruction forms from LIST (hex encodings, see
+// WriteFormListTest) instead of an image; --x64 decodes them as 64-bit
+// code.
 //
 // --only lifts the given functions and whatever they call or tail-call
 // directly, nothing else (no Ghidra entries, exports or pointer
@@ -95,7 +100,8 @@ int main(int argc, char** argv) {
   std::string outdir = "generated";
   uint64_t per_file = 12000;
   uint64_t dump = 0;
-  std::string x87_test, int_test, sse_test;
+  std::string x87_test, int_test, sse_test, forms;
+  bool forms_x64 = false;
   std::set<uint64_t> only;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -111,6 +117,8 @@ int main(int argc, char** argv) {
     else if (a == "--x87-test") x87_test = val();
     else if (a == "--int-test") int_test = val();
     else if (a == "--sse-test") sse_test = val();
+    else if (a == "--forms") forms = val();
+    else if (a == "--x64") forms_x64 = true;
     else if (a == "--only") {
       std::string list = val();
       for (size_t pos = 0; pos < list.size();) {
@@ -124,6 +132,17 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "unknown argument %s\n", a.c_str());
       return 2;
     }
+  }
+  if (!forms.empty()) {
+    if (int_test.empty() == sse_test.empty()) {
+      std::fprintf(stderr, "--forms needs one of --int-test, --sse-test\n");
+      return 2;
+    }
+    lifter::Decoder dec(forms_x64);
+    std::string prologue = kFilePrologue;
+    if (forms_x64) prologue.insert(prologue.find("#include"), "#define RECOMP_LIFT_X64 1\n");
+    return lifter::WriteFormListTest(forms, forms_x64, dec, sse_test.empty() ? int_test : sse_test,
+                                     prologue.c_str(), !sse_test.empty());
   }
   if (mods[0].path.empty()) {
     std::fprintf(stderr, "usage: recomp_lift --exe game.exe "

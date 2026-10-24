@@ -112,6 +112,9 @@ HOST(H_fistp_m16, "fistps (%1)")
 HOST(H_fist_m32, "fistl (%1)")
 HOST(H_fistp_m32, "fistpl (%1)")
 HOST(H_fistp_m64, "fistpll (%1)")
+HOST(H_fisttp_m16, "fisttps (%1)")
+HOST(H_fisttp_m32, "fisttpl (%1)")
+HOST(H_fisttp_m64, "fisttpll (%1)")
 
 #define ARITH_HOST(OPN, m32, m64, i16, i32, d8, dc, de)              \
   HOST(H_##OPN##_m32, m32 " (%1)")                                   \
@@ -228,6 +231,9 @@ MODEL(M_fistp_m16, Out(m, x::StoreI16(s)); x::Pop(s))
 MODEL(M_fist_m32, Out(m, x::StoreI32(s)))
 MODEL(M_fistp_m32, Out(m, x::StoreI32(s)); x::Pop(s))
 MODEL(M_fistp_m64, Out(m, x::StoreI64(s)); x::Pop(s))
+MODEL(M_fisttp_m16, Out(m, x::StoreI16Trunc(s)); x::Pop(s))
+MODEL(M_fisttp_m32, Out(m, x::StoreI32Trunc(s)); x::Pop(s))
+MODEL(M_fisttp_m64, Out(m, x::StoreI64Trunc(s)); x::Pop(s))
 
 #define ARITH_MODEL(OPN, OP)                                           \
   MODEL(M_##OPN##_m32, x::ArithF32(s, OP, M32(m)))                     \
@@ -977,6 +983,9 @@ int main(int argc, char** argv) {
       {"fist m32", H_fist_m32, M_fist_m32, 0, 4, E, kIntish},
       {"fistp m32", H_fistp_m32, M_fistp_m32, 0, 4, E, kIntish},
       {"fistp m64", H_fistp_m64, M_fistp_m64, 0, 8, E, kIntish},
+      {"fisttp m16", H_fisttp_m16, M_fisttp_m16, 0, 2, E, kIntish},
+      {"fisttp m32", H_fisttp_m32, M_fisttp_m32, 0, 4, E, kIntish},
+      {"fisttp m64", H_fisttp_m64, M_fisttp_m64, 0, 8, E, kIntish},
 #define ARITH_OPS(OPN)                                                      \
   {"f" #OPN " m32", H_##OPN##_m32, M_##OPN##_m32, 4, 0, E, kAny},          \
   {"f" #OPN " m64", H_##OPN##_m64, M_##OPN##_m64, 8, 0, E, kAny},          \

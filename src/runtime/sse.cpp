@@ -204,7 +204,14 @@ template <bool D>
 void CmpT(Ctx& c, int lanes, Xmm& d, const Xmm& s, uint8_t pred, uint64_t va) {
   using U = typename Fmt<D>::U;
   Scope sc(c, va);
-  const bool signal_qnan = pred == 1 || pred == 2 || pred == 5 || pred == 6;
+  // Per predicate (low four bits): the result when unordered, and whether
+  // a QNaN signals (flipped by bit 4).
+  static constexpr bool kUnord[16] = {false, false, false, true, true, true, true, false,
+                                      true, true, true, false, false, false, false, true};
+  static constexpr bool kSignal[16] = {false, true, true, false, false, true, true, false,
+                                       false, true, true, false, false, true, true, false};
+  const int p = pred & 15;
+  const bool signal_qnan = kSignal[p] != bool(pred & 16);
   Xmm r = d;
   for (int i = 0; i < lanes; i++) {
     U a = Lane<U>(d, i), b = Lane<U>(s, i);
@@ -212,20 +219,20 @@ void CmpT(Ctx& c, int lanes, Xmm& d, const Xmm& s, uint8_t pred, uint64_t va) {
     bool res;
     if (unord) {
       if (IsSNaN<D>(a) || IsSNaN<D>(b) || signal_qnan) sc.flags |= kIE;
-      res = pred == 3 || pred == 4 || pred == 5 || pred == 6;
+      res = kUnord[p];
     } else {
       sc.Operand<D>(a);
       sc.Operand<D>(b);
       int o = Order<D>(a, b);
-      switch (pred & 7) {
-        case 0: res = o == 0; break;
-        case 1: res = o < 0; break;
-        case 2: res = o <= 0; break;
-        case 3: res = false; break;
-        case 4: res = o != 0; break;
-        case 5: res = !(o < 0); break;
-        case 6: res = !(o <= 0); break;
-        default: res = true; break;
+      switch (p) {
+        case 0: case 8: res = o == 0; break;
+        case 1: case 9: res = o < 0; break;          // LT; NGE (not >=)
+        case 2: case 10: res = o <= 0; break;        // LE; NGT
+        case 3: case 11: res = false; break;         // UNORD; FALSE
+        case 4: case 12: res = o != 0; break;
+        case 5: case 13: res = !(o < 0); break;      // NLT; GE
+        case 6: case 14: res = !(o <= 0); break;     // NLE; GT
+        default: res = true; break;                  // ORD; TRUE
       }
     }
     SetLane<U>(r, i, res ? U(~U(0)) : U(0));
@@ -290,7 +297,136 @@ typename Fmt<!FromDbl>::U CvtLane(Scope& sc, typename Fmt<FromDbl>::U a) {
   return r;
 }
 
+template <bool D>
+void HorizOpT(Ctx& c, bool sub, Xmm& d, const Xmm& s, uint64_t va) {
+  using U = typename Fmt<D>::U;
+  constexpr int n = D ? 2 : 4;
+  Scope sc(c, va);
+  Xmm r;
+  for (int i = 0; i < n; i++) {
+    const Xmm& x = i < n / 2 ? d : s;
+    int k = 2 * (i % (n / 2));
+    SetLane<U>(r, i, ArithLane<D>(sc, sub ? kSub : kAdd, Lane<U>(x, k), Lane<U>(x, k + 1)));
+  }
+  sc.Finish();
+  d = r;
+}
+
+template <bool D>
+void AddSubT(Ctx& c, Xmm& d, const Xmm& s, uint64_t va) {
+  using U = typename Fmt<D>::U;
+  Scope sc(c, va);
+  Xmm r;
+  for (int i = 0; i < (D ? 2 : 4); i++)
+    SetLane<U>(r, i, ArithLane<D>(sc, i & 1 ? kAdd : kSub, Lane<U>(d, i), Lane<U>(s, i)));
+  sc.Finish();
+  d = r;
+}
+
+// One lane to an integral value. Only SNaN (IE) and inexact (PE, unless
+// suppressed) are signalled: no DE.
+template <bool D>
+typename Fmt<D>::U RoundLane(Scope& sc, typename Fmt<D>::U a, uint8_t imm) {
+  if (IsNaN<D>(a)) {
+    if (IsSNaN<D>(a)) sc.flags |= kIE;
+    return Quiet<D>(a);
+  }
+  if (IsDenormal<D>(a) && (sc.c.mxcsr & kDAZ))
+    FatalF("sse: DAZ with a denormal operand at %08llX (not modelled)",
+           (unsigned long long)sc.va);
+  static constexpr uint8_t kModes[4] = {softfloat_round_near_even, softfloat_round_min,
+                                        softfloat_round_max, softfloat_round_minMag};
+  const uint8_t mode = imm & 4 ? RoundingMode(sc.c.mxcsr) : kModes[imm & 3];
+  const bool exact = !(imm & 8);
+  sc.Begin();
+  typename Fmt<D>::U r;
+  if constexpr (D)
+    r = f64_roundToInt(float64_t{a}, mode, exact).v;
+  else
+    r = f32_roundToInt(float32_t{a}, mode, exact).v;
+  sc.End();
+  return r;
+}
+
+template <bool D>
+void RoundT(Ctx& c, int lanes, Xmm& d, const Xmm& s, uint8_t imm, uint64_t va) {
+  using U = typename Fmt<D>::U;
+  Scope sc(c, va);
+  Xmm r = d;
+  for (int i = 0; i < lanes; i++) SetLane<U>(r, i, RoundLane<D>(sc, Lane<U>(s, i), imm));
+  sc.Finish();
+  d = r;
+}
+
+template <bool D>
+void DpT(Ctx& c, Xmm& d, const Xmm& s, uint8_t imm, uint64_t va) {
+  using U = typename Fmt<D>::U;
+  constexpr int n = D ? 2 : 4;
+  Scope sc(c, va);
+  U p[4];
+  for (int i = 0; i < n; i++)
+    p[i] = imm >> (4 + i) & 1 ? ArithLane<D>(sc, kMul, Lane<U>(d, i), Lane<U>(s, i)) : U(0);
+  U sum = ArithLane<D>(sc, kAdd, p[0], p[1]);
+  if constexpr (!D)
+    sum = ArithLane<D>(sc, kAdd, sum, ArithLane<D>(sc, kAdd, p[2], p[3]));
+  Xmm r{};
+  for (int i = 0; i < n; i++)
+    if (imm >> i & 1) SetLane<U>(r, i, sum);
+  sc.Finish();
+  d = r;
+}
+
 }  // namespace
+
+void HorizOp(Ctx& c, bool dbl, bool sub, Xmm& d, const Xmm& s, uint64_t va) {
+  if (dbl)
+    HorizOpT<true>(c, sub, d, s, va);
+  else
+    HorizOpT<false>(c, sub, d, s, va);
+}
+
+void AddSub(Ctx& c, bool dbl, Xmm& d, const Xmm& s, uint64_t va) {
+  if (dbl)
+    AddSubT<true>(c, d, s, va);
+  else
+    AddSubT<false>(c, d, s, va);
+}
+
+void Round(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s, uint8_t imm, uint64_t va) {
+  if (dbl)
+    RoundT<true>(c, lanes, d, s, imm, va);
+  else
+    RoundT<false>(c, lanes, d, s, imm, va);
+}
+
+void Dp(Ctx& c, bool dbl, Xmm& d, const Xmm& s, uint8_t imm, uint64_t va) {
+  if (dbl)
+    DpT<true>(c, d, s, imm, va);
+  else
+    DpT<false>(c, d, s, imm, va);
+}
+
+// The float nearest to 1/x (SoftFloat's division is correctly rounded),
+// results below the normal range flushed to zero as the SDM requires.
+uint32_t RcpLane(uint32_t x) {
+  const uint32_t exp = (x >> 23) & 0xFF, frac = x & 0x7FFFFF, sign = x & 0x80000000u;
+  if (exp == 0xFF && frac) return x | 0x00400000u;  // NaN: quieted
+  if (exp == 0) return sign | 0x7F800000u;           // ±0, denormal: ±inf
+  if (exp == 0xFF) return sign;                      // ±inf: ±0
+  const uint_fast8_t mode = softfloat_roundingMode, flags = softfloat_exceptionFlags;
+  softfloat_roundingMode = softfloat_round_near_even;
+  uint32_t r = f32_div(float32_t{0x3F800000u}, float32_t{x}).v;
+  softfloat_roundingMode = mode;
+  softfloat_exceptionFlags = flags;
+  if (!(r & 0x7F800000u)) r &= 0x80000000u;  // tiny: ±0
+  return r;
+}
+
+void Rcp(Xmm& d, const Xmm& s) {
+  Xmm r;
+  for (int i = 0; i < 4; i++) SetLane<uint32_t>(r, i, RcpLane(Lane<uint32_t>(s, i)));
+  d = r;
+}
 
 void CheckAligned(Ctx& c, uint64_t a, uint64_t va) {
   (void)c;

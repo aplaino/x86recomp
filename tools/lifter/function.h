@@ -51,6 +51,8 @@ class Decoder {
  public:
   explicit Decoder(bool x64 = false);
   bool Decode(const Program& p, uint64_t va, Insn* out) const;
+  // The instruction in bytes[0, n) as if at va.
+  bool DecodeRaw(const uint8_t* bytes, size_t n, uint64_t va, Insn* out) const;
   std::string Format(const Insn& in) const;
 
  private:

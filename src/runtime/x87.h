@@ -107,6 +107,10 @@ void StoreSt(State& s, int i); // FST st(i)
 int16_t StoreI16(State& s);    // FIST m16: RC, indefinite 0x8000 + IE
 int32_t StoreI32(State& s);    // FIST m32: RC, indefinite 0x80000000
 int64_t StoreI64(State& s);    // FISTP m64: RC, indefinite INT64_MIN
+// FISTTP m16/m32/m64 (SSE3): the same, always truncating (CW's RC unused).
+int16_t StoreI16Trunc(State& s);
+int32_t StoreI32Trunc(State& s);
+int64_t StoreI64Trunc(State& s);
 void Pop(State& s);            // mark st0 empty, ++TOP
 
 // --- arithmetic ------------------------------------------------------

@@ -9,6 +9,7 @@
 #include <map>
 #include <random>
 #include <string>
+#include <vector>
 
 #include "runtime/lifted.h"
 
@@ -328,6 +329,108 @@ void TestDiv() {
   }
 }
 
+// BMI1 and POPCNT, 32- and 64-bit. bextr runs over a grid of start and
+// length values (both bytes of the control, edges included); the others
+// on edge-biased operands.
+void Check64(const char* op, int n, uint64_t a, uint64_t b, uint64_t want_r, uint32_t want_f,
+             uint64_t got_r, uint32_t got_f, uint32_t mask) {
+  g_checks++;
+  if (want_r == got_r && (want_f & mask) == (got_f & mask)) return;
+  g_fail_by_op[std::string(op) + "/" + std::to_string(n)]++;
+  if (++g_fail <= 40)
+    std::printf("FAIL %s/%d a=%016llX b=%016llX: hw r=%016llX f=%03X, lift r=%016llX f=%03X\n",
+                op, n, (unsigned long long)a, (unsigned long long)b,
+                (unsigned long long)want_r, want_f & mask, (unsigned long long)got_r,
+                got_f & mask);
+}
+
+#define NATIVE_BMI(name, insn)                                                        \
+  uint64_t name(int n, uint64_t a, uint64_t b, uint64_t fin, uint64_t* fo) {          \
+    uint64_t r, fl;                                                                   \
+    if (n == 8)                                                                       \
+      asm volatile("push %[fi]\n popfq\n " insn " %q[b], %q[a], %q[r]\n pushfq\n pop %[fl]" \
+                   : [r] "=&r"(r), [fl] "=r"(fl) : [a] "r"(a), [b] "r"(b), [fi] "r"(fin) \
+                   : "cc");                                                           \
+    else                                                                              \
+      asm volatile("push %[fi]\n popfq\n " insn " %k[b], %k[a], %k[r]\n pushfq\n pop %[fl]" \
+                   : [r] "=&r"(r), [fl] "=r"(fl) : [a] "r"(a), [b] "r"(b), [fi] "r"(fin) \
+                   : "cc");                                                           \
+    *fo = fl;                                                                         \
+    return n == 8 ? r : uint32_t(r);                                                  \
+  }
+// AT&T operand order: andn b, a, r is r = ~a & b; bextr b, a, r is r =
+// bextr(a, ctrl b).
+NATIVE_BMI(NAndn, "andn")
+NATIVE_BMI(NBextr, "bextr")
+
+#define NATIVE_UN64(name, insn)                                                       \
+  uint64_t name(int n, uint64_t a, uint64_t fin, uint64_t* fo) {                      \
+    uint64_t r, fl;                                                                   \
+    if (n == 8)                                                                       \
+      asm volatile("push %[fi]\n popfq\n " insn " %q[a], %q[r]\n pushfq\n pop %[fl]"     \
+                   : [r] "=&r"(r), [fl] "=r"(fl) : [a] "r"(a), [fi] "r"(fin) : "cc"); \
+    else                                                                              \
+      asm volatile("push %[fi]\n popfq\n " insn " %k[a], %k[r]\n pushfq\n pop %[fl]"     \
+                   : [r] "=&r"(r), [fl] "=r"(fl) : [a] "r"(a), [fi] "r"(fin) : "cc"); \
+    *fo = fl;                                                                         \
+    return n == 8 ? r : uint32_t(r);                                                  \
+  }
+NATIVE_UN64(NBlsi, "blsi")
+NATIVE_UN64(NBlsr, "blsr")
+NATIVE_UN64(NBlsmsk, "blsmsk")
+NATIVE_UN64(NPopcnt, "popcnt")
+
+uint64_t Interesting64(int n) {
+  static const uint64_t k[] = {0, 1, 2, 3, 0x7F, 0x80, 0xFF, 0x100, 0x7FFFFFFF, 0x80000000,
+                               0xFFFFFFFF, 0x100000000ull, 0x7FFFFFFFFFFFFFFFull,
+                               0x8000000000000000ull, ~0ull, ~1ull};
+  uint64_t v = rng() % 3 == 0 ? k[rng() % (sizeof k / sizeof *k)]
+                              : (uint64_t(rng()) << 32 | uint32_t(rng())) >> (rng() % 64);
+  return n == 8 ? v : uint32_t(v);
+}
+
+template <int N>
+void TestBmi() {
+  // bextr: ANDN-style flags, ZF defined, CF/OF clear; AF, SF, PF undefined.
+  std::vector<uint32_t> edges;
+  for (uint32_t i = 0; i <= 70; i++) edges.push_back(i);
+  for (uint32_t i = 250; i <= 255; i++) edges.push_back(i);
+  for (uint32_t start : edges)
+    for (uint32_t len : edges)
+      for (int k = 0; k < 3; k++) {
+        // All ones first: every bit the length keeps shows.
+        uint64_t a = k == 0 ? (N == 8 ? ~0ull : 0xFFFFFFFFull) : Interesting64(N);
+        uint64_t ctrl = (Interesting64(N) & ~0xFFFFull) | len << 8 | start;
+        if (N == 4) ctrl = uint32_t(ctrl);
+        uint64_t fin = 0x202 | (rng() & kAll), fo;
+        Flags f = Unpack(uint32_t(fin));
+        uint64_t r = L::Bextr<N>(f, a, ctrl);
+        Check64("bextr", N, a, ctrl, NBextr(N, a, ctrl, fin, &fo), uint32_t(fo), r, Pack(f),
+                ZF | CF | OF);
+      }
+  for (int it = 0; it < 200000; it++) {
+    uint64_t a = Interesting64(N), b = Interesting64(N);
+    uint64_t fin = 0x202 | (rng() & kAll), fo;
+    Flags f = Unpack(uint32_t(fin));
+    uint64_t r = L::Andn<N>(f, a, b);
+    Check64("andn", N, a, b, NAndn(N, a, b, fin, &fo), uint32_t(fo), r, Pack(f),
+            SF | ZF | CF | OF);
+    f = Unpack(uint32_t(fin));
+    r = L::Blsi<N>(f, a);
+    Check64("blsi", N, a, 0, NBlsi(N, a, fin, &fo), uint32_t(fo), r, Pack(f), SF | ZF | CF | OF);
+    f = Unpack(uint32_t(fin));
+    r = L::Blsr<N>(f, a);
+    Check64("blsr", N, a, 0, NBlsr(N, a, fin, &fo), uint32_t(fo), r, Pack(f), SF | ZF | CF | OF);
+    f = Unpack(uint32_t(fin));
+    r = L::Blsmsk<N>(f, a);
+    Check64("blsmsk", N, a, 0, NBlsmsk(N, a, fin, &fo), uint32_t(fo), r, Pack(f),
+            SF | ZF | CF | OF);
+    f = Unpack(uint32_t(fin));
+    r = L::Popcnt<N>(f, a);
+    Check64("popcnt", N, a, 0, NPopcnt(N, a, fin, &fo), uint32_t(fo), r, Pack(f), kAll);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -335,6 +438,8 @@ int main() {
   TestWidth<2>();
   TestWidth<4>();
   TestDiv();
+  TestBmi<4>();
+  TestBmi<8>();
   for (const auto& [op, n] : g_fail_by_op)
     std::printf("  %-10s %d failures\n", op.c_str(), n);
   std::printf("lift_semantics_test: %ld checks, %d failures\n", g_checks,

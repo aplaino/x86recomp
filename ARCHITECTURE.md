@@ -1098,12 +1098,22 @@ lifted, not avoided:
   have), with only the feature bits the lifter implements bit-exactly
   with oracle tests set, growing towards that part's set (SSE3, SSSE3,
   SSE4.1/4.2, POPCNT, LZCNT, AVX, F16C, BMI1, MOVBE, AES, PCLMUL; no
-  AVX2 or FMA). AVX is claimed (OSXSAVE, XCR0 = 7 through XGETBV) once
-  its forms hold. Games read CPUID themselves (MSVC's CRT fills
-  __isa_available from it), so which paths they take follows from this
-  table.
+  AVX2 or FMA). Claimed now: all of those but AVX and F16C (and
+  CMPXCHG16B, not in the model yet). AVX is claimed (OSXSAVE, XCR0 = 7
+  through XGETBV) once all its forms hold. Games read CPUID themselves
+  (MSVC's CRT fills __isa_available from it), so which paths they take
+  follows from this table.
+- VEX forms of SSE instructions go through the legacy emitter: `v op
+  dst, src1, src2` is `dst = src1; op dst, src2` (a source aliasing dst
+  copied first), the VEX.128 form then zeroes the destination's upper
+  half, and a 256-bit form of an operation that works within 128-bit
+  lanes (AVX's float ones) runs once per half. VEX memory operands need
+  no alignment but for the aligned moves. Forms with no legacy
+  counterpart (vblendv*, vmaskmov*, vperm*, 256-bit vptest, ...) are
+  emitted on their own.
 - Oracle tests (tests/lift_x64_test.cpp) run every integer and SSE/AVX
-  form found in an x64 image natively and lifted from random states:
+  form found in an x64 image, or listed in tests/x64_isa/forms.s (the
+  model's extensions, lift_isa64_*), natively and lifted from random states:
   all 16 general registers, the full YMM registers, flags, MXCSR and a
   memory buffer. The native stub keeps its state pointer in a
   RIP-relative slot, so forms may use any register but rsp.

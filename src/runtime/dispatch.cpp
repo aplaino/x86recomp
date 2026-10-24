@@ -422,7 +422,7 @@ static void Cpuid64(Ctx& c) {
   uint32_t a = 0, b = 0, cx = 0, d = 0;
   switch (leaf) {
     case 0:
-      a = 1;
+      a = 7;
       b = 0x68747541;  // "AuthenticAMD"
       d = 0x69746E65;
       cx = 0x444D4163;
@@ -430,8 +430,14 @@ static void Cpuid64(Ctx& c) {
     case 1:
       a = 0x00700F01;  // family 16h (0Fh + 07h), model 0, stepping 1
       b = (GuestProcessorCount() << 16) | (8u << 8);  // CLFLUSH: 64 bytes
-      cx = 0;
+      // SSE3, PCLMULQDQ, SSSE3, SSE4.1, SSE4.2, MOVBE, POPCNT, AES
+      // (tests/x64_isa/forms.s); not yet AVX/OSXSAVE, F16C, CMPXCHG16B.
+      cx = (1u << 0) | (1u << 1) | (1u << 9) | (1u << 19) | (1u << 20) | (1u << 22) |
+           (1u << 23) | (1u << 25);
       d = 0x0783F9FF;  // fpu tsc cx8 cmov mmx fxsr sse sse2 (as 32-bit)
+      break;
+    case 7:
+      if (uint32_t(c.rcx) == 0) b = 1u << 3;  // BMI1
       break;
     case 0x80000000:
       a = 0x80000001;

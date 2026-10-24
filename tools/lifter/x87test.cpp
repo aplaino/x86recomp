@@ -7,7 +7,9 @@
 #include "x87test.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
+#include <fstream>
 #include <map>
 #include <random>
 #include <set>
@@ -239,7 +241,8 @@ bool Excluded(const Insn& in) {
     case ZYDIS_ISA_SET_SSE: case ZYDIS_ISA_SET_SSE2:
     case ZYDIS_ISA_SET_SSEMXCSR: case ZYDIS_ISA_SET_SSE_PREFETCH:
     case ZYDIS_ISA_SET_SSE3: case ZYDIS_ISA_SET_SSSE3: case ZYDIS_ISA_SET_SSE4:
-    case ZYDIS_ISA_SET_AVX:
+    case ZYDIS_ISA_SET_SSE42: case ZYDIS_ISA_SET_AES: case ZYDIS_ISA_SET_AVXAES:
+    case ZYDIS_ISA_SET_PCLMULQDQ: case ZYDIS_ISA_SET_F16C: case ZYDIS_ISA_SET_AVX:
       return true;
     default:
       break;
@@ -319,7 +322,8 @@ bool SseCandidate(const Insn& in) {
   switch (in.d.meta.isa_set) {
     case ZYDIS_ISA_SET_SSE: case ZYDIS_ISA_SET_SSE2: case ZYDIS_ISA_SET_SSEMXCSR:
     case ZYDIS_ISA_SET_SSE3: case ZYDIS_ISA_SET_SSSE3: case ZYDIS_ISA_SET_SSE4:
-    case ZYDIS_ISA_SET_AVX:
+    case ZYDIS_ISA_SET_SSE42: case ZYDIS_ISA_SET_AES: case ZYDIS_ISA_SET_AVXAES:
+    case ZYDIS_ISA_SET_PCLMULQDQ: case ZYDIS_ISA_SET_F16C: case ZYDIS_ISA_SET_AVX:
       break;
     default:
       return false;
@@ -327,8 +331,14 @@ bool SseCandidate(const Insn& in) {
   if (in.d.mnemonic == ZYDIS_MNEMONIC_LDMXCSR || in.d.mnemonic == ZYDIS_MNEMONIC_VLDMXCSR)
     return false;
   // Approximate: no host result to match (tests/sse_rsqrt_test instead).
-  if (in.d.mnemonic == ZYDIS_MNEMONIC_RSQRTPS || in.d.mnemonic == ZYDIS_MNEMONIC_RSQRTSS)
-    return false;
+  switch (in.d.mnemonic) {
+    case ZYDIS_MNEMONIC_RSQRTPS: case ZYDIS_MNEMONIC_RSQRTSS: case ZYDIS_MNEMONIC_VRSQRTPS:
+    case ZYDIS_MNEMONIC_VRSQRTSS: case ZYDIS_MNEMONIC_RCPPS: case ZYDIS_MNEMONIC_RCPSS:
+    case ZYDIS_MNEMONIC_VRCPPS: case ZYDIS_MNEMONIC_VRCPSS:
+      return false;
+    default:
+      break;
+  }
   for (int i = 0; i < in.d.operand_count; i++)
     if (in.ops[i].type == ZYDIS_OPERAND_TYPE_REGISTER &&
         ZydisRegisterGetClass(in.ops[i].reg.value) == ZYDIS_REGCLASS_MMX)
@@ -358,10 +368,16 @@ int CopiedIndex(const uint8_t* raw, const ZydisDecodedInstruction& d, int off) {
 
 namespace {
 
+// An instruction to make a form of: decoded, with its raw bytes.
+struct Sample {
+  const Insn* in;
+  const uint8_t* raw;
+};
+
 // The integer and SSE tests share the form extraction: each distinct
 // instruction (by bytes) with its memory operand rewritten to [base].
-int WriteFormTest(const Program& p, const Decoder& dec, const std::string& out,
-                  const char* prologue, bool sse) {
+int WriteFormTest(const Decoder& dec, bool x64, const std::vector<Sample>& samples,
+                  const std::string& out, const char* prologue, bool sse) {
   struct IForm {
     std::vector<uint8_t> bytes;
     std::string text;
@@ -370,12 +386,12 @@ int WriteFormTest(const Program& p, const Decoder& dec, const std::string& out,
     uint64_t example_va = 0;
   };
   std::map<std::vector<uint8_t>, IForm> forms;
-  for (uint64_t e : p.entries) {
-    Function f;
-    BuildFunction(p, dec, e, &f);
-    for (const auto& [va, in] : f.insns) {
+  {
+    for (const Sample& sm : samples) {
+      const Insn& in = *sm.in;
+      const uint64_t va = in.va;
       if (!in.ok || (sse ? !SseCandidate(in) : Excluded(in))) continue;
-      const uint8_t* raw = p.Bytes(va);
+      const uint8_t* raw = sm.raw;
       std::vector<uint8_t> b;
       int base = -1;
       bool has_modrm = in.d.attributes & ZYDIS_ATTRIB_HAS_MODRM;
@@ -433,9 +449,9 @@ int WriteFormTest(const Program& p, const Decoder& dec, const std::string& out,
       } else {
         CopyNoSegPrefixes(raw, in.d, in.d.length, &b);
         // inc/dec r32 (40-4F) are REX prefixes in 64-bit mode: use FF /0, /1.
-        if (!p.x64 && b.size() == 1 && b[0] >= 0x40 && b[0] <= 0x4F)
+        if (!x64 && b.size() == 1 && b[0] >= 0x40 && b[0] <= 0x4F)
           b = {0xFF, uint8_t(0xC0 + (b[0] >= 0x48 ? 8 : 0) + (b[0] & 7))};
-        else if (!p.x64 && b.size() == 2 && b[0] == 0x66 && b[1] >= 0x40 && b[1] <= 0x4F)
+        else if (!x64 && b.size() == 2 && b[0] == 0x66 && b[1] >= 0x40 && b[1] <= 0x4F)
           b = {0x66, 0xFF, uint8_t(0xC0 + (b[1] >= 0x48 ? 8 : 0) + (b[1] & 7))};
       }
       if (forms.count(b)) continue;
@@ -456,7 +472,7 @@ int WriteFormTest(const Program& p, const Decoder& dec, const std::string& out,
     code.push_back({&fm.bytes, 32});
   }
   std::vector<uint64_t> vas;
-  std::string o = LiftSnippets(dec, prologue, code, &vas, p.x64);
+  std::string o = LiftSnippets(dec, prologue, code, &vas, x64);
   if (o.empty()) return 1;
   const std::string kind = sse ? "Sse" : "Int";
   o += std::string("#include \"lift_") + (sse ? "sse" : "int") + "_forms.h\"\n" +
@@ -478,16 +494,71 @@ int WriteFormTest(const Program& p, const Decoder& dec, const std::string& out,
   return 0;
 }
 
+// The instructions of every function of p.
+int WriteProgramFormTest(const Program& p, const Decoder& dec, const std::string& out,
+                         const char* prologue, bool sse) {
+  std::vector<Function> fns;
+  for (uint64_t e : p.entries) BuildFunction(p, dec, e, &fns.emplace_back());
+  std::vector<Sample> samples;
+  for (const Function& f : fns)
+    for (const auto& [va, in] : f.insns) samples.push_back({&in, p.Bytes(va)});
+  return WriteFormTest(dec, p.x64, samples, out, prologue, sse);
+}
+
 }  // namespace
 
 int WriteIntTest(const Program& p, const Decoder& dec, const std::string& out,
                  const char* prologue) {
-  return WriteFormTest(p, dec, out, prologue, false);
+  return WriteProgramFormTest(p, dec, out, prologue, false);
 }
 
 int WriteSseTest(const Program& p, const Decoder& dec, const std::string& out,
                  const char* prologue) {
-  return WriteFormTest(p, dec, out, prologue, true);
+  return WriteProgramFormTest(p, dec, out, prologue, true);
+}
+
+int WriteFormListTest(const std::string& list, bool x64, const Decoder& dec,
+                      const std::string& out, const char* prologue, bool sse) {
+  std::ifstream f(list);
+  if (!f) {
+    std::fprintf(stderr, "cannot open %s\n", list.c_str());
+    return 1;
+  }
+  std::vector<std::vector<uint8_t>> bytes;
+  std::string line;
+  int no = 0;
+  while (std::getline(f, line)) {
+    no++;
+    line = line.substr(0, line.find('#'));
+    std::vector<uint8_t> b;
+    for (size_t i = 0; i < line.size();) {
+      if (std::isspace(uint8_t(line[i]))) {
+        i++;
+        continue;
+      }
+      if (i + 1 >= line.size() || !std::isxdigit(uint8_t(line[i])) ||
+          !std::isxdigit(uint8_t(line[i + 1]))) {
+        std::fprintf(stderr, "%s:%d: expected hex bytes\n", list.c_str(), no);
+        return 1;
+      }
+      b.push_back(uint8_t(std::stoul(line.substr(i, 2), nullptr, 16)));
+      i += 2;
+    }
+    if (!b.empty()) bytes.push_back(b);
+  }
+  // Each encoding at its own (fake) address, so example_va tells them apart.
+  std::vector<Insn> insns(bytes.size());
+  std::vector<Sample> samples;
+  for (size_t i = 0; i < bytes.size(); i++) {
+    if (!dec.DecodeRaw(bytes[i].data(), bytes[i].size(), 0x1000 + 0x20 * i, &insns[i]) ||
+        insns[i].d.length != bytes[i].size()) {
+      std::fprintf(stderr, "%s: entry %zu does not decode as one instruction\n",
+                   list.c_str(), i + 1);
+      return 1;
+    }
+    samples.push_back({&insns[i], bytes[i].data()});
+  }
+  return WriteFormTest(dec, x64, samples, out, prologue, sse);
 }
 
 }  // namespace lifter

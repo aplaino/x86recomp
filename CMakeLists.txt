@@ -106,7 +106,7 @@ target_link_libraries(recomp_image PUBLIC recomp_log)
 # --- x87 and SSE models (SoftFloat 3e) ---------------------------------
 include(cmake/softfloat.cmake)  # defines target `softfloat`
 include(cmake/coremath.cmake)  # defines target `coremath`
-add_library(recomp_x87 SHARED src/runtime/x87.cpp src/runtime/sse.cpp)
+add_library(recomp_x87 SHARED src/runtime/x87.cpp src/runtime/sse.cpp src/runtime/sse_ext.cpp)
 target_include_directories(recomp_x87 PUBLIC src)
 target_compile_features(recomp_x87 PUBLIC cxx_std_20)
 target_link_libraries(recomp_x87 PRIVATE softfloat recomp_image)
