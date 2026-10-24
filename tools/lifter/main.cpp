@@ -16,6 +16,10 @@
 // base). Their functions go into gen_<module>_NNN.cpp, the EXE's into
 // gen_NNN.cpp, and table.cpp lists them all.
 //
+// --exe and --module also take the formats an enabled console platform
+// reads (ARCHITECTURE.md, "Console platforms"); for those, --symbols ""
+// lifts without Ghidra's symbols.
+//
 // --only lifts the given functions and whatever they call or tail-call
 // directly, nothing else (no Ghidra entries, exports or pointer
 // discovery): for oracle tests that run a few original routines lifted.
@@ -135,10 +139,6 @@ int main(int argc, char** argv) {
   lifter::Program p;
   std::string err;
   for (const ModuleArgs& m : mods) {
-    if (m.symdir.empty()) {
-      std::fprintf(stderr, "%s: --symbols missing\n", m.path.c_str());
-      return 2;
-    }
     if (!p.Load(m.path, m.symdir, m.base, &err)) {
       std::fprintf(stderr, "load %s: %s\n", m.path.c_str(), err.c_str());
       return 1;
@@ -214,14 +214,13 @@ int main(int argc, char** argv) {
     (*counter)++;
   };
   for (const auto& m : p.modules)
-    for (const auto& sec : m.img.sections) {
+    for (const auto& [lo, hi] : m.data) {
       if (!only.empty()) break;
-      if (sec.name != ".rdata" && sec.name != ".data") continue;
       if (p.x64)  // pointers are 8 bytes, 8-aligned
-        for (uint64_t a = sec.va; a + 8 <= sec.va + sec.vsize; a += 8)
+        for (uint64_t a = lo; a + 8 <= hi; a += 8)
           candidate(&m, p.mem.read<uint64_t>(a), &from_data_ptrs);
       else
-        for (uint64_t a = sec.va; a + 4 <= sec.va + sec.vsize; a += 4)
+        for (uint64_t a = lo; a + 4 <= hi; a += 4)
           candidate(&m, p.mem.read<uint32_t>(a), &from_data_ptrs);
     }
   size_t recovered_tables = 0;
@@ -384,7 +383,7 @@ int main(int argc, char** argv) {
     for (const auto& m : p.modules) {
       char buf[160];
       std::snprintf(buf, sizeof buf, "  %s at %08llX: %llu functions, %llu instructions\n",
-                    m.name.c_str(), (unsigned long long)m.img.image_base,
+                    m.name.c_str(), (unsigned long long)m.base,
                     (unsigned long long)per_module[&m].functions,
                     (unsigned long long)per_module[&m].insns);
       report += buf;
