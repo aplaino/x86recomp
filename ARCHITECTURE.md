@@ -1178,7 +1178,27 @@ The seams (core, generic):
   executables are mapped at 0x400000).
 - Process bring-up: a platform entry that loads the modules, binds
   imports to its HLE, sets up TLS (Windows' TEB through gs; FreeBSD's
-  TCB through fs) and starts the main thread.
+  TCB through fs) and starts the main thread. The core gives it the
+  pieces RunProcess (PE) is made of: StartProcess (the arena and the
+  thunk region), Process::thread_init (its per-thread setup instead of
+  a TEB) and fpu_control, Process::code (its images' code ranges, for
+  dispatch), InitDispatch, and RunMainThread (guest calls on the process
+  main thread, on a big host stack); CallGuest follows the process's
+  ABI.
+- The Orbis loader (platforms/orbis/src/orbis/process.h) maps the
+  eboot and the PRXs the game ships where the lifter put them, gives
+  each module with PT_TLS a slot in load order (FreeBSD's variant II:
+  the eboot's block right below the thread pointer), then binds every
+  import: to another module's export of that library and NID, else to
+  the HLE handler registered under the name with that NID (orbis/hle.h,
+  ORBIS_HLE), else to an unimplemented thunk (a data import nothing
+  defines is fatal at load). Each thread's TCB holds its own address and
+  the DTV, which __tls_get_addr reads. Before the eboot's
+  _start(argument block, cleanup), each PRX's _init(0, 0, 0) runs its
+  constructors and its module_start.
+- orbis_process_test runs C built for FreeBSD x86-64 (clang, ld.lld),
+  made SCE ELFs by tools/orbis_sce_elf.py and lifted at build time,
+  through the loader.
 
 Layout: platforms/<name>/ (its loader, ABI glue, process bring-up and HLE
 libraries as recomp_<name>_* shared libraries, its docs and tests), with
