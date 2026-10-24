@@ -123,6 +123,25 @@ uint64_t CallGuest(Ctx& c, gaddr va, std::initializer_list<uint64_t> args) {
     DepthGuard() { hle::t_hle_depth = 0; }
     ~DepthGuard() { hle::t_hle_depth = saved; }
   } guard;
+  if (g_proc->sysv) {
+    // System V: rdi, rsi, rdx, rcx, r8, r9, then the stack above the
+    // return address; rsp is 16-byte aligned before the call.
+    const uint64_t saved = c.rsp;
+    const uint64_t n = args.size() > 6 ? args.size() - 6 : 0;
+    uint64_t sp = ((c.rsp - 8 * n) & ~15ull) - 8;
+    uint64_t* regs[6] = {&c.rdi, &c.rsi, &c.rdx, &c.rcx, &c.r8, &c.r9};
+    size_t i = 0;
+    for (uint64_t a : args) {
+      if (i < 6) *regs[i] = a;
+      else Wr64(sp + 8 + 8 * (i - 6), a);
+      i++;
+    }
+    Wr64(sp, kReturnToHost64);
+    c.rsp = sp;
+    Dispatch(c, va, kReturnToHost64);
+    c.rsp = saved;
+    return c.rax;
+  }
   if (g_proc->x64) {
     // Win64: the callee finds its stack arguments above the return
     // address and 32 bytes of shadow space (homes for rcx..r9), and rsp
@@ -213,17 +232,19 @@ Thread* CreateGuestThread(uint64_t stack_size) {
   t->stack_lo = stack;
   t->stack_hi = stack + stack_size;
 
-  const uint32_t stride = p.x64 ? kTebStride64 : kTebStride;
-  {
-    std::lock_guard<std::mutex> l(g_threads_mu);
-    if (!g_next_teb) g_next_teb = p.x64 ? kTebTop64 : kTebTop;
-    g_next_teb -= stride;
-    if (p.x64 && g_next_teb < kTebLo64) FatalF("too many guest threads");
-    t->teb = g_next_teb;
-  }
   t->tid = p.next_tid.fetch_add(4);
-  p.mem.Commit(t->teb, stride, Prot::RW);
-  InitTeb(t.get());
+  if (!p.thread_init) {
+    const uint32_t stride = p.x64 ? kTebStride64 : kTebStride;
+    {
+      std::lock_guard<std::mutex> l(g_threads_mu);
+      if (!g_next_teb) g_next_teb = p.x64 ? kTebTop64 : kTebTop;
+      g_next_teb -= stride;
+      if (p.x64 && g_next_teb < kTebLo64) FatalF("too many guest threads");
+      t->teb = g_next_teb;
+    }
+    p.mem.Commit(t->teb, stride, Prot::RW);
+    InitTeb(t.get());
+  }
 
   Ctx& c = t->ctx;
   std::memset(&c, 0, sizeof c);
@@ -237,8 +258,9 @@ Thread* CreateGuestThread(uint64_t stack_size) {
   }
   c.thread = t.get();
   x87::Init(c.fpu);
-  x87::SetControlWord(c.fpu, 0x027F);  // Windows default for new threads
+  x87::SetControlWord(c.fpu, p.fpu_control);
   c.mxcsr = sse::kMxcsrDefault;
+  if (p.thread_init) p.thread_init(t.get());
 
   Thread* raw_t = t.get();
   std::lock_guard<std::mutex> l(g_threads_mu);
@@ -254,11 +276,10 @@ static void CheckHostFp() {
     FatalF("host floating-point environment: %s", why);
 }
 
-// Runs guest function `entry` (with no argument, as the process entry
-// point, or with `param`) on the calling host thread as guest thread t.
+// Runs body (which calls guest code: the process entry point, or a
+// thread's start routine) on the calling host thread as guest thread t.
 // Returns its exit code.
-static uint32_t RunGuestThread(Thread* t, gaddr entry,
-                               const uint64_t* param) {
+static uint32_t RunGuestThread(Thread* t, const std::function<uint64_t(Ctx&)>& body) {
   // Thread start is a full barrier on Windows. pthread_create already
   // makes the creator's writes visible here; the fence states it for
   // weakly ordered hosts like every other guest sync point
@@ -270,7 +291,7 @@ static uint32_t RunGuestThread(Thread* t, gaddr entry,
   RegisterGuestHostThread("guest", t->tid);
   uint32_t r;
   try {
-    r = uint32_t(param ? CallGuest(t->ctx, entry, {*param}) : CallGuest(t->ctx, entry, {}));
+    r = uint32_t(body(t->ctx));
   } catch (const GuestThreadExit& e) {
     r = e.code;
   }
@@ -297,7 +318,7 @@ struct ThreadStart {
 
 static void* GuestThreadMain(void* arg) {
   std::unique_ptr<ThreadStart> s(static_cast<ThreadStart*>(arg));
-  RunGuestThread(s->t, s->entry, &s->param);
+  RunGuestThread(s->t, [&](Ctx& c) { return CallGuest(c, s->entry, {s->param}); });
   return nullptr;
 }
 
@@ -333,20 +354,20 @@ void StartServiceThread(Thread* t, std::function<void()> fn) {
 // macOS, require UI calls there) but on a big private stack.
 namespace {
 Thread* g_main_thread = nullptr;
-gaddr g_main_entry = 0;
+const std::function<uint64_t(Ctx&)>* g_main_body = nullptr;
 uint32_t g_main_exit = 0;
 
 void GuestMainTrampoline() {
-  g_main_exit = RunGuestThread(g_main_thread, g_main_entry, nullptr);
+  g_main_exit = RunGuestThread(g_main_thread, *g_main_body);
 }
 }  // namespace
 
-static uint32_t RunOnMainThread(Thread* t, gaddr entry) {
+uint32_t RunMainThread(Thread* t, const std::function<uint64_t(Ctx&)>& body) {
   void* stack = mmap(nullptr, kHostStack, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
   if (stack == MAP_FAILED) FatalF("cannot allocate the main guest stack");
   g_main_thread = t;
-  g_main_entry = entry;
+  g_main_body = &body;
   platform::RunOnStack(stack, kHostStack, GuestMainTrampoline);
   munmap(stack, kHostStack);
   return g_main_exit;
@@ -384,8 +405,7 @@ void MapModule(Module& m) {
   m.stale = false;
 }
 
-int RunProcess(const GameConfig& game, const std::string& exe_path,
-               const std::string& game_dir, const std::string& game_args) {
+Process& StartProcess(const GameConfig& game, const std::string& game_dir, bool x64) {
   g_proc = new Process;
   Process& p = *g_proc;
   p.game = game;
@@ -394,9 +414,8 @@ int RunProcess(const GameConfig& game, const std::string& exe_path,
   x87::run::g_enabled = !(runs && runs[0] == '0');
   const char* doubles = Env("X87_DOUBLE");
   x87::run::g_doubles = !(doubles && doubles[0] == '0');
-  p.game_args = game_args;
   StartWatchdog();
-  p.x64 = PeImage::IsX64File(exe_path);
+  p.x64 = x64;
   if (!p.mem.Reserve(p.x64 ? kArenaBits64 : 32)) FatalF("cannot reserve the guest arena");
   g_guest_base = p.mem.base();
   // Calls to import thunks go to HLE handlers (Dispatch); nothing runs
@@ -407,6 +426,13 @@ int RunProcess(const GameConfig& game, const std::string& exe_path,
   // Its upper half holds the HLE's data exports, which are variables.
   p.mem.Protect(thunks + hle::kDataExportOffset, kThunkRegionSize - hle::kDataExportOffset,
                 Prot::RW);
+  return p;
+}
+
+int RunProcess(const GameConfig& game, const std::string& exe_path,
+               const std::string& game_dir, const std::string& game_args) {
+  Process& p = StartProcess(game, game_dir, PeImage::IsX64File(exe_path));
+  p.game_args = game_args;
   std::string err;
   if (!p.img.Load(exe_path, p.mem, &err, 0, hle::ImportThunk))
     FatalF("%s", err.c_str());
@@ -458,7 +484,7 @@ int RunProcess(const GameConfig& game, const std::string& exe_path,
   InitKernel32State();
 
   Thread* main = CreateGuestThread(p.img.stack_reserve);
-  return int(RunOnMainThread(main, p.img.entry));
+  return int(RunMainThread(main, [&](Ctx& c) { return CallGuest(c, p.img.entry, {}); }));
 }
 
 }  // namespace recomp

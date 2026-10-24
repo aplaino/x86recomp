@@ -137,11 +137,18 @@ std::string NormaliseDll(std::string dll) {
 }
 
 gaddr ImportThunk(const std::string& dll, const std::string& name) {
-  std::string n = NormaliseDll(dll);
-  if (gaddr data = DataAddress(n, name)) return data;
-  if (!Registry().count({n, name}))
-    RECOMP_TRACE("hle: import %s!%s has no handler\n", n.c_str(), name.c_str());
-  return AddSlot(n, name);
+  return BindImport(NormaliseDll(dll), name);
+}
+
+gaddr BindImport(const std::string& lib, const std::string& name) {
+  if (gaddr data = DataAddress(lib, name)) return data;
+  if (!Registry().count({lib, name}))
+    RECOMP_TRACE("hle: import %s!%s has no handler\n", lib.c_str(), name.c_str());
+  return AddSlot(lib, name);
+}
+
+bool IsDataExport(const std::string& lib, const std::string& name) {
+  return DataRegistry().count({lib, name}) != 0;
 }
 
 void CallThunk(Ctx& c, gaddr thunk) {

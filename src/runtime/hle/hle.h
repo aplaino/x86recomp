@@ -142,6 +142,13 @@ inline uint64_t RetF(Ctx& c, float v) {
 // handler's thunk (PeImage::Load's binder).
 gaddr ImportThunk(const std::string& dll, const std::string& name);
 
+// The same for a library named as the HLE registers it (a console
+// platform's, whose names are not DLL names): a data export's address or
+// a handler's thunk (an unimplemented import's, fatal when called).
+gaddr BindImport(const std::string& lib, const std::string& name);
+// True if lib!name is a data export (DataExport).
+bool IsDataExport(const std::string& lib, const std::string& name);
+
 // "KERNEL32.dll", "C:\x\Foo" -> "kernel32.dll", "foo.dll".
 std::string NormaliseDll(std::string dll);
 
