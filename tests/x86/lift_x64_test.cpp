@@ -175,7 +175,7 @@ void OnFault(int sig) {
 }
 
 uint64_t RandomValue(std::mt19937_64& g) {
-  switch (g() % 14) {
+  switch (g() % 15) {
     case 0: return 0;
     case 1: return ~0ull;
     case 2: return 0x8000000000000000ull >> (g() % 8 * 8);
@@ -187,6 +187,10 @@ uint64_t RandomValue(std::mt19937_64& g) {
     case 8: return 0x80000000u;                      // and sign-extended
     case 9: return uint64_t(int64_t(int32_t(g())));
     case 10: return uint32_t(g());
+    case 11: {  // edges in the low two bytes: bit-field controls (bextr)
+      static const uint8_t k[] = {0, 1, 7, 8, 15, 16, 31, 32, 33, 63, 64, 65, 127, 128, 255};
+      return (g() & ~0xFFFFull) | uint64_t(k[g() % 15]) << 8 | k[g() % 15];
+    }
     default: return g();
   }
 }

@@ -828,7 +828,7 @@ late-frame rule; on an idle host wake-ups land 15-30 us (Linux) or
 - mss32 (Miles): our own mixer on an SDL3 audio stream (runtime/audio):
   resampling, loop counts, gain ramps, the "Miles Fast 2D Positional
   Audio" model of the game's Miles version (6.1c or 6.5;
-  platforms/win32/docs/miles.md), MP3 through libavcodec. Miles' EAX
+  platforms/win32/platforms/win32/docs/miles.md), MP3 through libavcodec. Miles' EAX
   providers (EAX 1.0, 2.0, 3.0, with
   Msseax.m3d's attribute names and struct layouts): voices pan like
   DirectSound3D hardware and get an LF level and a 5 kHz level
@@ -843,7 +843,7 @@ late-frame rule; on an idle host wake-ups land 15-30 us (Linux) or
   master reverb (room types, reverb time/predelay/damping, driver and
   sample/stream wet levels) is our Miles-compatible Schroeder reverb
   (runtime/audio/digital_reverb), written from a behavioural description
-  of mss32 6.5e's (platforms/win32/docs/miles.md) and bit-exact with it:
+  of mss32 6.5e's (platforms/win32/platforms/win32/docs/miles.md) and bit-exact with it:
   recomp_add_digital_reverb_test lifts the original routines from the
   user's installed DLL at build time (`recomp_lift --only`) and compares;
   tests/digital_reverb_test checks a hash of our output on every host.
@@ -1128,12 +1128,22 @@ lifted, not avoided:
   have), with only the feature bits the lifter implements bit-exactly
   with oracle tests set, growing towards that part's set (SSE3, SSSE3,
   SSE4.1/4.2, POPCNT, LZCNT, AVX, F16C, BMI1, MOVBE, AES, PCLMUL; no
-  AVX2 or FMA). AVX is claimed (OSXSAVE, XCR0 = 7 through XGETBV) once
-  its forms hold. Games read CPUID themselves (MSVC's CRT fills
-  __isa_available from it), so which paths they take follows from this
-  table.
+  AVX2 or FMA). Claimed now: all of those but AVX and F16C (and
+  CMPXCHG16B, not in the model yet). AVX is claimed (OSXSAVE, XCR0 = 7
+  through XGETBV) once all its forms hold. Games read CPUID themselves
+  (MSVC's CRT fills __isa_available from it), so which paths they take
+  follows from this table.
+- VEX forms of SSE instructions go through the legacy emitter: `v op
+  dst, src1, src2` is `dst = src1; op dst, src2` (a source aliasing dst
+  copied first), the VEX.128 form then zeroes the destination's upper
+  half, and a 256-bit form of an operation that works within 128-bit
+  lanes (AVX's float ones) runs once per half. VEX memory operands need
+  no alignment but for the aligned moves. Forms with no legacy
+  counterpart (vblendv*, vmaskmov*, vperm*, 256-bit vptest, ...) are
+  emitted on their own.
 - Oracle tests (tests/x86/lift_x64_test.cpp) run every integer and SSE/AVX
-  form found in an x64 image natively and lifted from random states:
+  form found in an x64 image, or listed in tests/x86/x64_isa/forms.s (the
+  model's extensions, lift_isa64_*), natively and lifted from random states:
   all 16 general registers, the full YMM registers, flags, MXCSR and a
   memory buffer. The native stub keeps its state pointer in a
   RIP-relative slot, so forms may use any register but rsp.

@@ -1046,14 +1046,14 @@ Stored StoreIntValue(uint32_t cw, F80 v, int64_t lo, int64_t hi) {
   return {uint64_t(r), flags, up};
 }
 
-int64_t StoreInt(State& s, int64_t lo, int64_t hi) {
+int64_t StoreInt(State& s, int64_t lo, int64_t hi, bool truncate = false) {
   Wait(s);
   SetC1(s, false);
   if (Empty(s, 0)) {
     Underflow(s);
     return lo;
   }
-  Stored r = StoreIntValue(s.cw, Get(s, 0), lo, hi);
+  Stored r = StoreIntValue(truncate ? s.cw | 0xC00u : s.cw, Get(s, 0), lo, hi);
   SetC1(s, r.up);
   Raise(s, r.flags);
   return int64_t(r.bits);
@@ -1530,6 +1530,9 @@ int32_t StoreI32(State& s) {
   return static_cast<int32_t>(StoreInt(s, INT32_MIN, INT32_MAX));
 }
 int64_t StoreI64(State& s) { return StoreInt(s, INT64_MIN, INT64_MAX); }
+int16_t StoreI16Trunc(State& s) { return int16_t(StoreInt(s, INT16_MIN, INT16_MAX, true)); }
+int32_t StoreI32Trunc(State& s) { return int32_t(StoreInt(s, INT32_MIN, INT32_MAX, true)); }
+int64_t StoreI64Trunc(State& s) { return StoreInt(s, INT64_MIN, INT64_MAX, true); }
 
 void Pop(State& s) {
   SetEmpty(s, Phys(s, 0), true);

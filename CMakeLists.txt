@@ -165,7 +165,7 @@ target_link_libraries(recomp_base PUBLIC recomp_log Threads::Threads)
 
 # --- x86 core --------------------------------------------------------------
 # x87 and SSE models (SoftFloat 3e, from the base).
-add_library(recomp_x87 SHARED src/x86/x87.cpp src/x86/sse.cpp)
+add_library(recomp_x87 SHARED src/x86/x87.cpp src/x86/sse.cpp src/x86/sse_ext.cpp)
 target_include_directories(recomp_x87 PUBLIC src)
 target_compile_features(recomp_x87 PUBLIC cxx_std_20)
 target_link_libraries(recomp_x87 PRIVATE softfloat recomp_base)

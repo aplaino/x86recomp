@@ -544,6 +544,52 @@ template <int N>
   return r;
 }
 
+// ---- BMI1 and POPCNT (N = 4 or 8) ----------------------------------------
+// Flags the SDM leaves undefined (AF, PF; SF for bextr) are set from the
+// result like SF/ZF; nothing may depend on them.
+template <int N>
+[[gnu::always_inline]] inline U<N> Andn(Flags& f, U<N> a, U<N> b) {
+  return Logic<N>(f, ~a & b);
+}
+// bextr: the ctrl[15:8] bits of src from bit ctrl[7:0].
+template <int N>
+[[gnu::always_inline]] inline U<N> Bextr(Flags& f, U<N> src, U<N> ctrl) {
+  const uint32_t start = ctrl & 0xFF, len = (ctrl >> 8) & 0xFF;
+  U<N> r = start < W<N>::kBits ? U<N>(src >> start) : U<N>(0);
+  if (len < W<N>::kBits) r &= (U<N>(1) << len) - 1;
+  return Logic<N>(f, r);
+}
+template <int N>
+[[gnu::always_inline]] inline U<N> Blsi(Flags& f, U<N> src) {
+  const U<N> r = Logic<N>(f, U<N>(0 - src) & src);
+  f.cf = src != 0;
+  return r;
+}
+template <int N>
+[[gnu::always_inline]] inline U<N> Blsr(Flags& f, U<N> src) {
+  const U<N> r = Logic<N>(f, U<N>(src - 1) & src);
+  f.cf = src == 0;
+  return r;
+}
+template <int N>
+[[gnu::always_inline]] inline U<N> Blsmsk(Flags& f, U<N> src) {
+  const U<N> r = Logic<N>(f, U<N>(src - 1) ^ src);
+  f.cf = src == 0;
+  f.zf = false;
+  return r;
+}
+// popcnt clears every flag but ZF (set for a zero source); N = 2, 4 or 8.
+template <int N>
+[[gnu::always_inline]] inline U<N> Popcnt(Flags& f, U<N> src) {
+  src &= W<N>::kMask;
+  f.cf = f.of = f.sf = f.af = f.pf = false;
+  f.zf = src == 0;
+  if constexpr (N == 8)
+    return U<N>(__builtin_popcountll(src));
+  else
+    return U<N>(__builtin_popcount(src));
+}
+
 // ---- partial registers --------------------------------------------------
 inline uint32_t SetLo8(uint32_t r, uint32_t v) {
   return (r & ~0xFFu) | (v & 0xFFu);
