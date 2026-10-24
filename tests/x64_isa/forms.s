@@ -26,6 +26,12 @@ tzcnt ax, bx
 tzcnt eax, ebx
 tzcnt rax, qword ptr [rsi]
 
+# xchg with a redundant lock prefix
+lock xchg byte ptr [rsi], al
+lock xchg word ptr [rsi], si
+lock xchg dword ptr [rsi], esi
+lock xchg qword ptr [rsi], rdx
+
 # POPCNT, LZCNT (ABM)
 popcnt ax, bx
 popcnt eax, ebx

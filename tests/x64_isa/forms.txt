@@ -19,6 +19,10 @@ c4 e2 38 f3 16                                   # blsmsk r8d, dword ptr [rsi]
 66 f3 0f bc c3                                   # tzcnt ax, bx
 f3 0f bc c3                                      # tzcnt eax, ebx
 f3 48 0f bc 06                                   # tzcnt rax, qword ptr [rsi]
+f0 86 06                                         # lock xchg byte ptr [rsi], al
+66 f0 87 36                                      # lock xchg word ptr [rsi], si
+f0 87 36                                         # lock xchg dword ptr [rsi], esi
+f0 48 87 16                                      # lock xchg qword ptr [rsi], rdx
 66 f3 0f b8 c3                                   # popcnt ax, bx
 f3 0f b8 c3                                      # popcnt eax, ebx
 f3 48 0f b8 c3                                   # popcnt rax, rbx

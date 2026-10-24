@@ -2661,7 +2661,8 @@ void InsnEmitter::Emit64() {
   const auto m = d_.mnemonic;
   const uint64_t next = in_.next();
   const std::string va = Hex(in_.va);
-  bool locked = (d_.attributes & ZYDIS_ATTRIB_HAS_LOCK) && Nvis() && IsMem(0);
+  bool locked = (d_.attributes & ZYDIS_ATTRIB_HAS_LOCK) && Nvis() && IsMem(0) &&
+                m != ZYDIS_MNEMONIC_XCHG;
 
   switch (m) {
     case ZYDIS_MNEMONIC_CALL: {
@@ -3055,7 +3056,9 @@ void InsnEmitter::Emit() {
     if (IsMem(i) && m != ZYDIS_MNEMONIC_LEA && !MemType(Bytes(i)))
       return Unimpl();
 
-  bool locked = (d_.attributes & ZYDIS_ATTRIB_HAS_LOCK) && Nvis() && IsMem(0);
+  // xchg with memory is atomic with or without the (redundant) prefix.
+  bool locked = (d_.attributes & ZYDIS_ATTRIB_HAS_LOCK) && Nvis() && IsMem(0) &&
+                m != ZYDIS_MNEMONIC_XCHG;
 
   if (X64()) return Emit64();
 
