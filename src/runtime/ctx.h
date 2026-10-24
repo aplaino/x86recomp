@@ -44,8 +44,9 @@ struct Ctx {
   // code keeps in locals: a spill is one 32-bit store and a reload one
   // 32-bit load, which the CPU forwards (see ARCHITECTURE.md, "Flags").
   alignas(8) uint32_t eflags = 0x202;
-  uint32_t fs_base;  // guest VA of this thread's TEB (32-bit guests)
-  uint64_t gs_base;  // guest VA of this thread's TEB (x64 guests)
+  uint64_t fs_base;  // guest VA of this thread's TEB (32-bit guests), or
+                     // TCB (x64 System V guests)
+  uint64_t gs_base;  // guest VA of this thread's TEB (x64 Windows guests)
   x87::State fpu;
   // SSE state. Unlike the integer registers these are never cached in
   // locals: lifted code operates on them in place (runtime/sse.h). 32-bit

@@ -22,6 +22,7 @@
 #include <string>
 
 #include "runtime/ctx.h"
+#include "runtime/log.h"
 #include "runtime/runtime.h"
 
 namespace recomp::hle {
@@ -68,10 +69,24 @@ struct Exports {
   Exports(const char* dll, std::initializer_list<const char*> names);
 };
 
-// Argument i of the call into a handler. x64: rcx, rdx, r8, r9, then the
-// stack above the return address and the 32-byte shadow space.
+// Argument i of the call into a handler. Win64: rcx, rdx, r8, r9, then
+// the stack above the return address and the 32-byte shadow space.
+// System V: the i-th integer or pointer argument (float ones are counted
+// apart, see ArgD): rdi, rsi, rdx, rcx, r8, r9, then the stack above the
+// return address (as long as no float argument went to the stack).
 inline uint64_t Arg(const Ctx& c, int i) {
   if (!g_proc->x64) return Rd32(c.esp + 4 + 4 * i);
+  if (g_proc->sysv) {
+    switch (i) {
+      case 0: return c.rdi;
+      case 1: return c.rsi;
+      case 2: return c.rdx;
+      case 3: return c.rcx;
+      case 4: return c.r8;
+      case 5: return c.r9;
+      default: return Rd64(c.rsp + 8 + 8 * uint64_t(i - 6));
+    }
+  }
   switch (i) {
     case 0: return c.rcx;
     case 1: return c.rdx;
@@ -88,12 +103,15 @@ inline uint64_t HandleRet(uint32_t h) {
   return g_proc->x64 ? uint64_t(int64_t(int32_t(h))) : h;
 }
 
-// Win64 floating-point arguments and results: argument i of a float or
-// double type is in xmm<i> (i < 4; later ones on the stack like integers),
-// and the result goes to xmm0.
+// Floating-point arguments and results. Win64: argument i of a float or
+// double type is in xmm<i> (i < 4; later ones on the stack like integers).
+// System V: the i-th float or double argument is in xmm<i> (i < 8; where
+// a later one sits on the stack depends on the whole signature, so a
+// handler that needs one reads it itself). The result goes to xmm0.
 inline double ArgD(const Ctx& c, int i) {
   double v;
-  if (i < 4) std::memcpy(&v, c.xmm[i].b, 8);
+  if (g_proc->sysv && i >= 8) FatalF("System V float argument %d is on the stack", i);
+  if (i < (g_proc->sysv ? 8 : 4)) std::memcpy(&v, c.xmm[i].b, 8);
   else {
     uint64_t b = Arg(c, i);
     std::memcpy(&v, &b, 8);
@@ -102,7 +120,8 @@ inline double ArgD(const Ctx& c, int i) {
 }
 inline float ArgF(const Ctx& c, int i) {
   float v;
-  if (i < 4) std::memcpy(&v, c.xmm[i].b, 4);
+  if (g_proc->sysv && i >= 8) FatalF("System V float argument %d is on the stack", i);
+  if (i < (g_proc->sysv ? 8 : 4)) std::memcpy(&v, c.xmm[i].b, 4);
   else {
     uint32_t b = uint32_t(Arg(c, i));
     std::memcpy(&v, &b, 4);
