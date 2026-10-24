@@ -1027,16 +1027,6 @@ Lifter:
   falling through), and the index may be a copy (mov, movsxd, movzx) of
   the register that was compared. Tables outside .text are read from
   the module's read-only data (an ELF's .rodata).
-- Clang's tables hold signed offsets from the table itself: `lea rB,
-  [table]` ... `movsxd rT, [rB + idx*4]; add rT, rB; jmp rT`. Both forms
-  are "target = B + entry", with B (and the load's base) the value a
-  RIP-relative lea gives the register on every path to the jmp (through
-  register copies; paths around a loop back to it do not count), else
-  the image base. The bounds check may sit in another block that
-  branches to the table code (a taken jbe/jb counts like a ja/jae
-  falling through), and the index may be a copy (mov, movsxd, movzx) of
-  the register that was compared. Tables outside .text are read from
-  the module's read-only data (an ELF's .rodata).
 - Function pointers in x64 code are RIP-relative leas into .text (weak
   entries, like the immediates of 32-bit code); data pointers are
   8-byte aligned qwords.
@@ -1149,7 +1139,7 @@ Order: lifter first (PE32+, .pdata, long-mode emission, oracle tests),
 proven on a DLL with few imports; then the 2^N arena, Ctx and the Win64
 HLE ABI; then the unwinder and CRT; then graphics and audio.
 
-### Console platforms: modules on the shared core (planned)
+### Console platforms: modules on the shared core (in progress)
 Consoles whose CPU the lifter already models (the PS4: x86-64, AMD
 family 16h) are platform modules on the same lifter and runtime, not
 forks, and not mixed into the PC path. A PC game's build never compiles
@@ -1165,13 +1155,16 @@ its calling convention for HLE, its process and thread bring-up, its
 system libraries (HLE) and its GPU front end.
 
 The seams (core, generic):
-- Images. The lifter's Program takes modules from an image reader:
-  sections, the text ranges, function starts with their unwind ranges,
-  relocations, imports (a slot address and a name or hash) and exports.
-  PE is the built-in reader; a platform registers its own (the PS4:
-  SELF/ELF with SCE dynamic tables and NID imports, function starts
-  from .eh_frame), compiled into recomp_lift only when that platform is
-  enabled (CMake option RECOMP_PLATFORM_<NAME>).
+- Images. The lifter's Module is format-neutral: where it is mapped and
+  linked, its .text range, the data scanned for code pointers and the
+  read-only data switch tables may live in. PE is the built-in format;
+  a platform registers an ImageReader (tools/lifter/program.h) from a
+  source it adds to recomp_lift, which maps the image and adds what the
+  format says about code: function entries, names, noreturn imports.
+  The PS4's (platforms/orbis) reads decrypted ELFs with SCE dynamic
+  tables and NID imports, takes function starts from .eh_frame and
+  bounds .text by them and the PLT, since the executable segment also
+  holds .rodata and .eh_frame. Ghidra symbols are optional for it.
 - HLE ABI. Arg(), the return registers and float arguments follow the
   process's ABI: 32-bit stdcall/cdecl, Win64, or System V AMD64
   (Process::sysv). System V is generic (it is also the Linux and macOS
@@ -1182,7 +1175,7 @@ The seams (core, generic):
   their TCB through fs (Ctx::fs_base).
 - Address space. Where images, stacks, TLS and the thunk region go is
   the platform's choice ("nothing below 4 GiB" is Win64's rule; PS4
-  executables are linked at 0x400000).
+  executables are mapped at 0x400000).
 - Process bring-up: a platform entry that loads the modules, binds
   imports to its HLE, sets up TLS (Windows' TEB through gs; FreeBSD's
   TCB through fs) and starts the main thread.

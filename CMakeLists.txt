@@ -396,6 +396,13 @@ function(recomp_add_fast2d_test)
 endfunction()
 
 add_subdirectory(tests)
+
+# Console platform modules (ARCHITECTURE.md, "Console platforms"): off
+# unless a game project for that platform turns them on.
+option(RECOMP_PLATFORM_ORBIS "PS4 (Orbis OS) platform module" OFF)
+if(RECOMP_PLATFORM_ORBIS)
+  add_subdirectory(platforms/orbis)
+endif()
 # Dev tool: renders the EAX capture cases with recomp_audio (eax_render).
 if(PROJECT_IS_TOP_LEVEL AND FFMPEG_FOUND)
   add_subdirectory(tools/eax_capture)
