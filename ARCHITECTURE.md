@@ -1015,6 +1015,16 @@ Lifter:
   a function's tables inside its range, after the code. Two adjacent
   tables then read as one, which only adds labels that are real case
   targets of the same function.
+- Clang's tables hold signed offsets from the table itself: `lea rB,
+  [table]` ... `movsxd rT, [rB + idx*4]; add rT, rB; jmp rT`. Both forms
+  are "target = B + entry", with B (and the load's base) the value a
+  RIP-relative lea gives the register on every path to the jmp (through
+  register copies; paths around a loop back to it do not count), else
+  the image base. The bounds check may sit in another block that
+  branches to the table code (a taken jbe/jb counts like a ja/jae
+  falling through), and the index may be a copy (mov, movsxd, movzx) of
+  the register that was compared. Tables outside .text are read from
+  the module's read-only data (an ELF's .rodata).
 - Function pointers in x64 code are RIP-relative leas into .text (weak
   entries, like the immediates of 32-bit code); data pointers are
   8-byte aligned qwords.

@@ -19,9 +19,31 @@ namespace lifter {
 
 struct Module {
   std::string name;  // file name without extension, e.g. "game"
-  recomp::PeImage img;
+  // Where it is mapped, and the base its symbol files and manifest use.
+  uint64_t base = 0, preferred_base = 0;
   uint64_t text_lo = 0, text_hi = 0;  // [lo, hi) of .text
+  // Initialised data scanned for code pointers, as [lo, hi) ranges.
+  std::vector<std::pair<uint64_t, uint64_t>> data;
+  // Read-only data outside .text that may hold switch tables (an ELF's
+  // .rodata; MSVC puts its tables in .text).
+  std::vector<std::pair<uint64_t, uint64_t>> rodata;
+  recomp::PeImage pe;  // PE modules only; empty for an ImageReader's
 };
+
+struct Program;
+
+// A non-PE executable format, read by a console platform's module
+// (ARCHITECTURE.md, "Console platforms"), which registers it from a static
+// initialiser in the source it adds to recomp_lift. Match says whether a
+// file is in its format (and whether it is x64 code); Load maps the image
+// into p.mem, fills m (all but name) and adds what the format itself says
+// about code to p: function entries, names, noreturn import slots.
+struct ImageReader {
+  bool (*Match)(const std::string& path, bool* x64);
+  bool (*Load)(Program& p, Module& m, const std::string& path, uint64_t base,
+               std::string* err);
+};
+void RegisterImageReader(const ImageReader& r);
 
 struct Program {
   recomp::GuestMemory mem;
@@ -64,7 +86,8 @@ struct Program {
   std::map<uint64_t, EhFrame> eh_frames;      // by function entry
 
   // Maps an image (at `base`, 0 for its preferred base) and reads its
-  // symbols. The first one is the EXE.
+  // symbols (none if symdir is empty; PE images need them). The first one
+  // is the EXE.
   bool Load(const std::string& path, const std::string& symdir, uint64_t base,
             std::string* err);
 
