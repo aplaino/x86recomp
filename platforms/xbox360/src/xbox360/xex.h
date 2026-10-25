@@ -33,11 +33,20 @@ struct XexImport {
   bool thunk = false;
 };
 
+// Static thread-local storage (__declspec(thread)): each thread gets
+// `data_size` bytes, the first `raw_size` copied from `raw_data` (a VA),
+// and `slots` dynamic slots (KeTlsAlloc).
+struct XexTls {
+  uint32_t slots = 0, raw_data = 0, data_size = 0, raw_size = 0;
+};
+
 struct XexModule {
   uint32_t base = 0;        // the image's load address
   uint32_t entry = 0;
   uint32_t title_id = 0;    // 0 for system modules
   uint32_t module_flags = 0;
+  uint32_t stack_size = 0;  // the main thread's, 0 if the XEX does not say
+  XexTls tls;
   std::string original_name;
   std::vector<uint8_t> image;  // the loaded image, `base` at offset 0
   std::vector<XexSection> sections;

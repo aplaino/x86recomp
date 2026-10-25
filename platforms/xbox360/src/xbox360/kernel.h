@@ -1,0 +1,139 @@
+#pragma once
+// The kernel's state the HLE modules share (ARCHITECTURE.md, "Runtime:
+// threads and objects"): dispatcher objects in guest memory and the waits
+// on them, handles, guest threads with the structures guest code reads
+// through r13, and time.
+
+#include <cstdint>
+
+#include "ppc/ctx.h"
+
+namespace recomp::xbox360 {
+
+// NTSTATUS values.
+constexpr uint32_t kStatusSuccess = 0, kStatusAbandoned = 0x80, kStatusAlerted = 0x101,
+                   kStatusTimeout = 0x102, kStatusPending = 0x103,
+                   kStatusUnsuccessful = 0xC0000001, kStatusNotImplemented = 0xC0000002,
+                   kStatusInvalidHandle = 0xC0000008, kStatusInvalidParameter = 0xC000000D,
+                   kStatusNoMemory = 0xC0000017, kStatusConflictingAddresses = 0xC0000018,
+                   kStatusObjectTypeMismatch = 0xC0000024,
+                   kStatusInvalidPageProtection = 0xC0000045, kStatusMutantNotOwned = 0xC0000046,
+                   kStatusSemaphoreLimitExceeded = 0xC0000047,
+                   kStatusMemoryNotAllocated = 0xC00000A0, kStatusFreeVmNotAtBase = 0xC000009F;
+
+// ---- dispatcher objects -----------------------------------------------
+// Every waitable object starts with a DISPATCHER_HEADER in guest memory:
+// the type (byte 0), the signal state (be32 at 4) and the list of waiting
+// blocks (8). Guest code initialises events itself (KeInitializeEvent is
+// inline), so the header in guest memory is the object's state; the host
+// keeps no copy. KSEMAPHORE adds its limit at 0x10, KMUTANT its owner
+// thread at 0x18 and its abandoned flag at 0x1C.
+enum ObjectType : uint8_t {
+  kNotificationEvent = 0,
+  kSynchronizationEvent = 1,
+  kMutantObject = 2,
+  kProcessObject = 3,
+  kQueueObject = 4,
+  kSemaphoreObject = 5,
+  kThreadObject = 6,
+  kNotificationTimer = 8,
+  kSynchronizationTimer = 9,
+};
+constexpr uint32_t kDispatcherHeaderSize = 0x10, kSemaphoreSize = 0x14, kMutantSize = 0x20;
+
+// The header of a new object: type, signal state, empty wait list.
+void InitObject(uint32_t obj, ObjectType type, int32_t signal_state);
+// Changes an object's signal state and wakes its waiters, under the
+// dispatcher lock: SetSignal returns the previous state (KeSetEvent,
+// KeResetEvent), PulseEvent sets it, lets current waiters through and
+// clears it again.
+int32_t SetSignal(uint32_t obj, int32_t state);
+int32_t PulseEvent(uint32_t obj);
+// KeReleaseSemaphore: false (and no change) if the count would exceed the
+// limit.
+bool ReleaseSemaphore(uint32_t sem, int32_t count, int32_t& previous);
+// KeReleaseMutant on behalf of the current thread: kStatusMutantNotOwned
+// if it does not own it.
+uint32_t ReleaseMutant(uint32_t mutant, int32_t& previous);
+
+// KeWaitForMultipleObjects for the current thread. `timeout` is a 100 ns
+// count, NT's LARGE_INTEGER: negative relative, otherwise an absolute
+// system time; nullptr waits forever. Returns the index of the object
+// that satisfied a wait-any (plus kStatusAbandoned for an abandoned
+// mutant), 0 for a wait-all, or kStatusTimeout. Alertable waits are not
+// woken by APCs yet (none are queued).
+uint32_t Wait(const uint32_t* objs, uint32_t count, bool wait_all, const int64_t* timeout,
+              bool alertable);
+// KeDelayExecutionThread: a wait on nothing.
+uint32_t Delay(int64_t timeout, bool alertable);
+
+// ---- handles ------------------------------------------------------------
+// A handle names a dispatcher object (or another kernel object) by its
+// guest address, and holds a reference on it. Objects the kernel created
+// (NtCreateEvent, threads) are freed with their last reference.
+constexpr uint32_t kCurrentThreadHandle = 0xFFFFFFFE, kCurrentProcessHandle = 0xFFFFFFFF;
+uint32_t NewHandle(uint32_t obj);
+// The object of a handle (pseudo handles included), 0 if it names none.
+uint32_t HandleObject(uint32_t handle);
+bool CloseHandle(uint32_t handle);
+// References on objects (ObReferenceObjectByHandle, ObDereferenceObject).
+// An object registered with Own() is freed when its references drop to
+// zero.
+void Own(uint32_t obj, void (*destroy)(uint32_t obj));
+void Reference(uint32_t obj);
+void Dereference(uint32_t obj);
+
+// ---- threads ------------------------------------------------------------
+struct Thread;
+constexpr uint32_t kCreateSuspended = 0x1;
+
+struct ThreadParams {
+  uint32_t stack_size;  // 0: the title's default
+  uint32_t startup;     // XAPI's startup routine, called as startup(start, context); or 0
+  uint32_t start, context;
+  uint32_t flags;       // kCreateSuspended; the processor in bits 24-31
+  // The title's main thread: its start routine returning ends the process
+  // (the C runtime's exit), with what it returned.
+  bool main = false;
+};
+// A new guest thread on its own host thread; it holds one reference on its
+// KTHREAD until it ends.
+Thread* CreateThread(const ThreadParams& p);
+Thread* CurrentThread();
+// The guest KTHREAD of a thread (its dispatcher object) and back.
+uint32_t KThread(const Thread* t);
+Thread* ThreadOf(uint32_t kthread);
+uint32_t ThreadId(const Thread* t);
+// The guest address of a thread's dynamic TLS slots (KeTlsGetValue).
+uint32_t TlsSlots(const Thread* t);
+// Its processor (KPCR and KTHREAD), 0-5.
+void SetProcessor(Thread* t, uint32_t cpu);
+// Suspend counts (KeSuspendThread, KeResumeThread): the previous count.
+uint32_t SuspendThread(Thread* t);
+uint32_t ResumeThread(Thread* t);
+// Ends the current thread (ExTerminateThread, or its start routine
+// returning) with `status`. The process ends with its last thread.
+[[noreturn]] void ExitThread(uint32_t status);
+
+// The title process (KeGetCurrentProcessType): kTitleProcess.
+constexpr uint32_t kTitleProcess = 1;
+// The title's dynamic TLS slot count and static TLS (XEX TLS info), the
+// default stack size; set by the loader before the first thread.
+struct ProcessInfo {
+  uint32_t tls_slots, tls_data_size, tls_raw_data, tls_raw_size;
+  uint32_t stack_size;
+};
+void SetProcessInfo(const ProcessInfo& info);
+const ProcessInfo& Process();
+// Ends the host process with `status` (the title's exit).
+[[noreturn]] void ExitProcess(int status);
+
+// ---- time ---------------------------------------------------------------
+// The time base runs at the Xenon's 3.192 GHz / 64; xam converts its ticks
+// with that constant.
+constexpr uint64_t kTimeBaseFrequency = 49875000;
+uint64_t TimeBaseTicks();  // since start
+uint64_t SystemTime();     // 100 ns units since 1601 (FILETIME), the host's clock
+uint64_t InterruptTime();  // 100 ns units since start
+
+}  // namespace recomp::xbox360
