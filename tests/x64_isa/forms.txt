@@ -19,6 +19,8 @@ c4 e2 38 f3 16                                   # blsmsk r8d, dword ptr [rsi]
 66 f3 0f bc c3                                   # tzcnt ax, bx
 f3 0f bc c3                                      # tzcnt eax, ebx
 f3 48 0f bc 06                                   # tzcnt rax, qword ptr [rsi]
+f0 48 0f c7 0e                                   # lock cmpxchg16b xmmword ptr [rsi]
+48 0f c7 0e                                      # cmpxchg16b xmmword ptr [rsi]
 f0 86 06                                         # lock xchg byte ptr [rsi], al
 66 f0 87 36                                      # lock xchg word ptr [rsi], si
 f0 87 36                                         # lock xchg dword ptr [rsi], esi
@@ -732,3 +734,9 @@ c4 e3 79 62 da 08                                # vpcmpistrm xmm3, xmm2, 0x08
 c4 e2 69 03 cb                                   # vphaddsw xmm1, xmm2, xmm3
 c4 e2 69 0a c9                                   # vpsignd xmm1, xmm2, xmm1
 c4 e3 69 42 cb 05                                # vmpsadbw xmm1, xmm2, xmm3, 5
+c5 fc 5a c1                                      # vcvtps2pd ymm0, xmm1
+c5 fc 5a d2                                      # vcvtps2pd ymm2, xmm2
+c5 fc 5a 1e                                      # vcvtps2pd ymm3, xmmword ptr [rsi]
+c5 fd 5a c1                                      # vcvtpd2ps xmm0, ymm1
+c5 fd 5a e4                                      # vcvtpd2ps xmm4, ymm4
+c5 fd 5a 2e                                      # vcvtpd2ps xmm5, ymmword ptr [rsi]

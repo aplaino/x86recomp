@@ -1,5 +1,5 @@
-// AES-NI, PCLMULQDQ and the SSE4.2 string compares (see sse.h). Plain
-// integer code: the same bits on every host.
+// AES-NI, PCLMULQDQ, the SSE4.2 string compares and FXSAVE/FXRSTOR (see
+// sse.h). Plain integer code: the same bits on every host.
 //
 // AES: FIPS-197's round steps on the x86 state layout (byte i of the
 // register is row i % 4, column i / 4). The S-box is computed once from
@@ -11,8 +11,10 @@
 // results for invalid elements.
 
 #include <cstdint>
+#include <cstring>
 
 #include "runtime/sse.h"
+#include "runtime/x87.h"
 
 namespace recomp::sse {
 namespace {
@@ -220,6 +222,22 @@ uint32_t PcmpStrM(const Xmm& a, const Xmm& b, uint8_t imm, bool expl, int64_t la
   }
   *mask = r;
   return f;
+}
+
+void Fxsave(Ctx& c, uint8_t* p) {
+  x87::FxSave(c.fpu, p);
+  std::memcpy(p + 24, &c.mxcsr, 4);
+  const uint32_t mask = 0xFFFF;
+  std::memcpy(p + 28, &mask, 4);
+  for (int i = 0; i < 16; i++) std::memcpy(p + 160 + 16 * i, c.xmm[i].b, 16);
+}
+
+void Fxrstor(Ctx& c, const uint8_t* p, uint64_t va) {
+  uint32_t mxcsr;
+  std::memcpy(&mxcsr, p + 24, 4);
+  Ldmxcsr(c, mxcsr, va);
+  x87::FxRestore(c.fpu, p);
+  for (int i = 0; i < 16; i++) std::memcpy(c.xmm[i].b, p + 160 + 16 * i, 16);
 }
 
 }  // namespace recomp::sse

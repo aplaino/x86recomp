@@ -437,6 +437,7 @@ HLE64("kernel32.dll", IsProcessorFeaturePresent, 1) {
     case 10: return 1;  // PF_XMMI64_INSTRUCTIONS_AVAILABLE (SSE2)
     // x64 guests: the extensions their CPUID model claims (dispatch.cpp).
     case 13:  // PF_SSE3_INSTRUCTIONS_AVAILABLE
+    case 14:  // PF_COMPARE_EXCHANGE128
     case 36:  // PF_SSSE3_INSTRUCTIONS_AVAILABLE
     case 37:  // PF_SSE4_1_INSTRUCTIONS_AVAILABLE
     case 38:  // PF_SSE4_2_INSTRUCTIONS_AVAILABLE

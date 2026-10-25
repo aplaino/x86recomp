@@ -628,6 +628,10 @@ template <typename T>
 inline T* AtomicPtr(uint8_t* b, uint64_t a) {
   return reinterpret_cast<T*>(b + a);
 }
+// CMPXCHG16B: if the 16 bytes at p (16-byte aligned) equal hi:lo, stores
+// new_hi:new_lo and returns true; otherwise loads them into hi:lo.
+// Atomic (runtime/atomic128.cpp).
+bool Cas128(uint8_t* p, uint64_t* lo, uint64_t* hi, uint64_t new_lo, uint64_t new_hi);
 
 }  // namespace lift
 }  // namespace recomp

@@ -1104,14 +1104,16 @@ lifted, not avoided:
 - The YMM upper halves live in Ctx::ymm_hi; VEX instructions are lifted
   one 128-bit half at a time on the same lane functions (AVX has almost
   no operation that crosses halves; vperm2f128, vinsertf128 and
-  vextractf128 move whole halves).
+  vextractf128 move whole halves, and the 256-bit vcvtps2pd and
+  vcvtpd2ps convert between one half of floats and two of doubles, two
+  lanes at a time).
 - CPUID for x64 processes is a fixed CPU of its own, never the host's:
   AMD family 16h (the Jaguar class, which the console targets also
   have), with only the feature bits the lifter implements bit-exactly
   with oracle tests set, growing towards that part's set (SSE3, SSSE3,
-  SSE4.1/4.2, POPCNT, LZCNT, AVX, F16C, BMI1, MOVBE, AES, PCLMUL; no
-  AVX2 or FMA). Claimed now: all of those but AVX and F16C (and
-  CMPXCHG16B, not in the model yet). AVX is claimed (OSXSAVE, XCR0 = 7
+  SSE4.1/4.2, POPCNT, LZCNT, CMPXCHG16B, AVX, F16C, BMI1, MOVBE, AES,
+  PCLMUL; no AVX2 or FMA). Claimed now: all of those but AVX and F16C.
+  AVX is claimed (OSXSAVE, XCR0 = 7
   through XGETBV) once all its forms hold. Games read CPUID themselves
   (MSVC's CRT fills __isa_available from it), so which paths they take
   follows from this table.
@@ -1128,7 +1130,15 @@ lifted, not avoided:
   model's extensions, lift_isa64_*), natively and lifted from random states:
   all 16 general registers, the full YMM registers, flags, MXCSR and a
   memory buffer. The native stub keeps its state pointer in a
-  RIP-relative slot, so forms may use any register but rsp.
+  RIP-relative slot, so forms may use any register but rsp. Every other
+  trial of a compare-exchange form has the accumulator in its memory
+  operand, so both outcomes run.
+- CMPXCHG16B is the host compiler's own 16-byte atomic compare-exchange
+  (runtime/atomic128.cpp: one instruction on x86-64 with -mcx16 and on
+  arm64). FXSAVE/FXRSTOR write and read the x87 and SSE models' state
+  in the 512-byte layout, as the modelled family does: the x87 pointers
+  and opcode only while an exception is pending, MXCSR_MASK 0xFFFF;
+  tests/fxsave_test compares both against the host CPU.
 
 Graphics, audio, platform: Direct3D 11 / DXGI (and D3DCompiler_47) as
 HLE over gfx::Device; XAudio2 on the mixer; SDL2 imports on host SDL3;

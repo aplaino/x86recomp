@@ -440,10 +440,10 @@ static void Cpuid64(Ctx& c) {
     case 1:
       a = 0x00700F01;  // family 16h (0Fh + 07h), model 0, stepping 1
       b = (GuestProcessorCount() << 16) | (8u << 8);  // CLFLUSH: 64 bytes
-      // SSE3, PCLMULQDQ, SSSE3, SSE4.1, SSE4.2, MOVBE, POPCNT, AES
-      // (tests/x64_isa/forms.s); not yet AVX/OSXSAVE, F16C, CMPXCHG16B.
-      cx = (1u << 0) | (1u << 1) | (1u << 9) | (1u << 19) | (1u << 20) | (1u << 22) |
-           (1u << 23) | (1u << 25);
+      // SSE3, PCLMULQDQ, SSSE3, CMPXCHG16B, SSE4.1, SSE4.2, MOVBE,
+      // POPCNT, AES (tests/x64_isa/forms.s); not yet AVX/OSXSAVE, F16C.
+      cx = (1u << 0) | (1u << 1) | (1u << 9) | (1u << 13) | (1u << 19) | (1u << 20) |
+           (1u << 22) | (1u << 23) | (1u << 25);
       d = 0x0783F9FF;  // fpu tsc cx8 cmov mmx fxsr sse sse2 (as 32-bit)
       break;
     case 7:

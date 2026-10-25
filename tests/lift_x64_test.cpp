@@ -340,6 +340,7 @@ int main(int argc, char** argv) {
     is_string = is_string && mn != "movsx" && mn != "movsxd" && mn != "movss" &&
                 mn != "movsd" && text.find("xmm") == std::string::npos;
     bool is_bt = mn.rfind("bt", 0) == 0 && f.base >= 0;
+    bool is_cas = text.find("cmpxchg") != std::string::npos && f.base >= 0;
     uint32_t defined = (0x1u | 0x4u | 0x10u | 0x40u | 0x80u | 0x400u | 0x800u) & ~f.undef;
     int fails = 0;
     for (int t = 0; t < trials; t++) {
@@ -367,6 +368,13 @@ int main(int argc, char** argv) {
         for (int k = 0; k < 16; k++) in.xmm[i][k] = uint8_t(g());
       for (auto& b : init) b = uint8_t(g());
 #endif
+
+      // Compare-exchange forms: every other trial the memory operand holds
+      // the accumulator (rdx:rax for cmpxchg16b), so both outcomes run.
+      if (is_cas && t % 2) {
+        std::memcpy(&init[0x1000], &in.r[0], 8);
+        std::memcpy(&init[0x1008], &in.r[2], 8);
+      }
 
       Regs hw = in;
       std::memcpy(native_buf, init.data(), kBufSize);

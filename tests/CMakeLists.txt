@@ -91,6 +91,13 @@ target_compile_features(lazy_mem_test PRIVATE cxx_std_20)
 target_link_libraries(lazy_mem_test PRIVATE Threads::Threads)
 add_test(NAME lazy_mem COMMAND lazy_mem_test)
 
+# fxsave_test: FXSAVE/FXRSTOR of the x87 and SSE models against the host.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+  add_executable(fxsave_test fxsave_test.cpp)
+  target_link_libraries(fxsave_test PRIVATE recomp_x87)
+  add_test(NAME fxsave COMMAND fxsave_test)
+endif()
+
 # lift_semantics_test checks the integer/flag helpers in lifted.h against
 # the host CPU the same way.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
