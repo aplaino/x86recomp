@@ -10,6 +10,7 @@
 // usage: orbis_process_test eboot.elf prx.elf
 
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 
@@ -69,9 +70,11 @@ int main(int argc, char** argv) {
   std::filesystem::create_directories(dir / "sub");
   std::ofstream(dir / "sub" / "b.txt") << "b";
   std::ofstream(dir / "sub" / "a.txt") << "a";
+  // The per-user data (save data) in a directory of its own.
+  setenv("XDG_DATA_HOME", (dir / "data").c_str(), 1);
   const int r = recomp::orbis::RunProcess(game, dir.string(), config);
   std::filesystem::remove_all(dir);
-  constexpr int kChecks = 23 + 23 + 27;
+  constexpr int kChecks = 23 + 23 + 27 + 18 + 7;
   std::printf("%d checks, %d failed, _start returned %d\n", g_checks, g_failed, r);
   const bool ok = r == 0 && g_failed == 0 && g_checks == kChecks;
   std::printf("%s\n", ok ? "orbis_process: ok" : "orbis_process: FAILED");

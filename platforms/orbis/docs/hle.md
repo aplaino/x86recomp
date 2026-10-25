@@ -62,6 +62,26 @@ library.
   every chunk local, nothing to do, ETAs 0) and libSceDiscMap (a disc
   game's file locations from its sce_discmap.plt: MD5 of the path below
   /app0/, 24-bit block, location and length; every block is on the HDD).
+- recomp_orbis_audio: libSceAudioOut. Ports numbered and checked as
+  11.00 does; a port holds one buffer and Output returns once the system
+  has taken the previous one (every `length` samples at 48 kHz on the
+  host's clock, so a run without an audio device keeps time); samples go
+  to an SDL audio stream per port, scaled by the port's volumes.
+- recomp_orbis_savedata: libSceSaveData on DataDir()/savedata/<user>/
+  (each directory with a .meta of its blocks and SceSaveDataParam, and
+  its icon .png); a mount maps /savedataN onto it through libkernel's
+  files. The library's argument checks and codes are 11.00's, the save
+  data service's answers the SDK's error codes. Save data memory is
+  memory.dat beside them.
+- recomp_orbis_net: libSceNet (init, pools, errno, byte order),
+  libSceNetCtl, libSceSsl and libSceHttp contexts, for a console with no
+  network connection: NetCtl's state is disconnected and never changes.
+- recomp_orbis_np: libSceNpManager and libSceNpWebApi for a user not
+  signed in to PSN: the state is signed out, what the PSN service would
+  answer fails with SCE_NP_ERROR_SIGNED_OUT.
+- libSceCommonDialog (in recomp_orbis_system): initialisation.
+- libkernel also: signal masks (kept per thread; nothing delivers
+  signals to the guest) and libScePosix's clock_gettime.
 - The loader (orbis/process.cpp) provides __tls_get_addr.
 
 ## Not measured on hardware yet

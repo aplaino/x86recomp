@@ -95,7 +95,7 @@ ORBIS_HLE("libkernel", nanosleep, 2) {
   return 0;
 }
 
-ORBIS_HLE("libkernel", clock_gettime, 2) {
+static uint64_t ClockGettime(recomp::Ctx& c) {
   int64_t ns;
   if (!ClockNs(int(Arg(c, 0)), &ns)) {
     SetErrno(c, kEINVAL);
@@ -104,6 +104,8 @@ ORBIS_HLE("libkernel", clock_gettime, 2) {
   PutTimespec(Arg(c, 1), ns);
   return 0;
 }
+ORBIS_HLE("libkernel", clock_gettime, 2) { return ClockGettime(c); }
+ORBIS_HLE_NAMED("libScePosix", "clock_gettime", posix_clock_gettime, 2) { return ClockGettime(c); }
 
 ORBIS_HLE("libkernel", sceKernelClockGettime, 2) {
   int64_t ns;

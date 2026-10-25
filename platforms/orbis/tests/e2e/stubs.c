@@ -1,6 +1,6 @@
 // Link-time stand-ins that give the test programs' imports a library
 // (tools/orbis_sce_elf.py --lib): compiled once per library, with
-// -DLIB_TEST, -DLIB_KERNEL, -DLIB_FIBER or -DLIB_GNM. Never run.
+// -DLIB_<library> (build.py). Never run.
 
 #ifdef LIB_TEST
 int test_check(int id, long got, long want) { return 0; }
@@ -22,7 +22,7 @@ STUB(sceKernelWaitSema) STUB(sceKernelSignalSema) STUB(sceKernelCreateEventFlag)
 STUB(sceKernelSetEventFlag) STUB(sceKernelWaitEventFlag) STUB(__error) STUB(open)
 STUB(sceKernelOpen) STUB(sceKernelRead) STUB(sceKernelClose) STUB(sceKernelStat) STUB(mmap)
 STUB(munmap) STUB(sceKernelUsleep) STUB(sceKernelGetProcessTime) STUB(clock_gettime)
-STUB(sceKernelGetdents) STUB(sceKernelCreateEqueue) STUB(sceKernelWaitEqueue)
+STUB(sceKernelGetdents) STUB(sceKernelCreateEqueue) STUB(sceKernelWaitEqueue) STUB(sceKernelWrite)
 #endif
 
 #ifdef LIB_FIBER
@@ -30,6 +30,19 @@ STUB(sceKernelGetdents) STUB(sceKernelCreateEqueue) STUB(sceKernelWaitEqueue)
   void name(void) {}
 STUB(_sceFiberInitializeImpl) STUB(sceFiberRun) STUB(sceFiberSwitch) STUB(sceFiberReturnToThread)
 STUB(sceFiberGetSelf) STUB(sceFiberFinalize)
+#endif
+
+#ifdef LIB_SAVEDATA
+#define STUB(name) \
+  void name(void) {}
+STUB(sceSaveDataInitialize) STUB(sceSaveDataMount) STUB(sceSaveDataUmount) STUB(sceSaveDataDelete)
+STUB(sceSaveDataDirNameSearch) STUB(sceSaveDataSetParam)
+#endif
+
+#ifdef LIB_AUDIOOUT
+#define STUB(name) \
+  void name(void) {}
+STUB(sceAudioOutInit) STUB(sceAudioOutOpen) STUB(sceAudioOutOutput) STUB(sceAudioOutClose)
 #endif
 
 #ifdef LIB_GNM

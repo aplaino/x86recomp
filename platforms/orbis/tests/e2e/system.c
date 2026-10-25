@@ -31,6 +31,21 @@ int sceGnmSubmitCommandBuffers(unsigned n, void** dcbs, unsigned* sizes, void** 
                                unsigned* ccb_sizes);
 int sceGnmAddEqEvent(long eq, int id, void* udata);
 
+int sceSaveDataInitialize(const void* reserved);
+int sceSaveDataMount(const void* mount, void* result);
+int sceSaveDataUmount(const char* mount_point);
+int sceSaveDataDelete(const void* del);
+int sceSaveDataDirNameSearch(const void* cond, void* result);
+int sceSaveDataSetParam(const char* mount_point, int type, const void* buf, unsigned long size);
+long sceKernelWrite(int fd, const void* buf, unsigned long n);
+long sceKernelRead(int fd, void* buf, unsigned long n);
+
+int sceAudioOutInit(void);
+int sceAudioOutOpen(int user, int type, int index, unsigned len, unsigned freq, unsigned param);
+int sceAudioOutOutput(int handle, const void* buf);
+int sceAudioOutClose(int handle);
+unsigned long sceKernelGetProcessTime(void);
+
 #define SCE_ETIMEDOUT 0x8002003C
 
 // ---- fibers: a ping-pong between two, each on its own stack.
@@ -174,4 +189,106 @@ static int gpu_checks(void) {
   return failed;
 }
 
-int system_checks(void) { return fiber_checks() + dir_checks() + gpu_checks(); }
+// ---- save data: one directory created, written through its mount point,
+// mounted again and read, found, deleted.
+
+typedef struct {
+  int user, pad;
+  const char* title;
+  const char* dir;
+  const void* fingerprint;
+  unsigned long blocks;
+  unsigned mode;
+  char reserved[32];
+} SaveMount;
+typedef struct {
+  char mount_point[16];
+  unsigned long required;
+  unsigned unused, status;
+  char reserved[28];
+} SaveMountResult;
+
+static int save_checks(void) {
+  int failed = 0;
+  failed += test_check(110, sceSaveDataInitialize(0), 0);
+  SaveMount m = {1, 0, 0, "SAVE0001", 0, 96, 2 | 4};  // read-write, create
+  SaveMountResult r = {0};
+  failed += test_check(111, sceSaveDataMount(&m, &r), 0);
+  failed += test_check(112, streq(r.mount_point, "/savedata0") && r.status == 1, 1);
+  failed += test_check(113, (unsigned)sceSaveDataMount(&m, &r), 0x809F0003);  // busy: mounted
+  int fd = sceKernelOpen("/savedata0/slot.bin", 0x201 | 0x400, 0644);  // write, create, trunc
+  failed += test_check(114, sceKernelWrite(fd, "progress", 8), 8);
+  sceKernelClose(fd);
+  failed += test_check(115, sceSaveDataSetParam("/savedata0", 4, "\x2a\0\0\0", 4), 0);
+  failed += test_check(116, sceSaveDataUmount("/savedata0"), 0);
+  failed += test_check(117, (unsigned)sceKernelOpen("/savedata0/slot.bin", 0, 0), 0x80020002);
+  failed += test_check(118, (unsigned)sceSaveDataMount(&m, &r), 0x809F0007);  // exists
+  m.mode = 1;  // read-only
+  failed += test_check(119, sceSaveDataMount(&m, &r) == 0 && r.status == 0, 1);
+  char buf[16] = {0};
+  fd = sceKernelOpen("/savedata0/slot.bin", 0, 0);
+  failed += test_check(120, sceKernelRead(fd, buf, sizeof buf), 8);
+  sceKernelClose(fd);
+  failed += test_check(121, streq(buf, "progress"), 1);
+  failed += test_check(122, (unsigned)sceKernelOpen("/savedata0/new.bin", 0x201, 0644),
+                       0x8002001E);  // EROFS
+  sceSaveDataUmount("/savedata0");
+  struct {
+    int user, pad;
+    const char* title;
+    const char* dir;
+    unsigned key, order;
+    char reserved[32];
+  } cond = {1, 0, 0, "SAVE%", 0, 0};
+  char names[4][32];
+  unsigned char params[4][0x530];
+  struct {
+    unsigned hits, pad;
+    void* names;
+    unsigned room, set;
+    void* params;
+    void* infos;
+    char reserved[12];
+  } found = {0, 0, names, 4, 0, params, 0};
+  failed += test_check(123, sceSaveDataDirNameSearch(&cond, &found), 0);
+  failed += test_check(124, found.hits == 1 && found.set == 1 && streq(names[0], "SAVE0001") &&
+                                params[0][0x500] == 42,
+                       1);
+  struct {
+    int user, pad;
+    const char* title;
+    const char* dir;
+    unsigned unused;
+    char reserved[32];
+  } del = {1, 0, 0, "SAVE0001"};
+  failed += test_check(125, sceSaveDataDelete(&del), 0);
+  failed += test_check(126, (unsigned)sceSaveDataDelete(&del), 0x809F0008);  // not found
+  m.mode = 2;
+  failed += test_check(127, (unsigned)sceSaveDataMount(&m, &r), 0x809F0008);
+  return failed;
+}
+
+// ---- audio out: a port's buffers are taken one per 256 samples at 48 kHz.
+
+static short pcm[256 * 2];
+
+static int audio_checks(void) {
+  int failed = 0;
+  failed += test_check(130, sceAudioOutInit(), 0);
+  failed += test_check(131, (unsigned)sceAudioOutOpen(0xFF, 0, 0, 100, 48000, 1),
+                       0x80260006);  // not a multiple of 256
+  failed += test_check(132, (unsigned)sceAudioOutOpen(0xFF, 0, 0, 256, 44100, 1), 0x80260008);
+  int h = sceAudioOutOpen(0xFF, 0, 0, 256, 48000, 1);  // S16 stereo
+  failed += test_check(133, h, 0x20000007);
+  unsigned long t0 = sceKernelGetProcessTime();
+  for (int i = 0; i < 21; i++) sceAudioOutOutput(h, pcm);
+  // 20 buffers must have been taken: 20 x 5.33 ms.
+  failed += test_check(134, sceKernelGetProcessTime() - t0 >= 100000, 1);
+  failed += test_check(135, sceAudioOutClose(h), 0);
+  failed += test_check(136, (unsigned)sceAudioOutOutput(h, pcm), 0x80260001);  // not open
+  return failed;
+}
+
+int system_checks(void) {
+  return fiber_checks() + dir_checks() + gpu_checks() + save_checks() + audio_checks();
+}

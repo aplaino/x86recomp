@@ -21,12 +21,23 @@ add_library(recomp_orbis_kernel SHARED src/orbis/hle/kernel.cpp src/orbis/hle/ke
 target_link_libraries(recomp_orbis_kernel PUBLIC recomp_orbis)
 add_library(recomp_orbis_libc_internal SHARED src/orbis/hle/libc_internal.cpp)
 target_link_libraries(recomp_orbis_libc_internal PUBLIC recomp_orbis_kernel)
-# libSceSystemService, libSceUserService, libSceSysmodule, libScePlayGo, libSceDiscMap.
+# libSceSystemService, libSceUserService, libSceSysmodule, libScePlayGo, libSceDiscMap, the dialogs.
 add_library(recomp_orbis_system SHARED src/orbis/hle/system.cpp src/orbis/hle/playgo.cpp
-            src/orbis/hle/discmap.cpp)
+            src/orbis/hle/discmap.cpp src/orbis/hle/dialog.cpp)
 target_link_libraries(recomp_orbis_system PUBLIC recomp_orbis)
 add_library(recomp_orbis_fiber SHARED src/orbis/hle/fiber.cpp)
 target_link_libraries(recomp_orbis_fiber PUBLIC recomp_orbis)
+# libSceAudioOut (and the audio libraries on it).
+add_library(recomp_orbis_audio SHARED src/orbis/hle/audioout.cpp)
+target_link_libraries(recomp_orbis_audio PUBLIC recomp_orbis)
+add_library(recomp_orbis_savedata SHARED src/orbis/hle/savedata.cpp)
+target_link_libraries(recomp_orbis_savedata PUBLIC recomp_orbis_kernel)
+# Networking (libSceNet, libSceNetCtl): no connection.
+add_library(recomp_orbis_net SHARED src/orbis/hle/net.cpp)
+target_link_libraries(recomp_orbis_net PUBLIC recomp_orbis_kernel)
+# PSN (libSceNp*): a user not signed in.
+add_library(recomp_orbis_np SHARED src/orbis/hle/np_manager.cpp src/orbis/hle/np_webapi.cpp)
+target_link_libraries(recomp_orbis_np PUBLIC recomp_orbis)
 add_library(recomp_orbis_videoout SHARED src/orbis/hle/videoout.cpp)
 target_link_libraries(recomp_orbis_videoout PUBLIC recomp_orbis_kernel)
 # libSceGnmDriver and the GPU's command processor (orbis/gpu).
@@ -69,7 +80,8 @@ if(RECOMP_LD_LLD AND Python3_FOUND AND CMAKE_C_COMPILER_ID MATCHES "Clang")
   add_executable(orbis_process_test tests/orbis_process_test.cpp ${_gen}
                  "${RECOMP_ROOT}/src/runtime/lifted_table.cpp")
   target_link_libraries(orbis_process_test PRIVATE recomp_orbis recomp_orbis_kernel
-                        recomp_orbis_fiber recomp_orbis_gnm)
+                        recomp_orbis_fiber recomp_orbis_gnm recomp_orbis_savedata
+                        recomp_orbis_audio)
   add_test(NAME orbis_process COMMAND orbis_process_test "${_e2e}/eboot.elf" "${_e2e}/prx.elf")
   set_tests_properties(orbis_process PROPERTIES TIMEOUT 60)  # a hang is a failure
 endif()

@@ -2,7 +2,9 @@
 
 #include "orbis/hle/kernel.h"
 
+#include <array>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <vector>
 
@@ -64,6 +66,8 @@ void InitProgname(gaddr a) {
 }  // namespace recomp::orbis::kernel
 
 using namespace recomp::orbis::kernel;
+using recomp::Ctx;
+using recomp::hle::Arg;
 
 ORBIS_DATA("libkernel", "__stack_chk_guard", stack_chk_guard, 8, InitStackGuard);
 ORBIS_DATA("libkernel", "__progname", progname, 24, InitProgname);
@@ -79,3 +83,35 @@ ORBIS_HLE("libkernel", _sceKernelRtldSetApplicationHeapAPI, 1) { return 0; }
 
 // int* __error(void): the calling thread's errno.
 ORBIS_HLE("libkernel", __error, 0) { return ErrnoAddr(c); }
+
+// Signal masks: nothing delivers signals to guest threads, so each only
+// keeps its mask (FreeBSD's sigset_t, 128 bits).
+namespace {
+
+std::mutex g_sig_mu;
+std::map<uint32_t, std::array<uint32_t, 4>> g_sigmask;  // by guest thread
+
+uint64_t SigProcMask(Ctx& c) {
+  const int how = int(Arg(c, 0));
+  const recomp::gaddr set = Arg(c, 1), old = Arg(c, 2);
+  std::lock_guard<std::mutex> l(g_sig_mu);
+  auto& m = g_sigmask[recomp::CurrentThread()->tid];
+  if (old)
+    for (int i = 0; i < 4; i++) recomp::Wr32(old + 4 * i, m[i]);
+  if (!set) return 0;
+  if (how < 1 || how > 3) {
+    SetErrno(c, kEINVAL);
+    return ~uint64_t(0);
+  }
+  for (int i = 0; i < 4; i++) {
+    const uint32_t v = recomp::Rd32(set + 4 * i);
+    m[i] = how == 1 ? m[i] | v : how == 2 ? m[i] & ~v : v;  // BLOCK, UNBLOCK, SETMASK
+  }
+  return 0;
+}
+
+}  // namespace
+
+// int sigprocmask(int how, const sigset_t* set, sigset_t* old)
+ORBIS_HLE("libkernel", sigprocmask, 3) { return SigProcMask(c); }
+ORBIS_HLE("libkernel", _sigprocmask, 3) { return SigProcMask(c); }

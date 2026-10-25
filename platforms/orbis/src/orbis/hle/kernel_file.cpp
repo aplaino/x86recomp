@@ -1,8 +1,9 @@
 // libkernel HLE: files. Guest paths are mapped by their mount point:
 // /app0 (and /hostapp) is the game directory, read-only as on the PS4;
-// /temp0, /download0 and the save data mounts (/savedata0..15) are
-// directories below the per-user data directory. Other paths are fatal
-// until something needs them.
+// /temp0 and /download0 are directories below the per-user data
+// directory; other mount points are what libraries mount (save data's
+// /savedataN; ENOENT while nothing is). Other paths are fatal until
+// something needs them.
 //
 // Descriptors are host file descriptors, but only those the guest opened
 // are accepted. Flags, errno values and struct stat are FreeBSD's (9.x,
@@ -76,14 +77,22 @@ struct Mapped {
   bool ok = false;
 };
 
-// A guest path to a host path.
+// Mounts other libraries make (save data): guest root -> host directory.
+struct MountPoint {
+  std::string host;
+  bool read_only;
+};
+std::map<std::string, MountPoint> g_mounts;
+
+// A guest path to a host path; !ok: below a mount point nothing is
+// mounted on (ENOENT).
 Mapped MapPath(const std::string& guest) {
   Mapped m;
-  auto under = [&](const char* root) {
-    const size_t n = std::strlen(root);
+  auto under = [&](const std::string& root) {
+    const size_t n = root.size();
     return guest.compare(0, n, root) == 0 && (guest.size() == n || guest[n] == '/');
   };
-  auto rest = [&](const char* root) { return guest.substr(std::strlen(root)); };
+  auto rest = [&](const std::string& root) { return guest.substr(root.size()); };
   for (const char* root : {"/app0", "/hostapp"})
     if (under(root)) {
       m.host = g_proc->game_dir + rest(root);
@@ -98,20 +107,24 @@ Mapped MapPath(const std::string& guest) {
       m.ok = true;
       return m;
     }
-  if (guest.compare(0, 9, "/savedata") == 0) {
-    const size_t slash = guest.find('/', 1);
-    const std::string mount = guest.substr(0, slash);
-    m.host = DataDir() + mount + (slash == std::string::npos ? "" : guest.substr(slash));
-    MakeDirs(DataDir() + mount);
-    m.ok = true;
-    return m;
+  {
+    std::lock_guard<std::mutex> l(g_mu);
+    for (const auto& [root, mp] : g_mounts)
+      if (under(root)) {
+        m.host = mp.host + rest(root);
+        m.read_only = mp.read_only;
+        m.ok = true;
+        return m;
+      }
   }
+  if (guest.compare(0, 9, "/savedata") == 0) return m;  // not mounted
   FatalF("file path %s: no mount point maps it", guest.c_str());
 }
 
 // open(2) on the guest's terms: the fd, or -(FreeBSD errno).
 int64_t Open(const std::string& path, int flags, int mode) {
   const Mapped m = MapPath(path);
+  if (!m.ok) return -kENOENT;
   const int acc = flags & kOAccMode;
   if (m.read_only && (acc != 0 || flags & (kOCreat | kOTrunc | kOAppend))) return -kEROFS;
   int hf = acc == kORdWr ? O_RDWR : acc == kOWrOnly ? O_WRONLY : O_RDONLY;
@@ -163,6 +176,7 @@ void PutStat(gaddr p, const struct stat& st) {
 
 int64_t Stat(const std::string& path, gaddr out) {
   const Mapped m = MapPath(path);
+  if (!m.ok) return -kENOENT;
   struct stat st;
   if (::stat(m.host.c_str(), &st) != 0) return -FromHost(errno);
   PutStat(out, st);
@@ -248,6 +262,7 @@ int64_t Lseek(int fd, int64_t off, int whence) {
 
 int64_t PathOp(const std::string& path, int (*op)(const char*)) {
   const Mapped m = MapPath(path);
+  if (!m.ok) return -kENOENT;
   if (m.read_only) return -kEROFS;
   return op(m.host.c_str()) == 0 ? 0 : -FromHost(errno);
 }
@@ -261,6 +276,17 @@ uint64_t Posix(const Ctx& c, int64_t r) {
 }
 
 }  // namespace
+
+void Mount(const std::string& guest_root, const std::string& host_dir, bool read_only) {
+  std::lock_guard<std::mutex> l(g_mu);
+  g_mounts[guest_root] = {host_dir, read_only};
+}
+
+void Unmount(const std::string& guest_root) {
+  std::lock_guard<std::mutex> l(g_mu);
+  g_mounts.erase(guest_root);
+}
+
 }  // namespace recomp::orbis::kernel
 
 using namespace recomp::orbis::kernel;
@@ -320,6 +346,7 @@ ORBIS_HLE("libkernel", fstat, 2) { return Posix(c, Fstat(int(Arg(c, 0)), Arg(c, 
 
 ORBIS_HLE("libkernel", sceKernelMkdir, 2) {
   const Mapped m = MapPath(GStr(Arg(c, 0)));
+  if (!m.ok) return SceError(kENOENT);
   if (m.read_only) return SceError(kEROFS);
   return ::mkdir(m.host.c_str(), mode_t(Arg(c, 1) & 0777)) == 0 ? 0 : SceError(FromHost(errno));
 }
@@ -327,6 +354,7 @@ ORBIS_HLE("libkernel", sceKernelUnlink, 1) { return Sce(PathOp(GStr(Arg(c, 0)), 
 ORBIS_HLE("libkernel", sceKernelRmdir, 1) { return Sce(PathOp(GStr(Arg(c, 0)), ::rmdir)); }
 ORBIS_HLE("libkernel", sceKernelRename, 2) {
   const Mapped from = MapPath(GStr(Arg(c, 0))), to = MapPath(GStr(Arg(c, 1)));
+  if (!from.ok || !to.ok) return SceError(kENOENT);
   if (from.read_only || to.read_only) return SceError(kEROFS);
   return ::rename(from.host.c_str(), to.host.c_str()) == 0 ? 0 : SceError(FromHost(errno));
 }
@@ -340,6 +368,7 @@ ORBIS_HLE("libkernel", sceKernelFtruncate, 2) {
 }
 ORBIS_HLE("libkernel", sceKernelTruncate, 2) {
   const Mapped m = MapPath(GStr(Arg(c, 0)));
+  if (!m.ok) return SceError(kENOENT);
   if (m.read_only) return SceError(kEROFS);
   return ::truncate(m.host.c_str(), off_t(Arg(c, 1))) == 0 ? 0 : SceError(FromHost(errno));
 }

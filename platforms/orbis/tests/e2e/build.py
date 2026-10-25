@@ -27,7 +27,9 @@ run(clang, *cflags, "-DLIB_TEST", os.path.join(here, "stubs.c"), "-o", o("test_s
 run(clang, *cflags, "-DLIB_KERNEL", os.path.join(here, "stubs.c"), "-o", o("kernel_stub.o"))
 run(lld, "-shared", "-soname", "libTest", o("test_stub.o"), "-o", o("libTest.so"))
 run(lld, "-shared", "-soname", "libkernel", o("kernel_stub.o"), "-o", o("libkernel.so"))
-for lib, define in (("libSceFiber", "LIB_FIBER"), ("libSceGnmDriver", "LIB_GNM")):
+LIBS = (("libSceFiber", "LIB_FIBER"), ("libSceGnmDriver", "LIB_GNM"),
+        ("libSceSaveData", "LIB_SAVEDATA"), ("libSceAudioOut", "LIB_AUDIOOUT"))
+for lib, define in LIBS:
     run(clang, *cflags, "-D" + define, os.path.join(here, "stubs.c"), "-o", o(lib + "_stub.o"))
     run(lld, "-shared", "-soname", lib, o(lib + "_stub.o"), "-o", o(lib + ".so"))
 
@@ -42,8 +44,8 @@ run(clang, *cflags, os.path.join(here, "kernel.c"), "-o", o("kernel.o"))
 run(clang, *cflags, os.path.join(here, "system.c"), "-o", o("system.o"))
 run(lld, "-pie", "--no-dynamic-linker", "--eh-frame-hdr", "-e", "_start", o("eboot.o"),
     o("kernel.o"), o("system.o"), o("libTest.so"), o("prx.so"), o("libkernel.so"),
-    o("libSceFiber.so"), o("libSceGnmDriver.so"), "-o", o("eboot.so"))
+    *[o(lib + ".so") for lib, _ in LIBS], "-o", o("eboot.so"))
 run(sys.executable, sce, o("eboot.so"), o("eboot.elf"), "--name", "eboot",
     "--lib", "libTest=" + o("libTest.so"), "--lib", "libTestPrx=" + o("prx.so"),
-    "--lib", "libkernel=" + o("libkernel.so"), "--lib", "libSceFiber=" + o("libSceFiber.so"),
-    "--lib", "libSceGnmDriver=" + o("libSceGnmDriver.so"))
+    "--lib", "libkernel=" + o("libkernel.so"),
+    *[a for lib, _ in LIBS for a in ("--lib", lib + "=" + o(lib + ".so"))])
