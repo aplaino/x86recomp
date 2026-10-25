@@ -48,7 +48,8 @@ src/a64) follows these rules too.
   fallback to the model outside the proof's conditions, and a fuzz test
   that mutations of the path make fail.
 - Guest addresses are host addresses: modules at their console VAs,
-  everything guest-visible below 1<<39. Never hand the game a host
+  everything guest-visible in layout.h's window below 1<<39 (the range
+  macOS arm64 leaves free; ARCHITECTURE.md). Never hand the game a host
   address outside those reservations.
 
 ## Rules

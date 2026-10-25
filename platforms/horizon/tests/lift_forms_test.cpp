@@ -31,7 +31,7 @@
 namespace {
 
 // Repeated in tests/oracle/oracle.py.
-constexpr uint64_t kBuf = 0x6000000000ull, kBufSize = 0x10000;
+constexpr uint64_t kBuf = 0x7080000000ull, kBufSize = 0x10000;
 constexpr uint64_t kWindow = kBuf + kBufSize / 2 - 256, kWindowSize = 512;
 constexpr uint64_t kPatternSeed = 0x5EED;
 

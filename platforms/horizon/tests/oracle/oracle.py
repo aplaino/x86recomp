@@ -25,10 +25,10 @@ from unicorn import arm64_const as A
 
 # src/horizon/layout.h
 MAIN_BASE = 0x7100000000
-STACK_BASE = 0x5000000000
+STACK_BASE = 0x7000000000
 STACK_SIZE = 0x100000
 # lift_forms_test.cpp
-BUF = 0x6000000000
+BUF = 0x7080000000
 BUF_SIZE = 0x10000
 WINDOW = BUF + BUF_SIZE // 2 - 256
 WINDOW_SIZE = 512

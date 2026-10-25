@@ -109,10 +109,17 @@ and comments mean the same thing everywhere:
   resolves at run time, NVN entry points, callbacks the runtime hands
   out) live in one reserved range so the dispatcher recognises them.
 
-On macOS the kernel honours fixed mappings in this range (it is far
-above the main image and below the 47-bit limit); on Linux they are
-free. Both are checked at startup and a collision is fatal, not worked
-around.
+All of it is in one window, [0x7000000000, 0x7180000000) (layout.h):
+modules from 0x7100000000 up, stacks and heap below them. That window
+is what both hosts leave free. On Linux everything below 1<<39 is.
+macOS 27 on arm64 does not: the kernel keeps [0xfc0000000,
+0x7000000000) unmappable (EACCES even with MAP_FIXED), the dyld shared
+region's reservation runs up to 0xfc0000000, and libmalloc reserves
+about 24 GiB at a random address in [0x7180000000, 0x8000000000) before
+`main` runs. A large host mmap without a hint takes the first free
+range from 0x7000000000 up, so guest memory is mapped at process
+bring-up, before the host layer allocates. Every fixed mapping is
+checked and a collision is fatal, not worked around.
 
 ## Game projects
 A game project adds x86recomp with `add_subdirectory()` (with
@@ -339,8 +346,8 @@ by family; `<ID>_SCHED` logs scheduler decisions.
 1. `recomp_lift_a64` lifts a homebrew NRO built from checked-in assembly
    and C (no SDK, supervisor calls only) and the differential tests pass
    against Unicorn on x86-64 and the CPU on arm64. Done on
-   x86-64 and on arm64 under qemu-aarch64 (the `horizon_lift_*` tests);
-   QEMU's CPU is emulated, so real arm64 hardware is still to run.
+   x86-64, on arm64 under qemu-aarch64 and on Apple Silicon under macOS
+   (the `horizon_lift_*` tests, where the forms also run on the CPU).
 2. A game's `main` lifts whole; with `sdk` imports bound to fatal
    stubs the game reaches `nnMain`, mounts RomFS and reads its first
    files through `nn::fs` HLE.
