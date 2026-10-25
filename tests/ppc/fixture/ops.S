@@ -209,5 +209,91 @@ ops:
   dcbst 5, 6
   dcbf 7, 8
   dcbz 9, 10
+  // floating-point loads and stores
+  lfs 1, 8(4)
+  lfsu 2, -4(5)
+  lfsx 3, 6, 7
+  lfsux 4, 8, 9
+  lfd 5, 16(10)
+  lfdu 6, -8(11)
+  lfdx 7, 12, 13
+  lfdux 8, 14, 15
+  stfs 9, 4(16)
+  stfsu 10, -8(17)
+  stfsx 11, 18, 19
+  stfsux 12, 20, 21
+  stfd 13, 8(22)
+  stfdu 14, -16(23)
+  stfdx 15, 24, 25
+  stfdux 16, 26, 27
+  stfiwx 17, 28, 29
+  // floating-point arithmetic, double and single, with record forms
+  fadd 1, 2, 3
+  fadd. 1, 2, 3
+  fsub 4, 5, 6
+  fsub. 4, 5, 6
+  fmul 7, 8, 9
+  fmul. 7, 8, 9
+  fdiv 10, 11, 12
+  fdiv. 10, 11, 12
+  fsqrt 13, 14
+  fmadd 15, 16, 17, 18
+  fmadd. 15, 16, 17, 18
+  fmsub 19, 20, 21, 22
+  fnmadd 23, 24, 25, 26
+  fnmadd. 23, 24, 25, 26
+  fnmsub 27, 28, 29, 30
+  fadds 1, 2, 3
+  fadds. 1, 2, 3
+  fsubs 4, 5, 6
+  fmuls 7, 8, 9
+  fmuls. 7, 8, 9
+  fdivs 10, 11, 12
+  fsqrts 13, 14
+  fmadds 15, 16, 17, 18
+  fmsubs 19, 20, 21, 22
+  fmsubs. 19, 20, 21, 22
+  fnmadds 23, 24, 25, 26
+  fnmsubs 27, 28, 29, 30
+  fnmsubs. 27, 28, 29, 30
+  fres 1, 2
+  frsqrte 3, 4
+  fsel 5, 6, 7, 8
+  fsel. 5, 6, 7, 8
+  // moves, rounding and conversions
+  fmr 9, 10
+  fmr. 9, 10
+  fneg 11, 12
+  fabs 13, 14
+  fnabs 15, 16
+  frsp 17, 18
+  frsp. 17, 18
+  fctiw 19, 20
+  fctiwz 21, 22
+  fctiwz. 21, 22
+  fctid 23, 24
+  fctidz 25, 26
+  fcfid 27, 28
+  fcfid. 27, 28
+  // compares and the FPSCR
+  fcmpu 0, 1, 2
+  fcmpu 7, 3, 4
+  fcmpo 1, 5, 6
+  fcmpo 6, 7, 8
+  mffs 9
+  mffs. 9
+  mtfsf 0xFF, 10
+  mtfsf 0x81, 11
+  mtfsf. 0x3C, 12
+  mtfsfi 7, 3
+  mtfsfi 0, 9
+  mtfsfi. 5, 15
+  mtfsb0 31
+  mtfsb0 3
+  mtfsb1 6
+  mtfsb1 24
+  .long 0xFFC0004D  // mtfsb1. 30 (LLVM has no record form of it)
+  mcrfs 2, 0
+  mcrfs 5, 3
   blr
   .size ops, .-ops

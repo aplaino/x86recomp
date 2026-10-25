@@ -15,6 +15,11 @@ struct Ctx {
   uint32_t xer;    // SO OV CA in bits 31, 30, 29 and the byte count in bits 6-0, as MFXER reads it
   uint64_t msr;    // what MFMSR reads back: whatever MTMSR(D) wrote
   uint32_t vrsave;
+  // Floating point: FPRs as their bit patterns, FPSCR as MFFS reads it.
+  // Lifted code leaves them here (every floating-point operation is a
+  // call into ppc/fp.cpp).
+  uint64_t f[32];
+  uint32_t fpscr;
   // The guest arena: guest address a is at mem + a, big-endian.
   uint8_t* mem;
   // The reservation (LWARX/LDARX, STWCX./STDCX.). A store-conditional

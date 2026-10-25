@@ -187,6 +187,15 @@ void Primary31(Insn& i) {
     case 918: MemX(i, Op::kStore, 2, false, false, true); return;
     case 662: MemX(i, Op::kStore, 4, false, false, true); return;
     case 660: MemX(i, Op::kStore, 8, false, false, true); return;
+    case 535: MemX(i, Op::kFpLoad, 4, false); return;
+    case 567: MemX(i, Op::kFpLoad, 4, true); return;
+    case 599: MemX(i, Op::kFpLoad, 8, false); return;
+    case 631: MemX(i, Op::kFpLoad, 8, true); return;
+    case 663: MemX(i, Op::kFpStore, 4, false); return;
+    case 695: MemX(i, Op::kFpStore, 4, true); return;
+    case 727: MemX(i, Op::kFpStore, 8, false); return;
+    case 759: MemX(i, Op::kFpStore, 8, true); return;
+    case 983: MemX(i, Op::kFpStore, 4, false); i.opc = 1; return;
     default: return;
   }
 }
@@ -197,7 +206,7 @@ bool NoRecordForm(Op op) {
     case Op::kCmp: case Op::kCmpl: case Op::kTw: case Op::kTd: case Op::kMfcr: case Op::kMtcrf:
     case Op::kMfspr: case Op::kMtspr: case Op::kMftb: case Op::kMfmsr: case Op::kMtmsr:
     case Op::kMtmsrd: case Op::kMcrxr: case Op::kSync: case Op::kCacheHint: case Op::kDcbz:
-    case Op::kLoad: case Op::kStore:
+    case Op::kLoad: case Op::kStore: case Op::kFpLoad: case Op::kFpStore:
       return true;
     default:
       return false;
@@ -239,6 +248,88 @@ void Primary19(Insn& i) {
       return;
     default:
       i.lk = false;
+      return;
+  }
+}
+
+// Primary opcodes 59 (single precision) and 63: A forms by their 5-bit
+// extended opcode, the rest X forms by their 10-bit one.
+void PrimaryFp(Insn& i, bool single) {
+  i.rc = i.raw & 1;
+  i.rc_reg = uint8_t(F(i.raw, 21, 5));
+  i.single = single;
+  auto arith = [&](FpOp op, bool uses_a, bool uses_b, bool uses_c) {
+    // Fields an operation does not use must be 0.
+    if ((!uses_a && i.ra) || (!uses_b && i.rb) || (!uses_c && i.rc_reg)) return;
+    i.op = Op::kFpArith;
+    i.opc = op;
+  };
+  switch (F(i.raw, 26, 5)) {
+    case 18: arith(kFDiv, true, true, false); return;
+    case 20: arith(kFSub, true, true, false); return;
+    case 21: arith(kFAdd, true, true, false); return;
+    case 22: arith(kFSqrt, false, true, false); return;
+    case 25: arith(kFMul, true, false, true); return;
+    case 28: arith(kFMsub, true, true, true); return;
+    case 29: arith(kFMadd, true, true, true); return;
+    case 30: arith(kFNmsub, true, true, true); return;
+    case 31: arith(kFNmadd, true, true, true); return;
+    case 24: if (single) arith(kFRes, false, true, false); return;
+    case 26: if (!single) arith(kFRsqrte, false, true, false); return;
+    case 23: if (!single) i.op = Op::kFsel; return;
+    default: break;
+  }
+  if (single) return;
+  i.single = false;
+  i.rc_reg = 0;
+  const uint32_t xo = F(i.raw, 21, 10);
+  auto noa = [&](Op op) {
+    if (!i.ra) i.op = op;
+  };
+  switch (xo) {
+    case 0: case 32:
+      if (F(i.raw, 9, 2) || (i.raw & 1)) return;
+      i.op = Op::kFcmp;
+      i.opc = xo ? 1 : 0;
+      i.crfd = uint8_t(F(i.raw, 6, 3));
+      i.rc = false;
+      return;
+    case 12: noa(Op::kFrsp); return;
+    case 14: noa(Op::kFctiw); i.opc = 0; return;
+    case 15: noa(Op::kFctiw); i.opc = 1; return;
+    case 814: noa(Op::kFctiw); i.opc = 2; return;
+    case 815: noa(Op::kFctiw); i.opc = 3; return;
+    case 846: noa(Op::kFcfid); return;
+    case 72: noa(Op::kFpMove); i.opc = 0; return;
+    case 40: noa(Op::kFpMove); i.opc = 1; return;
+    case 264: noa(Op::kFpMove); i.opc = 2; return;
+    case 136: noa(Op::kFpMove); i.opc = 3; return;
+    case 583: if (!i.ra && !i.rb) i.op = Op::kMffs; return;
+    case 711:
+      if (F(i.raw, 6, 1) || F(i.raw, 15, 1)) return;
+      i.op = Op::kMtfsf;
+      i.crm = uint8_t(F(i.raw, 7, 8));
+      return;
+    case 134:
+      if (F(i.raw, 9, 7) || F(i.raw, 20, 1)) return;
+      i.op = Op::kMtfsfi;
+      i.crfd = uint8_t(F(i.raw, 6, 3));
+      i.imm = F(i.raw, 16, 4);
+      return;
+    case 38: case 70:
+      if (i.ra || i.rb) return;
+      i.op = Op::kMtfsb;
+      i.bo = i.rd;
+      i.opc = xo == 38 ? 1 : 0;
+      return;
+    case 64:
+      if (F(i.raw, 9, 2) || F(i.raw, 14, 7) || (i.raw & 1)) return;
+      i.op = Op::kMcrfs;
+      i.crfd = uint8_t(F(i.raw, 6, 3));
+      i.crfs = uint8_t(F(i.raw, 11, 3));
+      i.rc = false;
+      return;
+    default:
       return;
   }
 }
@@ -336,6 +427,16 @@ Insn Decode(uint64_t va, uint32_t raw) {
     case 43: Mem(i, Op::kLoad, 2, true, true); break;
     case 44: Mem(i, Op::kStore, 2, false); break;
     case 45: Mem(i, Op::kStore, 2, true); break;
+    case 48: Mem(i, Op::kFpLoad, 4, false); break;
+    case 49: Mem(i, Op::kFpLoad, 4, true); break;
+    case 50: Mem(i, Op::kFpLoad, 8, false); break;
+    case 51: Mem(i, Op::kFpLoad, 8, true); break;
+    case 52: Mem(i, Op::kFpStore, 4, false); break;
+    case 53: Mem(i, Op::kFpStore, 4, true); break;
+    case 54: Mem(i, Op::kFpStore, 8, false); break;
+    case 55: Mem(i, Op::kFpStore, 8, true); break;
+    case 59: PrimaryFp(i, true); break;
+    case 63: PrimaryFp(i, false); break;
     case 46: i.op = Op::kLmw; i.imm = Sext(simm, 16); break;
     case 47: i.op = Op::kStmw; i.imm = Sext(simm, 16); break;
     case 58:
@@ -359,9 +460,9 @@ Insn Decode(uint64_t va, uint32_t raw) {
       break;
   }
   // Invalid forms the ISA calls out: an update form whose base is r0, or
-  // (loads) the target register.
-  if ((i.op == Op::kLoad || i.op == Op::kStore) && i.update &&
-      (i.ra == 0 || (i.op == Op::kLoad && i.ra == i.rd)))
+  // (integer loads) the target register.
+  if ((i.op == Op::kLoad || i.op == Op::kStore || i.op == Op::kFpLoad || i.op == Op::kFpStore) &&
+      i.update && (i.ra == 0 || (i.op == Op::kLoad && i.ra == i.rd)))
     i.op = Op::kInvalid;
   if (i.op == Op::kLmw && i.ra >= i.rd && i.ra != 0) i.op = Op::kInvalid;
   return i;
@@ -484,6 +585,35 @@ std::string Name(const Insn& i) {
     }
     case Op::kLmw: return "lmw";
     case Op::kStmw: return "stmw";
+    case Op::kFpLoad: case Op::kFpStore: {
+      std::string s = std::string(i.op == Op::kFpLoad ? "lf" : "stf") + (i.size == 8 ? "d" : "s");
+      if (i.op == Op::kFpStore && i.opc == 1) return "stfiwx";
+      if (i.update) s += "u";
+      if (i.indexed) s += "x";
+      return s;
+    }
+    case Op::kFpArith: {
+      static const char* kNames[] = {"fadd", "fsub", "fmul", "fdiv", "fsqrt", "fres", "frsqrte",
+                                     "fmadd", "fmsub", "fnmadd", "fnmsub"};
+      return std::string(kNames[i.opc]) + (i.single ? "s" : "");
+    }
+    case Op::kFpMove: {
+      static const char* kNames[] = {"fmr", "fneg", "fabs", "fnabs"};
+      return kNames[i.opc & 3];
+    }
+    case Op::kFsel: return "fsel";
+    case Op::kFcmp: return i.opc ? "fcmpo" : "fcmpu";
+    case Op::kFrsp: return "frsp";
+    case Op::kFctiw: {
+      static const char* kNames[] = {"fctiw", "fctiwz", "fctid", "fctidz"};
+      return kNames[i.opc & 3];
+    }
+    case Op::kFcfid: return "fcfid";
+    case Op::kMffs: return "mffs";
+    case Op::kMtfsf: return "mtfsf";
+    case Op::kMtfsfi: return "mtfsfi";
+    case Op::kMtfsb: return i.opc ? "mtfsb1" : "mtfsb0";
+    case Op::kMcrfs: return "mcrfs";
     case Op::kLarx: return i.size == 8 ? "ldarx" : "lwarx";
     case Op::kStcx: return i.size == 8 ? "stdcx." : "stwcx.";
   }

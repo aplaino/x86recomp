@@ -103,6 +103,41 @@ __attribute__((noinline)) static u32 bump(u32 by) {
   return old;
 }
 
+// Floating point, double and single: the arithmetic, a fused multiply-add,
+// square roots, conversions both ways, compares and selects. The results
+// are printed as bits.
+static u64 bits_of(double d) {
+  u64 v;
+  memcpy(&v, &d, 8);
+  return v;
+}
+static u32 bits_of_float(float f) {
+  u32 v;
+  memcpy(&v, &f, 4);
+  return v;
+}
+__attribute__((noinline)) static double horner(double x) {
+  return ((((0.0083333 * x - 0.1666667) * x) * x + 1.0) * x) / (1.0 + x * x);
+}
+__attribute__((noinline)) static float lerp(float a, float b, float t) { return a + (b - a) * t; }
+__attribute__((noinline)) static u64 floats(void) {
+  u64 h = 0;
+  double x = 0.125;
+  for (u32 k = 0; k < 200; k++) {
+    double v = (double)(i64)next() / 9.007199254740992e15;
+    x = horner(v) + __builtin_sqrt(__builtin_fabs(v) + x * x);
+    h = h * 31 + bits_of(x);
+    i32 iv = (i32)(v * 1000.0);
+    h ^= (u64)(i64)iv + bits_of((double)(i64)next());
+    float f = lerp((float)v, (float)x, 0.25f) * 1.5f;
+    h = h * 7 + bits_of_float(f) + bits_of_float(__builtin_sqrtf(__builtin_fabsf(f)));
+    h += (v < x) + 2 * (f > 0.5f) + 4 * (x == x);
+    double m = v > 0 ? v : -v;
+    h ^= bits_of(m / (x + 3.0));
+  }
+  return h;
+}
+
 struct Item {
   u32 key;
   unsigned short tag;
@@ -118,6 +153,8 @@ int main(void) {
   u64 sw = 0;
   for (u32 k = 0; k < 400; k++) sw = sw * 33 + classify((u32)next());
   hex("switch", sw);
+
+  hex("float", floats());
 
   u64 jt = 0;
   for (u32 k = 0; k < 64; k++) jt = jt * 5 + (u64)(i64)table_words(k % 7) + (u64)(i64)table_bytes(k % 8);

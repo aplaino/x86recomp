@@ -30,6 +30,12 @@ namespace recomp::ppc {
 
 using GuestFn = void (*)(Ctx&);
 
+// Floating-point arithmetic operations (FpArith), shared with the decoder.
+enum FpOp : uint8_t {
+  kFAdd, kFSub, kFMul, kFDiv, kFSqrt, kFRes, kFRsqrte,
+  kFMadd, kFMsub, kFNmadd, kFNmsub,
+};
+
 // Emitted by the lifter into generated/table.cpp.
 struct LiftedFn {
   uint32_t va;
@@ -228,6 +234,40 @@ constexpr uint64_t Mask(unsigned mb, unsigned me) {
   }
   *ca = x < 0 && n && (v & ((1ull << n) - 1)) != 0;
   return uint64_t(x >> n);
+}
+
+// ---- floating point (ppc/fp.cpp) ------------------------------------------
+// FPSCR bits.
+constexpr uint32_t kFx = 1u << 31, kFex = 1u << 30, kVx = 1u << 29, kOx = 1u << 28,
+                   kUx = 1u << 27, kZx = 1u << 26, kXx = 1u << 25, kVxsnan = 1u << 24,
+                   kVxisi = 1u << 23, kVxidi = 1u << 22, kVxzdz = 1u << 21, kVximz = 1u << 20,
+                   kVxvc = 1u << 19, kFr = 1u << 18, kFi = 1u << 17, kFprf = 0x1Fu << 12,
+                   kFpcc = 0xFu << 12, kVxsoft = 1u << 10, kVxsqrt = 1u << 9, kVxcvi = 1u << 8,
+                   kVe = 1u << 7, kOe = 1u << 6, kUe = 1u << 5, kZe = 1u << 4, kXe = 1u << 3,
+                   kNi = 1u << 2, kRn = 3u;
+// Arithmetic (FpOp): FRT from FRA, FRB, FRC under
+// FPSCR[RN], with every FPSCR effect. Single precision rounds the exact
+// result once to single, as the ISA defines it for any double operands.
+uint64_t FpArith(Ctx& c, unsigned op, bool single, uint64_t a, uint64_t b, uint64_t cc);
+uint64_t Frsp(Ctx& c, uint64_t b);
+// FCTIW FCTIWZ FCTID FCTIDZ: `mode` bit 0 toward zero, bit 1 doubleword.
+uint64_t Fctiw(Ctx& c, unsigned mode, uint64_t b);
+uint64_t Fcfid(Ctx& c, uint64_t b);
+// FCMPU / FCMPO: the CR field (LT GT EQ UN) and FPSCR[FPCC].
+uint32_t Fcmp(Ctx& c, bool ordered, uint64_t a, uint64_t b);
+void Mtfsf(Ctx& c, uint32_t flm, uint64_t b);
+void Mtfsfi(Ctx& c, unsigned field, unsigned imm);
+void Mtfsb(Ctx& c, unsigned bit, bool v);
+// MCRFS: FPSCR field `field`, then that field's exception bits cleared.
+uint32_t Mcrfs(Ctx& c, unsigned field);
+// LFS's and STFS's format conversions: bit-exact, no rounding, NaNs kept.
+uint64_t SingleToDouble(uint32_t w);
+uint32_t DoubleToSingle(uint64_t d);
+[[gnu::always_inline]] inline uint64_t Fsel(uint64_t a, uint64_t b, uint64_t cc) {
+  // FRA >= 0 (not a NaN; -0 counts) ? FRC : FRB.
+  bool nan = (a & 0x7FFFFFFFFFFFFFFFull) > 0x7FF0000000000000ull;
+  bool ge = !nan && (!(a >> 63) || !(a << 1));
+  return ge ? cc : b;
 }
 
 // ---- traps ---------------------------------------------------------------

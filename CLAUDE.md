@@ -49,9 +49,12 @@ platform module too.
   be read closely, and anything copied keeps its notice in the file and
   in NOTICE.
 - The CPU is modelled exactly in 32-bit mode (src/ppc/ARCHITECTURE.md,
-  "CPU"); floating point, when it comes, through SoftFloat with the
-  PowerPC's NaN rules under FPSCR, never host float arithmetic outside
+  "CPU"); floating point through SoftFloat with the PowerPC's NaN rules
+  under FPSCR (src/ppc/fp.cpp), never host float arithmetic outside
   proven-exact fast paths with their proof and fuzz test.
+- Where the oracle (QEMU) departs from the ISA, follow the ISA, show the
+  difference with exact arithmetic or the ISA's text, and leave that bit
+  out of the comparison with the reason next to it.
 - ppc/lifted.h semantics changes must keep ppc_lift_forms passing
   against the oracle, and a planted bug (RECOMP_PPC_MUTATION) for each
   new helper that the test catches.

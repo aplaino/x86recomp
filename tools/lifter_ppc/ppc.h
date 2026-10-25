@@ -2,12 +2,14 @@
 // PowerPC decoder for the lifter: the 64-bit PowerPC user instruction set
 // the Xbox 360's Xenon runs (Power ISA 2.02 Book I/II), decoded from the
 // instruction encodings in IBM's Power ISA. So far the fixed-point,
-// branch, condition register, storage control and special purpose
-// register instructions; floating point, VMX and VMX128 decode as
-// kInvalid until they are lifted.
+// branch, condition register, storage control, special purpose register
+// and floating-point instructions; VMX and VMX128 decode as kInvalid until
+// they are lifted.
 
 #include <cstdint>
 #include <string>
+
+#include "ppc/lifted.h"
 
 namespace lifter::ppc {
 
@@ -57,7 +59,26 @@ enum class Op : uint8_t {
   kLmw, kStmw,
   kLarx,       // LWARX LDARX   [size]
   kStcx,       // STWCX. STDCX. [size]
+  // Floating point. FPRs: rd = FRT/FRS, ra = FRA, rb = FRB, rc = FRC.
+  kFpLoad,     // LFS LFD (+U, X)   [size, update, indexed]
+  kFpStore,    // STFS STFD (+U, X), STFIWX (size 4, opc 1)
+  kFpArith,    // [opc: FpOp, single]  FRT = FRA op FRB / FRA*FRC (+/-) FRB
+  kFpMove,     // FMR FNEG FABS FNABS  [opc: 0 1 2 3]
+  kFsel,
+  kFcmp,       // FCMPU FCMPO [opc: 0 1] -> crfd
+  kFrsp,
+  kFctiw,      // FCTIW FCTIWZ FCTID FCTIDZ [opc: bit 0 toward zero, bit 1 doubleword]
+  kFcfid,
+  kMffs,
+  kMtfsf,      // [crm = FLM]
+  kMtfsfi,     // [crfd, imm]
+  kMtfsb,      // [bo = bit, opc = value]
+  kMcrfs,      // crfd = FPSCR field crfs
 };
+
+// kFpArith operations: the runtime's numbering.
+using recomp::ppc::FpOp;
+using enum recomp::ppc::FpOp;
 
 // Special purpose registers by number.
 enum Spr : uint16_t {
@@ -74,6 +95,8 @@ struct Insn {
   uint32_t raw = 0;
   Op op = Op::kInvalid;
   uint8_t rd = 0, ra = 0, rb = 0;  // rd is RT or RS
+  uint8_t rc_reg = 0;  // FRC of the floating-point A forms
+  bool single = false; // single-precision floating-point arithmetic
   bool rc = false;   // record form: sets CR0 (stwcx.: always)
   bool oe = false;   // sets XER[OV, SO]
   bool lk = false;   // branch and link

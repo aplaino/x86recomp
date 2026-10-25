@@ -89,8 +89,9 @@ void Collect(const Insn& i, Uses& u) {
     u.lr = u.ctr = true;
   if (i.lk) u.lr = true;
   if (i.op == Op::kLoad || i.op == Op::kStore || i.op == Op::kLmw || i.op == Op::kStmw ||
-      i.op == Op::kDcbz)
+      i.op == Op::kDcbz || i.op == Op::kFpLoad || i.op == Op::kFpStore)
     u.mem = true;
+  if (i.op == Op::kFcmp || i.op == Op::kMcrfs) u.cr = true;
 }
 
 class Emitter {
@@ -207,6 +208,10 @@ std::string Emitter::Body(const Insn& i) {
   };
   auto logic = [&](const std::string& v) { return set(i.ra, v) + rec(i.ra); };
   const char* U = UType(i.size);
+  // Floating-point registers stay in the context; record forms copy
+  // FPSCR[FX FEX VX OX] to CR1.
+  auto F = [](int r) { return "c.f[" + N(r) + "]"; };
+  auto fprec = [&]() { return i.rc ? std::string(" cr = lift::SetField(cr, 1, c.fpscr >> 28);") : std::string(); };
 
   switch (i.op) {
     case Op::kInvalid: {
@@ -439,6 +444,52 @@ std::string Emitter::Body(const Insn& i) {
       }
       return s;
     }
+    case Op::kFpLoad: {
+      std::string s = i.indexed ? ea_x() : ea_d();
+      s += F(i.rd) + " = " +
+           (i.size == 8 ? "lift::Ld<uint64_t>(m, uint32_t(ea));"
+                        : "lift::SingleToDouble(lift::Ld<uint32_t>(m, uint32_t(ea)));");
+      if (i.update) s += " " + R(i.ra) + " = uint32_t(ea);";
+      return s;
+    }
+    case Op::kFpStore: {
+      std::string s = i.indexed ? ea_x() : ea_d();
+      if (i.opc == 1) s += "lift::St<uint32_t>(m, uint32_t(ea), uint32_t(" + F(i.rd) + "));";
+      else if (i.size == 8) s += "lift::St<uint64_t>(m, uint32_t(ea), " + F(i.rd) + ");";
+      else s += "lift::St<uint32_t>(m, uint32_t(ea), lift::DoubleToSingle(" + F(i.rd) + "));";
+      if (i.update) s += " " + R(i.ra) + " = uint32_t(ea);";
+      return s;
+    }
+    case Op::kFpArith:
+      return F(i.rd) + " = lift::FpArith(c, " + N(i.opc) + ", " + (i.single ? "true" : "false") + ", " +
+             F(i.ra) + ", " + F(i.rb) + ", " + F(i.rc_reg) + ");" + fprec();
+    case Op::kFpMove: {
+      static const char* kOp[4] = {"", " ^ 0x8000000000000000ull", " & 0x7FFFFFFFFFFFFFFFull",
+                                   " | 0x8000000000000000ull"};
+      return F(i.rd) + " = " + F(i.rb) + kOp[i.opc & 3] + ";" + fprec();
+    }
+    case Op::kFsel:
+      return F(i.rd) + " = lift::Fsel(" + F(i.ra) + ", " + F(i.rb) + ", " + F(i.rc_reg) + ");" + fprec();
+    case Op::kFcmp:
+      return "cr = lift::SetField(cr, " + N(i.crfd) + ", lift::Fcmp(c, " + (i.opc ? "true" : "false") +
+             ", " + F(i.ra) + ", " + F(i.rb) + "));";
+    case Op::kFrsp:
+      return F(i.rd) + " = lift::Frsp(c, " + F(i.rb) + ");" + fprec();
+    case Op::kFctiw:
+      return F(i.rd) + " = lift::Fctiw(c, " + N(i.opc) + ", " + F(i.rb) + ");" + fprec();
+    case Op::kFcfid:
+      return F(i.rd) + " = lift::Fcfid(c, " + F(i.rb) + ");" + fprec();
+    case Op::kMffs:
+      // The high word is undefined; 0 here.
+      return F(i.rd) + " = c.fpscr;" + fprec();
+    case Op::kMtfsf:
+      return "lift::Mtfsf(c, " + N(i.crm) + ", " + F(i.rb) + ");" + fprec();
+    case Op::kMtfsfi:
+      return "lift::Mtfsfi(c, " + N(i.crfd) + ", " + N(int(i.imm)) + ");" + fprec();
+    case Op::kMtfsb:
+      return "lift::Mtfsb(c, " + N(i.bo) + ", " + (i.opc ? "true" : "false") + ");" + fprec();
+    case Op::kMcrfs:
+      return "cr = lift::SetField(cr, " + N(i.crfd) + ", lift::Mcrfs(c, " + N(i.crfs) + "));";
     case Op::kLarx:
       return ea_x() + set(i.rd, std::string("lift::Larx<") + U + ">(c, uint32_t(ea))");
     case Op::kStcx:
