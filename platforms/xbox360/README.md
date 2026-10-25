@@ -8,10 +8,10 @@ console's kernel, system library and GPU. Built only with
 `RECOMP_PLATFORM_XBOX360`; the x86 path (`RECOMP_X86`) can be off.
 
 Status: milestone 1 of [ARCHITECTURE.md](ARCHITECTURE.md). The XEX2 reader
-(with its own LZX decoder) and the integer core lift system modules and
-titles, and a fixture runs lifted with the same output as on a PowerPC
-970 in 32-bit mode, every instruction form checked bit for bit against
-it. Floating point, VMX, VMX128 and the runtime are the design being
+(with its own LZX decoder) and the integer and floating-point core lift
+system modules and titles, and a fixture runs lifted with the same output
+as on a PowerPC 970 in 32-bit mode, every instruction form checked bit
+for bit against it. VMX, VMX128 and the runtime are the design being
 built.
 
 ## Using it

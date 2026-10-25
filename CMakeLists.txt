@@ -82,9 +82,17 @@ endif()
 # The PowerPC lifter and CPU model, for the platforms with a PowerPC CPU
 # (the Xbox 360), then those platforms.
 if(RECOMP_PLATFORM_XBOX360)
-  add_library(recomp_ppc SHARED src/ppc/dispatch.cpp src/ppc/fatal.cpp)
+  # SoftFloat (cmake/softfloat.cmake) for the exact floating-point unit
+  # (src/ppc/fp.cpp), which applies the PowerPC's own NaN rules.
+  include(FetchContent)
+  if(NOT TARGET softfloat)
+    include(cmake/softfloat.cmake)
+    target_compile_options(softfloat PRIVATE -O2)
+  endif()
+  add_library(recomp_ppc SHARED src/ppc/dispatch.cpp src/ppc/fatal.cpp src/ppc/fp.cpp)
   target_include_directories(recomp_ppc PUBLIC src)
   target_compile_features(recomp_ppc PUBLIC cxx_std_20)
+  target_link_libraries(recomp_ppc PRIVATE softfloat)
   add_subdirectory(tools/lifter_ppc)
 
   # recomp_add_lifted_ppc(<target> <dir>): an object library of
@@ -131,7 +139,9 @@ target_compile_features(recomp_image PUBLIC cxx_std_20)
 target_link_libraries(recomp_image PUBLIC recomp_log)
 
 # --- x87 and SSE models (SoftFloat 3e) ---------------------------------
-include(cmake/softfloat.cmake)  # defines target `softfloat`
+if(NOT TARGET softfloat)
+  include(cmake/softfloat.cmake)  # defines target `softfloat`
+endif()
 include(cmake/coremath.cmake)  # defines target `coremath`
 add_library(recomp_x87 SHARED src/runtime/x87.cpp src/runtime/sse.cpp)
 target_include_directories(recomp_x87 PUBLIC src)

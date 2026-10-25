@@ -71,12 +71,33 @@ negative value by -1 is 0 (CR0 of the record form from that 0), and
 MULHW(U)'s and DIVW(U)'s high words are 0. These wait for a check on a
 console. DCBZ zeroes 32 bytes and the Xenon's DCBZ128 128.
 
-Milestone 1 lifts the fixed-point, branch, condition register, storage
-control and special purpose register instructions; floating point, VMX
-and VMX128 decode as invalid (a fatal error if reached) until they are
-lifted, exactly like the other models (SoftFloat with the PowerPC's NaN
-rules under FPSCR; VMX's non-IEEE mode; VMX128's extra registers and
-Direct3D packing instructions).
+### Floating point
+The FPU (src/ppc/fp.cpp) is exact: Berkeley SoftFloat under FPSCR[RN] with
+tininess detected before rounding, and the PowerPC's own rules on top:
+- NaNs: the first NaN of FRA, FRB, FRC (in that order, whatever the
+  operation's operand order), quieted; the default NaN 0x7FF8000000000000
+  for invalid operations; FNMADD and FNMSUB do not negate a NaN.
+- Single-precision arithmetic rounds the exact result of its double
+  operands once, to single precision, as the ISA defines it for any
+  operands: the operation runs on float128 with round-to-odd, then one
+  rounding to f32 under RN. A NaN result in single precision keeps only
+  single's fraction.
+- FPSCR: the exception bits with each invalid operation's cause (VXSNAN
+  VXISI VXIDI VXZDZ VXIMZ VXVC VXSQRT VXCVI), FX when an exception bit
+  goes from 0 to 1, the VX and FEX summaries, FI, FR (the rounding
+  increased the magnitude: the result against the same operation rounded
+  toward zero) and FPRF. MTFSF and MTFSFI do not write the reserved bit 20.
+- LFS and STFS convert by the ISA's bit-level algorithms (no rounding,
+  SNaNs kept).
+- An exception whose enable bit is set, and FPSCR[NI], are fatal errors
+  until their semantics are modelled.
+FRES and FRSQRTE are estimates whose exact values are the CPU's own: the
+model returns the correctly rounded reciprocal (square root), as QEMU's
+970 does; the Xenon's tables wait for a console. FCTIW(Z)'s high word is
+undefined (the word's sign extension here), so is MFFS's (0).
+
+VMX and VMX128 decode as invalid (a fatal error if reached) until they
+are lifted.
 
 ## Lifter
 `recomp_lift_ppc --image <title.xex> --out <dir>` (tools/lifter_ppc):
@@ -134,13 +155,18 @@ memory; any other interrupt fails the run.
   replays them through the lifted forms, which must end bit for bit in
   the same registers, CR, XER, LR, CTR and memory. Builds with planted
   bugs in ppc/lifted.h (RECOMP_PPC_MUTATION) must fail it.
+- Where QEMU departs from the ISA the test does not compare (and the
+  model follows the ISA): FR (QEMU's is not the ISA's, as spot checks with exact
+  arithmetic show), FX (QEMU sets it on every exception, not on a
+  0 to 1 change), FI and FPRF's C bit on compares (the ISA alters only
+  FPCC), FRES's FPRF and its estimate of 1/±0 (QEMU: ±0.5).
 - Not covered by QEMU: VMX128 (no emulator implements it) and what the
   970 does differently from the Xenon (DCBZ's size, the undefined cases
-  above). Those wait for a console.
+  above, the estimates). Those wait for a console.
 
 ## Roadmap
 1. Integer core, XEX reader, oracle (done).
-2. Floating point (exact, FPSCR) and VMX, on the same oracle.
+2. Floating point (exact, FPSCR; done) and VMX, on the same oracle.
 3. VMX128: Xenia's implementation as the reference until a console can
    run test programs.
 4. Runtime: the arena with the physical memory views, process and

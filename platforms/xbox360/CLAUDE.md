@@ -34,9 +34,12 @@ follows these rules too.
   intrinsics, no inline asm, no `long double`, no host FP environment
   changes, no assumption of 4 KiB host pages.
 - The CPU is modelled exactly in 32-bit mode (ARCHITECTURE.md, "CPU");
-  floating point, when it comes, through SoftFloat with the PowerPC's NaN
-  rules under FPSCR, never host float arithmetic outside proven-exact fast
-  paths with their proof and fuzz test.
+  floating point through SoftFloat with the PowerPC's NaN rules under
+  FPSCR (src/ppc/fp.cpp), never host float arithmetic outside
+  proven-exact fast paths with their proof and fuzz test.
+- Where the oracle (QEMU) departs from the ISA, follow the ISA, show the
+  difference with exact arithmetic or the ISA's text, and leave that bit
+  out of the comparison with the reason next to it.
 
 ## Rules
 - Nothing game-specific here, as for the rest of the repository: title

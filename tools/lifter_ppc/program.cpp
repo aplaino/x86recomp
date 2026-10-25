@@ -32,7 +32,7 @@ bool WritesReg(const Insn& i, int r) {
       return i.ra == r;
     case Op::kLoad:
       return i.rd == r || (i.update && i.ra == r);
-    case Op::kStore:
+    case Op::kStore: case Op::kFpLoad: case Op::kFpStore:
       return i.update && i.ra == r;
     case Op::kLmw:
       return r >= i.rd;
