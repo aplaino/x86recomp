@@ -48,7 +48,10 @@ The game ports built on it and their status are on the
 Consoles whose CPU the lifter already models are to be platform modules
 on the same core rather than forks: the first, for the PlayStation 4
 (its executable format, system libraries and GPU), is in progress on
-its own branch.
+its own branch. A console with another CPU brings that CPU's core with
+it: the Nintendo Switch module ([platforms/horizon](platforms/horizon))
+adds an AArch64 lifter and CPU model, and builds with the x86 path
+switched off.
 
 [ARCHITECTURE.md](ARCHITECTURE.md) describes the design; `docs/` the
 observed behaviour of the middleware reimplemented here

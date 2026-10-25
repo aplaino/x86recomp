@@ -1156,6 +1156,21 @@ libraries as recomp_<name>_* shared libraries, its docs and tests), with
 its own CMakeLists.txt that the top level includes only when the option
 is on. Game projects for that platform turn it on; nothing else does.
 
+A console with another CPU brings that CPU's core with it, built only
+when a platform that needs it is on. The Switch (platforms/horizon,
+RECOMP_PLATFORM_HORIZON; its design is platforms/horizon/ARCHITECTURE.md)
+is AArch64: its core is the lifter recomp_lift_a64 (tools/lifter_a64)
+and the CPU model and dispatcher it targets (src/a64, recomp_a64). The
+Switch module adds the NRO/NSO image reader to recomp_lift_a64, the
+address layout, process bring-up, the kernel's supervisor calls (Svc,
+which a64/lifted.h declares and the platform defines) and its HLE. The
+x86 path is its own option, RECOMP_X86 (default on): a Switch game
+turns it off and builds without any of its code or dependencies. Each
+option is independent, so one tree can build the x86 path, the PS4 and
+the Switch together (CMakePresets: debug for the x86 path, horizon for
+the Switch alone, horizon-aarch64-qemu for the Switch on an arm64 host
+under qemu-aarch64).
+
 ## Roadmap
 - 64-bit guests (above).
 - EAX for games on DirectSound3D (IDirectSound3DBuffer property sets),
