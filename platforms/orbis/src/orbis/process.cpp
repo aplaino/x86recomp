@@ -8,6 +8,7 @@
 
 #include "orbis/elf_image.h"
 #include "orbis/hle.h"
+#include "orbis/host.h"
 #include "orbis/nid.h"
 #include "runtime/log.h"
 
@@ -117,6 +118,8 @@ NidName::NidName(const char* library, const char* name) {
   NidNames()[{library, Nid(name)}] = name;
 }
 
+NidName::NidName(const char* library, const char* nid, Raw) { NidNames()[{library, nid}] = nid; }
+
 const std::string* NameOfNid(const std::string& library, const std::string& nid) {
   auto it = NidNames().find({library, nid});
   return it != NidNames().end() ? &it->second : nullptr;
@@ -165,7 +168,7 @@ int RunProcess(const GameConfig& game, const std::string& game_dir, const Config
   Thread* main = CreateGuestThread(config.main_stack);
   const gaddr args = ArgBlock(config.args);
   const gaddr cleanup = hle::BindImport("rtld", "rtld_cleanup");
-  return int(RunMainThread(main, [&](Ctx& c) {
+  return int(RunMainThreadBeside(main, [&](Ctx& c) {
     // PRX initialisers: _init(args, argp, module_start) runs the
     // module's constructors, then module_start (its own, when the third
     // argument is null).
@@ -173,7 +176,7 @@ int RunProcess(const GameConfig& game, const std::string& game_dir, const Config
       if (g_modules[i].img.init) CallGuest(c, g_modules[i].img.init, {0, 0, 0});
     // _start(the argument block, a cleanup function for atexit).
     return CallGuest(c, g_modules[0].img.entry, {args, cleanup});
-  }));
+  }, RunHostLoop));
 }
 
 }  // namespace recomp::orbis

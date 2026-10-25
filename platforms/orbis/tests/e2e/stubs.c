@@ -1,6 +1,6 @@
 // Link-time stand-ins that give the test programs' imports a library
 // (tools/orbis_sce_elf.py --lib): compiled once per library, with
-// -DLIB_TEST or -DLIB_KERNEL. Never run.
+// -DLIB_TEST, -DLIB_KERNEL, -DLIB_FIBER or -DLIB_GNM. Never run.
 
 #ifdef LIB_TEST
 int test_check(int id, long got, long want) { return 0; }
@@ -22,4 +22,19 @@ STUB(sceKernelWaitSema) STUB(sceKernelSignalSema) STUB(sceKernelCreateEventFlag)
 STUB(sceKernelSetEventFlag) STUB(sceKernelWaitEventFlag) STUB(__error) STUB(open)
 STUB(sceKernelOpen) STUB(sceKernelRead) STUB(sceKernelClose) STUB(sceKernelStat) STUB(mmap)
 STUB(munmap) STUB(sceKernelUsleep) STUB(sceKernelGetProcessTime) STUB(clock_gettime)
+STUB(sceKernelGetdents) STUB(sceKernelCreateEqueue) STUB(sceKernelWaitEqueue)
+#endif
+
+#ifdef LIB_FIBER
+#define STUB(name) \
+  void name(void) {}
+STUB(_sceFiberInitializeImpl) STUB(sceFiberRun) STUB(sceFiberSwitch) STUB(sceFiberReturnToThread)
+STUB(sceFiberGetSelf) STUB(sceFiberFinalize)
+#endif
+
+#ifdef LIB_GNM
+#define STUB(name) \
+  void name(void) {}
+STUB(sceGnmSetVsShader) STUB(sceGnmInsertPushMarker) STUB(sceGnmDrawInitDefaultHardwareState200)
+STUB(sceGnmSubmitCommandBuffers) STUB(sceGnmAddEqEvent)
 #endif

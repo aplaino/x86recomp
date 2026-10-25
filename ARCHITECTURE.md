@@ -1193,8 +1193,13 @@ The seams (core, generic):
   thunk region), Process::thread_init (its per-thread setup instead of
   a TEB) and fpu_control, Process::code (its images' code ranges, for
   dispatch), InitDispatch, and RunMainThread (guest calls on the process
-  main thread, on a big host stack); CallGuest follows the process's
-  ABI.
+  main thread, on a big host stack) or RunMainThreadBeside (the guest's
+  main thread on a host thread of its own, the process main thread
+  running the platform's loop: a console guest has no UI thread);
+  CallGuest follows the process's ABI.
+- Coroutines (platform.h): contexts with stacks of their own on one
+  host thread, for guest fibers, which need a host stack each since
+  lifted code keeps its call frames there.
 - The Orbis loader (platforms/orbis/src/orbis/process.h) maps the
   eboot and the PRXs the game ships where the lifter put them, gives
   each module with PT_TLS a slot in load order (FreeBSD's variant II:
@@ -1209,6 +1214,16 @@ The seams (core, generic):
 - orbis_process_test runs C built for FreeBSD x86-64 (clang, ld.lld),
   made SCE ELFs by tools/orbis_sce_elf.py and lifted at build time,
   through the loader and libkernel's HLE.
+- The Orbis host thread (orbis/host.h): the process main thread brings
+  up SDL video, owns the window and its events and runs what the HLE
+  posts to it (presentation); guest threads never touch SDL.
+- The GPU (orbis/gpu/cp.h): the command processor runs the PM4 buffers
+  libSceGnmDriver submits on host threads, one per queue (graphics, each
+  mapped compute ring), beside the CPU: the packets that write memory the
+  CPU sees, the waits and the end-of-pipe interrupts (as event queue
+  events) are exact, register writes are kept; drawing and dispatching
+  are not implemented yet. libSceGnmDriver's HLE writes the same packets
+  into the game's command buffers as the 11.00 driver does.
 - System libraries' HLE (platforms/orbis/src/orbis/hle, one shared
   library per library or family: recomp_orbis_kernel, ..._system, ...)
   registers by name; platforms/orbis/docs/hle.md has their choices and

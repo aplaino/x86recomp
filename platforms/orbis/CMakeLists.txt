@@ -10,19 +10,28 @@ target_link_libraries(recomp_orbis_image PUBLIC recomp_image)
 
 # The process loader (orbis/process.h) and the HLE registration by NID
 # (orbis/hle.h); the system libraries' HLE builds on it.
-add_library(recomp_orbis SHARED src/orbis/process.cpp)
+add_library(recomp_orbis SHARED src/orbis/process.cpp src/orbis/host.cpp)
 target_link_libraries(recomp_orbis PUBLIC recomp_runtime recomp_orbis_image)
 
 # System library HLE, one shared library each.
 add_library(recomp_orbis_kernel SHARED src/orbis/hle/kernel.cpp src/orbis/hle/kernel_memory.cpp
             src/orbis/hle/kernel_pthread.cpp src/orbis/hle/kernel_sync.cpp
-            src/orbis/hle/kernel_time.cpp src/orbis/hle/kernel_file.cpp)
+            src/orbis/hle/kernel_time.cpp src/orbis/hle/kernel_file.cpp
+            src/orbis/hle/kernel_equeue.cpp)
 target_link_libraries(recomp_orbis_kernel PUBLIC recomp_orbis)
 add_library(recomp_orbis_libc_internal SHARED src/orbis/hle/libc_internal.cpp)
-target_link_libraries(recomp_orbis_libc_internal PUBLIC recomp_orbis)
-# libSceSystemService, libSceUserService, libSceSysmodule.
-add_library(recomp_orbis_system SHARED src/orbis/hle/system.cpp)
+target_link_libraries(recomp_orbis_libc_internal PUBLIC recomp_orbis_kernel)
+# libSceSystemService, libSceUserService, libSceSysmodule, libScePlayGo, libSceDiscMap.
+add_library(recomp_orbis_system SHARED src/orbis/hle/system.cpp src/orbis/hle/playgo.cpp
+            src/orbis/hle/discmap.cpp)
 target_link_libraries(recomp_orbis_system PUBLIC recomp_orbis)
+add_library(recomp_orbis_fiber SHARED src/orbis/hle/fiber.cpp)
+target_link_libraries(recomp_orbis_fiber PUBLIC recomp_orbis)
+add_library(recomp_orbis_videoout SHARED src/orbis/hle/videoout.cpp)
+target_link_libraries(recomp_orbis_videoout PUBLIC recomp_orbis_kernel)
+# libSceGnmDriver and the GPU's command processor (orbis/gpu).
+add_library(recomp_orbis_gnm SHARED src/orbis/hle/gnm_driver.cpp src/orbis/gpu/cp.cpp)
+target_link_libraries(recomp_orbis_gnm PUBLIC recomp_orbis_videoout)
 
 # recomp_lift reads Orbis ELFs.
 target_sources(recomp_lift PRIVATE lifter/orbis_reader.cpp)
@@ -44,8 +53,8 @@ if(RECOMP_LD_LLD AND Python3_FOUND AND CMAKE_C_COMPILER_ID MATCHES "Clang")
   add_custom_command(OUTPUT "${_e2e}/eboot.elf" "${_e2e}/prx.elf"
     COMMAND Python3::Interpreter "${_src}/build.py" "${_e2e}" "${CMAKE_C_COMPILER}"
             "${RECOMP_LD_LLD}"
-    DEPENDS "${_src}/build.py" "${_src}/eboot.c" "${_src}/kernel.c" "${_src}/prx.c"
-            "${_src}/stubs.c"
+    DEPENDS "${_src}/build.py" "${_src}/eboot.c" "${_src}/kernel.c" "${_src}/system.c"
+            "${_src}/prx.c" "${_src}/stubs.c"
             "${RECOMP_ROOT}/tools/orbis_sce_elf.py"
     VERBATIM)
   set(_gen "${_e2e}/gen/gen_000.cpp" "${_e2e}/gen/gen_prx_000.cpp" "${_e2e}/gen/table.cpp")
@@ -59,7 +68,8 @@ if(RECOMP_LD_LLD AND Python3_FOUND AND CMAKE_C_COMPILER_ID MATCHES "Clang")
     "-O2;-g0;-fno-strict-aliasing;-fnon-call-exceptions;${RECOMP_X87_FP_FLAGS};${RECOMP_FAULT_FRAME_FLAGS}")
   add_executable(orbis_process_test tests/orbis_process_test.cpp ${_gen}
                  "${RECOMP_ROOT}/src/runtime/lifted_table.cpp")
-  target_link_libraries(orbis_process_test PRIVATE recomp_orbis recomp_orbis_kernel)
+  target_link_libraries(orbis_process_test PRIVATE recomp_orbis recomp_orbis_kernel
+                        recomp_orbis_fiber recomp_orbis_gnm)
   add_test(NAME orbis_process COMMAND orbis_process_test "${_e2e}/eboot.elf" "${_e2e}/prx.elf")
   set_tests_properties(orbis_process PROPERTIES TIMEOUT 60)  # a hang is a failure
 endif()
