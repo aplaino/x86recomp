@@ -30,6 +30,7 @@ endif()
 # module with its own option. A game for another CPU turns RECOMP_X86 off.
 option(RECOMP_X86 "x86 lifter, CPU model and Win32 HLE (PC games)" ON)
 option(RECOMP_PLATFORM_HORIZON "Nintendo Switch (Horizon OS) platform module" OFF)
+option(RECOMP_PLATFORM_XBOX360 "Xbox 360 platform module" OFF)
 
 # The host layer (cmake/host.cmake): what a native program needs on its
 # host, whatever its guest CPU. SDL3 (windows, input, audio output),
@@ -76,6 +77,30 @@ if(RECOMP_PLATFORM_HORIZON)
   endfunction()
 
   add_subdirectory(platforms/horizon)
+endif()
+
+# The PowerPC lifter and CPU model, for the platforms with a PowerPC CPU
+# (the Xbox 360), then those platforms.
+if(RECOMP_PLATFORM_XBOX360)
+  add_library(recomp_ppc SHARED src/ppc/dispatch.cpp src/ppc/fatal.cpp)
+  target_include_directories(recomp_ppc PUBLIC src)
+  target_compile_features(recomp_ppc PUBLIC cxx_std_20)
+  add_subdirectory(tools/lifter_ppc)
+
+  # recomp_add_lifted_ppc(<target> <dir>): an object library of
+  # recomp_lift_ppc's output in <dir> plus the registration of its function
+  # table, optimised like recomp_add_lifted_a64's.
+  function(recomp_add_lifted_ppc target dir)
+    file(GLOB _gen CONFIGURE_DEPENDS "${dir}/*.cpp")
+    recomp_add_lifted_ppc_files(${target} ${_gen})
+  endfunction()
+  # The same over a known list of generated files (a build-time lift).
+  function(recomp_add_lifted_ppc_files target)
+    add_library(${target} OBJECT ${ARGN} "${RECOMP_ROOT}/src/ppc/lifted_table.cpp")
+    target_include_directories(${target} PRIVATE "${RECOMP_ROOT}/src")
+    target_compile_features(${target} PRIVATE cxx_std_20)
+    target_compile_options(${target} PRIVATE -O2 -g0 -fno-strict-aliasing)
+  endfunction()
 endif()
 
 if(NOT RECOMP_X86)
