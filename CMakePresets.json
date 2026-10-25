@@ -24,6 +24,12 @@
       "cacheVariables": { "RECOMP_X86": "OFF", "RECOMP_PLATFORM_HORIZON": "ON" }
     },
     {
+      "name": "xbox360",
+      "inherits": "debug",
+      "binaryDir": "${sourceDir}/out/build/xbox360",
+      "cacheVariables": { "RECOMP_X86": "OFF", "RECOMP_PLATFORM_XBOX360": "ON" }
+    },
+    {
       "name": "horizon-aarch64-qemu",
       "inherits": "horizon",
       "binaryDir": "${sourceDir}/out/build/horizon-aarch64-qemu",
@@ -35,6 +41,7 @@
     { "name": "debug", "configurePreset": "debug" },
     { "name": "release", "configurePreset": "release" },
     { "name": "horizon", "configurePreset": "horizon" },
-    { "name": "horizon-aarch64-qemu", "configurePreset": "horizon-aarch64-qemu" }
+    { "name": "horizon-aarch64-qemu", "configurePreset": "horizon-aarch64-qemu" },
+    { "name": "xbox360", "configurePreset": "xbox360" }
   ]
 }

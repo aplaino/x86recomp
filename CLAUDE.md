@@ -28,6 +28,7 @@ a game is where it came up.
   platforms") are built only with their RECOMP_PLATFORM_<NAME> option;
   their own rules are in platforms/<name>/CLAUDE.md. The Switch and its
   AArch64 core alone: `cmake --preset horizon && cmake --build --preset horizon && ctest --test-dir out/build/horizon`.
+  The Xbox 360 and its PowerPC core alone: `cmake --preset xbox360 && cmake --build --preset xbox360 && ctest --test-dir out/build/xbox360`.
 
 ## Product constraints (see ARCHITECTURE.md)
 - No emulation in the shipping binary: no interpreter, JIT, runtime x86

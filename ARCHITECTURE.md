@@ -1166,6 +1166,13 @@ address layout, process bring-up, the kernel's supervisor calls (Svc,
 which a64/lifted.h declares and the platform defines) and its HLE. The
 x86 path is its own option, RECOMP_X86 (default on): a Switch game
 turns it off and builds without the x86 lifter, CPU model or Win32 HLE.
+The Xbox 360 (platforms/xbox360, RECOMP_PLATFORM_XBOX360; its design is
+platforms/xbox360/ARCHITECTURE.md) is PowerPC the same way: its core is
+the lifter recomp_lift_ppc (tools/lifter_ppc) and the CPU model and
+dispatcher it targets (src/ppc, recomp_ppc), a 64-bit PowerPC in 32-bit
+mode with big-endian guest memory in a 4 GiB arena. The module adds the
+XEX2 image reader and LZX to recomp_lift_ppc, and the kernel and system
+library HLE behind the core's Import, Sc, Trap and TimeBase.
 
 Guest and host are separate axes. Every guest's lifted code is portable
 C++, so each one runs on every host (Linux x86-64, macOS arm64), and
@@ -1178,9 +1185,10 @@ CPU-only test builds, such as the AArch64 lifter tests cross built for
 an arm64 host whose sysroot has none of those libraries.
 
 Each guest option is independent, so one tree can build the x86 path,
-the PS4 and the Switch together (CMakePresets: debug for the x86 path,
-horizon for the Switch alone, horizon-aarch64-qemu for the Switch's
-CPU-only tests on an arm64 host under qemu-aarch64).
+the PS4, the Switch and the Xbox 360 together (CMakePresets: debug for the
+x86 path, horizon for the Switch alone, horizon-aarch64-qemu for the
+Switch's CPU-only tests on an arm64 host under qemu-aarch64, xbox360 for
+the Xbox 360 alone).
 
 ## Roadmap
 - 64-bit guests (above).

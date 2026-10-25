@@ -1,0 +1,130 @@
+# PowerPC lifter tests on the fixture (fixture/): built from source for
+# big-endian PowerPC64 with clang's integrated assembler and LLD, turned
+# into a XEX by xbox360_elf2xex, lifted by recomp_lift_ppc at build time,
+# and checked against the oracle: the same code bare metal on
+# qemu-system-ppc64, a PowerPC 970 in 32-bit mode (oracle/qemu_run.py).
+
+if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+  message(STATUS "xbox360: the PowerPC lifter tests build a PowerPC fixture with clang; skipped")
+  return()
+endif()
+find_program(RECOMP_LD_LLD ld.lld)
+if(NOT RECOMP_LD_LLD)
+  message(STATUS "xbox360: ld.lld not found; the PowerPC lifter tests are skipped")
+  return()
+endif()
+
+set(_src "${CMAKE_CURRENT_SOURCE_DIR}")
+set(_bin "${CMAKE_CURRENT_BINARY_DIR}/ppc")
+set(_flags --target=powerpc64-unknown-linux-gnu -mabi=elfv2 -mcpu=970 -mno-altivec -msoft-float
+    -ffreestanding -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables -fno-jump-tables -O2
+    -Wall -Wextra -Werror -I "${_src}/oracle")
+
+# Compiles PowerPC sources into objects: ppc_objects(<var> <file>...).
+function(ppc_objects var)
+  set(_objs)
+  foreach(_f ${ARGN})
+    get_filename_component(_name "${_f}" NAME)
+    set(_o "${_bin}/${_name}.o")
+    add_custom_command(OUTPUT "${_o}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${_bin}"
+      COMMAND "${CMAKE_C_COMPILER}" ${_flags} -c "${_f}" -o "${_o}"
+      DEPENDS "${_f}" "${_src}/oracle/oracle.h"
+      COMMENT "Compiling the PowerPC test program's ${_name}")
+    list(APPEND _objs "${_o}")
+  endforeach()
+  set(${var} ${_objs} PARENT_SCOPE)
+endfunction()
+
+# --- the interrupt vectors of the oracle runs ---------------------------------
+ppc_objects(_vec_objs "${_src}/oracle/vectors.S")
+add_custom_command(OUTPUT "${_bin}/vectors.elf"
+  COMMAND "${RECOMP_LD_LLD}" -static -T "${_src}/oracle/vectors.ld" -o "${_bin}/vectors.elf" ${_vec_objs}
+  DEPENDS ${_vec_objs} "${_src}/oracle/vectors.ld")
+
+# --- the fixture -----------------------------------------------------------------
+ppc_objects(_fix_objs "${_src}/oracle/crt0.S" "${_src}/fixture/ops.S" "${_src}/fixture/tables.S"
+            "${_src}/fixture/main.c")
+add_custom_command(OUTPUT "${_bin}/fixture.elf"
+  COMMAND "${RECOMP_LD_LLD}" -static -T "${_src}/fixture/fixture.ld" -o "${_bin}/fixture.elf" ${_fix_objs}
+  DEPENDS ${_fix_objs} "${_src}/fixture/fixture.ld"
+  COMMENT "Linking the PowerPC fixture")
+set(_xex "${_bin}/fixture.xex")
+add_custom_command(OUTPUT "${_xex}"
+  COMMAND xbox360_elf2xex "${_bin}/fixture.elf" "${_xex}"
+  DEPENDS xbox360_elf2xex "${_bin}/fixture.elf")
+
+# --- lifting it --------------------------------------------------------------
+set(_gen "${CMAKE_CURRENT_BINARY_DIR}/fixture_generated")
+set(_funcs)
+foreach(_k 000 001 002 003)
+  list(APPEND _funcs "${_gen}/funcs_${_k}.cpp")
+endforeach()
+add_custom_command(OUTPUT ${_funcs} "${_gen}/table.cpp" "${_gen}/forms.cpp" "${_gen}/forms_native.S"
+         "${_gen}/forms_native.c"
+  COMMAND "${CMAKE_COMMAND}" -E make_directory "${_gen}"
+  COMMAND recomp_lift_ppc --image "${_xex}" --out "${_gen}" --files 4 --forms "${_gen}"
+  DEPENDS recomp_lift_ppc "${_xex}"
+  COMMENT "Lifting the PowerPC fixture")
+
+recomp_add_lifted_ppc_files(xbox360_fixture_code ${_funcs} "${_gen}/table.cpp")
+add_executable(xbox360_fixture fixture_main.cpp $<TARGET_OBJECTS:xbox360_fixture_code>)
+target_include_directories(xbox360_fixture PRIVATE "${_src}/oracle")
+target_link_libraries(xbox360_fixture PRIVATE recomp_ppc recomp_xbox360_image)
+
+# --- the form oracle: every form's native stub, bare metal -------------------
+ppc_objects(_forms_objs "${_src}/oracle/crt0.S" "${_src}/oracle/forms_main.c" "${_gen}/forms_native.S"
+            "${_gen}/forms_native.c")
+add_custom_command(OUTPUT "${_bin}/forms_oracle.elf"
+  COMMAND "${RECOMP_LD_LLD}" -static -T "${_src}/oracle/forms.ld" -o "${_bin}/forms_oracle.elf" ${_forms_objs}
+  DEPENDS ${_forms_objs} "${_src}/oracle/forms.ld"
+  COMMENT "Linking the PowerPC form oracle")
+add_custom_target(xbox360_oracle_programs ALL
+  DEPENDS "${_bin}/vectors.elf" "${_bin}/fixture.elf" "${_bin}/forms_oracle.elf")
+
+# xbox360_lift_forms_test, and the same built with each planted bug of
+# ppc/lifted.h (RECOMP_PPC_MUTATION), which the test must catch.
+set(_mutations 1 2 3)
+foreach(_m 0 ${_mutations})
+  set(_t xbox360_lift_forms_test)
+  if(_m)
+    set(_t xbox360_lift_forms_mutation_${_m})
+  endif()
+  add_executable(${_t} lift_forms_test.cpp "${_gen}/forms.cpp")
+  target_include_directories(${_t} PRIVATE "${_src}" "${_src}/oracle")
+  target_compile_definitions(${_t} PRIVATE RECOMP_PPC_MUTATION=${_m})
+  target_compile_options(${_t} PRIVATE -O1 -fno-strict-aliasing)
+  target_link_libraries(${_t} PRIVATE recomp_ppc)
+endforeach()
+
+# --- tests against the oracle ----------------------------------------------
+find_program(RECOMP_QEMU_PPC64 qemu-system-ppc64)
+if(NOT RECOMP_QEMU_PPC64)
+  message(STATUS "xbox360: qemu-system-ppc64 not found; the PowerPC oracle tests are skipped")
+  return()
+endif()
+set(RECOMP_PYTHON "${RECOMP_ROOT}/.venv/bin/python" CACHE FILEPATH
+    "Python for the oracle tests' scripts")
+if(NOT EXISTS "${RECOMP_PYTHON}")
+  message(STATUS "xbox360: ${RECOMP_PYTHON} missing; the PowerPC oracle tests are skipped")
+  return()
+endif()
+set(_run "${RECOMP_PYTHON}" "${_src}/oracle/qemu_run.py" --qemu "${RECOMP_QEMU_PPC64}"
+    --vectors "${_bin}/vectors.elf")
+set(_fixture_out "${CMAKE_CURRENT_BINARY_DIR}/fixture_oracle.bin")
+set(_records "${CMAKE_CURRENT_BINARY_DIR}/forms_records.bin")
+
+add_test(NAME xbox360_oracle_fixture COMMAND ${_run} --program "${_bin}/fixture.elf" --out "${_fixture_out}")
+set_tests_properties(xbox360_oracle_fixture PROPERTIES FIXTURES_SETUP xbox360_fixture_out)
+add_test(NAME xbox360_lift_fixture COMMAND xbox360_fixture "${_xex}" "${_fixture_out}")
+set_tests_properties(xbox360_lift_fixture PROPERTIES FIXTURES_REQUIRED xbox360_fixture_out)
+
+add_test(NAME xbox360_oracle_forms COMMAND ${_run} --program "${_bin}/forms_oracle.elf" --out "${_records}")
+set_tests_properties(xbox360_oracle_forms PROPERTIES FIXTURES_SETUP xbox360_forms_records)
+add_test(NAME xbox360_lift_forms COMMAND xbox360_lift_forms_test "${_records}")
+set_tests_properties(xbox360_lift_forms PROPERTIES FIXTURES_REQUIRED xbox360_forms_records)
+foreach(_m ${_mutations})
+  add_test(NAME xbox360_lift_forms_mutation_${_m} COMMAND xbox360_lift_forms_mutation_${_m} "${_records}")
+  set_tests_properties(xbox360_lift_forms_mutation_${_m} PROPERTIES
+    FIXTURES_REQUIRED xbox360_forms_records WILL_FAIL TRUE)
+endforeach()

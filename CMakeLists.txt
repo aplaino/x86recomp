@@ -101,6 +101,8 @@ if(RECOMP_PLATFORM_XBOX360)
     target_compile_features(${target} PRIVATE cxx_std_20)
     target_compile_options(${target} PRIVATE -O2 -g0 -fno-strict-aliasing)
   endfunction()
+
+  add_subdirectory(platforms/xbox360)
 endif()
 
 if(NOT RECOMP_X86)
