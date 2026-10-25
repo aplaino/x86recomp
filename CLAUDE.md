@@ -24,6 +24,10 @@ a game is where it came up.
   too).
 - Lifter output must not change unintentionally: when touching
   tools/lifter, diff a game's generated/ before and after.
+- Console platform modules (platforms/<name>, ARCHITECTURE.md "Console
+  platforms") are built only with their RECOMP_PLATFORM_<NAME> option;
+  their own rules are in platforms/<name>/CLAUDE.md. The Switch and its
+  AArch64 core alone: `cmake --preset horizon && cmake --build --preset horizon && ctest --test-dir out/build/horizon`.
 
 ## Product constraints (see ARCHITECTURE.md)
 - No emulation in the shipping binary: no interpreter, JIT, runtime x86

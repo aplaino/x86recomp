@@ -16,10 +16,24 @@
       "inherits": "debug",
       "binaryDir": "${sourceDir}/out/build/release",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+    },
+    {
+      "name": "horizon",
+      "inherits": "debug",
+      "binaryDir": "${sourceDir}/out/build/horizon",
+      "cacheVariables": { "RECOMP_X86": "OFF", "RECOMP_PLATFORM_HORIZON": "ON" }
+    },
+    {
+      "name": "horizon-aarch64-qemu",
+      "inherits": "horizon",
+      "binaryDir": "${sourceDir}/out/build/horizon-aarch64-qemu",
+      "toolchainFile": "${sourceDir}/cmake/aarch64-linux-qemu.cmake"
     }
   ],
   "buildPresets": [
     { "name": "debug", "configurePreset": "debug" },
-    { "name": "release", "configurePreset": "release" }
+    { "name": "release", "configurePreset": "release" },
+    { "name": "horizon", "configurePreset": "horizon" },
+    { "name": "horizon-aarch64-qemu", "configurePreset": "horizon-aarch64-qemu" }
   ]
 }

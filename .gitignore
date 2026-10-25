@@ -8,3 +8,7 @@ build/
 # Never commit game files or anything derived from them
 *.exe
 *.dll
+
+# The AArch64 oracle tests' Python (unicorn)
+.venv/
+__pycache__/
