@@ -4,8 +4,11 @@
 // non-Java mode (VSCR[NJ]) denormal operands and results flushed to zero
 // of the same sign. VEXPTEFP and VLOGEFP are estimates (the CPU's own);
 // these compute 2^x and log2 x accurately in double, then round once.
+// VMX128's dot products and D3D formats follow Xenia's (BSD) x64 back end
+// until a console can run test programs (platforms/xbox360/ARCHITECTURE.md,
+// "VMX128").
 //
-// RECOMP_PPC_MUTATION 7-9 plant known bugs here and in ppc/vmx.h.
+// RECOMP_PPC_MUTATION 7-12 plant known bugs here and in ppc/vmx.h.
 
 extern "C" {
 #include "softfloat.h"
@@ -89,10 +92,166 @@ uint32_t Log2(uint32_t x) {
   return f64_to_f32(Add(lg, D(e))).v;
 }
 
+// VMSUM3FP128 and VMSUM4FP128: the products exact in double, summed in
+// double as (x + z) + y (+ (y + w) for four), rounded once to single and
+// splatted; a sum that overflows single gives the default NaN (Xenia
+// measured these against a console: right but for the last bit at times).
+// The first NaN of the products in lane order, A's before B's, quieted;
+// an invalid product or sum gives the default NaN.
+Vec Dot(const Lanes& l, bool four, const Vec& a, const Vec& b) {
+  int n = four ? 4 : 3;
+  uint32_t out = 0;
+  bool done = false;
+  float64_t p[4];
+  for (int k = 0; k < n && !done; k++) {
+    uint32_t x = l.In(VGet<uint32_t>(a, k)), y = l.In(VGet<uint32_t>(b, k));
+    for (uint32_t v : {x, y})
+      if (!done && IsNaN(v)) {
+        out = v | kQuiet;
+        done = true;
+      }
+    p[k] = f64_mul(f32_to_f64(F32(x)), f32_to_f64(F32(y)));
+  }
+  if (!done) {
+    float64_t s = Add(p[0], p[2]);
+    s = four ? Add(s, Add(p[1], p[3])) : Add(s, p[1]);
+    softfloat_exceptionFlags = 0;
+    float32_t r = f64_to_f32(s);
+    if (IsNaN(r.v) || (!Mutated(11) && (softfloat_exceptionFlags & softfloat_flag_overflow))) out = kDefaultNaN;
+    else out = l.Out(r.v);
+  }
+  Vec r;
+  for (int k = 0; k < 4; k++) VPut<uint32_t>(r, k, out);
+  return r;
+}
+
+// The D3D formats of VPKD3D128 and VUPKD3D128. The integer formats work on
+// biased floats: 3.0 + v * 2^-22 holds v in its low mantissa bits (and
+// 1.0 + v * 2^-23 a D3DCOLOR byte or a W), so packing clamps each lane as
+// a float to the format's range (a NaN to its bottom) and keeps those
+// bits; unpacking builds them, and the most negative value of a signed
+// field (outside D3D's symmetric range) unpacks to the default NaN. Halves
+// are the Xenos's: exponent 31 is a number (no infinities or NaNs), no
+// denormals (they pack and unpack as zero), larger magnitudes and NaNs
+// pack as the largest; packing rounds to nearest even.
+uint32_t Clamp(uint32_t x, uint32_t lo, uint32_t hi) {
+  if (IsNaN(x) || f32_lt(F32(x), F32(lo))) return Mutated(12) && IsNaN(x) ? hi : lo;
+  return f32_lt(F32(hi), F32(x)) ? hi : x;
+}
+uint32_t Half(uint32_t f) {
+  uint32_t abs = f & ~kSign, h = 0;
+  if (abs >= 0x47FFE000u) {
+    h = 0x7FFF;
+  } else if (abs >= 0x38800000u) {
+    uint32_t v = abs + 0xC8000000u;  // rebias the exponent from 127 to 15
+    h = ((v + 0xFFF + ((v >> 13) & 1)) >> 13) & 0x7FFF;
+  }
+  return h | (f & kSign) >> 16;
+}
+uint32_t Unhalf(uint32_t h) {
+  uint32_t e = (h >> 10) & 0x1F, s = (h & 0x8000) << 16;
+  return e ? s | (e + 112) << 23 | (h & 0x3FF) << 13 : s;
+}
+
+// imm: the type (0 D3DCOLOR, 1 NORMSHORT2, 2 NORMPACKED32 (10:10:10:2),
+// 3 FLOAT16_2, 4 NORMSHORT4, 5 FLOAT16_4, 6 NORMPACKED64 (20:20:20:4)) in
+// bits 4-6, then for packing the size of what is merged into vD in bits
+// 2-3 (1: a word, 2 and 3: a doubleword) and where in bits 0-1.
+Vec Pack(const Vec& d, const Vec& b, uint32_t imm) {
+  uint32_t x[4], p[4] = {0, 0, 0, 0};
+  for (int k = 0; k < 4; k++) x[k] = VGet<uint32_t>(b, k);
+  auto norm = [&](int k, uint32_t lo, uint32_t hi, uint32_t mask) { return Clamp(x[k], lo, hi) & mask; };
+  auto s16 = [&](int k) { return norm(k, 0x403F8001u, 0x40407FFFu, 0xFFFF); };
+  switch (imm >> 4) {
+    case 0:  // ARGB from XYZW
+      p[3] = norm(3, 0x40400000u, 0x404000FFu, 0xFF) << 24 | norm(0, 0x40400000u, 0x404000FFu, 0xFF) << 16 |
+             norm(1, 0x40400000u, 0x404000FFu, 0xFF) << 8 | norm(2, 0x40400000u, 0x404000FFu, 0xFF);
+      break;
+    case 1: p[3] = s16(0) << 16 | s16(1); break;
+    case 2:  // in all four words, as Xenia has it
+      p[0] = p[1] = p[2] = p[3] = norm(0, 0x403FFE01u, 0x404001FFu, 0x3FF) |
+                                  norm(1, 0x403FFE01u, 0x404001FFu, 0x3FF) << 10 |
+                                  norm(2, 0x403FFE01u, 0x404001FFu, 0x3FF) << 20 |
+                                  norm(3, 0x40400000u, 0x40400003u, 0x3) << 30;
+      break;
+    case 3: p[3] = Half(x[0]) << 16 | Half(x[1]); break;
+    case 4:
+      p[2] = s16(0) << 16 | s16(1);
+      p[3] = s16(2) << 16 | s16(3);
+      break;
+    case 5:
+      p[2] = Half(x[0]) << 16 | Half(x[1]);
+      p[3] = Half(x[2]) << 16 | Half(x[3]);
+      break;
+    default: {  // 6 (the decoder takes nothing else)
+      uint64_t v = uint64_t(norm(0, 0x40380001u, 0x4047FFFFu, 0xFFFFF)) |
+                   uint64_t(norm(1, 0x40380001u, 0x4047FFFFu, 0xFFFFF)) << 20 |
+                   uint64_t(norm(2, 0x40380001u, 0x4047FFFFu, 0xFFFFF)) << 40 |
+                   uint64_t(norm(3, 0x40400000u, 0x4040000Fu, 0xF)) << 60;
+      p[2] = uint32_t(v >> 32);
+      p[3] = uint32_t(v);
+      break;
+    }
+  }
+  // Per element of the result: the packed vector's word, or -1 for vD's
+  // (a size of 0 does not decode).
+  static const int8_t kFrom[3][4][4] = {
+      {{-1, -1, -1, 3}, {-1, -1, 3, -1}, {-1, 3, -1, -1}, {3, -1, -1, -1}},
+      {{-1, -1, 2, 3}, {-1, 2, 3, -1}, {2, 3, -1, -1}, {3, -1, -1, -1}},
+      {{-1, -1, 2, 3}, {-1, 2, 3, -1}, {2, 3, -1, -1}, {-1, -1, -1, 2}},
+  };
+  Vec r;
+  const int8_t* from = kFrom[((imm >> 2) & 3) - 1][imm & 3];
+  for (int k = 0; k < 4; k++) VPut<uint32_t>(r, k, from[k] < 0 ? VGet<uint32_t>(d, k) : p[from[k]]);
+  return r;
+}
+Vec Unpack(const Vec& b, uint32_t imm) {
+  uint32_t w2 = VGet<uint32_t>(b, 2), w3 = VGet<uint32_t>(b, 3), r[4];
+  auto biased = [](int32_t v, uint32_t overflow) {
+    uint32_t f = 0x40400000u + uint32_t(v);
+    return f == overflow ? kDefaultNaN : f;
+  };
+  auto field = [](uint64_t v, int at, int bits) { return int32_t(int64_t(v << (64 - at - bits)) >> (64 - bits)); };
+  switch (imm >> 4) {
+    case 0:
+      r[0] = 0x3F800000u | (w3 >> 16 & 0xFF), r[1] = 0x3F800000u | (w3 >> 8 & 0xFF);
+      r[2] = 0x3F800000u | (w3 & 0xFF), r[3] = 0x3F800000u | w3 >> 24;
+      break;
+    case 1:
+      r[0] = biased(int16_t(w3 >> 16), 0x403F8000u), r[1] = biased(int16_t(w3), 0x403F8000u);
+      r[2] = 0, r[3] = 0x3F800000u;
+      break;
+    case 2:
+      for (int k = 0; k < 3; k++) r[k] = biased(field(w3, 10 * k, 10), 0x403FFE00u);
+      r[3] = 0x3F800000u + (w3 >> 30);
+      break;
+    case 3: r[0] = Unhalf(w3 >> 16), r[1] = Unhalf(w3 & 0xFFFF), r[2] = 0, r[3] = 0x3F800000u; break;
+    case 4:
+      r[0] = biased(int16_t(w2 >> 16), 0x403F8000u), r[1] = biased(int16_t(w2), 0x403F8000u);
+      r[2] = biased(int16_t(w3 >> 16), 0x403F8000u), r[3] = biased(int16_t(w3), 0x403F8000u);
+      break;
+    case 5:
+      r[0] = Unhalf(w2 >> 16), r[1] = Unhalf(w2 & 0xFFFF), r[2] = Unhalf(w3 >> 16), r[3] = Unhalf(w3 & 0xFFFF);
+      break;
+    default: {
+      uint64_t v = uint64_t(w2) << 32 | w3;
+      for (int k = 0; k < 3; k++) r[k] = biased(field(v, 20 * k, 20), 0x40380000u);
+      r[3] = 0x3F800000u + uint32_t(v >> 60);
+      break;
+    }
+  }
+  Vec out;
+  for (int k = 0; k < 4; k++) VPut<uint32_t>(out, k, r[k]);
+  return out;
+}
+
 }  // namespace
 
 Vec VmxFloat(Ctx& c, unsigned op, const Vec& a, const Vec& b, const Vec& cc, uint32_t imm) {
   Lanes l(c);
+  if (op == kVmsum3fp128 || op == kVmsum4fp128) return Dot(l, op == kVmsum4fp128, a, b);
+  if (op == kVpkd3d128) return Pack(cc, b, imm);
+  if (op == kVupkd3d128) return Unpack(b, imm);
   Vec r;
   for (int k = 0; k < 4; k++) {
     uint32_t x = l.In(VGet<uint32_t>(a, k)), y = l.In(VGet<uint32_t>(b, k)), z = l.In(VGet<uint32_t>(cc, k));
@@ -110,6 +269,12 @@ Vec VmxFloat(Ctx& c, unsigned op, const Vec& a, const Vec& b, const Vec& cc, uin
       case kVaddfp: case kVsubfp:
         if (!nan({x, y}, out)) {
           float32_t s = op == kVaddfp ? f32_add(F32(x), F32(y)) : f32_sub(F32(x), F32(y));
+          out = IsNaN(s.v) ? kDefaultNaN : s.v;
+        }
+        break;
+      case kVmulfp128:
+        if (!nan({x, y}, out)) {
+          float32_t s = f32_mul(F32(x), F32(y));
           out = IsNaN(s.v) ? kDefaultNaN : s.v;
         }
         break;

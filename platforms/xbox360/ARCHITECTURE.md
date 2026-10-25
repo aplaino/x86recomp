@@ -115,7 +115,40 @@ leaves them undefined). The Xenon's (and Cell's) LVLX, LVRX, STVLX, STVRX
 and their LRU forms load and store the parts of a quadword left and right
 of the address; the 970 has none of them, so they wait for a console too.
 
-VMX128 decodes as invalid (a fatal error if reached) until it is lifted.
+### VMX128
+The Xenon's extension of VMX to 128 vector registers, in primary opcodes 4
+(loads, stores and VSLDOI128), 5 and 6. The decoder reads its encodings as
+Xenia's opcode table has them, with the register numbers split across the
+word (vD in bits 6-10 and 28-29, vA in 11-15, 26 and 21, vB in 16-20 and
+30-31), and lifts most of it as the VMX operations they are: the loads
+and stores (the LVLX family among them), the logical, shift, merge, pack
+and unpack operations (VUPKHSB128 and VUPKLSB128 with vA 0x60 are the
+halfword unpacks), the compares, conversions, roundings and estimates, and
+the multiply-adds, which take an operand from vD (VMADDFP128: vA * vB + vD;
+VMADDCFP128: vA * vD + vB; VNMSUBFP128: -(vA * vB - vD); VSEL128's mask
+is vD; VPERM128's vC is one of v0-v7). Its own (src/ppc/vmx.h, vmx.cpp):
+- VMULFP128, rounded once; VRLIMI128 (rotate by words, insert the words a
+  mask selects into vD) and VPERMWI128 (words chosen by an immediate);
+- VMSUM3FP128 and VMSUM4FP128, the dot products: as Xenia's x64 back end
+  computes them, which it measured against a console (right but for the
+  last bit at times): exact products in double, summed as (x + z) + y
+  (+ (y + w)), rounded once to single, the default NaN when that
+  overflows; denormals flushed under NJ;
+- VPKD3D128 and VUPKD3D128, the D3D formats (D3DCOLOR, NORMSHORT2/4,
+  10:10:10:2, 20:20:20:4, FLOAT16_2/4): the integer formats as biased
+  floats (3.0 + v * 2^-22), clamped as floats when packed (a NaN to the
+  bottom), the most negative field unpacking to the default NaN; the
+  Xenos's halves (no infinities or NaNs, no denormals); then merged into
+  vD as a word or a doubleword at the place the immediate says. As
+  Xenia's x64 back end has them, but for one choice: FLOAT16_2 packs
+  round to nearest even like FLOAT16_4 (Xenia truncates the first; its
+  tests have a tie for the second only).
+What Xenia has not measured waits for a console: the NaN a dot product
+returns (here the first of the products' operands, lane by lane, A's
+before B's), the multiply-adds' NaN order, the halves' rounding, a
+packed 10:10:10:2 in all four words of the intermediate, and the
+encodings the decoder rejects (a VPKD3D128 size of 0, type 7, VRLIMI128's
+mask bit 4, an unused immediate).
 
 ## Lifter
 `recomp_lift_ppc --image <title.xex> --out <dir>` (tools/lifter_ppc):
@@ -179,15 +212,24 @@ memory; any other interrupt fails the run.
   0 to 1 change), FI and FPRF's C bit on compares (the ISA alters only
   FPCC), FRES's FPRF and its estimate of 1/±0 (QEMU: ±0.5), and VSCR's
   reserved bits (QEMU keeps what MTVSCR wrote).
-- Not covered by QEMU: VMX128 (no emulator implements it) and what the
-  970 does differently from the Xenon (DCBZ's size, the undefined cases
-  above, the estimates, the LVLX family). Those wait for a console.
+- VMX128 runs on the oracle as VMX: the form writer re-encodes each
+  VMX128 form as the VMX instruction with the same operation and
+  operands, or for VMULFP128, VRLIMI128 and VPERMWI128 as a short VMX
+  sequence through scratch registers the stub reloads; the fixture keeps
+  those forms' registers below 30. Since the twin comes from the
+  decoder's reading, xbox360_vmx128_test checks the decoding itself
+  (high registers, operand roles) against each operation's definition,
+  and the dot products and D3D formats, which have no twin, against
+  Xenia's test vectors; it has its own planted bugs.
+- Not covered by QEMU: what the 970 does differently from the Xenon
+  (DCBZ's size, the undefined cases above, the estimates, the LVLX
+  family) and VMX128 beyond its VMX twins. Those wait for a console.
 
 ## Roadmap
 1. Integer core, XEX reader, oracle (done).
 2. Floating point (exact, FPSCR) and VMX, on the same oracle (done).
-3. VMX128: Xenia's implementation as the reference until a console can
-   run test programs.
+3. VMX128, with Xenia's implementation as the reference until a console
+   can run test programs (done).
 4. Runtime: the arena with the physical memory views, process and
    thread bring-up (r13 and the thread's kernel structures), the kernel
    and xam HLE, written against the system's own behaviour.

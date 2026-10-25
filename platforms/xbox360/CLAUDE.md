@@ -53,8 +53,9 @@ follows these rules too.
   formats come through the lifter's ImageReader, the kernel through
   Import/Sc/Trap/TimeBase.
 - ppc/lifted.h semantics changes must keep xbox360_lift_forms passing
-  against the oracle, and a planted bug (RECOMP_PPC_MUTATION) for each new
-  helper that the test catches.
+  against the oracle (xbox360_vmx128_test too for VMX128, which the oracle
+  runs only as VMX twins), and a planted bug (RECOMP_PPC_MUTATION) for
+  each new helper that a test catches.
 - Where the ISA leaves a result undefined, say so next to the code, keep
   it out of the oracle comparison (tests/lift_forms_test.cpp, Undefined)
   and note it for the console check in ARCHITECTURE.md.

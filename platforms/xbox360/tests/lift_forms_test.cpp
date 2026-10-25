@@ -57,8 +57,9 @@ struct Undefined {
 };
 Undefined UndefinedIn(uint32_t raw, const NativeState& in) {
   Undefined u;
-  // VEXPTEFP and VLOGEFP: estimates, the CPU's own.
+  // VEXPTEFP and VLOGEFP (and their VMX128 forms): estimates, the CPU's own.
   if (raw >> 26 == 4 && ((raw & 0x7FF) == 394 || (raw & 0x7FF) == 458)) u.vr = int((raw >> 21) & 31);
+  if (raw >> 26 == 6 && ((raw >> 4 & 0x7F) == 0x6B || (raw >> 4 & 0x7F) == 0x6F)) u.vr = int((raw >> 21) & 31);
   // Where the oracle departs from the ISA, which the model follows:
   // - FR: QEMU's is not "the rounding increased the magnitude" (spot
   //   checks with exact arithmetic);
@@ -224,7 +225,7 @@ int main(int argc, char** argv) {
         std::printf("FAIL form %u %08x %s at %llx:%s\n", r.form, r.raw, kForms[r.form].name,
                     (unsigned long long)kForms[r.form].va, why.c_str());
         // The operands, for floating point and VMX.
-        if (r.raw >> 26 == 4) {
+        if (r.raw >> 26 >= 4 && r.raw >> 26 <= 6) {
           std::printf("     in: vscr %08x", VscrOf(r.in.vscr_in));
           for (int f : {(r.raw >> 16) & 31, (r.raw >> 11) & 31, (r.raw >> 6) & 31}) {
             std::printf(" v%d ", f);

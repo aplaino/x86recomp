@@ -86,7 +86,7 @@ add_custom_target(xbox360_oracle_programs ALL
 # ppc/lifted.h, ppc/vmx.h, ppc/fp.cpp and ppc/vmx.cpp (RECOMP_PPC_MUTATION),
 # which the test must catch. Each builds its own fp.cpp and vmx.cpp, which
 # take precedence over recomp_ppc's.
-set(_mutations 1 2 3 4 5 6 7 8 9)
+set(_mutations 1 2 3 4 5 6 7 8 9 10)
 foreach(_m 0 ${_mutations})
   set(_t xbox360_lift_forms_test)
   if(_m)
@@ -98,6 +98,25 @@ foreach(_m 0 ${_mutations})
   target_compile_definitions(${_t} PRIVATE RECOMP_PPC_MUTATION=${_m})
   target_compile_options(${_t} PRIVATE -O1 -fno-strict-aliasing)
   target_link_libraries(${_t} PRIVATE recomp_ppc softfloat)
+endforeach()
+
+# xbox360_vmx128_test: VMX128's decoding and its operations without a VMX
+# twin (the oracle has none of VMX128), with its own planted bugs.
+set(_vmx128_mutations 11 12)
+foreach(_m 0 ${_vmx128_mutations})
+  set(_t xbox360_vmx128_test)
+  if(_m)
+    set(_t xbox360_vmx128_mutation_${_m})
+  endif()
+  add_executable(${_t} vmx128_test.cpp "${RECOMP_ROOT}/tools/lifter_ppc/ppc.cpp" "${RECOMP_ROOT}/src/ppc/vmx.cpp")
+  target_include_directories(${_t} PRIVATE "${RECOMP_ROOT}/tools/lifter_ppc")
+  target_compile_definitions(${_t} PRIVATE RECOMP_PPC_MUTATION=${_m})
+  target_compile_features(${_t} PRIVATE cxx_std_20)
+  target_link_libraries(${_t} PRIVATE recomp_ppc softfloat)
+  add_test(NAME ${_t} COMMAND ${_t})
+  if(_m)
+    set_tests_properties(${_t} PROPERTIES WILL_FAIL TRUE)
+  endif()
 endforeach()
 
 # --- tests against the oracle ----------------------------------------------

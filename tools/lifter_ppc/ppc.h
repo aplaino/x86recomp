@@ -3,8 +3,9 @@
 // the Xbox 360's Xenon runs (Power ISA 2.02 Book I/II), decoded from the
 // instruction encodings in IBM's Power ISA. So far the fixed-point,
 // branch, condition register, storage control, special purpose register,
-// floating-point and VMX instructions (with the Xenon's LVLX family);
-// VMX128 decodes as kInvalid until it is lifted.
+// floating-point and VMX instructions, and the Xenon's: the LVLX family
+// and VMX128 (as the VMX operations they are, on 128 vector registers,
+// with VMX128's own beside them).
 
 #include <cstdint>
 #include <string>
@@ -74,7 +75,8 @@ enum class Op : uint8_t {
   kMtfsfi,     // [crfd, imm]
   kMtfsb,      // [bo = bit, opc = value]
   kMcrfs,      // crfd = FPSCR field crfs
-  // VMX. Vector registers: rd = vD/vS, ra = vA, rb = vB, rc_reg = vC.
+  // VMX and VMX128. Vector registers (0-127): rd = vD/vS, ra = vA, rb = vB,
+  // rc_reg = vC.
   kVmx,        // [opc: VmxOp, imm: UIMM SIMM SHB]
   kVcmp,       // [opc: VmxOp, rc: sets CR6]
   kVload,      // [opc: VecMem, size: element size]
@@ -134,6 +136,14 @@ struct Insn {
 };
 
 Insn Decode(uint64_t va, uint32_t raw);
+
+// True for VMX128 encodings (decoded or not).
+bool IsVmx128(uint32_t raw);
+
+// The VMX encoding of a decoded VMX instruction (VMX128's among them) with
+// the same operation and operands, for the form test's oracle, which has
+// only VMX; 0 for VMX128's own operations and registers above 31.
+uint32_t VmxEncoding(const Insn& i);
 
 // True for instructions after which execution does not fall through.
 bool IsTerminator(const Insn& i);

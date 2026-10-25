@@ -140,7 +140,8 @@ int main(void) {
     const struct FormInfo* f = &kFormInfo[k];
     if (!f->stub) continue;
     uint32_t primary = f->raw >> 26;
-    int vectors = primary == 59 || primary == 63 || primary == 4 ? kVectorsPerFpForm : kVectorsPerForm;
+    int vectors = primary == 59 || primary == 63 || (primary >= 4 && primary <= 6) ? kVectorsPerFpForm
+                                                                                    : kVectorsPerForm;
     for (int v = 0; v < vectors; v++, n++) {
       struct NativeState s __attribute__((aligned(16)));
       for (int r = 0; r < 32; r++) s.r[r] = Value();

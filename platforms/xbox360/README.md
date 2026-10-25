@@ -7,11 +7,12 @@ and `src/ppc`) and linked against a runtime that reimplements the
 console's kernel, system library and GPU. Built only with
 `RECOMP_PLATFORM_XBOX360`; the x86 path (`RECOMP_X86`) can be off.
 
-Status: milestone 1 of [ARCHITECTURE.md](ARCHITECTURE.md). The XEX2 reader
-(with its own LZX decoder) and the integer, floating-point and VMX core
-lift system modules and titles, and a fixture runs lifted with the same
-output as on a PowerPC 970 in 32-bit mode, every instruction form checked
-bit for bit against it. VMX128 and the runtime are the design being
+Status: milestones 1-3 of [ARCHITECTURE.md](ARCHITECTURE.md). The XEX2
+reader (with its own LZX decoder) and the integer, floating-point, VMX
+and VMX128 core lift system modules and titles with every instruction
+decoded, and a fixture runs lifted with the same output as on a PowerPC
+970 in 32-bit mode, every instruction form checked bit for bit against it
+(VMX128's as their VMX equivalents). The runtime is the design being
 built.
 
 ## Using it
