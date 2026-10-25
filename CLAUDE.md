@@ -30,6 +30,7 @@ a game is where it came up.
   platforms") are built only with their RECOMP_PLATFORM_<NAME> option;
   their own rules are in platforms/<name>/CLAUDE.md. The Switch and its
   AArch64 core alone: `cmake --preset horizon && cmake --build --preset horizon && ctest --test-dir out/build/horizon`.
+  The x86 path with the PS4: `cmake --preset orbis && cmake --build --preset orbis && ctest --test-dir out/build/orbis`.
 
 ## Product constraints (see ARCHITECTURE.md)
 - No emulation in the shipping binary: no interpreter, JIT, runtime x86

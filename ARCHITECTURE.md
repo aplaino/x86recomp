@@ -1254,13 +1254,19 @@ what a native program needs on its host is one host layer for all of
 them (cmake/host.cmake, RECOMP_HOST, on by default): SDL3, ffmpeg,
 LLVM's demanglers, gfx::Device on Vulkan or Metal with the shader
 compilers, the software mixer and logging (recomp_log). The x86 path
-and every platform module build on it. RECOMP_HOST off is only for
+and every platform module build on it, and a platform's HLE reaches the
+host only through it: its GPU front end through gfx::Device, audio
+through the software mixer, windows and input through SDL3, movies
+through ffmpeg, never a host graphics or audio API of its own and no
+host library outside the layer. The PS4 (platforms/orbis,
+RECOMP_PLATFORM_ORBIS) is an x86-64 guest, so it builds on the x86 path
+(RECOMP_X86). RECOMP_HOST off is only for
 CPU-only test builds, such as the AArch64 lifter tests cross built for
 an arm64 host whose sysroot has none of those libraries.
 
 Each guest option is independent, so one tree can build the x86 path,
 the PS4 and the Switch together (CMakePresets: debug for the x86 path,
-horizon for the Switch alone, horizon-aarch64-qemu for the Switch's
+orbis for it with the PS4, horizon for the Switch alone, horizon-aarch64-qemu for the Switch's
 CPU-only tests on an arm64 host under qemu-aarch64).
 
 ## Roadmap

@@ -24,6 +24,12 @@
       "cacheVariables": { "RECOMP_X86": "OFF", "RECOMP_PLATFORM_HORIZON": "ON" }
     },
     {
+      "name": "orbis",
+      "inherits": "debug",
+      "binaryDir": "${sourceDir}/out/build/orbis",
+      "cacheVariables": { "RECOMP_PLATFORM_ORBIS": "ON" }
+    },
+    {
       "name": "horizon-aarch64-qemu",
       "inherits": "horizon",
       "binaryDir": "${sourceDir}/out/build/horizon-aarch64-qemu",
@@ -35,6 +41,7 @@
     { "name": "debug", "configurePreset": "debug" },
     { "name": "release", "configurePreset": "release" },
     { "name": "horizon", "configurePreset": "horizon" },
+    { "name": "orbis", "configurePreset": "orbis" },
     { "name": "horizon-aarch64-qemu", "configurePreset": "horizon-aarch64-qemu" }
   ]
 }

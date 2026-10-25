@@ -30,6 +30,11 @@ endif()
 # module with its own option. A game for another CPU turns RECOMP_X86 off.
 option(RECOMP_X86 "x86 lifter, CPU model and Win32 HLE (PC games)" ON)
 option(RECOMP_PLATFORM_HORIZON "Nintendo Switch (Horizon OS) platform module" OFF)
+# The PS4 is an x86-64 guest: its module builds on the x86 path.
+option(RECOMP_PLATFORM_ORBIS "PS4 (Orbis OS) platform module" OFF)
+if(RECOMP_PLATFORM_ORBIS AND NOT RECOMP_X86)
+  message(FATAL_ERROR "RECOMP_PLATFORM_ORBIS needs RECOMP_X86")
+endif()
 
 # The host layer (cmake/host.cmake): what a native program needs on its
 # host, whatever its guest CPU. SDL3 (windows, input, audio output),
@@ -402,9 +407,7 @@ endfunction()
 
 add_subdirectory(tests)
 
-# Console platform modules (ARCHITECTURE.md, "Console platforms"): off
-# unless a game project for that platform turns them on.
-option(RECOMP_PLATFORM_ORBIS "PS4 (Orbis OS) platform module" OFF)
+# The PS4 platform module, on the x86 path above.
 if(RECOMP_PLATFORM_ORBIS)
   add_subdirectory(platforms/orbis)
 endif()
