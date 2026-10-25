@@ -20,6 +20,15 @@ constexpr uint32_t kStatusSuccess = 0, kStatusAbandoned = 0x80, kStatusAlerted =
                    kStatusInvalidPageProtection = 0xC0000045, kStatusMutantNotOwned = 0xC0000046,
                    kStatusSemaphoreLimitExceeded = 0xC0000047,
                    kStatusMemoryNotAllocated = 0xC00000A0, kStatusFreeVmNotAtBase = 0xC000009F;
+// ... and the file system's.
+constexpr uint32_t kStatusBufferOverflow = 0x80000005, kStatusNoMoreFiles = 0x80000006,
+                   kStatusInvalidInfoClass = 0xC0000003, kStatusInfoLengthMismatch = 0xC0000004,
+                   kStatusNoSuchFile = 0xC000000F, kStatusEndOfFile = 0xC0000011,
+                   kStatusAccessDenied = 0xC0000022, kStatusObjectNameInvalid = 0xC0000033,
+                   kStatusObjectNameNotFound = 0xC0000034, kStatusObjectNameCollision = 0xC0000035,
+                   kStatusObjectPathNotFound = 0xC000003A, kStatusDiskFull = 0xC000007F,
+                   kStatusFileIsADirectory = 0xC00000BA, kStatusDirectoryNotEmpty = 0xC0000101,
+                   kStatusNotADirectory = 0xC0000103;
 
 // ---- dispatcher objects -----------------------------------------------
 // Every waitable object starts with a DISPATCHER_HEADER in guest memory:

@@ -78,6 +78,30 @@ here; on the console a KPCR belongs to a hardware thread.
 - Handles: multiples of 4 from 0xF8000004; -2 the current thread, -1 the
   current process.
 
+## Files
+- Device names: xam opens `\Device\CdRom0\default.xex` and makes the
+  `\??\GAME:` link; `\Device\Harddisk0\Partition1` is the hard
+  disk's data partition. D: as Xenia has it.
+- Paths in OBJECT_ATTRIBUTES (RootDirectory, ObjectName, Attributes) are
+  ANSI_STRINGs, not Unicode; links are named `\??\name:`.
+- NtCreateFile(handle, access, attributes, io status, allocation size,
+  file attributes, share, disposition, options) takes nine arguments;
+  dispositions, options and IO_STATUS_BLOCK.Information are NT's.
+- NtQueryDirectoryFile(handle, event, APC routine, APC context, io status,
+  info, length, mask, restart) has no class argument: it returns
+  FILE_DIRECTORY_INFORMATION with the name in ANSI at 0x40, one entry per
+  call (Xenia, ReXGlue). A mask that matches nothing on the first query is
+  STATUS_NO_SUCH_FILE, the end STATUS_NO_MORE_FILES.
+- FILE_NETWORK_OPEN_INFORMATION, FILE_STANDARD_INFORMATION,
+  FILE_RENAME_INFORMATION (replace, root directory, an ANSI_STRING) and
+  the volume information are NT's layouts in big-endian, as ReXGlue has
+  them. FILE_BASIC_INFORMATION's attributes are NT's 32-bit field at
+  0x20; ReXGlue has a 64-bit one there. Console check.
+- File systems: GDFX on the disc, FATX on the hard disk (names of at most
+  42 characters), 512-byte sectors (Xenia notes code that needs that).
+- Files on the disc are read-only (FILE_ATTRIBUTE_READONLY), as on a
+  disc image in Xenia.
+
 ## Calls
 - Arguments past the eighth are 8-byte slots of the caller's parameter
   area from r1 + 0x50 (ReXGlue reads 32-bit ones at r1 + 0x54 + 8 * (i - 8)).

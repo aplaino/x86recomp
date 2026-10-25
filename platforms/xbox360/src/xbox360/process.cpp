@@ -2,10 +2,13 @@
 
 #include <unistd.h>
 
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 
 #include "ppc/dispatch.h"
 #include "ppc/fatal.h"
+#include "xbox360/fs.h"
 #include "xbox360/hle.h"
 #include "xbox360/kernel.h"
 #include "xbox360/memory.h"
@@ -34,6 +37,34 @@ void MapImage(const XexModule& m) {
     if (s.code) Protect(s.va, s.size, kPageExecuteRead, nullptr);
 }
 
+std::filesystem::path DataDirectory(const std::string& id) {
+  const char* home = std::getenv("HOME");
+  std::filesystem::path h = home ? home : ".";
+#if defined(__APPLE__)
+  return h / "Library" / "Application Support" / id;
+#else
+  const char* xdg = std::getenv("XDG_DATA_HOME");
+  return (xdg && *xdg ? std::filesystem::path(xdg) : h / ".local" / "share") / id;
+#endif
+}
+
+// The title's disc and the hard disk's data partition (allocation units of
+// 2 KiB, GDFX's sectors, and 16 KiB, FATX's clusters), and the links the
+// system makes for a title it launches from a disc (xam creates GAME:; D:
+// as Xenia has it).
+void MountFiles(const GameConfig& cfg) {
+  namespace fs = std::filesystem;
+  fs::path game = cfg.game_dir.empty() ? fs::absolute(cfg.xex).parent_path() : fs::path(cfg.game_dir);
+  fs::path data = (cfg.data_dir.empty() ? DataDirectory(cfg.id) : fs::path(cfg.data_dir)) / "Partition1";
+  std::error_code ec;
+  fs::create_directories(data, ec);
+  if (ec) Fatal(nullptr, "cannot create %s: %s", data.c_str(), ec.message().c_str());
+  MountDevice({"\\Device\\CdRom0", game, false, "GDFX", kFileDeviceCdRom, 0x800});
+  MountDevice({"\\Device\\Harddisk0\\Partition1", data, true, "FATX", kFileDeviceDisk, 0x4000});
+  CreateSymbolicLink("GAME:", "\\Device\\CdRom0");
+  CreateSymbolicLink("D:", "\\Device\\CdRom0");
+}
+
 }  // namespace
 
 void RunProcess(const GameConfig& cfg) {
@@ -43,6 +74,7 @@ void RunProcess(const GameConfig& cfg) {
   if (!ppc::HasLiftedModule(TextHash(m)))
     Fatal(nullptr, "%s is not the module this program was lifted from", cfg.xex.c_str());
   MapGuestMemory();
+  MountFiles(cfg);
   MapImage(m);
   BindImports(m);
   SetProcessInfo({m.tls.slots ? m.tls.slots : kDefaultTlsSlots, m.tls.data_size, m.tls.raw_data,

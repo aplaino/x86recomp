@@ -55,6 +55,8 @@ inline void Wr64(uint32_t va, uint64_t v) { ppc::lift::St<uint64_t>(Mem(), va, v
 // A NUL-terminated guest string (of bytes; of big-endian UTF-16 units).
 std::string ReadString(uint32_t va);
 std::u16string ReadString16(uint32_t va);
+// The characters of an ANSI_STRING (Length, MaximumLength, Buffer).
+std::string ReadAnsiString(uint32_t ansi_string);
 
 // Argument i of a call into a handler: r3-r10, then the caller's parameter
 // area, 8 bytes per argument from r1 + 0x50 (32-bit values in their low

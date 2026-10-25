@@ -59,12 +59,29 @@ u32 KeTlsAlloc(void);
 u32 KeTlsGetValue(u32 index);
 u32 KeTlsSetValue(u32 index, u32 value);
 u32 sprintf(char* buf, const char* fmt, ...);
+u32 NtCreateFile(void);  // through NtCreateFile9
+u32 NtQueryDirectoryFile(void);  // through NtQueryDirectoryFile9
+u32 NtFlushBuffersFile(u32 handle, u32* io);
+u32 NtOpenFile(u32* handle, u32 access, void* attributes, u32* io, u32 share, u32 options);
+u32 NtQueryFullAttributesFile(void* attributes, void* info);
+u32 NtQueryInformationFile(u32 handle, u32* io, void* info, u32 length, u32 cls);
+u32 NtQueryVolumeInformationFile(u32 handle, u32* io, void* info, u32 length, u32 cls);
+u32 NtReadFile(u32 handle, u32 event, void* apc, void* context, u32* io, void* buf, u32 length, int64_t* offset);
+u32 NtSetInformationFile(u32 handle, u32* io, void* info, u32 length, u32 cls);
+u32 NtWriteFile(u32 handle, u32 event, void* apc, void* context, u32* io, const void* buf, u32 length,
+                int64_t* offset);
+u32 ObCreateSymbolicLink(void* link, void* target);
+u32 ObDeleteSymbolicLink(void* link);
 u32 _vsnprintf(char* buf, u32 count, const char* fmt, uint64_t* args);
 extern u32 __imp_NtClose, __imp_ExThreadObjectType, __imp_KeTimeStampBundle, __imp_XboxKrnlVersion;
 
 // start.S
 void thread_startup(void);
 u32 sprintf9(char* buf, const char* fmt, int a, int b, int c, int d, int e, int f, int g);
+u32 NtCreateFile9(u32* handle, u32 access, void* attributes, u32* io, void* size, u32 file_attributes,
+                  u32 share, u32 disposition, u32 options);
+u32 NtQueryDirectoryFile9(u32 handle, u32 event, void* apc, void* context, u32* io, void* info, u32 length,
+                          void* mask, u32 restart);
 uint64_t time_base(void);
 uint64_t pcr(void);
 
@@ -72,7 +89,12 @@ enum {
   kMemCommit = 0x1000, kMemReserve = 0x2000, kMemDecommit = 0x4000, kMemRelease = 0x8000,
   kMemLargePages = 0x20000000, kMem16MbPages = 0x80000000, kPageReadWrite = 0x04,
   kStatusTimeout = 0x102, kStatusConflictingAddresses = 0xC0000018, kStatusInvalidHandle = 0xC0000008,
-  kStatusMutantNotOwned = 0xC0000046,
+  kStatusMutantNotOwned = 0xC0000046, kStatusEndOfFile = 0xC0000011, kStatusAccessDenied = 0xC0000022,
+  kStatusObjectNameNotFound = 0xC0000034, kStatusObjectNameCollision = 0xC0000035,
+  kStatusObjectPathNotFound = 0xC000003A, kStatusNoMoreFiles = 0x80000006,
+  kGenericRead = 0x80000000, kGenericWrite = 0x40000000,
+  kOpen = 1, kCreate = 2, kOpenIf = 3, kSync = 0x20, kDirectoryFile = 0x1, kNonDirectoryFile = 0x40,
+  kOpened = 1, kCreated = 2,
 };
 
 void* memset(void* d, int v, unsigned long n) {
@@ -94,6 +116,11 @@ static int failures;
   } while (0)
 
 static volatile u32* At(u32 va) { return (volatile u32*)(uintptr_t)va; }
+static int Memeq(const void* a, const void* b, unsigned long n) {
+  for (unsigned long k = 0; k < n; k++)
+    if (((const char*)a)[k] != ((const char*)b)[k]) return 0;
+  return 1;
+}
 static int Streq(const char* a, const char* b) {
   while (*a && *a == *b) a++, b++;
   return *a == *b;
@@ -345,6 +372,118 @@ static void Variables(void) {
   CHECK(now > 0x01D0000000000000ull);  // after 2014
 }
 
+
+// ---- files ------------------------------------------------------------------
+// The title's disc (tests/CMakeLists.txt writes it): data.bin (the 32 bytes
+// 0-9A-V), Sub/Name.TXT ("hello"), Sub/other.dat.
+struct Ansi {
+  uint16_t length, maximum;
+  u32 buffer;
+};
+struct Attributes {
+  u32 root, name, attributes;
+};
+
+static u32 OpenPath(u32* h, const char* path, u32 access, u32 disposition, u32 options, u32* io) {
+  struct Ansi name;
+  RtlInitAnsiString(&name, path);
+  struct Attributes a = {0, (u32)(uintptr_t)&name, 0};
+  return NtCreateFile9(h, access, &a, io, 0, 0x80, 7, disposition, options);
+}
+
+static u32 QueryFull(const char* path, uint64_t* info) {
+  struct Ansi name;
+  RtlInitAnsiString(&name, path);
+  struct Attributes a = {0, (u32)(uintptr_t)&name, 0};
+  return NtQueryFullAttributesFile(&a, info);
+}
+
+static void Files(void) {
+  u32 h = 0, d = 0, io[2];
+  char buf[64];
+  uint64_t info[7];
+  // A file on the disc, read in order, then at an offset.
+  CHECK(OpenPath(&h, "game:\\data.bin", kGenericRead, kOpen, kSync | kNonDirectoryFile, io) == 0 &&
+        io[1] == kOpened);
+  CHECK(NtReadFile(h, 0, 0, 0, io, buf, 10, 0) == 0 && io[1] == 10 && Memeq(buf, "0123456789", 10));
+  CHECK(NtReadFile(h, 0, 0, 0, io, buf, 64, 0) == 0 && io[1] == 22 && buf[0] == 'A' && buf[21] == 'V');
+  CHECK(NtReadFile(h, 0, 0, 0, io, buf, 64, 0) == kStatusEndOfFile && io[1] == 0);
+  CHECK(NtQueryInformationFile(h, io, info, 8, 14) == 0 && info[0] == 32);
+  int64_t at = 4;
+  CHECK(NtReadFile(h, 0, 0, 0, io, buf, 2, &at) == 0 && Memeq(buf, "45", 2));
+  CHECK(NtQueryInformationFile(h, io, info, 0x38, 34) == 0 && info[5] == 32 && (info[6] >> 32) == 0x01);
+  u32 volume[8];
+  CHECK(NtQueryVolumeInformationFile(h, io, volume, sizeof volume, 5) == 0 && volume[2] == 4 &&
+        Memeq(&volume[3], "GDFX", 4));
+  NtClose(h);
+  // Names are case-insensitive; the disc is read-only.
+  CHECK(OpenPath(&h, "GAME:\\SUB\\name.txt", kGenericRead, kOpen, kSync, io) == 0);
+  CHECK(NtReadFile(h, 0, 0, 0, io, buf, 64, 0) == 0 && io[1] == 5 && Memeq(buf, "hello", 5));
+  NtClose(h);
+  CHECK(OpenPath(&h, "d:\\data.bin", kGenericWrite, kOpen, kSync, io) == kStatusAccessDenied);
+  CHECK(OpenPath(&h, "game:\\missing.bin", kGenericRead, kOpen, kSync, io) == kStatusObjectNameNotFound);
+  CHECK(OpenPath(&h, "game:\\nodir\\x.bin", kGenericRead, kOpen, kSync, io) == kStatusObjectPathNotFound);
+  // A directory's entries, through a mask, one per query.
+  u32 entry[32];
+  struct Ansi mask;
+  RtlInitAnsiString(&mask, "*.txt");
+  CHECK(OpenPath(&d, "game:\\Sub", kGenericRead, kOpen, kSync | kDirectoryFile, io) == 0);
+  CHECK(NtQueryDirectoryFile9(d, 0, 0, 0, io, entry, sizeof entry, &mask, 0) == 0 && entry[15] == 8 &&
+        Memeq(&entry[16], "Name.TXT", 8) && entry[11] == 5);
+  CHECK(NtQueryDirectoryFile9(d, 0, 0, 0, io, entry, sizeof entry, 0, 0) == kStatusNoMoreFiles);
+  CHECK(NtQueryDirectoryFile9(d, 0, 0, 0, io, entry, sizeof entry, 0, 1) == 0 && Memeq(&entry[16], "Name.TXT", 8));
+  CHECK(NtQueryDirectoryFile9(d, 0, 0, 0, io, entry, sizeof entry, 0, 0) == 0 && entry[15] == 9 &&
+        Memeq(&entry[16], "other.dat", 9));
+  NtClose(d);
+
+  // Writable storage, through a link the title makes.
+  struct Ansi link, target;
+  RtlInitAnsiString(&link, "\\??\\hdd:");
+  RtlInitAnsiString(&target, "\\Device\\Harddisk0\\Partition1");
+  CHECK(ObCreateSymbolicLink(&link, &target) == 0);
+  CHECK(OpenPath(&d, "hdd:\\dir", kGenericRead, kCreate, kSync | kDirectoryFile, io) == 0 && io[1] == kCreated);
+  CHECK(OpenPath(&h, "hdd:\\dir\\f.bin", kGenericRead | kGenericWrite, kCreate, kSync | kNonDirectoryFile, io) == 0);
+  CHECK(OpenPath(&h, "hdd:\\dir\\f.bin", kGenericRead, kCreate, kSync, io) == kStatusObjectNameCollision);
+  CHECK(NtWriteFile(h, 0, 0, 0, io, "abcdefghij", 10, 0) == 0 && io[1] == 10);
+  uint64_t v = 0;
+  CHECK(NtSetInformationFile(h, io, &v, 8, 14) == 0);
+  CHECK(NtReadFile(h, 0, 0, 0, io, buf, 64, 0) == 0 && io[1] == 10 && Memeq(buf, "abcdefghij", 10));
+  v = 4;
+  CHECK(NtSetInformationFile(h, io, &v, 8, 20) == 0);
+  CHECK(NtFlushBuffersFile(h, io) == 0);
+  CHECK(QueryFull("hdd:\\DIR\\F.BIN", info) == 0 && info[5] == 4 && (info[6] >> 32) == 0x80);
+  // An asynchronous read completes with its event set.
+  u32 e = 0;
+  CHECK(NtCreateEvent(&e, 0, 0, 0) == 0);
+  at = 1;
+  CHECK(NtReadFile(h, e, 0, 0, io, buf, 2, &at) == 0 && io[0] == 0 && io[1] == 2 && Memeq(buf, "bc", 2));
+  int64_t zero = 0;
+  CHECK(NtWaitForSingleObjectEx(e, 1, 0, &zero) == 0);
+  NtClose(e);
+  // Renamed, then deleted when its handle closes.
+  struct {
+    u32 replace, root;
+    struct Ansi name;
+  } rename = {0, 0, {0, 0, 0}};
+  RtlInitAnsiString(&rename.name, "hdd:\\dir\\g.bin");
+  CHECK(NtSetInformationFile(h, io, &rename, sizeof rename, 10) == 0);
+  CHECK(QueryFull("hdd:\\dir\\f.bin", info) == kStatusObjectNameNotFound && QueryFull("hdd:\\dir\\g.bin", info) == 0);
+  uint8_t remove = 1;
+  CHECK(NtSetInformationFile(h, io, &remove, 1, 13) == 0);
+  NtClose(h);
+  CHECK(QueryFull("hdd:\\dir\\g.bin", info) == kStatusObjectNameNotFound);
+  CHECK(NtQueryVolumeInformationFile(d, io, volume, sizeof volume, 5) == 0 && Memeq(&volume[3], "FATX", 4));
+  NtClose(d);
+  CHECK(ObDeleteSymbolicLink(&link) == 0);
+  CHECK(OpenPath(&d, "hdd:\\dir", kGenericRead, kOpen, kSync | kDirectoryFile, io) == kStatusObjectPathNotFound);
+  // Opened through NtOpenFile, by the device's own name.
+  struct Ansi name;
+  RtlInitAnsiString(&name, "\\Device\\Harddisk0\\Partition1\\dir");
+  struct Attributes a = {0, (u32)(uintptr_t)&name, 0};
+  CHECK(NtOpenFile(&d, kGenericRead, &a, io, 7, kSync | kDirectoryFile) == 0 && io[1] == kOpened);
+  NtClose(d);
+}
+
 int main(void) {
   Memory();
   Physical();
@@ -352,6 +491,7 @@ int main(void) {
   Objects();
   Strings();
   Variables();
+  Files();
   DbgPrint("runtime test: %d failed\n", failures);
   return failures;
 }

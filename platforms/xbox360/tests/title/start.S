@@ -61,21 +61,26 @@ pcr:
   blr
   .size pcr, .-pcr
 
-// sprintf9(buf, fmt, a, b, c, d, e, f, g): sprintf with nine arguments, the
-// ninth (g, at r1 + 96 in the caller's ELFv2 parameter area) where the
-// Xenon's ABI has it, 8 bytes at r1 + 0x50.
-  .globl sprintf9
-  .type sprintf9, @function
-sprintf9:
+// Calls with nine arguments: the ninth, at r1 + 96 in the caller's ELFv2
+// parameter area, goes where the Xenon's ABI has it, 8 bytes at r1 + 0x50.
+  .macro XENON9 name, target
+  .globl \name
+  .type \name, @function
+\name:
   mflr 0
   std 0, 16(1)
   ld 11, 96(1)
   stdu 1, -128(1)
   std 11, 0x50(1)
-  bl sprintf
+  bl \target
   nop
   addi 1, 1, 128
   ld 0, 16(1)
   mtlr 0
   blr
-  .size sprintf9, .-sprintf9
+  .size \name, .-\name
+  .endm
+
+  XENON9 sprintf9, sprintf
+  XENON9 NtCreateFile9, NtCreateFile
+  XENON9 NtQueryDirectoryFile9, NtQueryDirectoryFile

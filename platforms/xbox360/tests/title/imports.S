@@ -52,6 +52,18 @@ __xex_import_slot_\name:
   FUNCTION 196, MmQueryAddressProtect
   FUNCTION 204, NtAllocateVirtualMemory
   FUNCTION 207, NtClose
+  FUNCTION 210, NtCreateFile
+  FUNCTION 219, NtFlushBuffersFile
+  FUNCTION 223, NtOpenFile
+  FUNCTION 228, NtQueryDirectoryFile
+  FUNCTION 231, NtQueryFullAttributesFile
+  FUNCTION 232, NtQueryInformationFile
+  FUNCTION 239, NtQueryVolumeInformationFile
+  FUNCTION 240, NtReadFile
+  FUNCTION 247, NtSetInformationFile
+  FUNCTION 255, NtWriteFile
+  FUNCTION 259, ObCreateSymbolicLink
+  FUNCTION 260, ObDeleteSymbolicLink
   FUNCTION 209, NtCreateEvent
   FUNCTION 212, NtCreateMutant
   FUNCTION 220, NtFreeVirtualMemory
