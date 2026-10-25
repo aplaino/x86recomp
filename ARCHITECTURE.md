@@ -123,6 +123,13 @@ are the exception: changing those still recompiles every game.
   the x87 model and the runtime; the runtime adds the guest state,
   backtraces and crash file to FatalF through `g_fatal_report`.
 
+Console platforms (the Xbox 360 first: platforms/xbox360/ARCHITECTURE.md,
+"Programs and libraries") go one step further: a title's lifted code is
+a shared library of its own too, and recomp_bundle() puts the program
+and every library it loads in one directory, found through an rpath
+relative to them, so each part (the lifted title, the runtime, an HLE
+module) is a file that can be replaced alone. The x86 path may follow.
+
 Game-specific patches to lifted code (fixes, enhancements such as
 widescreen) live in the game project as hand-written replacements of
 specific lifted functions. `replace <va>` in a manifest makes the lifter

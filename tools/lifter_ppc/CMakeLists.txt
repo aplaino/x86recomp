@@ -8,3 +8,4 @@ add_executable(recomp_lift_ppc
   program.cpp)
 target_include_directories(recomp_lift_ppc PRIVATE ${RECOMP_ROOT}/src)
 target_compile_features(recomp_lift_ppc PRIVATE cxx_std_20)
+recomp_bundle(recomp_lift_ppc)

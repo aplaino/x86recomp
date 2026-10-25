@@ -1,5 +1,6 @@
 #pragma once
-// The lifted function table: guest VA -> lifted function.
+// The lifted function table: guest VA -> lifted function, over every
+// lifted module loaded (each registers its table as its library loads).
 
 #include <cstdint>
 
@@ -8,7 +9,7 @@
 namespace recomp::ppc {
 
 GuestFn LookupLifted(uint32_t va);
-// TextHash() of the module the registered table was lifted from.
-uint64_t LiftedTextHash();
+// True if a lifted module made from code with this TextHash() is loaded.
+bool HasLiftedModule(uint64_t text_hash);
 
 }  // namespace recomp::ppc

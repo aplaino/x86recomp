@@ -24,6 +24,28 @@ if(NOT APPLE)
   string(APPEND CMAKE_SHARED_LINKER_FLAGS " -Wl,--no-undefined")
 endif()
 
+# recomp_bundle(<target>...): programs and the shared libraries they load
+# sit side by side in RECOMP_BUNDLE_DIR, found through an rpath relative
+# to themselves ($ORIGIN, @loader_path on macOS), so the directory can be
+# moved or installed as a whole and one library (a lifted module, the
+# runtime, an HLE module) replaced alone. Used by the console platforms
+# and their game projects.
+set(RECOMP_BUNDLE_DIR "${CMAKE_BINARY_DIR}/bin" CACHE PATH
+    "Where recomp_bundle() puts programs and their shared libraries")
+if(APPLE)
+  set(RECOMP_BUNDLE_RPATH "@loader_path" CACHE INTERNAL "")
+else()
+  set(RECOMP_BUNDLE_RPATH "$ORIGIN" CACHE INTERNAL "")
+endif()
+function(recomp_bundle)
+  set_target_properties(${ARGN} PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${RECOMP_BUNDLE_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY "${RECOMP_BUNDLE_DIR}"
+    BUILD_RPATH "${RECOMP_BUNDLE_RPATH}"
+    INSTALL_RPATH "${RECOMP_BUNDLE_RPATH}"
+    BUILD_RPATH_USE_ORIGIN ON)
+endfunction()
+
 # --- guests and host -------------------------------------------------------
 # Guests: RECOMP_X86 is everything at the end of this file, the x86 lifter
 # and CPU model with the Win32 HLE (PC games); each console platform is a
@@ -93,21 +115,36 @@ if(RECOMP_PLATFORM_XBOX360)
   target_include_directories(recomp_ppc PUBLIC src)
   target_compile_features(recomp_ppc PUBLIC cxx_std_20)
   target_link_libraries(recomp_ppc PRIVATE softfloat)
+  recomp_bundle(recomp_ppc)
   add_subdirectory(tools/lifter_ppc)
 
-  # recomp_add_lifted_ppc(<target> <dir>): an object library of
-  # recomp_lift_ppc's output in <dir> plus the registration of its function
-  # table, optimised like recomp_add_lifted_a64's.
+  # recomp_add_lifted_ppc(<target> <dir> LINK <platform library>): a shared
+  # library (a lifted module) of recomp_lift_ppc's output in <dir> plus
+  # the registration of its function table, which runs when the library
+  # loads. LINK names the platform library that defines what lifted code
+  # calls (Import, Sc, Trap, TimeBase). Lifted code is optimised like
+  # recomp_add_lifted_a64's, and its symbols stay inside the library: calls
+  # between lifted functions are direct, and the dynamic symbol table holds
+  # none of them. A program links its lifted modules --no-as-needed, as
+  # nothing in it refers to them.
   function(recomp_add_lifted_ppc target dir)
     file(GLOB _gen CONFIGURE_DEPENDS "${dir}/*.cpp")
-    recomp_add_lifted_ppc_files(${target} ${_gen})
+    recomp_add_lifted_ppc_files(${target} ${_gen} ${ARGN})
   endfunction()
-  # The same over a known list of generated files (a build-time lift).
+  # The same over a known list of generated files (a build-time lift):
+  # recomp_add_lifted_ppc_files(<target> <file>... LINK <platform library>).
   function(recomp_add_lifted_ppc_files target)
-    add_library(${target} OBJECT ${ARGN} "${RECOMP_ROOT}/src/ppc/lifted_table.cpp")
+    cmake_parse_arguments(PARSE_ARGV 1 _l "" "" "LINK")
+    add_library(${target} SHARED ${_l_UNPARSED_ARGUMENTS} "${RECOMP_ROOT}/src/ppc/lifted_table.cpp")
     target_include_directories(${target} PRIVATE "${RECOMP_ROOT}/src")
     target_compile_features(${target} PRIVATE cxx_std_20)
     target_compile_options(${target} PRIVATE -O2 -g0 -fno-strict-aliasing)
+    set_target_properties(${target} PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+    target_link_libraries(${target} PRIVATE recomp_ppc ${_l_LINK})
+    if(NOT APPLE)
+      target_link_options(${target} INTERFACE "LINKER:--no-as-needed")
+    endif()
+    recomp_bundle(${target})
   endfunction()
 
   add_subdirectory(platforms/xbox360)

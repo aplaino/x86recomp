@@ -16,9 +16,9 @@ ARCHITECTURE.md, "Console platforms"), built only with
   `recomp_ppc`). The lifter knows no executable format; the platform
   registers an image reader for its own.
 - Platform, here: XEX2 and the lifter's reader for it, LZX, the tools
-  around the format, and (to come) the guest address layout, process
-  bring-up, the kernel and xam HLE and the Xenos front end (libraries
-  `recomp_xbox360_*`), with their tests and docs.
+  around the format, the runtime (the guest address layout, process
+  bring-up, the kernel HLE; xam's and the Xenos front end to come;
+  libraries `recomp_xbox360_*`), with their tests and docs.
 Paths below are relative to `platforms/xbox360` unless they start with
 `src/ppc` or `tools/lifter_ppc`. An Xbox 360 game project turns
 `RECOMP_X86` off and keeps the host layer every guest shares.
@@ -169,8 +169,8 @@ mask bit 4, an unused immediate).
   `bctrl` and `blrl` dispatch; registers are spilled to the context
   around anything that can observe them.
 - Import thunks become `Import(c, module, ordinal, va)`, defined by the
-  platform. `sc` calls `Sc()`, traps that fire `Trap()`, `mftb`
-  `TimeBase()`.
+  platform. `sc` calls `Sc()`, traps that fire `Trap()`, `mftb` (and
+  `mfspr` of TBL or TBU, its later spelling) `TimeBase()`.
 
 ## XEX2
 `src/xbox360/xex.{h,cpp}` reads the headers, the file format info, the
@@ -186,6 +186,111 @@ pointer to `xbox360_xex_decrypt` (tools/xex_decrypt.cpp, OpenSSL's AES
 linked dynamically): the security info's AES key decrypted with the
 owner's key (ECB) is the session key, the data is CBC under it with a
 zero IV.
+
+## Runtime
+The runtime (`src/xbox360`, library `recomp_xbox360`) holds what lifted
+code calls (`Import`, `Sc`, `Trap`, `TimeBase`) and the kernel's state:
+guest memory, the HLE registry, threads, dispatcher objects, handles and
+time. The system modules' exports are HLE modules on top of it, one
+shared library per system module (`recomp_xbox360_xboxkrnl` so far, in
+`src/xbox360/xboxkrnl`). Behaviour comes from the system's own code where
+it shows it (xam, which the console's update ships unencrypted, and what
+titles read), otherwise from Xenia and ReXGlue, and is written down in
+docs/xboxkrnl.md with what still waits for a console.
+
+### Programs and libraries
+A program is a directory of files, each of which can be replaced alone:
+- A title's lifted code is a shared library of its own, a lifted module
+  (`recomp_add_lifted_ppc(<target> <dir> LINK recomp_xbox360)`). Its
+  symbols are hidden: calls between lifted functions are direct, and the
+  dynamic symbol table does not carry a title's 10^5 functions. It hands
+  its function table to the dispatcher when it loads; the dispatcher
+  holds the tables of every loaded module, and the loader refuses a XEX
+  whose code hash matches none of them.
+- The runtime, the HLE modules and recomp_ppc are shared libraries as on
+  the x86 path; nothing refers to an HLE module's or a lifted module's
+  symbols, so programs link them --no-as-needed.
+- The game project's executable holds `main()` and little else: it fills
+  a `GameConfig` (xbox360/process.h) and calls `RunProcess`.
+- `recomp_bundle()` (top-level CMakeLists.txt) puts executables and
+  libraries in one directory (`RECOMP_BUNDLE_DIR`, `bin/` of the build)
+  with an rpath relative to themselves (`$ORIGIN`, `@loader_path`). A
+  title update is a new lifted module, a kernel fix a new
+  `librecomp_xbox360_xboxkrnl`, and neither relinks the rest.
+
+### Memory
+One 4 GiB arena, guest address a at `mem + a`, laid out as the kernel
+does (the ranges are Xenia's, which match the addresses titles use):
+
+| Range | Pages | What |
+|---|---|---|
+| 0x00000000-0x3FFFFFFF | 4 KiB | NtAllocateVirtualMemory; the first 64 KiB never mapped |
+| 0x40000000-0x7EFFFFFF | 64 KiB | the same with MEM_LARGE_PAGES; thread stacks from the top |
+| 0x7F000000-0x7FFFFFFF | | the GPU's registers (milestone 5) |
+| 0x80000000-0x8FFFFFFF | 64 KiB | XEX images |
+| 0x90000000-0x9FFFFFFF | 4 KiB | XEX images; the kernel's own objects from the top |
+| 0xA0000000-0xBFFFFFFF | 64 KiB | physical memory |
+| 0xC0000000-0xDFFFFFFF | 16 MiB | physical memory |
+| 0xE0000000-0xFFFFFFFF | 4 KiB | physical memory from 0x1000 |
+
+The 512 MiB of physical memory is one shared memory object mapped three
+times, so a write through one view is read through the others, and an
+allocation in any view claims its physical pages, so no two allocations
+share any. MmGetPhysicalAddress answers for the physical views only:
+virtual memory has no physical pages behind it here, and a title that
+asks for one is stopped (fatal) rather than handed a wrong one.
+Allocation state and protection are kept per 4 KiB page; the host's
+protection is never changed for them (only the first 64 KiB are
+inaccessible, so a null pointer faults), and decommitted pages are zeroed
+so that a commit always hands out zeros.
+
+The 0xE0000000 view starts one 4 KiB page into physical memory (Xenia's
+measurement; titles get physical addresses from MmGetPhysicalAddress and
+hand them to the GPU). mmap can alias that only with 4 KiB host pages:
+on hosts with larger ones (macOS on Apple Silicon) the runtime refuses to
+start for now. The way there is the one Xenia's x64 back end takes on
+Windows, whose mappings are 64 KiB grained: lifted code adds 0x1000 to
+addresses at and above 0xE0000000, which needs the address computation
+of lifted.h to know about it.
+
+### HLE
+Handlers are registered by module and ordinal with
+`HLE("xboxkrnl.exe", 300, RtlInitAnsiString) { ... }`. A handler reads
+its arguments with `Arg(c, i)`: r3-r10, then the caller's parameter area,
+an 8-byte slot per argument from r1 + 0x50 (the low word of a 32-bit one
+at r1 + 0x54 + 8 * (i - 8)); its result goes to r3. An import without a
+handler is fatal when it is called, naming the export. The loader writes
+every import slot: a function's gets its thunk's address, so a call
+through the slot reaches the same handler, a variable's the address of
+guest memory the HLE module defines for it (`HLE_VARIABLE`), and a module
+importing a variable nobody defines is refused at load, naming each.
+Import() finds the handler by the thunk's address in a per-thread table,
+without a lock.
+
+### Threads and objects
+- A guest thread runs on its own host thread (16 MiB of host stack, for
+  the lifted calls). Its guest stack comes from the top of the 64 KiB
+  virtual range; its KTHREAD, KPCR and TLS from the kernel's objects.
+  r13 points at its own KPCR (the console has one per hardware thread);
+  the fields guest code reads are set (docs/xboxkrnl.md).
+- Dispatcher objects (events, semaphores, mutants, threads) live in guest
+  memory and their headers are their state: guest code initialises
+  events itself. Every signal and every check of a wait is made under one
+  dispatcher lock, and any change wakes every waiter to look again.
+  Timers, queues and APCs are not there yet; alertable waits are not
+  woken.
+- Handles name objects by guest address and hold references; objects the
+  kernel created (NtCreateEvent, threads) go with their last reference.
+- Critical sections follow the kernel's algorithm on the guest structure;
+  spin locks hold their owner's KPCR; IRQL is the KPCR's byte, and no
+  interrupt or DPC ever runs.
+- The title ends when its entry point returns (with what it returned),
+  when its last thread ends, or at HalReturnToFirmware. A thread that is
+  running cannot be suspended (fatal; a host thread cannot be stopped
+  where it is), one created suspended can.
+- The time base runs at 49.875 MHz from the host's steady clock, system
+  time is the host's, KeTimeStampBundle is kept current every
+  millisecond.
 
 ## Tests and the oracle
 The oracle is QEMU's PowerPC 970 bare metal (`qemu-system-ppc64 -M none
@@ -221,6 +326,13 @@ memory; any other interrupt fails the run.
   (high registers, operand roles) against each operation's definition,
   and the dot products and D3D formats, which have no twin, against
   Xenia's test vectors; it has its own planted bugs.
+- The runtime test title (tests/title, `xbox360_runtime`): C and assembly
+  built like the fixture, which calls the kernel through imports
+  (`xbox360_elf2xex --import` writes its import library), is lifted into
+  a lifted module and run on the runtime. It checks what the kernel gives
+  it (memory and the physical views, threads, TLS, r13, waits and
+  objects, critical sections, formatting, variables, time) and exits
+  with the number of failed checks.
 - Not covered by QEMU: what the 970 does differently from the Xenon
   (DCBZ's size, the undefined cases above, the estimates, the LVLX
   family) and VMX128 beyond its VMX twins. Those wait for a console.
@@ -232,5 +344,8 @@ memory; any other interrupt fails the run.
    can run test programs (done).
 4. Runtime: the arena with the physical memory views, process and
    thread bring-up (r13 and the thread's kernel structures), the kernel
-   and xam HLE, written against the system's own behaviour.
+   and xam HLE, written against the system's own behaviour. In progress:
+   the libraries and their layout, memory, threads, synchronisation and
+   the first kernel exports are done; next the file system, the title's
+   module (Xex*), timers and APCs, then xam.
 5. Xenos: the command processor and shaders through gfx::Device.

@@ -22,6 +22,8 @@ enum : uint32_t {
   kImportLibraries = 0x000103FF,
   kOriginalName = 0x000183FF,
   kExecutionInfo = 0x00040006,
+  kTlsInfo = 0x00020104,
+  kDefaultStackSize = 0x00020200,
 };
 constexpr uint32_t kSecurityLoadAddress = 0x110, kSecurityExportTable = 0x160;
 constexpr uint16_t kNoEncryption = 0;
@@ -226,6 +228,10 @@ bool ParseXex(const std::vector<uint8_t>& file, XexModule& m, std::string& err) 
                                  strnlen(reinterpret_cast<const char*>(r.At(value + 4)), r.U32(value) - 4));
         break;
       case kExecutionInfo: m.title_id = r.U32(value + 12); break;
+      case kTlsInfo:
+        m.tls = {r.U32(value), r.U32(value + 4), r.U32(value + 8), r.U32(value + 12)};
+        break;
+      case kDefaultStackSize: m.stack_size = value; break;
       default: break;
     }
   }

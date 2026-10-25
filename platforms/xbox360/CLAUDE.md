@@ -49,6 +49,16 @@ follows these rules too.
 - Every import needs an explicit handler, registered by module and
   ordinal; an unhandled one is fatal by design. No catch-all stubs that
   return 0.
+- Handlers live in the HLE module of the system module that exports them
+  (src/xbox360/<module>/, library recomp_xbox360_<module>), registered
+  with HLE(module, ordinal, Name).
+- Kernel and xam behaviour comes from the system's own code (xam, what
+  titles read) where it shows it; what comes only from Xenia or ReXGlue,
+  or is chosen, says so next to the code and in docs/, marked for the
+  console check.
+- Runtime and HLE changes must keep xbox360_runtime passing; behaviour
+  the test title (tests/title) can check without a console gets a check
+  there.
 - Nothing in src/ppc or tools/lifter_ppc knows the Xbox 360: executable
   formats come through the lifter's ImageReader, the kernel through
   Import/Sc/Trap/TimeBase.
