@@ -13,8 +13,9 @@
 // arena is 4 GiB). Multiplies and divides set OV as their own width says,
 // in any mode.
 //
-// RECOMP_PPC_MUTATION=<n> plants a known bug (see Mutated below) so the
-// differential tests can show they catch it; never set it elsewhere.
+// RECOMP_PPC_MUTATION=<n> plants a known bug (see Mutated below, ppc/fp.cpp
+// and ppc/vmx.h) so the differential tests can show they catch it; never
+// set it elsewhere.
 
 #include <cstdint>
 #include <cstring>
@@ -341,3 +342,5 @@ template <typename T>
 
 }  // namespace lift
 }  // namespace recomp::ppc
+
+#include "ppc/vmx.h"

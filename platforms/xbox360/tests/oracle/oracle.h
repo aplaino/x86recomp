@@ -36,6 +36,10 @@ struct NativeState {
   uint64_t f[32];
   uint64_t fpscr;    /* FPSCR in the low word, as MFFS reads it */
   uint64_t fpscr_in; /* the FPSCR the instruction saw (MTFSF computes FEX, VX) */
+  uint64_t pad;
+  uint8_t v[32][16] __attribute__((aligned(16)));
+  uint8_t vscr[16];    /* as MFVSCR reads it: VSCR in the last word */
+  uint8_t vscr_in[16]; /* the VSCR the instruction saw */
 };
 
 enum FormMem { FORM_MEM_NONE, FORM_MEM_DISP, FORM_MEM_INDEXED, FORM_MEM_MULTIPLE };

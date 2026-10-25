@@ -16,7 +16,7 @@ endif()
 
 set(_src "${CMAKE_CURRENT_SOURCE_DIR}")
 set(_bin "${CMAKE_CURRENT_BINARY_DIR}/ppc")
-set(_flags --target=powerpc64-unknown-linux-gnu -mabi=elfv2 -mcpu=970 -mno-altivec
+set(_flags --target=powerpc64-unknown-linux-gnu -mabi=elfv2 -mcpu=970 -maltivec
     -ffreestanding -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables -fno-jump-tables -fno-math-errno -O2
     -Wall -Wextra -Werror -I "${_src}/oracle")
 
@@ -83,16 +83,17 @@ add_custom_target(xbox360_oracle_programs ALL
   DEPENDS "${_bin}/vectors.elf" "${_bin}/fixture.elf" "${_bin}/forms_oracle.elf")
 
 # xbox360_lift_forms_test, and the same built with each planted bug of
-# ppc/lifted.h and ppc/fp.cpp (RECOMP_PPC_MUTATION), which the test must
-# catch. Each builds its own fp.cpp, which takes precedence over
-# recomp_ppc's.
-set(_mutations 1 2 3 4 5 6)
+# ppc/lifted.h, ppc/vmx.h, ppc/fp.cpp and ppc/vmx.cpp (RECOMP_PPC_MUTATION),
+# which the test must catch. Each builds its own fp.cpp and vmx.cpp, which
+# take precedence over recomp_ppc's.
+set(_mutations 1 2 3 4 5 6 7 8 9)
 foreach(_m 0 ${_mutations})
   set(_t xbox360_lift_forms_test)
   if(_m)
     set(_t xbox360_lift_forms_mutation_${_m})
   endif()
-  add_executable(${_t} lift_forms_test.cpp "${_gen}/forms.cpp" "${RECOMP_ROOT}/src/ppc/fp.cpp")
+  add_executable(${_t} lift_forms_test.cpp "${_gen}/forms.cpp" "${RECOMP_ROOT}/src/ppc/fp.cpp"
+                 "${RECOMP_ROOT}/src/ppc/vmx.cpp")
   target_include_directories(${_t} PRIVATE "${_src}" "${_src}/oracle")
   target_compile_definitions(${_t} PRIVATE RECOMP_PPC_MUTATION=${_m})
   target_compile_options(${_t} PRIVATE -O1 -fno-strict-aliasing)

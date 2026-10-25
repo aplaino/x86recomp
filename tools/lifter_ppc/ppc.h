@@ -2,9 +2,9 @@
 // PowerPC decoder for the lifter: the 64-bit PowerPC user instruction set
 // the Xbox 360's Xenon runs (Power ISA 2.02 Book I/II), decoded from the
 // instruction encodings in IBM's Power ISA. So far the fixed-point,
-// branch, condition register, storage control, special purpose register
-// and floating-point instructions; VMX and VMX128 decode as kInvalid until
-// they are lifted.
+// branch, condition register, storage control, special purpose register,
+// floating-point and VMX instructions (with the Xenon's LVLX family);
+// VMX128 decodes as kInvalid until it is lifted.
 
 #include <cstdint>
 #include <string>
@@ -74,11 +74,27 @@ enum class Op : uint8_t {
   kMtfsfi,     // [crfd, imm]
   kMtfsb,      // [bo = bit, opc = value]
   kMcrfs,      // crfd = FPSCR field crfs
+  // VMX. Vector registers: rd = vD/vS, ra = vA, rb = vB, rc_reg = vC.
+  kVmx,        // [opc: VmxOp, imm: UIMM SIMM SHB]
+  kVcmp,       // [opc: VmxOp, rc: sets CR6]
+  kVload,      // [opc: VecMem, size: element size]
+  kVstore,     // [opc: VecMem, size]
+  kMfvscr, kMtvscr,
 };
 
-// kFpArith operations: the runtime's numbering.
+// kVload / kVstore kinds.
+enum VecMem : uint8_t {
+  kVecQuad,      // LVX LVXL STVX STVXL
+  kVecElement,   // LVEBX LVEHX LVEWX STVEBX STVEHX STVEWX
+  kVecShiftLeft, kVecShiftRight,  // LVSL LVSR
+  kVecLeft, kVecRight,            // LVLX LVRX STVLX STVRX (and their L forms)
+};
+
+// kFpArith and kVmx operations: the runtime's numbering.
 using recomp::ppc::FpOp;
 using enum recomp::ppc::FpOp;
+using recomp::ppc::VmxOp;
+using enum recomp::ppc::VmxOp;
 
 // Special purpose registers by number.
 enum Spr : uint16_t {

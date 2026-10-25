@@ -89,9 +89,10 @@ void Collect(const Insn& i, Uses& u) {
     u.lr = u.ctr = true;
   if (i.lk) u.lr = true;
   if (i.op == Op::kLoad || i.op == Op::kStore || i.op == Op::kLmw || i.op == Op::kStmw ||
-      i.op == Op::kDcbz || i.op == Op::kFpLoad || i.op == Op::kFpStore)
+      i.op == Op::kDcbz || i.op == Op::kFpLoad || i.op == Op::kFpStore || i.op == Op::kVload ||
+      i.op == Op::kVstore)
     u.mem = true;
-  if (i.op == Op::kFcmp || i.op == Op::kMcrfs) u.cr = true;
+  if (i.op == Op::kFcmp || i.op == Op::kMcrfs || i.op == Op::kVcmp) u.cr = true;
 }
 
 class Emitter {
@@ -211,6 +212,7 @@ std::string Emitter::Body(const Insn& i) {
   // Floating-point registers stay in the context; record forms copy
   // FPSCR[FX FEX VX OX] to CR1.
   auto F = [](int r) { return "c.f[" + N(r) + "]"; };
+  auto V = [](int r) { return "c.v[" + N(r) + "]"; };
   auto fprec = [&]() { return i.rc ? std::string(" cr = lift::SetField(cr, 1, c.fpscr >> 28);") : std::string(); };
 
   switch (i.op) {
@@ -490,6 +492,42 @@ std::string Emitter::Body(const Insn& i) {
       return "lift::Mtfsb(c, " + N(i.bo) + ", " + (i.opc ? "true" : "false") + ");" + fprec();
     case Op::kMcrfs:
       return "cr = lift::SetField(cr, " + N(i.crfd) + ", lift::Mcrfs(c, " + N(i.crfs) + "));";
+    case Op::kVmx:
+      return V(i.rd) + " = lift::Vmx(c, " + N(i.opc) + ", " + V(i.ra) + ", " + V(i.rb) + ", " +
+             V(i.rc_reg) + ", " + N(int(i.imm)) + ");";
+    case Op::kVcmp: {
+      std::string s = "{ Vec t = lift::Vmx(c, " + N(i.opc) + ", " + V(i.ra) + ", " + V(i.rb) +
+                      ", " + V(i.rb) + ", 0); " + V(i.rd) + " = t;";
+      if (i.rc)
+        s += std::string(" cr = lift::SetField(cr, 6, lift::VCr6(t, ") +
+             (i.opc == recomp::ppc::kVcmpbfp ? "true" : "false") + "));";
+      return s + " }";
+    }
+    case Op::kVload: {
+      std::string s = ea_x();
+      switch (i.opc) {
+        case ppc::kVecQuad: return s + V(i.rd) + " = lift::Lvx(m, uint32_t(ea));";
+        case ppc::kVecElement: return s + "lift::Lve(m, uint32_t(ea), " + V(i.rd) + ", " + N(i.size) + ");";
+        case ppc::kVecShiftLeft: return s + V(i.rd) + " = lift::Lvsl(uint32_t(ea), false);";
+        case ppc::kVecShiftRight: return s + V(i.rd) + " = lift::Lvsl(uint32_t(ea), true);";
+        case ppc::kVecLeft: return s + V(i.rd) + " = lift::Lvlx(m, uint32_t(ea));";
+        default: return s + V(i.rd) + " = lift::Lvrx(m, uint32_t(ea));";
+      }
+    }
+    case Op::kVstore: {
+      std::string s = ea_x();
+      switch (i.opc) {
+        case ppc::kVecQuad: return s + "lift::Stvx(m, uint32_t(ea), " + V(i.rd) + ");";
+        case ppc::kVecElement: return s + "lift::Stve(m, uint32_t(ea), " + V(i.rd) + ", " + N(i.size) + ");";
+        case ppc::kVecLeft: return s + "lift::Stvlx(m, uint32_t(ea), " + V(i.rd) + ");";
+        default: return s + "lift::Stvrx(m, uint32_t(ea), " + V(i.rd) + ");";
+      }
+    }
+    case Op::kMfvscr:
+      return V(i.rd) + " = lift::Mfvscr(c.vscr);";
+    case Op::kMtvscr:
+      // Only NJ and SAT exist.
+      return "c.vscr = lift::VGet<uint32_t>(" + V(i.rb) + ", 3) & (lift::kVscrNj | lift::kVscrSat);";
     case Op::kLarx:
       return ea_x() + set(i.rd, std::string("lift::Larx<") + U + ">(c, uint32_t(ea))");
     case Op::kStcx:

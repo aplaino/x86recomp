@@ -8,6 +8,12 @@
 
 namespace recomp::ppc {
 
+// A vector register in the register's own (big-endian) element order:
+// byte 0 is the most significant, as LVX loads it from memory.
+struct alignas(16) Vec {
+  uint8_t b[16];
+};
+
 struct Ctx {
   uint64_t r[32];
   uint64_t lr, ctr;
@@ -20,6 +26,10 @@ struct Ctx {
   // call into ppc/fp.cpp).
   uint64_t f[32];
   uint32_t fpscr;
+  // Vector registers (VMX's 32 are VMX128's first 32) and VSCR (NJ, SAT),
+  // left here like the FPRs.
+  uint32_t vscr;
+  Vec v[128];
   // The guest arena: guest address a is at mem + a, big-endian.
   uint8_t* mem;
   // The reservation (LWARX/LDARX, STWCX./STDCX.). A store-conditional

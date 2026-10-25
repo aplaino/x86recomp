@@ -196,6 +196,23 @@ void Primary31(Insn& i) {
     case 727: MemX(i, Op::kFpStore, 8, false); return;
     case 759: MemX(i, Op::kFpStore, 8, true); return;
     case 983: MemX(i, Op::kFpStore, 4, false); i.opc = 1; return;
+    // VMX loads and stores (and the Xenon's LVLX family).
+    case 103: case 359: MemX(i, Op::kVload, 16, false); i.opc = kVecQuad; return;
+    case 231: case 487: MemX(i, Op::kVstore, 16, false); i.opc = kVecQuad; return;
+    case 7: MemX(i, Op::kVload, 1, false); i.opc = kVecElement; return;
+    case 39: MemX(i, Op::kVload, 2, false); i.opc = kVecElement; return;
+    case 71: MemX(i, Op::kVload, 4, false); i.opc = kVecElement; return;
+    case 135: MemX(i, Op::kVstore, 1, false); i.opc = kVecElement; return;
+    case 167: MemX(i, Op::kVstore, 2, false); i.opc = kVecElement; return;
+    case 199: MemX(i, Op::kVstore, 4, false); i.opc = kVecElement; return;
+    case 6: MemX(i, Op::kVload, 0, false); i.opc = kVecShiftLeft; return;
+    case 38: MemX(i, Op::kVload, 0, false); i.opc = kVecShiftRight; return;
+    case 519: case 775: MemX(i, Op::kVload, 16, false); i.opc = kVecLeft; return;
+    case 551: case 807: MemX(i, Op::kVload, 16, false); i.opc = kVecRight; return;
+    case 647: case 903: MemX(i, Op::kVstore, 16, false); i.opc = kVecLeft; return;
+    case 679: case 935: MemX(i, Op::kVstore, 16, false); i.opc = kVecRight; return;
+    // DST DSTST DSS: data stream hints.
+    case 342: case 374: case 822: i.op = Op::kCacheHint; return;
     default: return;
   }
 }
@@ -206,7 +223,8 @@ bool NoRecordForm(Op op) {
     case Op::kCmp: case Op::kCmpl: case Op::kTw: case Op::kTd: case Op::kMfcr: case Op::kMtcrf:
     case Op::kMfspr: case Op::kMtspr: case Op::kMftb: case Op::kMfmsr: case Op::kMtmsr:
     case Op::kMtmsrd: case Op::kMcrxr: case Op::kSync: case Op::kCacheHint: case Op::kDcbz:
-    case Op::kLoad: case Op::kStore: case Op::kFpLoad: case Op::kFpStore:
+    case Op::kLoad: case Op::kStore: case Op::kFpLoad: case Op::kFpStore: case Op::kVload:
+    case Op::kVstore:
       return true;
     default:
       return false;
@@ -334,6 +352,116 @@ void PrimaryFp(Insn& i, bool single) {
   }
 }
 
+// Primary opcode 4, VMX: VA forms by their 6-bit extended opcode (32-47),
+// VC forms (compares) by their 10-bit one with Rc in bit 21, VX forms by
+// the 11-bit one. Other words whose low two bits are 11 are VMX128 loads
+// and stores (not lifted yet).
+void Primary4(Insn& i) {
+  const uint32_t raw = i.raw;
+  i.rc = false;
+  if (!(raw & 0x20) && (raw & 3) == 3) return;
+  i.rc_reg = uint8_t(F(raw, 21, 5));
+  auto va = [&](VmxOp op) {
+    i.op = Op::kVmx;
+    i.opc = op;
+  };
+  if (raw & 0x20) {
+    switch (raw & 0x3F) {
+      case 32: va(kVmhaddshs); return;
+      case 33: va(kVmhraddshs); return;
+      case 34: va(kVmladduhm); return;
+      case 36: va(kVmsumubm); return;
+      case 37: va(kVmsummbm); return;
+      case 38: va(kVmsumuhm); return;
+      case 39: va(kVmsumuhs); return;
+      case 40: va(kVmsumshm); return;
+      case 41: va(kVmsumshs); return;
+      case 42: va(kVsel); return;
+      case 43: va(kVperm); return;
+      case 44:
+        if (F(raw, 21, 1)) return;
+        va(kVsldoi);
+        i.imm = F(raw, 22, 4);
+        i.rc_reg = 0;
+        return;
+      case 46: va(kVmaddfp); return;
+      case 47: va(kVnmsubfp); return;
+      default: return;
+    }
+  }
+  i.rc_reg = 0;
+  if ((raw & 0x3F) == 6) {
+    static const struct { uint16_t xo; VmxOp op; } kCmp[] = {
+        {6, kVcmpequb}, {70, kVcmpequh}, {134, kVcmpequw}, {198, kVcmpeqfp}, {454, kVcmpgefp},
+        {518, kVcmpgtub}, {582, kVcmpgtuh}, {646, kVcmpgtuw}, {710, kVcmpgtfp}, {774, kVcmpgtsb},
+        {838, kVcmpgtsh}, {902, kVcmpgtsw}, {966, kVcmpbfp}};
+    for (const auto& c : kCmp)
+      if ((raw & 0x3FF) == c.xo) {
+        i.op = Op::kVcmp;
+        i.opc = c.op;
+        i.rc = raw & 0x400;
+      }
+    return;
+  }
+  // VX forms. `one`: the operation reads only vB (vA must be 0); `uimm`:
+  // the vA field is an immediate.
+  enum { kTwo, kOne, kUimm, kSimm };
+  static const struct { uint16_t xo; VmxOp op; uint8_t form; } kVx[] = {
+      {0, kVaddubm, kTwo}, {64, kVadduhm, kTwo}, {128, kVadduwm, kTwo}, {384, kVaddcuw, kTwo},
+      {512, kVaddubs, kTwo}, {576, kVadduhs, kTwo}, {640, kVadduws, kTwo}, {768, kVaddsbs, kTwo},
+      {832, kVaddshs, kTwo}, {896, kVaddsws, kTwo},
+      {1024, kVsububm, kTwo}, {1088, kVsubuhm, kTwo}, {1152, kVsubuwm, kTwo}, {1408, kVsubcuw, kTwo},
+      {1536, kVsububs, kTwo}, {1600, kVsubuhs, kTwo}, {1664, kVsubuws, kTwo}, {1792, kVsubsbs, kTwo},
+      {1856, kVsubshs, kTwo}, {1920, kVsubsws, kTwo},
+      {1026, kVavgub, kTwo}, {1090, kVavguh, kTwo}, {1154, kVavguw, kTwo}, {1282, kVavgsb, kTwo},
+      {1346, kVavgsh, kTwo}, {1410, kVavgsw, kTwo},
+      {2, kVmaxub, kTwo}, {66, kVmaxuh, kTwo}, {130, kVmaxuw, kTwo}, {258, kVmaxsb, kTwo},
+      {322, kVmaxsh, kTwo}, {386, kVmaxsw, kTwo},
+      {514, kVminub, kTwo}, {578, kVminuh, kTwo}, {642, kVminuw, kTwo}, {770, kVminsb, kTwo},
+      {834, kVminsh, kTwo}, {898, kVminsw, kTwo},
+      {520, kVmuleub, kTwo}, {584, kVmuleuh, kTwo}, {776, kVmulesb, kTwo}, {840, kVmulesh, kTwo},
+      {8, kVmuloub, kTwo}, {72, kVmulouh, kTwo}, {264, kVmulosb, kTwo}, {328, kVmulosh, kTwo},
+      {1544, kVsum4ubs, kTwo}, {1800, kVsum4sbs, kTwo}, {1608, kVsum4shs, kTwo},
+      {1672, kVsum2sws, kTwo}, {1928, kVsumsws, kTwo},
+      {1028, kVand, kTwo}, {1092, kVandc, kTwo}, {1156, kVor, kTwo}, {1284, kVnor, kTwo},
+      {1220, kVxor, kTwo},
+      {4, kVrlb, kTwo}, {68, kVrlh, kTwo}, {132, kVrlw, kTwo}, {260, kVslb, kTwo},
+      {324, kVslh, kTwo}, {388, kVslw, kTwo}, {516, kVsrb, kTwo}, {580, kVsrh, kTwo},
+      {644, kVsrw, kTwo}, {772, kVsrab, kTwo}, {836, kVsrah, kTwo}, {900, kVsraw, kTwo},
+      {452, kVsl, kTwo}, {708, kVsr, kTwo}, {1036, kVslo, kTwo}, {1100, kVsro, kTwo},
+      {12, kVmrghb, kTwo}, {76, kVmrghh, kTwo}, {140, kVmrghw, kTwo}, {268, kVmrglb, kTwo},
+      {332, kVmrglh, kTwo}, {396, kVmrglw, kTwo},
+      {524, kVspltb, kUimm}, {588, kVsplth, kUimm}, {652, kVspltw, kUimm},
+      {780, kVspltisb, kSimm}, {844, kVspltish, kSimm}, {908, kVspltisw, kSimm},
+      {14, kVpkuhum, kTwo}, {78, kVpkuwum, kTwo}, {142, kVpkuhus, kTwo}, {206, kVpkuwus, kTwo},
+      {270, kVpkshus, kTwo}, {334, kVpkswus, kTwo}, {398, kVpkshss, kTwo}, {462, kVpkswss, kTwo},
+      {782, kVpkpx, kTwo},
+      {526, kVupkhsb, kOne}, {590, kVupkhsh, kOne}, {654, kVupklsb, kOne}, {718, kVupklsh, kOne},
+      {846, kVupkhpx, kOne}, {974, kVupklpx, kOne},
+      {10, kVaddfp, kTwo}, {74, kVsubfp, kTwo}, {1034, kVmaxfp, kTwo}, {1098, kVminfp, kTwo},
+      {266, kVrefp, kOne}, {330, kVrsqrtefp, kOne}, {394, kVexptefp, kOne}, {458, kVlogefp, kOne},
+      {522, kVrfin, kOne}, {586, kVrfiz, kOne}, {650, kVrfip, kOne}, {714, kVrfim, kOne},
+      {778, kVcfux, kUimm}, {842, kVcfsx, kUimm}, {906, kVctuxs, kUimm}, {970, kVctsxs, kUimm}};
+  const uint32_t xo = raw & 0x7FF;
+  if (xo == 1540) {
+    if (!i.ra && !i.rb) i.op = Op::kMfvscr;
+    return;
+  }
+  if (xo == 1604) {
+    if (!i.rd && !i.ra) i.op = Op::kMtvscr;
+    return;
+  }
+  for (const auto& v : kVx) {
+    if (v.xo != xo) continue;
+    if (v.form == kOne && i.ra) return;
+    if (v.form == kSimm && i.rb) return;
+    if (v.form == kUimm || v.form == kSimm) i.imm = i.ra;
+    i.op = Op::kVmx;
+    i.opc = v.op;
+    return;
+  }
+}
+
 }  // namespace
 
 Insn Decode(uint64_t va, uint32_t raw) {
@@ -348,6 +476,7 @@ Insn Decode(uint64_t va, uint32_t raw) {
       i.to = i.rd;
       i.imm = Sext(simm, 16);
       break;
+    case 4: Primary4(i); break;
     case 7: i.op = Op::kMulli; i.imm = Sext(simm, 16); break;
     case 8: i.op = Op::kSubfic; i.imm = Sext(simm, 16); break;
     case 10: case 11:
@@ -614,6 +743,18 @@ std::string Name(const Insn& i) {
     case Op::kMtfsfi: return "mtfsfi";
     case Op::kMtfsb: return i.opc ? "mtfsb1" : "mtfsb0";
     case Op::kMcrfs: return "mcrfs";
+    case Op::kVmx: case Op::kVcmp: {
+      char b[32];
+      std::snprintf(b, sizeof b, "vmx op %u%s", unsigned(i.opc), i.rc ? "." : "");
+      return b;
+    }
+    case Op::kVload: case Op::kVstore: {
+      static const char* kLoads[] = {"lvx", "lve*x", "lvsl", "lvsr", "lvlx", "lvrx"};
+      static const char* kStores[] = {"stvx", "stve*x", "?", "?", "stvlx", "stvrx"};
+      return (i.op == Op::kVload ? kLoads : kStores)[i.opc % 6];
+    }
+    case Op::kMfvscr: return "mfvscr";
+    case Op::kMtvscr: return "mtvscr";
     case Op::kLarx: return i.size == 8 ? "ldarx" : "lwarx";
     case Op::kStcx: return i.size == 8 ? "stdcx." : "stwcx.";
   }

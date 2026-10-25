@@ -368,9 +368,11 @@ uint64_t SingleToDouble(uint32_t w) {
     }
     return sign | uint64_t(e + 1023) << 52 | uint64_t(frac & 0x7FFFFF) << 29;
   }
-  // Normal, infinity and NaN alike: W0 W1 ~W1 ~W1 ~W1 W2..W31, then zeros.
+  // Normal: W0 W1 ~W1 ~W1 ~W1 W2..W31, then zeros; infinity and NaN
+  // (exponent 255): W0 W1 W1 W1 W1 W2..W31.
   uint64_t w1 = (w >> 30) & 1;
-  uint64_t top = uint64_t(w >> 30) << 62 | (w1 ? 0 : 7ull << 59);
+  bool replicate = exp == 255 ? w1 : !w1;
+  uint64_t top = uint64_t(w >> 30) << 62 | (replicate ? 7ull << 59 : 0);
   return top | uint64_t(w & 0x3FFFFFFF) << 29;
 }
 

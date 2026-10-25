@@ -96,8 +96,26 @@ model returns the correctly rounded reciprocal (square root), as QEMU's
 970 does; the Xenon's tables wait for a console. FCTIW(Z)'s high word is
 undefined (the word's sign extension here), so is MFFS's (0).
 
-VMX and VMX128 decode as invalid (a fatal error if reached) until they
-are lifted.
+### VMX
+The context holds 128 vector registers (VMX's 32 are VMX128's first 32)
+in the register's own big-endian element order, so LVX and STVX are
+plain 16-byte copies, and VSCR (only NJ and SAT exist). The integer
+operations are inline (src/ppc/vmx.h, one switch the constant operation
+folds), saturations set SAT; the floating-point ones (src/ppc/vmx.cpp) run
+lane by lane on SoftFloat: round to nearest even, no exceptions, the
+first NaN of the operands quieted, the default NaN 0x7FC00000, and with
+NJ set denormal operands and results flushed to zero of the same sign.
+VMADDFP and VNMSUBFP are fused. VREFP and VRSQRTEFP return the correctly
+rounded value, as QEMU's 970 does; VEXPTEFP and VLOGEFP compute 2^x and
+log2 x accurately in double and round once (estimates both: the Xenon's
+own values wait for a console, and the test does not compare the last
+two). A NaN converted by VCTUXS/VCTSXS gives 0 without SAT, as on the
+oracle. LVEBX/LVEHX/LVEWX leave the other elements as they were (the ISA
+leaves them undefined). The Xenon's (and Cell's) LVLX, LVRX, STVLX, STVRX
+and their LRU forms load and store the parts of a quadword left and right
+of the address; the 970 has none of them, so they wait for a console too.
+
+VMX128 decodes as invalid (a fatal error if reached) until it is lifted.
 
 ## Lifter
 `recomp_lift_ppc --image <title.xex> --out <dir>` (tools/lifter_ppc):
@@ -159,14 +177,15 @@ memory; any other interrupt fails the run.
   model follows the ISA): FR (QEMU's is not the ISA's, as spot checks with exact
   arithmetic show), FX (QEMU sets it on every exception, not on a
   0 to 1 change), FI and FPRF's C bit on compares (the ISA alters only
-  FPCC), FRES's FPRF and its estimate of 1/±0 (QEMU: ±0.5).
+  FPCC), FRES's FPRF and its estimate of 1/±0 (QEMU: ±0.5), and VSCR's
+  reserved bits (QEMU keeps what MTVSCR wrote).
 - Not covered by QEMU: VMX128 (no emulator implements it) and what the
   970 does differently from the Xenon (DCBZ's size, the undefined cases
-  above, the estimates). Those wait for a console.
+  above, the estimates, the LVLX family). Those wait for a console.
 
 ## Roadmap
 1. Integer core, XEX reader, oracle (done).
-2. Floating point (exact, FPSCR; done) and VMX, on the same oracle.
+2. Floating point (exact, FPSCR) and VMX, on the same oracle (done).
 3. VMX128: Xenia's implementation as the reference until a console can
    run test programs.
 4. Runtime: the arena with the physical memory views, process and

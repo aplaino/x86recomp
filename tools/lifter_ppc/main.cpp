@@ -54,6 +54,8 @@ Mem MemKind(const Insn& i) {
   switch (i.op) {
     case Op::kLoad: case Op::kStore: case Op::kFpLoad: case Op::kFpStore:
       return i.indexed ? kIndexed : kDisp;
+    case Op::kVload: case Op::kVstore:
+      return i.opc == lifter::ppc::kVecShiftLeft || i.opc == lifter::ppc::kVecShiftRight ? kNone : kIndexed;
     case Op::kLarx: case Op::kStcx: case Op::kDcbz: return kIndexed;
     case Op::kLmw: case Op::kStmw: return kMultiple;
     default: return kNone;
@@ -80,6 +82,10 @@ bool NamesR31(const Insn& i) {
       return false;  // no general registers
     case Op::kFpLoad: case Op::kFpStore:
       return i.ra == 31 || (i.indexed && i.rb == 31);  // RT/RS is an FPR
+    case Op::kVmx: case Op::kVcmp: case Op::kMfvscr: case Op::kMtvscr:
+      return false;
+    case Op::kVload: case Op::kVstore:
+      return i.ra == 31 || i.rb == 31;
     default:
       break;
   }
@@ -93,6 +99,10 @@ bool Native(const Insn& i) {
   switch (i.op) {
     case Op::kMftb: case Op::kMfmsr: case Op::kMtmsr: case Op::kMtmsrd: case Op::kDcbz:
       return false;
+    // The LVLX family is the Xenon's (and Cell's), not the 970's.
+    case Op::kVload: case Op::kVstore:
+      if (i.opc == lifter::ppc::kVecLeft || i.opc == lifter::ppc::kVecRight) return false;
+      break;
     case Op::kMfspr: case Op::kMtspr:
       return i.spr == lifter::ppc::kXer || i.spr == lifter::ppc::kLr || i.spr == lifter::ppc::kCtr;
     default:
@@ -115,6 +125,9 @@ std::string NativeStub(const std::string& name, uint32_t raw) {
   // FPSCR (and what it became: MTFSF computes the summaries), then the FPRs.
   s += "  lfd 0, 552(31)\n  mtfsf 255, 0\n  mffs 0\n  stfd 0, 560(31)\n";
   for (int r = 0; r < 32; r++) s += "  lfd " + std::to_string(r) + ", " + std::to_string(296 + 8 * r) + "(31)\n";
+  // VSCR (and what it became), then the vector registers, r0 as the index.
+  s += "  li 0, 1088\n  lvx 0, 31, 0\n  mtvscr 0\n  mfvscr 0\n  li 0, 1104\n  stvx 0, 31, 0\n";
+  for (int r = 0; r < 32; r++) s += "  li 0, " + std::to_string(576 + 16 * r) + "\n  lvx " + std::to_string(r) + ", 31, 0\n";
   for (int r = 0; r < 31; r++) s += "  ld " + std::to_string(r) + ", " + std::to_string(8 * r) + "(31)\n";
   char inst[32];
   std::snprintf(inst, sizeof inst, "  .long 0x%08x\n", raw);
@@ -122,6 +135,8 @@ std::string NativeStub(const std::string& name, uint32_t raw) {
   for (int r = 0; r < 31; r++) s += "  std " + std::to_string(r) + ", " + std::to_string(8 * r) + "(31)\n";
   for (int r = 0; r < 32; r++) s += "  stfd " + std::to_string(r) + ", " + std::to_string(296 + 8 * r) + "(31)\n";
   s += "  mffs 0\n  stfd 0, 552(31)\n";
+  for (int r = 0; r < 32; r++) s += "  li 0, " + std::to_string(576 + 16 * r) + "\n  stvx " + std::to_string(r) + ", 31, 0\n";
+  s += "  mfvscr 0\n  li 0, 1088\n  stvx 0, 31, 0\n";
   s += "  mfcr 0\n  std 0, 256(31)\n  mfxer 0\n  std 0, 264(31)\n  mflr 0\n  std 0, 272(31)\n"
        "  mfctr 0\n  std 0, 280(31)\n  ld 1, 288(31)\n  ld 2, 32(1)\n";
   for (int r = 13; r < 32; r++) s += "  ld " + std::to_string(r) + ", " + std::to_string(40 + 8 * (r - 13)) + "(1)\n";
@@ -145,6 +160,22 @@ bool WriteForms(const lifter::ppc::Program& p, const std::string& dir) {
       // X forms: 21-31), without the FPR fields.
       if (primary == 59 || primary == 63)
         key = i.op == Op::kFpArith || i.op == Op::kFsel ? i.raw & 0xFC00003Fu : i.raw & 0xFC0007FFu;
+      // VMX: VA forms by bits 26-31, VC and VX forms by 21-31; the
+      // operations with an immediate in a register field keep it.
+      if (primary == 4) {
+        key = i.raw & 0x20 ? i.raw & 0xFC00003Fu : i.raw & 0xFC0007FFu;
+        switch (i.opc) {
+          case recomp::ppc::kVsldoi: key |= i.raw & 0x000003C0u; break;
+          case recomp::ppc::kVspltb: case recomp::ppc::kVsplth: case recomp::ppc::kVspltw:
+          case recomp::ppc::kVspltisb: case recomp::ppc::kVspltish: case recomp::ppc::kVspltisw:
+          case recomp::ppc::kVcfux: case recomp::ppc::kVcfsx: case recomp::ppc::kVctuxs:
+          case recomp::ppc::kVctsxs:
+            key |= i.raw & 0x001F0000u;
+            break;
+          default:
+            break;
+        }
+      }
       // Where those bits are not registers: the SPR, the SYNC kind, DCBZ's
       // size, and the compares' L bit.
       switch (i.op) {

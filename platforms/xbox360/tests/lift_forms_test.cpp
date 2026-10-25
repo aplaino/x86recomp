@@ -9,6 +9,7 @@
 // lifter's choice there waits for the Xenon itself.
 //   xbox360_lift_forms_test <records.bin>
 
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -30,7 +31,14 @@ uint64_t TimeBase(Ctx&) { return 0; }
 void Import(Ctx&, const char*, uint32_t, uint64_t va) { std::fprintf(stderr, "import in a form at %llx\n", (unsigned long long)va), std::abort(); }
 }  // namespace recomp::ppc
 
+// The stub's offsets (recomp_lift_ppc's NativeStub).
+static_assert(offsetof(NativeState, f) == 296 && offsetof(NativeState, fpscr) == 552 &&
+              offsetof(NativeState, v) == 576 && offsetof(NativeState, vscr) == 1088 &&
+              offsetof(NativeState, vscr_in) == 1104);
+
 namespace {
+
+uint32_t VscrOf(const uint8_t* v) { return uint32_t(v[12]) << 24 | v[13] << 16 | v[14] << 8 | v[15]; }
 
 // What the ISA leaves undefined in this run, and so the oracle's
 // implementation chooses: the quotient of a divide by zero or of the most
@@ -39,6 +47,7 @@ namespace {
 // FPRF after the conversions to integer; and the FPSCR bits where the
 // oracle departs from the ISA (UndefinedIn).
 struct Undefined {
+  int vr = -1;  // a vector register not compared (an estimate)
   int gpr = -1;
   uint32_t cr = 0;
   uint32_t xer = ~(0xE000007Fu);
@@ -48,6 +57,8 @@ struct Undefined {
 };
 Undefined UndefinedIn(uint32_t raw, const NativeState& in) {
   Undefined u;
+  // VEXPTEFP and VLOGEFP: estimates, the CPU's own.
+  if (raw >> 26 == 4 && ((raw & 0x7FF) == 394 || (raw & 0x7FF) == 458)) u.vr = int((raw >> 21) & 31);
   // Where the oracle departs from the ISA, which the model follows:
   // - FR: QEMU's is not "the rounding increased the magnitude" (spot
   //   checks with exact arithmetic);
@@ -154,6 +165,8 @@ int main(int argc, char** argv) {
     c.ctr = r.in.ctr;
     std::memcpy(c.f, r.in.f, sizeof c.f);
     c.fpscr = uint32_t(r.in.fpscr_in);
+    std::memcpy(c.v, r.in.v, sizeof r.in.v);
+    c.vscr = VscrOf(r.in.vscr_in);
     c.mem = mem;
     kForms[r.form].fn(c);
     runs[r.form]++;
@@ -187,6 +200,20 @@ int main(int argc, char** argv) {
       }
     }
     spr("fpscr", c.fpscr & ~u.fpscr, uint32_t(r.out.fpscr) & ~u.fpscr);
+    for (int g = 0; g < 32; g++)
+      if (g != u.vr && std::memcmp(c.v[g].b, r.out.v[g], 16)) {
+        char b[96];
+        std::snprintf(b, sizeof b, " v%d %08x%08x%08x%08x want ", g, recomp::ppc::lift::VGet<uint32_t>(c.v[g], 0),
+                      recomp::ppc::lift::VGet<uint32_t>(c.v[g], 1), recomp::ppc::lift::VGet<uint32_t>(c.v[g], 2),
+                      recomp::ppc::lift::VGet<uint32_t>(c.v[g], 3));
+        why += b;
+        for (int k = 0; k < 16; k++) {
+          std::snprintf(b, sizeof b, "%02x", r.out.v[g][k]);
+          why += b;
+        }
+      }
+    // VSCR has only NJ and SAT; QEMU keeps whatever MTVSCR wrote.
+    spr("vscr", c.vscr, VscrOf(r.out.vscr) & 0x00010001u);
     if (std::memcmp(mem + ORACLE_WINDOW, r.window_out, ORACLE_WINDOW_SIZE)) why += " memory (window)";
     else if (OracleCrc32(mem + ORACLE_BUF, ORACLE_BUF_SIZE) != r.crc) why += " memory (outside the window)";
     if (!why.empty()) {
@@ -196,7 +223,15 @@ int main(int argc, char** argv) {
       if (failures[r.form]++ < 3 && shown++ < 60) {
         std::printf("FAIL form %u %08x %s at %llx:%s\n", r.form, r.raw, kForms[r.form].name,
                     (unsigned long long)kForms[r.form].va, why.c_str());
-        // The operands, for floating point.
+        // The operands, for floating point and VMX.
+        if (r.raw >> 26 == 4) {
+          std::printf("     in: vscr %08x", VscrOf(r.in.vscr_in));
+          for (int f : {(r.raw >> 16) & 31, (r.raw >> 11) & 31, (r.raw >> 6) & 31}) {
+            std::printf(" v%d ", f);
+            for (int k = 0; k < 16; k++) std::printf("%02x", r.in.v[f][k]);
+          }
+          std::printf("\n");
+        }
         if (r.raw >> 26 == 59 || r.raw >> 26 == 63)
           std::printf("     in: fpscr %08x fra %016llx frb %016llx frc %016llx\n", uint32_t(r.in.fpscr_in),
                       (unsigned long long)r.in.f[(r.raw >> 16) & 31], (unsigned long long)r.in.f[(r.raw >> 11) & 31],
