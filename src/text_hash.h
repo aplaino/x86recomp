@@ -1,12 +1,12 @@
 #pragma once
 // FNV-1a over a module's code: identifies the code a lifted build was made
 // from (kLiftedTextHash), so the runtime refuses to run it against a
-// different module. Shared by recomp_lift_a64 and the platform loaders.
+// different module. Shared by the lifters and the platform loaders.
 
 #include <cstddef>
 #include <cstdint>
 
-namespace recomp::a64 {
+namespace recomp {
 
 inline uint64_t TextHash(const uint8_t* p, size_t n) {
   uint64_t h = 0xCBF29CE484222325ull;
@@ -17,4 +17,4 @@ inline uint64_t TextHash(const uint8_t* p, size_t n) {
   return h;
 }
 
-}  // namespace recomp::a64
+}  // namespace recomp

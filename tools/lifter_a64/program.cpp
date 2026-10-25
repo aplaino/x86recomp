@@ -6,7 +6,7 @@
 #include <deque>
 
 #include "a64/lifted.h"
-#include "a64/text_hash.h"
+#include "text_hash.h"
 
 namespace lifter::a64 {
 
@@ -57,7 +57,7 @@ bool Program::Load(const std::string& path, std::string& err) {
 }
 
 uint64_t Program::text_hash() const {
-  return recomp::a64::TextHash(img_.bytes.data() + (img_.text_lo - img_.base),
+  return recomp::TextHash(img_.bytes.data() + (img_.text_lo - img_.base),
                                img_.text_hi - img_.text_lo);
 }
 

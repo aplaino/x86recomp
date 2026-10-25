@@ -5,7 +5,7 @@
 #include <fstream>
 #include <iterator>
 
-#include "a64/text_hash.h"
+#include "text_hash.h"
 
 namespace recomp::horizon {
 namespace {
@@ -253,7 +253,7 @@ bool Relocate(Module& m, uint64_t base, std::string& err) {
   return true;
 }
 
-uint64_t TextHash(const Module& m) { return a64::TextHash(m.image.data() + m.text.off, m.text.size); }
+uint64_t TextHash(const Module& m) { return recomp::TextHash(m.image.data() + m.text.off, m.text.size); }
 
 std::vector<FdeRange> EhFrameFunctions(const Module& m) {
   std::vector<FdeRange> out;
