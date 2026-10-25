@@ -2488,6 +2488,51 @@ void Restore(State& s, const uint8_t in[108]) {
   ReadEnv(s, in);
 }
 
+// FXSAVE layout: FCW, FSW, the abridged tag (bit p: physical register p
+// not empty), FOP, the pointers (32-bit form: FIP, FCS, FDP, FDS; REX.W:
+// 64-bit FIP, FDP; the same bytes here, with 32-bit pointers and zero
+// selectors), then ST(0)-ST(7) in 16-byte slots from byte 32 (the upper
+// six bytes zero). Bytes 24-31 (MXCSR) are the SSE side's.
+void FxSave(const State& s, uint8_t* out) {
+  const uint16_t sw = StatusWord(s);
+  const bool es = sw & kES;
+  Put16(out + 0, ControlWord(s));
+  Put16(out + 2, sw);
+  out[4] = static_cast<uint8_t>(~s.empty);
+  out[5] = 0;
+  Put16(out + 6, es ? static_cast<uint16_t>(s.fop & 0x7FF) : 0);
+  const uint32_t fip = es ? s.fip : 0, fdp = es ? s.fdp : 0;
+  std::memset(out + 8, 0, 16);
+  Put32(out + 8, fip);
+  Put32(out + 16, fdp);
+  for (int i = 0; i < 8; ++i) {
+    F80 v = Get(s, i);
+    uint8_t* slot = out + 32 + 16 * i;
+    std::memcpy(slot, &v.sig, 8);
+    Put16(slot + 8, v.se);
+    std::memset(slot + 10, 0, 6);
+  }
+}
+
+void FxRestore(State& s, const uint8_t* in) {
+  s.cw = static_cast<uint16_t>((Get16(in + 0) & 0x1F3F) | 0x0040);
+  const uint16_t sw = Get16(in + 2);
+  s.top = (sw >> 11) & 7;
+  s.sw = static_cast<uint16_t>(sw & ~(kTopMask | kES | kBusy));
+  s.empty = static_cast<uint8_t>(~in[4]);
+  if (StatusWord(s) & kES) {
+    s.fop = static_cast<uint16_t>(Get16(in + 6) & 0x7FF);
+    s.fip = Get32(in + 8);
+    s.fdp = Get32(in + 16);
+  }
+  for (int i = 0; i < 8; ++i) {
+    F80 v;
+    std::memcpy(&v.sig, in + 32 + 16 * i, 8);
+    v.se = Get16(in + 32 + 16 * i + 8);
+    s.r[(s.top + i) & 7] = v;
+  }
+}
+
 // --- value-level operations for lifted runs ---------------------------
 
 namespace run {

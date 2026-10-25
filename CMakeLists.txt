@@ -172,7 +172,12 @@ target_link_libraries(recomp_base PUBLIC recomp_log Threads::Threads)
 
 # --- x86 core --------------------------------------------------------------
 # x87 and SSE models (SoftFloat 3e, from the base).
-add_library(recomp_x87 SHARED src/x86/x87.cpp src/x86/sse.cpp src/x86/sse_ext.cpp)
+add_library(recomp_x87 SHARED src/x86/x87.cpp src/x86/sse.cpp src/x86/sse_ext.cpp
+            src/x86/atomic128.cpp)
+# CMPXCHG16B's compare-exchange inlined as one instruction (no libatomic).
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+  set_source_files_properties(src/x86/atomic128.cpp PROPERTIES COMPILE_OPTIONS -mcx16)
+endif()
 target_include_directories(recomp_x87 PUBLIC src)
 target_compile_features(recomp_x87 PUBLIC cxx_std_20)
 target_link_libraries(recomp_x87 PRIVATE softfloat recomp_base)

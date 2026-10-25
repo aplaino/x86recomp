@@ -32,6 +32,13 @@ add_executable(hle_abi_test hle_abi_test.cpp)
 target_link_libraries(hle_abi_test PRIVATE recomp_x86)
 add_test(NAME hle_abi COMMAND hle_abi_test)
 
+# fxsave_test: FXSAVE/FXRSTOR of the x87 and SSE models against the host.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+  add_executable(fxsave_test fxsave_test.cpp)
+  target_link_libraries(fxsave_test PRIVATE recomp_x87)
+  add_test(NAME fxsave COMMAND fxsave_test)
+endif()
+
 # lift_semantics_test checks the integer/flag helpers in lifted.h against
 # the host CPU the same way.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")

@@ -26,6 +26,10 @@ tzcnt ax, bx
 tzcnt eax, ebx
 tzcnt rax, qword ptr [rsi]
 
+# CMPXCHG16B (the harness gives every other trial a matching operand)
+lock cmpxchg16b xmmword ptr [rsi]
+cmpxchg16b xmmword ptr [rsi]
+
 # xchg with a redundant lock prefix
 lock xchg byte ptr [rsi], al
 lock xchg word ptr [rsi], si
@@ -754,3 +758,11 @@ vpcmpistrm xmm3, xmm2, 0x08
 vphaddsw xmm1, xmm2, xmm3
 vpsignd xmm1, xmm2, xmm1
 vmpsadbw xmm1, xmm2, xmm3, 5
+
+# AVX: the 256-bit conversions across the halves
+vcvtps2pd ymm0, xmm1
+vcvtps2pd ymm2, xmm2
+vcvtps2pd ymm3, xmmword ptr [rsi]
+vcvtpd2ps xmm0, ymm1
+vcvtpd2ps xmm4, ymm4
+vcvtpd2ps xmm5, ymmword ptr [rsi]

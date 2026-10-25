@@ -650,6 +650,7 @@ class InsnEmitter {
   bool vex_ = false;
   std::map<int, std::string> xsub_;
   void EmitLocked();
+  void EmitWideMem();
   void Emit64();
 
   const Program& p_;
@@ -2435,6 +2436,33 @@ void InsnEmitter::EmitAvx() {
       if (halves == 1) ZeroUpper(0);
       return;
     }
+    case ZYDIS_MNEMONIC_VCVTPS2PD: case ZYDIS_MNEMONIC_VCVTPD2PS: {
+      // VEX.256 crosses the halves: four floats (one half) <-> four
+      // doubles (two halves), two lanes at a time on copies of the source
+      // (the destination may be it). VEX.128 is the legacy form.
+      if (halves == 1) {
+        if (!TryVexBridge()) Unimpl();
+        return;
+      }
+      if (!IsVec(0)) return Unimpl();
+      if (m == ZYDIS_MNEMONIC_VCVTPS2PD) {
+        std::string s1 = HalfSrc(1, 0);
+        L("{ const ::recomp::Xmm s = " + s1 + "; ::recomp::Xmm u{};");
+        L("  std::memcpy(u.b, s.b + 8, 8);");
+        L(Fmt("  ::recomp::sse::CvtFloat(c, true, 2, %s, s, %s);", Half(0, 0).c_str(),
+              va.c_str()));
+        L(Fmt("  ::recomp::sse::CvtFloat(c, true, 2, %s, u, %s); }", Half(0, 1).c_str(),
+              va.c_str()));
+        return;
+      }
+      std::string lo = HalfSrc(1, 0), hi = HalfSrc(1, 1);
+      L("{ const ::recomp::Xmm a = " + lo + ", b = " + hi + "; ::recomp::Xmm r, t;");
+      L(Fmt("  ::recomp::sse::CvtFloat(c, false, 2, r, a, %s);", va.c_str()));
+      L(Fmt("  ::recomp::sse::CvtFloat(c, false, 2, t, b, %s);", va.c_str()));
+      L("  std::memcpy(r.b + 8, t.b, 8); " + Half(0, 0) + " = r; }");
+      ZeroUpper(0);
+      return;
+    }
     case ZYDIS_MNEMONIC_VSQRTPS: case ZYDIS_MNEMONIC_VSQRTPD: {
       if (!IsVec(0)) return Unimpl();
       const bool dbl = m == ZYDIS_MNEMONIC_VSQRTPD;
@@ -3031,10 +3059,40 @@ void InsnEmitter::Emit64() {
   Unimpl();
 }
 
+// x64 instructions whose memory operand is wider than any register: the
+// 16-byte compare-exchange and the 512-byte FXSAVE area (both need it
+// 16-byte aligned).
+void InsnEmitter::EmitWideMem() {
+  if (!PrepareMem()) return Unimpl();
+  const std::string va = Hex(in_.va);
+  L(Fmt("::recomp::sse::CheckAligned(c, m0, %s);", va.c_str()));
+  switch (d_.mnemonic) {
+    case ZYDIS_MNEMONIC_CMPXCHG16B:
+      // Compares rdx:rax with the operand: equal, ZF and rcx:rbx stored;
+      // otherwise rdx:rax loaded. Other flags are unchanged.
+      L("{ uint64_t lo = rax, hi = rdx;");
+      L("  F.zf = ::recomp::lift::Cas128(B + m0, &lo, &hi, rbx, rcx);");
+      L("  rax = lo; rdx = hi; }");
+      return;
+    case ZYDIS_MNEMONIC_FXSAVE: case ZYDIS_MNEMONIC_FXSAVE64:
+      L("::recomp::sse::Fxsave(c, B + m0);");
+      return;
+    case ZYDIS_MNEMONIC_FXRSTOR: case ZYDIS_MNEMONIC_FXRSTOR64:
+      L(Fmt("::recomp::sse::Fxrstor(c, B + m0, %s);", va.c_str()));
+      return;
+    default:
+      return Unimpl();
+  }
+}
+
 void InsnEmitter::Emit() {
   const auto m = d_.mnemonic;
   const uint64_t next = in_.next();
 
+  if (X64() && (m == ZYDIS_MNEMONIC_CMPXCHG16B || m == ZYDIS_MNEMONIC_FXSAVE ||
+                m == ZYDIS_MNEMONIC_FXSAVE64 || m == ZYDIS_MNEMONIC_FXRSTOR ||
+                m == ZYDIS_MNEMONIC_FXRSTOR64))
+    return EmitWideMem();
   if (IsX87(d_)) {
     if (!PrepareMem()) return Unimpl();
     return EmitX87();

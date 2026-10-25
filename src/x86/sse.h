@@ -159,6 +159,13 @@ inline Xmm Cvtdq2pd(const Xmm& s) {
   return r;
 }
 
+// FXSAVE / FXRSTOR (both forms) of the 512-byte area at p (16-byte
+// aligned): the x87 part (x87::FxSave), MXCSR and MXCSR_MASK (0xFFFF:
+// the bits LDMXCSR takes), XMM0-15 from byte 160; bytes 416-511 are left
+// alone. FXRSTOR with reserved MXCSR bits set would #GP: fatal.
+void Fxsave(Ctx& c, uint8_t* p);
+void Fxrstor(Ctx& c, const uint8_t* p, uint64_t va);
+
 // LDMXCSR: reserved bits set would #GP: fatal.
 void Ldmxcsr(Ctx& c, uint32_t v, uint64_t va);
 
