@@ -7,14 +7,8 @@ linked against a runtime that reimplements the parts of Windows and its
 middleware the game uses. There is no emulator, interpreter or Wine in
 the result, and no game code or data in this repository.
 
-Used by:
-- [DS1-Rebuilt](https://github.com/JTM-rootstorm/DS1-Rebuilt) (Dungeon
-  Siege, 2002), where it was developed;
-- [CoD1-Reissued](https://github.com/JTM-rootstorm/CoD1-Reissued) (Call
-  of Duty, 2003), in progress;
-- [LSWTCS_Rebricked](https://github.com/JTM-rootstorm/LSWTCS_Rebricked)
-  (LEGO Star Wars: The Complete Saga, 2009), started;
-- Q2E (Quake II Enhanced, 2023), the first x64 user, started.
+The game ports built on it and their status are on the
+[project site](https://jtm-rootstorm.github.io/x86recomp.github.io/).
 
 ## What is here
 

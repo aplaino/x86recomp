@@ -73,8 +73,9 @@ a game is where it came up.
   project's files (FINDINGS.md, ...). Explain why behaviour exists in
   generic terms ("games that ..."). Middleware is not a game: Miles,
   Bink, EAX builds may be named and identified by version and SHA-256.
-  The only places game projects are named are README.md ("Used by") and
-  Layout above.
+  The only place game projects are named here is Layout above; their
+  list and status live on the project site (sibling checkout
+  ../x86recomp.github.io), which README.md links to.
 - Dev/test switches are read with Env("NAME") (the game's <ID>_NAME),
   never getenv with a hard-coded prefix, and never at static-init time.
 - Every import needs an explicit HLE handler; an unhandled one is fatal
