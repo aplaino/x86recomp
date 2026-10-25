@@ -71,7 +71,7 @@ set_target_properties(softfloat PROPERTIES EXCLUDE_FROM_ALL ON)
 if(RECOMP_PPC)
   # The base's SoftFloat under the exact floating-point unit
   # (src/ppc/fp.cpp), which applies the PowerPC's own NaN rules.
-  add_library(recomp_ppc SHARED src/ppc/dispatch.cpp src/ppc/fatal.cpp src/ppc/fp.cpp)
+  add_library(recomp_ppc SHARED src/ppc/dispatch.cpp src/ppc/fatal.cpp src/ppc/fp.cpp src/ppc/vmx.cpp)
   target_include_directories(recomp_ppc PUBLIC src)
   target_compile_features(recomp_ppc PUBLIC cxx_std_20)
   target_link_libraries(recomp_ppc PRIVATE softfloat)

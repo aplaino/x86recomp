@@ -9,9 +9,9 @@
 extern const struct FormInfo kFormInfo[];
 extern const int kFormInfoCount;
 
-/* Floating-point forms get more states: their edge cases (double rounding,
-   tininess, NaN priority) are rarer in random data. */
-enum { kVectorsPerForm = 96, kVectorsPerFpForm = 384 };
+/* Floating-point and VMX forms get more states: their edge cases (double
+   rounding, tininess, NaN priority, saturation) are rarer in random data. */
+enum { kVectorsPerForm = 64, kVectorsPerFpForm = 256 };
 
 static uint64_t rng = 0x243F6A8885A308D3ull;
 static uint64_t Next(void) { return OracleSplitMix(&rng); }
@@ -39,7 +39,9 @@ static uint64_t Value(void) {
    integers (for the conversions) and random patterns. */
 static uint64_t SingleBits(uint32_t w) {
   /* LFS's conversion, for normal and special single values. */
-  uint64_t top = (uint64_t)(w >> 30) << 62 | (((w >> 30) & 1) ? 0 : 7ull << 59);
+  int special = ((w >> 23) & 0xFF) == 0xFF;
+  uint64_t w1 = (w >> 30) & 1;
+  uint64_t top = (uint64_t)(w >> 30) << 62 | ((special ? w1 : !w1) ? 7ull << 59 : 0);
   return top | (uint64_t)(w & 0x3FFFFFFF) << 29;
 }
 static uint64_t FpValue(void) {
@@ -79,12 +81,32 @@ static uint64_t Fpscr(void) {
   return v;
 }
 
+/* Vector lanes: words of floating-point interest (as singles), or random
+   bytes. */
+static void VecValue(uint8_t* v) {
+  for (int k = 0; k < 16; k += 4) {
+    uint32_t w;
+    uint64_t r = Next();
+    if (r & 1) {
+      uint64_t d = FpValue();
+      /* The double's single counterpart where it has one, else its top. */
+      w = (uint32_t)((d >> 32 & 0xC0000000u) | (d >> 29 & 0x3FFFFFFFu));
+    } else {
+      w = (uint32_t)(r >> 16);
+    }
+    v[k] = (uint8_t)(w >> 24);
+    v[k + 1] = (uint8_t)(w >> 16);
+    v[k + 2] = (uint8_t)(w >> 8);
+    v[k + 3] = (uint8_t)w;
+  }
+}
+
 /* Base registers: the effective address is inside the window, naturally
    aligned for the access; the high word is random, which 32-bit mode
    ignores. */
 static void Place(const struct FormInfo* f, struct NativeState* s) {
   uint32_t size = f->size ? (uint32_t)f->size : 1;
-  uint32_t align = size > 8 ? 8 : size;
+  uint32_t align = size > 16 ? 16 : size;
   uint32_t ea = ORACLE_WINDOW + (uint32_t)(Next() % (ORACLE_WINDOW_SIZE - size + 1));
   ea &= ~(align - 1);
   uint64_t high = Next() << 32;
@@ -118,9 +140,9 @@ int main(void) {
     const struct FormInfo* f = &kFormInfo[k];
     if (!f->stub) continue;
     uint32_t primary = f->raw >> 26;
-    int vectors = primary == 59 || primary == 63 ? kVectorsPerFpForm : kVectorsPerForm;
+    int vectors = primary == 59 || primary == 63 || primary == 4 ? kVectorsPerFpForm : kVectorsPerForm;
     for (int v = 0; v < vectors; v++, n++) {
-      struct NativeState s;
+      struct NativeState s __attribute__((aligned(16)));
       for (int r = 0; r < 32; r++) s.r[r] = Value();
       s.cr = (uint32_t)Next();
       s.xer = (uint32_t)Next() & 0xE000007Fu;
@@ -130,6 +152,11 @@ int main(void) {
       for (int r = 0; r < 32; r++) s.f[r] = FpValue();
       s.fpscr = Fpscr();
       s.fpscr_in = 0;
+      s.pad = 0;
+      for (int r = 0; r < 32; r++) VecValue(s.v[r]);
+      for (int b = 0; b < 16; b++) s.vscr[b] = s.vscr_in[b] = 0;
+      s.vscr[13] = (uint8_t)(Next() & 1); /* NJ */
+      s.vscr[15] = (uint8_t)(Next() & 1); /* SAT */
       if (f->mem != FORM_MEM_NONE) Place(f, &s);
       OraclePattern(buf);
       for (uint32_t b = 0; b < ORACLE_WINDOW_SIZE; b += 8) {
@@ -143,6 +170,7 @@ int main(void) {
       f->stub(&s);
       s.host_sp = 0;
       rec[n].in.fpscr_in = s.fpscr_in;
+      Copy(rec[n].in.vscr_in, s.vscr_in, 16);
       Copy(&rec[n].out, &s, sizeof s);
       Copy(rec[n].window_out, window, ORACLE_WINDOW_SIZE);
       rec[n].crc = OracleCrc32(buf, ORACLE_BUF_SIZE);

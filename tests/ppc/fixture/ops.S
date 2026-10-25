@@ -295,5 +295,187 @@ ops:
   .long 0xFFC0004D  // mtfsb1. 30 (LLVM has no record form of it)
   mcrfs 2, 0
   mcrfs 5, 3
+  // VMX: loads and stores
+  lvx 1, 3, 4
+  lvxl 2, 5, 6
+  stvx 3, 7, 8
+  stvxl 4, 9, 10
+  lvebx 5, 11, 12
+  lvehx 6, 13, 14
+  lvewx 7, 15, 16
+  stvebx 8, 17, 18
+  stvehx 9, 19, 20
+  stvewx 10, 21, 22
+  lvsl 11, 23, 24
+  lvsr 12, 25, 26
+  lvx 13, 0, 27
+  dst 3, 4, 0
+  dss 0
+  // VMX: integer arithmetic
+  vaddubm 1, 2, 3
+  vadduhm 4, 5, 6
+  vadduwm 7, 8, 9
+  vaddubs 10, 11, 12
+  vadduhs 13, 14, 15
+  vadduws 16, 17, 18
+  vaddsbs 19, 20, 21
+  vaddshs 22, 23, 24
+  vaddsws 25, 26, 27
+  vaddcuw 28, 29, 30
+  vsububm 1, 2, 3
+  vsubuhm 4, 5, 6
+  vsubuwm 7, 8, 9
+  vsububs 10, 11, 12
+  vsubuhs 13, 14, 15
+  vsubuws 16, 17, 18
+  vsubsbs 19, 20, 21
+  vsubshs 22, 23, 24
+  vsubsws 25, 26, 27
+  vsubcuw 28, 29, 30
+  vavgub 1, 2, 3
+  vavguh 4, 5, 6
+  vavguw 7, 8, 9
+  vavgsb 10, 11, 12
+  vavgsh 13, 14, 15
+  vavgsw 16, 17, 18
+  vmaxub 1, 2, 3
+  vmaxuh 4, 5, 6
+  vmaxuw 7, 8, 9
+  vmaxsb 10, 11, 12
+  vmaxsh 13, 14, 15
+  vmaxsw 16, 17, 18
+  vminub 19, 20, 21
+  vminuh 22, 23, 24
+  vminuw 25, 26, 27
+  vminsb 28, 29, 30
+  vminsh 31, 0, 1
+  vminsw 2, 3, 4
+  vmuleub 1, 2, 3
+  vmuleuh 4, 5, 6
+  vmulesb 7, 8, 9
+  vmulesh 10, 11, 12
+  vmuloub 13, 14, 15
+  vmulouh 16, 17, 18
+  vmulosb 19, 20, 21
+  vmulosh 22, 23, 24
+  vmhaddshs 1, 2, 3, 4
+  vmhraddshs 5, 6, 7, 8
+  vmladduhm 9, 10, 11, 12
+  vmsumubm 13, 14, 15, 16
+  vmsummbm 17, 18, 19, 20
+  vmsumuhm 21, 22, 23, 24
+  vmsumuhs 25, 26, 27, 28
+  vmsumshm 29, 30, 31, 0
+  vmsumshs 1, 2, 3, 4
+  vsum4ubs 5, 6, 7
+  vsum4sbs 8, 9, 10
+  vsum4shs 11, 12, 13
+  vsum2sws 14, 15, 16
+  vsumsws 17, 18, 19
+  // VMX: logical, rotates and shifts
+  vand 1, 2, 3
+  vandc 4, 5, 6
+  vor 7, 8, 9
+  vnor 10, 11, 12
+  vxor 13, 14, 15
+  vsel 16, 17, 18, 19
+  vrlb 1, 2, 3
+  vrlh 4, 5, 6
+  vrlw 7, 8, 9
+  vslb 10, 11, 12
+  vslh 13, 14, 15
+  vslw 16, 17, 18
+  vsrb 19, 20, 21
+  vsrh 22, 23, 24
+  vsrw 25, 26, 27
+  vsrab 28, 29, 30
+  vsrah 1, 2, 3
+  vsraw 4, 5, 6
+  vsl 7, 8, 9
+  vsr 10, 11, 12
+  vslo 13, 14, 15
+  vsro 16, 17, 18
+  // VMX: permutes, merges, splats, packs, unpacks
+  vperm 1, 2, 3, 4
+  vsldoi 5, 6, 7, 0
+  vsldoi 8, 9, 10, 5
+  vsldoi 11, 12, 13, 15
+  vmrghb 1, 2, 3
+  vmrghh 4, 5, 6
+  vmrghw 7, 8, 9
+  vmrglb 10, 11, 12
+  vmrglh 13, 14, 15
+  vmrglw 16, 17, 18
+  vspltb 1, 2, 0
+  vspltb 3, 4, 15
+  vsplth 5, 6, 3
+  vspltw 7, 8, 2
+  vspltisb 9, -16
+  vspltisb 10, 7
+  vspltish 11, -1
+  vspltisw 12, 15
+  vspltisw 13, -9
+  vpkuhum 1, 2, 3
+  vpkuwum 4, 5, 6
+  vpkuhus 7, 8, 9
+  vpkuwus 10, 11, 12
+  vpkshus 13, 14, 15
+  vpkswus 16, 17, 18
+  vpkshss 19, 20, 21
+  vpkswss 22, 23, 24
+  vpkpx 25, 26, 27
+  vupkhsb 1, 2
+  vupkhsh 3, 4
+  vupklsb 5, 6
+  vupklsh 7, 8
+  vupkhpx 9, 10
+  vupklpx 11, 12
+  // VMX: integer compares
+  vcmpequb 1, 2, 3
+  vcmpequb. 4, 5, 6
+  vcmpequh 7, 8, 9
+  vcmpequh. 10, 11, 12
+  vcmpequw 13, 14, 15
+  vcmpequw. 16, 17, 18
+  vcmpgtub 19, 20, 21
+  vcmpgtub. 22, 23, 24
+  vcmpgtuh 25, 26, 27
+  vcmpgtuw. 28, 29, 30
+  vcmpgtsb 1, 2, 3
+  vcmpgtsh. 4, 5, 6
+  vcmpgtsw 7, 8, 9
+  vcmpgtsw. 10, 11, 12
+  // VMX: floating point
+  vaddfp 1, 2, 3
+  vsubfp 4, 5, 6
+  vmaddfp 7, 8, 9, 10
+  vnmsubfp 11, 12, 13, 14
+  vmaxfp 15, 16, 17
+  vminfp 18, 19, 20
+  vrefp 21, 22
+  vrsqrtefp 23, 24
+  vexptefp 25, 26
+  vlogefp 27, 28
+  vrfin 1, 2
+  vrfiz 3, 4
+  vrfip 5, 6
+  vrfim 7, 8
+  vcfux 9, 10, 0
+  vcfux 11, 12, 17
+  vcfsx 13, 14, 31
+  vctuxs 15, 16, 0
+  vctuxs 17, 18, 9
+  vctsxs 19, 20, 0
+  vctsxs 21, 22, 30
+  vcmpeqfp 1, 2, 3
+  vcmpeqfp. 4, 5, 6
+  vcmpgefp 7, 8, 9
+  vcmpgefp. 10, 11, 12
+  vcmpgtfp 13, 14, 15
+  vcmpgtfp. 16, 17, 18
+  vcmpbfp 19, 20, 21
+  vcmpbfp. 22, 23, 24
+  mfvscr 25
+  mtvscr 26
   blr
   .size ops, .-ops
