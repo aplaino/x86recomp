@@ -1162,7 +1162,14 @@ only those below it.
   threads, calls between the host and lifted code, the HLE registry and
   its calling conventions (32-bit stdcall/cdecl, Win64, System V),
   presentation's dev aids and the hang watchdog. Its tests are in
-  tests/x86.
+  tests/x86. The PowerPC core (RECOMP_PPC, which a PowerPC platform
+  turns on; its design is src/ppc/ARCHITECTURE.md): the lifter
+  recomp_lift_ppc (tools/lifter_ppc) and the CPU model and dispatcher it
+  targets (src/ppc, recomp_ppc), a 64-bit PowerPC in 32-bit mode with
+  big-endian guest memory in a 4 GiB arena. A PowerPC platform adds its
+  image reader to recomp_lift_ppc and defines what lifted code calls
+  (Import, Sc, Trap, TimeBase); recomp_lift_ppc reads ELF itself, so the
+  core and its tests (tests/ppc) build without any platform.
 - Platform modules (platforms/<name>, option RECOMP_PLATFORM_<NAME>):
   an OS and its system libraries on a core, with their own
   CMakeLists.txt, CLAUDE.md, docs and tests. Win32 (platforms/win32, on
@@ -1204,7 +1211,9 @@ C++, so each one runs on every host (Linux x86-64, macOS arm64), and the
 host layer serves them all. RECOMP_HOST off is only for CPU-only test
 builds, such as a lifter's tests cross built for a host whose sysroot
 has none of its libraries. Each core and platform option is
-independent, so one tree can build several together.
+independent, so one tree can build several together (CMakePresets:
+debug for the x86 core with Win32, x86 for the x86 core alone, ppc for
+the PowerPC core alone).
 
 ## Roadmap
 - 64-bit guests (above).

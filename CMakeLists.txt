@@ -35,6 +35,8 @@ option(RECOMP_PLATFORM_WIN32 "Win32 platform module (Windows PC games)" ON)
 if(RECOMP_PLATFORM_WIN32 AND NOT RECOMP_X86)
   message(FATAL_ERROR "RECOMP_PLATFORM_WIN32 needs RECOMP_X86")
 endif()
+# Consoles with a PowerPC CPU.
+option(RECOMP_PPC "PowerPC core: lifter and CPU model (a PowerPC platform turns it on)" OFF)
 
 # The host layer (cmake/host.cmake): what a native program needs on its
 # host, whatever its guest CPU. SDL3 (windows, input, audio output),
@@ -63,6 +65,32 @@ include(FetchContent)
 include(cmake/softfloat.cmake)  # defines target `softfloat`
 target_compile_options(softfloat PRIVATE -O2)
 set_target_properties(softfloat PROPERTIES EXCLUDE_FROM_ALL ON)
+
+# The PowerPC lifter and CPU model, for the platforms with a PowerPC CPU
+# (RECOMP_PPC, which they turn on), and its tests.
+if(RECOMP_PPC)
+  add_library(recomp_ppc SHARED src/ppc/dispatch.cpp src/ppc/fatal.cpp)
+  target_include_directories(recomp_ppc PUBLIC src)
+  target_compile_features(recomp_ppc PUBLIC cxx_std_20)
+  add_subdirectory(tools/lifter_ppc)
+
+  # recomp_add_lifted_ppc(<target> <dir>): an object library of
+  # recomp_lift_ppc's output in <dir> plus the registration of its function
+  # table. Lifted code is always optimised: at -O0 it is unusably slow.
+  function(recomp_add_lifted_ppc target dir)
+    file(GLOB _gen CONFIGURE_DEPENDS "${dir}/*.cpp")
+    recomp_add_lifted_ppc_files(${target} ${_gen})
+  endfunction()
+  # The same over a known list of generated files (a build-time lift).
+  function(recomp_add_lifted_ppc_files target)
+    add_library(${target} OBJECT ${ARGN} "${RECOMP_ROOT}/src/ppc/lifted_table.cpp")
+    target_include_directories(${target} PRIVATE "${RECOMP_ROOT}/src")
+    target_compile_features(${target} PRIVATE cxx_std_20)
+    target_compile_options(${target} PRIVATE -O2 -g0 -fno-strict-aliasing)
+  endfunction()
+
+  add_subdirectory(tests/ppc)
+endif()
 
 if(NOT RECOMP_X86)
   return()
