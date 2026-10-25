@@ -373,6 +373,31 @@ uint32_t RunMainThread(Thread* t, const std::function<uint64_t(Ctx&)>& body) {
   return g_main_exit;
 }
 
+namespace {
+struct BesideStart {
+  Thread* t;
+  const std::function<uint64_t(Ctx&)>* body;
+  std::atomic<bool> done{false};
+  uint32_t exit = 0;
+};
+
+void* BesideMain(void* arg) {
+  BesideStart* s = static_cast<BesideStart*>(arg);
+  s->exit = RunGuestThread(s->t, *s->body);
+  s->done.store(true, std::memory_order_release);
+  return nullptr;
+}
+}  // namespace
+
+uint32_t RunMainThreadBeside(Thread* t, const std::function<uint64_t(Ctx&)>& body,
+                             const std::function<void(const std::atomic<bool>&)>& host_loop) {
+  BesideStart s{t, &body};
+  SpawnHostThread(BesideMain, &s);
+  host_loop(s.done);
+  if (!s.done.load(std::memory_order_acquire)) FatalF("host loop returned before the guest main thread");
+  return s.exit;
+}
+
 const PeImage* ImageAt(gaddr va) {
   const Process& p = *g_proc;
   if (va - p.img.image_base < p.img.image_size) return &p.img;

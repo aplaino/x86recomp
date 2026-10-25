@@ -77,6 +77,18 @@ void SleepUntilNs(uint64_t t);
 // guest needs a bigger stack than the OS gives it).
 void RunOnStack(void* stack, size_t size, void (*fn)());
 
+// Coroutines (fibers): contexts of execution on one thread, each with a
+// stack of its own. NewCoroutine makes one that runs fn(arg) on [stack,
+// stack + size) when first switched to (fn must not return);
+// ThreadCoroutine one for the code already running on the calling
+// thread. SwitchCoroutine saves the running context in from and resumes
+// to.
+struct Coroutine;
+Coroutine* NewCoroutine(void* stack, size_t size, void (*fn)(void*), void* arg);
+Coroutine* ThreadCoroutine();
+void SwitchCoroutine(Coroutine* from, Coroutine* to);
+void FreeCoroutine(Coroutine* c);
+
 // ---- faults (SIGSEGV/SIGBUS handlers; `uc` is the handler's ucontext)
 struct FaultContext {
   bool write_known = false;  // whether `write` comes from the CPU
