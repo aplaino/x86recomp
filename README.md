@@ -9,7 +9,7 @@ uses. There is no emulator, interpreter or Wine in
 the result, and no game code or data in this repository.
 
 The game ports built on it and their status are on the
-[project site](https://jtm-rootstorm.github.io/x86recomp.github.io/).
+[project site](https://jtm-rootstorm.github.io/x86recomp.site/).
 
 ## What is here
 
