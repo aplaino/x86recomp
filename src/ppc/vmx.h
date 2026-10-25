@@ -48,6 +48,11 @@ enum VmxOp : uint8_t {
   kVrfin, kVrfiz, kVrfip, kVrfim,
   kVcfux, kVcfsx, kVctuxs, kVctsxs,
   kVcmpeqfp, kVcmpgefp, kVcmpgtfp, kVcmpbfp,
+  // VMX128 only (the Xenon's extension; its other operations are VMX's):
+  // word rotate-and-insert and permute by an immediate, a multiply, the
+  // dot products and the D3D formats (the last three in ppc/vmx.cpp).
+  kVrlimi128, kVpermwi128,
+  kVmulfp128, kVmsum3fp128, kVmsum4fp128, kVpkd3d128, kVupkd3d128,
   kVmxOpCount,
 };
 
@@ -99,7 +104,8 @@ template <typename T, typename F>
 Vec VmxFloat(Ctx& c, unsigned op, const Vec& a, const Vec& b, const Vec& cc, uint32_t imm);
 
 // One VMX operation (VmxOp). `imm` is UIMM, SIMM or SHB as the operation
-// takes; `cc` is the third source of the VA forms.
+// takes; `cc` is the third source of the VA forms (VRLIMI128, VPKD3D128:
+// vD, which they merge into).
 [[gnu::always_inline]] inline Vec Vmx(Ctx& c, unsigned op, const Vec& a, const Vec& b,
                                       const Vec& cc, uint32_t imm) {
   using i8 = int8_t;
@@ -385,6 +391,19 @@ Vec VmxFloat(Ctx& c, unsigned op, const Vec& a, const Vec& b, const Vec& cc, uin
     case kVcmpgtsb: return VMap<i8>(a, b, [](i8 x, i8 y) { return i8(x > y ? -1 : 0); });
     case kVcmpgtsh: return VMap<i16>(a, b, [](i16 x, i16 y) { return i16(x > y ? -1 : 0); });
     case kVcmpgtsw: return VMap<i32>(a, b, [](i32 x, i32 y) { return x > y ? -1 : 0; });
+
+    // VRLIMI128: b rotated left by imm >> 4 words, inserted into vD (cc)
+    // where imm's low 4 bits say (bit 3: element 0). VPERMWI128: each word
+    // of b chosen by two bits of imm (bits 7-6: element 0).
+    case kVrlimi128:
+      for (int k = 0; k < 4; k++) {
+        int s = Mutated(10) ? k - int(imm >> 4) : k + int(imm >> 4);
+        VPut<u32>(r, k, (imm >> (3 - k)) & 1 ? VGet<u32>(b, s & 3) : VGet<u32>(cc, k));
+      }
+      return r;
+    case kVpermwi128:
+      for (int k = 0; k < 4; k++) VPut<u32>(r, k, VGet<u32>(b, (imm >> (6 - 2 * k)) & 3));
+      return r;
     default:
       return VmxFloat(c, op, a, b, cc, imm);
   }

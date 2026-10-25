@@ -58,7 +58,18 @@ bool IsCall(const Insn& i) {
 }
 
 void Collect(const Insn& i, Uses& u) {
-  u.r[i.rd] = u.r[i.ra] = u.r[i.rb] = true;
+  // Vector instructions name vector registers (up to 127), other than a
+  // load's or store's address registers.
+  switch (i.op) {
+    case Op::kVmx: case Op::kVcmp: case Op::kMfvscr: case Op::kMtvscr:
+      break;
+    case Op::kVload: case Op::kVstore:
+      u.r[i.ra] = u.r[i.rb] = true;
+      break;
+    default:
+      u.r[i.rd] = u.r[i.ra] = u.r[i.rb] = true;
+      break;
+  }
   switch (i.op) {
     case Op::kLmw: case Op::kStmw:
       for (int r = i.rd; r < 32; r++) u.r[r] = true;

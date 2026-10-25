@@ -56,8 +56,9 @@ platform module too.
   difference with exact arithmetic or the ISA's text, and leave that bit
   out of the comparison with the reason next to it.
 - ppc/lifted.h semantics changes must keep ppc_lift_forms passing
-  against the oracle, and a planted bug (RECOMP_PPC_MUTATION) for each
-  new helper that the test catches.
+  against the oracle (ppc_vmx128_test too for VMX128, which the oracle
+  runs only as VMX twins), and a planted bug (RECOMP_PPC_MUTATION) for
+  each new helper that a test catches.
 - Where the ISA leaves a result undefined, say so next to the code, keep
   it out of the oracle comparison (tests/ppc/lift_forms_test.cpp,
   Undefined) and note it for the hardware check in
