@@ -4,9 +4,64 @@ project(x86recomp LANGUAGES C CXX)
 # Static recompilation of 32-bit x86 Windows games to native programs: the
 # lifter (build-time tool), the x87 model, and the runtime with its Win32/
 # DirectX/Miles HLE. A game project pulls this in with add_subdirectory()
-# and links the parts its EXE imports; see README.md.
+# and links the parts its EXE imports; see README.md. Console platforms
+# are modules on top, each behind its own option (ARCHITECTURE.md,
+# "Console platforms").
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# For the helper functions below, which run in the game project's scope.
+set(RECOMP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}" CACHE INTERNAL "")
+
+# The runtime, the HLE modules and their helpers are shared libraries
+# (ARCHITECTURE.md "Game projects"): one copy of their state, and a change
+# to one rebuilds only that library. Their thread-locals use the
+# initial-exec model: the fault handler reads them, and a general-dynamic
+# access can allocate. --no-undefined holds Linux to what macOS requires
+# of a dylib: everything it uses comes from the libraries it links.
+add_compile_options(-ftls-model=initial-exec)
+if(NOT APPLE)
+  string(APPEND CMAKE_SHARED_LINKER_FLAGS " -Wl,--no-undefined")
+endif()
+
+# --- guests -------------------------------------------------------------
+# RECOMP_X86 is everything below this block: the x86 lifter and CPU model
+# with the Win32 HLE (PC games). A game for another CPU turns it off and
+# needs none of its dependencies (SDL3, ffmpeg, LLVM).
+option(RECOMP_X86 "x86 lifter, CPU model and Win32 HLE (PC games)" ON)
+option(RECOMP_PLATFORM_HORIZON "Nintendo Switch (Horizon OS) platform module" OFF)
+if(PROJECT_IS_TOP_LEVEL)
+  enable_testing()
+endif()
+
+# The AArch64 lifter and CPU model, for the platforms with an AArch64 CPU
+# (the Switch), then those platforms.
+if(RECOMP_PLATFORM_HORIZON)
+  add_library(recomp_a64 SHARED src/a64/dispatch.cpp src/a64/fatal.cpp src/a64/platform.cpp)
+  target_include_directories(recomp_a64 PUBLIC src)
+  target_compile_features(recomp_a64 PUBLIC cxx_std_20)
+  add_subdirectory(tools/lifter_a64)
+
+  # recomp_add_lifted_a64(<target> <dir>): an object library of
+  # recomp_lift_a64's output in <dir> plus the registration of its function
+  # table. Lifted code is always optimised: at -O0 it is unusably slow,
+  # and debug info for generated source is not useful.
+  function(recomp_add_lifted_a64 target dir)
+    file(GLOB _gen CONFIGURE_DEPENDS "${dir}/*.cpp")
+    recomp_add_lifted_a64_files(${target} ${_gen})
+  endfunction()
+  # The same over a known list of generated files (a build-time lift).
+  function(recomp_add_lifted_a64_files target)
+    add_library(${target} OBJECT ${ARGN} "${RECOMP_ROOT}/src/a64/lifted_table.cpp")
+    target_include_directories(${target} PRIVATE "${RECOMP_ROOT}/src")
+    target_compile_features(${target} PRIVATE cxx_std_20)
+    target_compile_options(${target} PRIVATE -O2 -g0 -fno-strict-aliasing)
+  endfunction()
+endif()
+
+if(NOT RECOMP_X86)
+  return()
+endif()
 
 include(FetchContent)
 
@@ -36,20 +91,6 @@ if(APPLE)
       CACHE INTERNAL "")
 else()
   set(RECOMP_FAULT_FRAME_FLAGS "" CACHE INTERNAL "")
-endif()
-
-# For the helper functions below, which run in the game project's scope.
-set(RECOMP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}" CACHE INTERNAL "")
-
-# The runtime, the HLE modules and their helpers are shared libraries
-# (ARCHITECTURE.md "Game projects"): one copy of their state, and a change
-# to one rebuilds only that library. Their thread-locals use the
-# initial-exec model: the fault handler reads them, and a general-dynamic
-# access can allocate. --no-undefined holds Linux to what macOS requires
-# of a dylib: everything it uses comes from the libraries it links.
-add_compile_options(-ftls-model=initial-exec)
-if(NOT APPLE)
-  string(APPEND CMAKE_SHARED_LINKER_FLAGS " -Wl,--no-undefined")
 endif()
 
 # Guest address space + PE mapping, and logging (runtime/log.h). Shared by
@@ -466,9 +507,6 @@ function(recomp_add_fast2d_test)
   set_tests_properties(fast2d_oracle PROPERTIES TIMEOUT 600)
 endfunction()
 
-if(PROJECT_IS_TOP_LEVEL)
-  enable_testing()
-endif()
 add_subdirectory(tests)
 # Dev tool: renders the EAX capture cases with recomp_audio (eax_render).
 if(PROJECT_IS_TOP_LEVEL AND FFMPEG_FOUND)
