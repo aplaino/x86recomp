@@ -137,6 +137,12 @@ Thread* CreateGuestThread(uint64_t stack_size);
 Process& StartProcess(const GameConfig& game, const std::string& game_dir, bool x64);
 void InitDispatch();
 uint32_t RunMainThread(Thread* t, const std::function<uint64_t(Ctx&)>& body);
+// For platforms whose guest has no UI thread of its own (consoles): body
+// runs as guest thread t on a host thread of its own, and the process
+// main thread runs host_loop (the window, its events, presentation),
+// which returns once done is set (body has returned).
+uint32_t RunMainThreadBeside(Thread* t, const std::function<uint64_t(Ctx&)>& body,
+                             const std::function<void(const std::atomic<bool>&)>& host_loop);
 // Whether va is the entry of a lifted function in Process::code (once
 // InitDispatch has run).
 bool IsLifted(gaddr va);

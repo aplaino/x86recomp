@@ -11,6 +11,7 @@
 #include "runtime/platform.h"
 
 #include <errno.h>
+#include <stdlib.h>
 #include <signal.h>
 #include <time.h>
 #include <ucontext.h>
@@ -40,6 +41,48 @@ void RunOnStack(void* stack, size_t size, void (*fn)()) {
   makecontext(&g_stack_ctx, fn, 0);
   swapcontext(&g_caller_ctx, &g_stack_ctx);
 }
+
+struct Coroutine {
+  ucontext_t uc;
+  void (*fn)(void*) = nullptr;
+  void* arg = nullptr;
+  bool started = true;
+};
+
+namespace {
+thread_local Coroutine* t_starting = nullptr;
+
+void CoroutineStart() {
+  Coroutine* c = t_starting;
+  c->fn(c->arg);
+  abort();  // fn must not return
+}
+}  // namespace
+
+Coroutine* NewCoroutine(void* stack, size_t size, void (*fn)(void*), void* arg) {
+  Coroutine* c = new Coroutine;
+  getcontext(&c->uc);
+  c->uc.uc_stack.ss_sp = stack;
+  c->uc.uc_stack.ss_size = size;
+  c->uc.uc_link = nullptr;
+  makecontext(&c->uc, CoroutineStart, 0);
+  c->fn = fn;
+  c->arg = arg;
+  c->started = false;
+  return c;
+}
+
+Coroutine* ThreadCoroutine() { return new Coroutine; }
+
+void SwitchCoroutine(Coroutine* from, Coroutine* to) {
+  if (!to->started) {
+    to->started = true;
+    t_starting = to;
+  }
+  swapcontext(&from->uc, &to->uc);
+}
+
+void FreeCoroutine(Coroutine* c) { delete c; }
 #pragma clang diagnostic pop
 
 FaultContext ReadFaultContext(const void* uc) {
