@@ -35,8 +35,7 @@ target_link_libraries(recomp_orbis_savedata PUBLIC recomp_orbis_kernel)
 # libScePad on SDL gamepads and the keyboard.
 add_library(recomp_orbis_pad SHARED src/orbis/hle/pad.cpp)
 target_link_libraries(recomp_orbis_pad PUBLIC recomp_orbis)
-# libSceFont and libSceFontFt on FreeType.
-find_package(Freetype REQUIRED)
+# libSceFont and libSceFontFt on the host layer's FreeType.
 add_library(recomp_orbis_font SHARED src/orbis/hle/font.cpp)
 target_link_libraries(recomp_orbis_font PUBLIC recomp_orbis PRIVATE Freetype::Freetype)
 # libSceAvPlayer on ffmpeg.

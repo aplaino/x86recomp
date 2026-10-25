@@ -10,6 +10,9 @@ find_package(PkgConfig REQUIRED)
 # console movies.
 pkg_check_modules(FFMPEG IMPORTED_TARGET
   libavformat libavcodec libavutil libswscale)
+# FreeType (FTL, linked dynamically): the font engine of consoles whose
+# font libraries are built on it (the PS4's libSceFontFt).
+find_package(Freetype REQUIRED)
 if(APPLE)
   set(_llvm_default "/opt/homebrew/opt/llvm@22")  # Homebrew
 else()
