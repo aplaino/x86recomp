@@ -47,8 +47,8 @@ library.
   queue and run at the vblank the flip rate allows, on the host thread
   (orbis/host.h); the flip event's ident is 6 << 48 | handle << 40 and
   its data the flip argument << 16 | 1 << 12 (one flip reported). Linear
-  A8R8G8B8 and A8B8G8R8 buffers are shown; tiled ones are fatal until
-  the GPU draws.
+  A8R8G8B8 and A8B8G8R8 buffers are shown; tiled ones are shown black
+  until the GPU draws (only it writes them).
 - recomp_orbis_gnm: libSceGnmDriver. Its packet builders write what
   11.00's do (the same dwords; a padding NOP's body is left alone, the
   NOP-wrapped context registers of the Update*Shader functions included,
@@ -79,6 +79,18 @@ library.
 - recomp_orbis_np: libSceNpManager and libSceNpWebApi for a user not
   signed in to PSN: the state is signed out, what the PSN service would
   answer fails with SCE_NP_ERROR_SIGNED_OUT.
+- recomp_orbis_font: libSceFont and libSceFontFt on the host's FreeType:
+  libSceFont's structures, checks, codes and the objects it allocates
+  through the game's memory interface are 11.00's; glyphs are
+  FreeType's (unhinted, anti-aliased), not libSceFontFt's own
+  rasteriser, so pixels differ, and FreeType's allocations through the
+  game's memory are not made.
+- recomp_orbis_pad: libScePad, the user's controller from the first SDL
+  gamepad or the keyboard, always connected; at rest in background
+  runs; one state per read; the motion sensors report it lying still.
+- libSceNpTrophy (recomp_orbis_np): contexts and handles from 1,
+  unlocks kept below DataDir()/trophies; what needs the trophy pack
+  (outside the game's files) is not implemented.
 - libSceCommonDialog (in recomp_orbis_system): initialisation.
 - libkernel also: signal masks (kept per thread; nothing delivers
   signals to the guest) and libScePosix's clock_gettime.
@@ -92,6 +104,9 @@ library.
   (lifted.h kTscHz); the console's own TSC runs at its CPU clock.
 - The signed-in user's id and name.
 - The display's refresh (60 Hz) and the flip event's data below bit 16.
-- The GPU's clock for timestamps (the 100 MHz reference clock).
+- The GPU's clocks for timestamps (the 100 MHz reference clock, the
+  800 MHz core clock).
+- libScePad's touch pad (44.86 dots/mm, 1920 x 943) and stick dead
+  zones (13).
 - PlayGo's chunk count (every id below 1000 is accepted) and its
   default install speed (full).

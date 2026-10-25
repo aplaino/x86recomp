@@ -32,11 +32,19 @@ add_library(recomp_orbis_audio SHARED src/orbis/hle/audioout.cpp)
 target_link_libraries(recomp_orbis_audio PUBLIC recomp_orbis)
 add_library(recomp_orbis_savedata SHARED src/orbis/hle/savedata.cpp)
 target_link_libraries(recomp_orbis_savedata PUBLIC recomp_orbis_kernel)
+# libScePad on SDL gamepads and the keyboard.
+add_library(recomp_orbis_pad SHARED src/orbis/hle/pad.cpp)
+target_link_libraries(recomp_orbis_pad PUBLIC recomp_orbis)
+# libSceFont and libSceFontFt on FreeType.
+find_package(Freetype REQUIRED)
+add_library(recomp_orbis_font SHARED src/orbis/hle/font.cpp)
+target_link_libraries(recomp_orbis_font PUBLIC recomp_orbis PRIVATE Freetype::Freetype)
 # Networking (libSceNet, libSceNetCtl): no connection.
 add_library(recomp_orbis_net SHARED src/orbis/hle/net.cpp)
 target_link_libraries(recomp_orbis_net PUBLIC recomp_orbis_kernel)
 # PSN (libSceNp*): a user not signed in.
-add_library(recomp_orbis_np SHARED src/orbis/hle/np_manager.cpp src/orbis/hle/np_webapi.cpp)
+add_library(recomp_orbis_np SHARED src/orbis/hle/np_manager.cpp src/orbis/hle/np_webapi.cpp
+            src/orbis/hle/np_trophy.cpp)
 target_link_libraries(recomp_orbis_np PUBLIC recomp_orbis)
 add_library(recomp_orbis_videoout SHARED src/orbis/hle/videoout.cpp)
 target_link_libraries(recomp_orbis_videoout PUBLIC recomp_orbis_kernel)
@@ -81,7 +89,7 @@ if(RECOMP_LD_LLD AND Python3_FOUND AND CMAKE_C_COMPILER_ID MATCHES "Clang")
                  "${RECOMP_ROOT}/src/runtime/lifted_table.cpp")
   target_link_libraries(orbis_process_test PRIVATE recomp_orbis recomp_orbis_kernel
                         recomp_orbis_fiber recomp_orbis_gnm recomp_orbis_savedata
-                        recomp_orbis_audio)
+                        recomp_orbis_audio recomp_orbis_pad recomp_orbis_np)
   add_test(NAME orbis_process COMMAND orbis_process_test "${_e2e}/eboot.elf" "${_e2e}/prx.elf")
   set_tests_properties(orbis_process PROPERTIES TIMEOUT 60)  # a hang is a failure
 endif()

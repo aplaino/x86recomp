@@ -112,12 +112,18 @@ void Show(Port& p, const Flip& f) {
     px.assign(size_t(w) * h * 4, 0);
   } else {
     const Attr& a = f.attr;
-    if (a.tiling != kTilingLinear)
-      FatalF("sceVideoOutSubmitFlip: tiled scanout (tiling mode %u) not implemented yet",
-             a.tiling);
     w = int(a.width);
     h = int(a.height);
     px.resize(size_t(w) * h * 4);
+    if (a.tiling != kTilingLinear) {
+      // Only the GPU writes tiled buffers, and it does not draw yet: they
+      // hold nothing to show.
+      static bool warned = false;
+      if (!warned) WarnF("videoout: tiled buffers are shown black until the GPU draws\n");
+      warned = true;
+      std::fill(px.begin(), px.end(), uint8_t(0));
+      goto show;
+    }
     for (int y = 0; y < h; y++)
       std::memcpy(&px[size_t(y) * w * 4], GPtr(f.addr + uint64_t(y) * a.pitch * 4),
                   size_t(w) * 4);
@@ -126,6 +132,7 @@ void Show(Port& p, const Flip& f) {
     else if (a.format != kA8R8G8B8Srgb)
       FatalF("sceVideoOutSubmitFlip: pixel format %08X not implemented yet", a.format);
   }
+show:
   if (!p.window) OpenWindow(p, w, h);
   if (w != p.w || h != p.h) {
     p.w = w;

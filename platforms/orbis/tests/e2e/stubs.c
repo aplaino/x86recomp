@@ -45,6 +45,19 @@ STUB(sceSaveDataDirNameSearch) STUB(sceSaveDataSetParam)
 STUB(sceAudioOutInit) STUB(sceAudioOutOpen) STUB(sceAudioOutOutput) STUB(sceAudioOutClose)
 #endif
 
+#ifdef LIB_PAD
+#define STUB(name) \
+  void name(void) {}
+STUB(scePadInit) STUB(scePadOpen) STUB(scePadRead)
+#endif
+
+#ifdef LIB_TROPHY
+#define STUB(name) \
+  void name(void) {}
+STUB(sceNpTrophyCreateContext) STUB(sceNpTrophyCreateHandle) STUB(sceNpTrophyRegisterContext)
+STUB(sceNpTrophyUnlockTrophy)
+#endif
+
 #ifdef LIB_GNM
 #define STUB(name) \
   void name(void) {}

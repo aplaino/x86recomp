@@ -46,6 +46,15 @@ int sceAudioOutOutput(int handle, const void* buf);
 int sceAudioOutClose(int handle);
 unsigned long sceKernelGetProcessTime(void);
 
+int scePadInit(void);
+int scePadOpen(int user, int type, int index, const void* param);
+int scePadRead(int handle, void* data, int n);
+
+int sceNpTrophyCreateContext(int* ctx, int user, unsigned label, unsigned long options);
+int sceNpTrophyCreateHandle(int* handle);
+int sceNpTrophyRegisterContext(int ctx, int handle, unsigned long options);
+int sceNpTrophyUnlockTrophy(int ctx, int handle, int id, int* platinum);
+
 #define SCE_ETIMEDOUT 0x8002003C
 
 // ---- fibers: a ping-pong between two, each on its own stack.
@@ -289,6 +298,38 @@ static int audio_checks(void) {
   return failed;
 }
 
+// ---- the pad: the user's controller, at rest with no host input.
+
+static int pad_checks(void) {
+  int failed = 0;
+  unsigned char data[2][0x80];
+  failed += test_check(140, scePadInit(), 0);
+  const int h = scePadOpen(1, 0, 0, 0);
+  failed += test_check(141, h, 1);
+  failed += test_check(142, (unsigned)scePadOpen(1, 0, 0, 0), 0x80920004);  // opened already
+  failed += test_check(143, (unsigned)scePadRead(h, data, 0), 0x80920001);
+  failed += test_check(144, scePadRead(h, data, 2), 1);
+  failed += test_check(145, *(unsigned*)data[0] == 0 && data[0][4] == 0x80 && data[0][7] == 0x80 &&
+                                data[0][0x4C] == 1,
+                       1);  // no buttons, sticks centred, connected
+  return failed;
+}
+
+// ---- trophies, kept per service label.
+
+static int trophy_checks(void) {
+  int failed = 0, ctx = 0, h = 0, platinum = 0;
+  failed += test_check(150, sceNpTrophyCreateContext(&ctx, 1, 0, 0), 0);
+  failed += test_check(151, sceNpTrophyCreateHandle(&h), 0);
+  failed += test_check(152, sceNpTrophyRegisterContext(ctx, h, 0), 0);
+  failed += test_check(153, sceNpTrophyUnlockTrophy(ctx, h, 3, &platinum), 0);
+  failed += test_check(154, platinum, -1);
+  failed += test_check(155, (unsigned)sceNpTrophyUnlockTrophy(ctx, h, 3, &platinum), 0x8055160C);
+  failed += test_check(156, (unsigned)sceNpTrophyUnlockTrophy(ctx, h, 200, &platinum), 0x8055160A);
+  return failed;
+}
+
 int system_checks(void) {
-  return fiber_checks() + dir_checks() + gpu_checks() + save_checks() + audio_checks();
+  return fiber_checks() + dir_checks() + gpu_checks() + save_checks() + audio_checks() +
+         pad_checks() + trophy_checks();
 }

@@ -65,20 +65,23 @@ struct Engines {
   bool warned_draw = false, warned_dispatch = false;
 };
 
-uint64_t GpuClock() {
-  // The GPU's 100 MHz reference clock.
+uint64_t Ns() {
   return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                       std::chrono::steady_clock::now().time_since_epoch())
-                      .count()) /
-         10;
+                      .count());
 }
+// The GPU's clocks: the 100 MHz reference (global) clock and the 800 MHz
+// core clock.
+uint64_t GlobalClock() { return Ns() / 10; }
+uint64_t CoreClock() { return Ns() * 4 / 5; }
 
 void WriteMem(gaddr a, uint32_t sel, uint64_t data) {
   switch (sel) {
     case 0: break;
     case 1: Wr32(a, uint32_t(data)); break;
     case 2: Wr64(a, data); break;
-    case 3: Wr64(a, GpuClock()); break;
+    case 3: Wr64(a, GlobalClock()); break;
+    case 4: Wr64(a, CoreClock()); break;
     default: FatalF("GPU: end-of-pipe data select %u not implemented yet", sel);
   }
 }
@@ -185,17 +188,29 @@ bool Step(Engines& e, Stream& s, bool ce) {
       break;
     }
     case kDmaData: {
+      // Sources: memory (0, or 3 through the L2), GDS (1), data (2);
+      // destinations: memory (0), GDS (1). The command's DAS/SAS (bits
+      // 27/26) put either in register space, SAIC/DAIC (28/29) keep its
+      // address from incrementing.
       const uint32_t src_sel = (d[0] >> 29) & 3, dst_sel = (d[0] >> 20) & 3;
       const uint32_t bytes = d[5] & 0x1FFFFF;
+      const bool dst_reg = d[5] & 0x08000000, src_reg = d[5] & 0x04000000;
+      const bool dst_fixed = d[5] & 0x20000000, src_fixed = d[5] & 0x10000000;
       const gaddr dst = d[3] | uint64_t(d[4]) << 32;
-      if (dst_sel != 0) FatalF("GPU: DMA_DATA to destination %u not implemented yet", dst_sel);
-      if (d[5] & 0x30000000) FatalF("GPU: DMA_DATA without address increment not implemented yet");
+      const bool src_mem = src_sel == 0 || src_sel == 3;
+      if (dst_sel == 0 && dst_reg && dst_fixed && src_mem && !src_reg) {
+        // Memory read into one register: Gnm's prefetch into the L2. Only
+        // the cache sees the data.
+        break;
+      }
+      if (dst_sel != 0 || dst_reg || dst_fixed || src_reg || (src_mem && src_fixed))
+        FatalF("GPU: DMA_DATA %08X %08X not implemented yet", d[0], d[5]);
       if (src_sel == 2) {
         for (uint32_t i = 0; i + 4 <= bytes; i += 4) Wr32(dst + i, d[1]);
-      } else if (src_sel == 0) {
+      } else if (src_mem) {
         std::memmove(GPtr(dst), GPtr(d[1] | uint64_t(d[2]) << 32), bytes);
       } else {
-        FatalF("GPU: DMA_DATA from source %u not implemented yet", src_sel);
+        FatalF("GPU: DMA_DATA from GDS not implemented yet");
       }
       break;
     }

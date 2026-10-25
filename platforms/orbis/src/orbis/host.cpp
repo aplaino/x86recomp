@@ -24,7 +24,7 @@ std::vector<void (*)(const SDL_Event&)> g_sinks;
 bool g_video_up = false;
 
 void PumpEvents() {
-  if (!g_video_up) return;
+  if (!SDL_WasInit(0)) return;
   SDL_Event e;
   while (SDL_PollEvent(&e)) {
     // Closing the window is switching the console off.
