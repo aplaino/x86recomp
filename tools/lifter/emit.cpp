@@ -649,6 +649,11 @@ class InsnEmitter {
   bool TryVexBridge();
   bool vex_ = false;
   std::map<int, std::string> xsub_;
+  // fnstsw ax: the status word into ax, the rest of the register kept.
+  std::string StoreAx(const std::string& v) {
+    if (X64()) return WriteReg(ZYDIS_REGISTER_AX, v);
+    return "eax = ::recomp::lift::SetLo16(eax, " + v + ");";
+  }
   void EmitLocked();
   void EmitWideMem();
   void Emit64();
@@ -1031,7 +1036,7 @@ void InsnEmitter::EmitX87() {
       if (mem >= 0)
         L(Fmt("::recomp::lift::Wr<uint16_t>(B, m%d, ::recomp::x87::StatusWord(c.fpu));", mem));
       else
-        L("eax = ::recomp::lift::SetLo16(eax, ::recomp::x87::StatusWord(c.fpu));");
+        L(StoreAx("::recomp::x87::StatusWord(c.fpu)"));
       return;
     case ZYDIS_MNEMONIC_FNSTCW:
       L(Fmt("::recomp::lift::Wr<uint16_t>(B, m%d, ::recomp::x87::ControlWord(c.fpu));", mem));
@@ -1284,7 +1289,7 @@ bool InsnEmitter::EmitX87Fast(X87Sim& sim) {
       if (mem >= 0)
         L(Fmt("::recomp::lift::Wr<uint16_t>(B, m%d, %s);", mem, v.c_str()));
       else
-        L(Fmt("eax = ::recomp::lift::SetLo16(eax, %s);", v.c_str()));
+        L(StoreAx(v));
       return sim.ok;
     }
     case ZYDIS_MNEMONIC_FNOP:
