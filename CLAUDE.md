@@ -14,6 +14,8 @@ a game is where it came up.
   - ~/Documents/Programming/Recomp/Travellers_Tales/LSWTCS (LEGO Star
     Wars: The Complete Saga)
   - ~/Documents/Programming/Recomp/KEX/Q2E (Quake II Enhanced, x64)
+  - ~/Documents/Programming/Recomp/PS4/GravityRush (Gravity Rush
+    Remastered, PS4; the platform module RECOMP_PLATFORM_ORBIS)
 
 ## Build and test
 - Standalone (library tests only):

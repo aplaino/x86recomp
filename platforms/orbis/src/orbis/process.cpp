@@ -1,6 +1,7 @@
 #include "orbis/process.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -24,9 +25,9 @@ std::vector<Loaded> g_modules;
 std::map<std::pair<std::string, std::string>, gaddr> g_exports;  // (library, NID)
 
 // Static TLS (FreeBSD's variant II): every module's block sits below the
-// thread pointer, at tls.offset; the TCB at the thread pointer holds its
-// own address, then the DTV ([0] generation, [1] count, [1 + i] module
-// i's block).
+// thread pointer, at tls.offset; the TCB at the thread pointer (process.h)
+// holds its own address, then the DTV ([0] generation, [1] count, [1 + i]
+// module i's block).
 uint64_t g_tls_size = 0, g_tls_align = 16;
 uint64_t g_tls_modules = 0;
 constexpr uint64_t kTcbSize = 0x40;
@@ -58,14 +59,37 @@ void ThreadInit(Thread* t) {
   t->ctx.fs_base = tp;
 }
 
+// Dev aid: <ID>_NID_NAMES names a file of symbol names (one per line)
+// that imports without a handler are named by (else by NID) in traces
+// and errors.
+const std::map<std::string, std::string>& DevNames() {
+  static const std::map<std::string, std::string> names = [] {
+    std::map<std::string, std::string> m;
+    if (const char* path = Env("NID_NAMES"))
+      if (std::FILE* f = std::fopen(path, "r")) {
+        char line[1024];
+        while (std::fgets(line, sizeof line, f)) {
+          std::string n = line;
+          while (!n.empty() && (n.back() == '\n' || n.back() == '\r')) n.pop_back();
+          if (!n.empty()) m.emplace(Nid(n), n);
+        }
+        std::fclose(f);
+      }
+    return m;
+  }();
+  return names;
+}
+
 gaddr Bind(const ElfImport& imp, const std::string& module) {
   if (auto it = g_exports.find({imp.library, imp.nid}); it != g_exports.end()) return it->second;
   if (const std::string* name = NameOfNid(imp.library, imp.nid))
     return hle::BindImport(imp.library, *name);
+  auto dev = DevNames().find(imp.nid);
+  const std::string& shown = dev != DevNames().end() ? dev->second : imp.nid;
   if (imp.type == 1)
     FatalF("%s imports data %s!%s (module %s), which nothing defines", module.c_str(),
-           imp.library.c_str(), imp.nid.c_str(), imp.module.c_str());
-  return hle::BindImport(imp.library, imp.nid);  // fatal when called
+           imp.library.c_str(), shown.c_str(), imp.module.c_str());
+  return hle::BindImport(imp.library, shown);  // fatal when called
 }
 
 // argc, argv[], NULL, an empty environment and auxv, then the strings.
@@ -86,6 +110,8 @@ gaddr ArgBlock(const std::vector<std::string>& args) {
 }
 
 }  // namespace
+
+gaddr ProcParam() { return g_modules.empty() ? 0 : g_modules[0].img.proc_param; }
 
 NidName::NidName(const char* library, const char* name) {
   NidNames()[{library, Nid(name)}] = name;

@@ -1,11 +1,15 @@
-// The eboot of orbis_process_test: built for FreeBSD x86-64, made an SCE
-// ELF (tools/orbis_sce_elf.py), lifted and run by the test. Each check
-// reports to the test's HLE (libTest); _start returns how many failed.
+// The eboot of orbis_process_test: built for FreeBSD x86-64 with kernel.c,
+// made an SCE ELF (tools/orbis_sce_elf.py), lifted and run by the test.
+// Each check reports to the test's HLE (libTest); _start returns how many
+// failed.
 
 // libTest (the test's HLE)
 int test_check(int id, long got, long want);
 int test_double(int id, double d, long n);  // d in xmm0, n in rsi
 extern int test_value;                      // a data export: 1234
+
+// kernel.c: the libkernel HLE's checks (40 on).
+int kernel_checks(void);
 
 // libTestPrx (prx.c)
 int prx_add(int a, int b);
@@ -66,5 +70,5 @@ long _start(struct args* a, void (*cleanup)(void)) {
 
   static const long want[] = {11, 13, 12, 28, 12, 23, 34, -1};
   for (int k = 0; k < 8; k++) failed += test_check(16 + k, sw(k, 1), want[k]);
-  return failed;
+  return failed + kernel_checks();
 }

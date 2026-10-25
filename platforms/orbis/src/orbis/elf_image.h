@@ -73,6 +73,7 @@ struct ElfImage {
   gaddr link_base = 0;    // the lowest p_vaddr
   gaddr entry = 0;
   gaddr init = 0, fini = 0;  // DT_INIT / DT_FINI, 0 if absent
+  gaddr proc_param = 0;      // PT_SCE_PROCPARAM (an eboot's), 0 if absent
   std::vector<ElfSegment> segments;
   // The code: the executable segment up to its last .eh_frame function or
   // PLT stub (the segment also holds .rodata and .eh_frame); and the

@@ -1208,7 +1208,14 @@ The seams (core, generic):
   constructors and its module_start.
 - orbis_process_test runs C built for FreeBSD x86-64 (clang, ld.lld),
   made SCE ELFs by tools/orbis_sce_elf.py and lifted at build time,
-  through the loader.
+  through the loader and libkernel's HLE.
+- System libraries' HLE (platforms/orbis/src/orbis/hle, one shared
+  library per library or family: recomp_orbis_kernel, ..._system, ...)
+  registers by name; platforms/orbis/docs/hle.md has their choices and
+  the values not yet measured on hardware. A dev aid names imports
+  without a handler: <ID>_NID_NAMES is a local file of symbol names
+  (one per line) that the loader hashes, so an unimplemented import's
+  error shows its name.
 
 Layout: platforms/<name>/ (its loader, ABI glue, process bring-up and HLE
 libraries as recomp_<name>_* shared libraries, its docs and tests), with

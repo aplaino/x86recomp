@@ -69,6 +69,7 @@ void Xgetbv(Ctx& c);                           // ecx in, edx:eax out
 #endif
 void Cpuid(Ctx& c);                            // eax/ecx in, eax..edx out
 uint64_t Rdtsc(Ctx& c);
+inline constexpr uint64_t kTscHz = 3000000000;  // the rate Rdtsc counts at
 
 namespace lift {
 

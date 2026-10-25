@@ -13,6 +13,10 @@
 
 namespace recomp::orbis {
 
+// Each thread's TCB (Ctx::fs_base): its own address, its DTV, then
+// libkernel's per-thread words: errno at kTcbErrno.
+inline constexpr uint64_t kTcbErrno = 0x20;
+
 struct Prx {
   std::string path;  // host path
   gaddr base;        // the lifter's --base for it
@@ -24,6 +28,9 @@ struct Config {
   std::vector<std::string> args;  // argv, argv[0] first
   uint64_t main_stack = 8u << 20;
 };
+
+// The eboot's process parameters (PT_SCE_PROCPARAM), 0 if it has none.
+gaddr ProcParam();
 
 // Runs the process to the end of its entry point; returns the exit code.
 int RunProcess(const GameConfig& game, const std::string& game_dir, const Config& config);

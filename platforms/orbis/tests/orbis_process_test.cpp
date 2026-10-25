@@ -3,12 +3,14 @@
 // the Orbis loader: imports bound by NID to the HLE and across modules,
 // data imports both ways, static TLS and the TCB through fs, general-
 // dynamic TLS (__tls_get_addr), the PRX's _init before _start, _start's
-// arguments, a switch table and System V argument order. Here is libTest,
-// the HLE the eboot imports.
+// arguments, a switch table and System V argument order; then libkernel's
+// HLE (e2e/kernel.c). Here is libTest, the HLE the eboot imports.
 //
 // usage: orbis_process_test eboot.elf prx.elf
 
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 
 #include "orbis/hle.h"
 #include "orbis/process.h"
@@ -59,8 +61,13 @@ int main(int argc, char** argv) {
   config.eboot = argv[1];
   config.prxs = {{argv[2], 0x800000000}};
   config.args = {"eboot", "hello"};
-  const int r = recomp::orbis::RunProcess(game, "", config);
-  constexpr int kChecks = 23;
+  // The game directory (/app0): one file.
+  const auto dir = std::filesystem::temp_directory_path() / "orbis_process_test";
+  std::filesystem::create_directories(dir);
+  std::ofstream(dir / "data.txt") << "hello\n";
+  const int r = recomp::orbis::RunProcess(game, dir.string(), config);
+  std::filesystem::remove_all(dir);
+  constexpr int kChecks = 23 + 23;
   std::printf("%d checks, %d failed, _start returned %d\n", g_checks, g_failed, r);
   const bool ok = r == 0 && g_failed == 0 && g_checks == kChecks;
   std::printf("%s\n", ok ? "orbis_process: ok" : "orbis_process: FAILED");

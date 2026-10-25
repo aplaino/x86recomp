@@ -511,6 +511,7 @@ void Cpuid(Ctx& c) {
 uint64_t Rdtsc(Ctx& c) {
   (void)c;
   using namespace std::chrono;
+  static_assert(kTscHz == 3000000000);
   return 3 * uint64_t(
       duration_cast<nanoseconds>(steady_clock::now().time_since_epoch())
           .count());
