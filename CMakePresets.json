@@ -27,7 +27,8 @@
       "name": "horizon-aarch64-qemu",
       "inherits": "horizon",
       "binaryDir": "${sourceDir}/out/build/horizon-aarch64-qemu",
-      "toolchainFile": "${sourceDir}/cmake/aarch64-linux-qemu.cmake"
+      "toolchainFile": "${sourceDir}/cmake/aarch64-linux-qemu.cmake",
+      "cacheVariables": { "RECOMP_HOST": "OFF" }
     }
   ],
   "buildPresets": [
