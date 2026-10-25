@@ -28,7 +28,8 @@ run(clang, *cflags, "-DLIB_KERNEL", os.path.join(here, "stubs.c"), "-o", o("kern
 run(lld, "-shared", "-soname", "libTest", o("test_stub.o"), "-o", o("libTest.so"))
 run(lld, "-shared", "-soname", "libkernel", o("kernel_stub.o"), "-o", o("libkernel.so"))
 LIBS = (("libSceFiber", "LIB_FIBER"), ("libSceGnmDriver", "LIB_GNM"),
-        ("libSceSaveData", "LIB_SAVEDATA"), ("libSceAudioOut", "LIB_AUDIOOUT"))
+        ("libSceSaveData", "LIB_SAVEDATA"), ("libSceAudioOut", "LIB_AUDIOOUT"),
+        ("libScePad", "LIB_PAD"), ("libSceNpTrophy", "LIB_TROPHY"))
 for lib, define in LIBS:
     run(clang, *cflags, "-D" + define, os.path.join(here, "stubs.c"), "-o", o(lib + "_stub.o"))
     run(lld, "-shared", "-soname", lib, o(lib + "_stub.o"), "-o", o(lib + ".so"))
