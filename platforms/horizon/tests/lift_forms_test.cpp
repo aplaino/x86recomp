@@ -181,6 +181,9 @@ int main(int argc, char** argv) {
         native_faults++;
       } else {
         native_checks++;
+        // macOS may zero x18 under any form (forms using it are skipped
+        // above), so the CPU is no oracle for it; Unicorn still is.
+        if (kX18Reserved) ns.x[18] = c.x[18];
         uint32_t native_crc = Crc32(buf, kBufSize);
         bool lifted_ok = native_crc == crc && ns.nzcv == c.nzcv &&
                          !std::memcmp(ns.x, c.x, sizeof ns.x);
