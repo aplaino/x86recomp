@@ -1186,7 +1186,12 @@ only those below it.
   gdi32 and the rest of Windows (recomp_win32), and of DirectX and the
   middleware, one library per DLL (recomp_d3d9, recomp_mss32, ...).
   Console platforms are modules the same way, on the core of their CPU;
-  a game's build compiles and links only its own platform.
+  a game's build compiles and links only its own platform. The Xbox 360
+  (platforms/xbox360, RECOMP_PLATFORM_XBOX360; its design is
+  platforms/xbox360/ARCHITECTURE.md) is one on the PowerPC core: it turns
+  on RECOMP_PPC and adds the XEX2 image reader (for the Xenon's code) and
+  LZX to recomp_lift_ppc, and the kernel and system library HLE behind
+  the core's Import, Sc, Trap and TimeBase.
 
 The x86 core knows no platform. A platform's loader (Win32's
 RunProcess) creates the process (StartProcess: the arena and the thunk
@@ -1220,7 +1225,7 @@ builds, such as a lifter's tests cross built for a host whose sysroot
 has none of its libraries. Each core and platform option is
 independent, so one tree can build several together (CMakePresets:
 debug for the x86 core with Win32, x86 for the x86 core alone, ppc for
-the PowerPC core alone).
+the PowerPC core alone, xbox360 for the Xbox 360 alone).
 
 ## Roadmap
 - 64-bit guests (above).
