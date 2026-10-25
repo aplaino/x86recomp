@@ -1,6 +1,7 @@
 // Registers the lifter's function table (generated/table.cpp) with the
-// runtime before main(). Compiled into each game's lifted code by
-// recomp_add_lifted_ppc (CMakeLists.txt), not into the runtime library.
+// runtime when the lifted module's library loads. Compiled into each
+// lifted module by recomp_add_lifted_ppc (CMakeLists.txt), not into the
+// runtime library.
 
 #include "ppc/lifted.h"
 

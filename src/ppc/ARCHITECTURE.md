@@ -150,7 +150,21 @@ mask bit 4, an unused immediate).
   around anything that can observe them.
 - Import thunks (from a platform's image reader) become `Import(c, module,
   ordinal, va)`, defined by the platform. `sc` calls `Sc()`, traps that
-  fire `Trap()`, `mftb` `TimeBase()`.
+  fire `Trap()`, `mftb` (and `mfspr` of TBL or TBU, its later spelling)
+  `TimeBase()`.
+
+## Lifted modules
+`recomp_add_lifted_ppc(<target> <dir> LINK <platform library>)` makes a
+lifted module: a shared library of recomp_lift_ppc's output, linked to
+the platform library that defines what lifted code calls. Its symbols
+are hidden (calls between lifted functions are direct, and the dynamic
+symbol table holds none of them), and it hands its function table to the
+dispatcher as it loads (src/ppc/lifted_table.cpp). The dispatcher holds
+the tables of every lifted module loaded; two modules with a function at
+the same address are a fatal error, and `HasLiftedModule` tells a loader
+whether a module made from its image's code (`TextHash`) is there.
+Nothing refers to a lifted module's symbols, so programs link it
+--no-as-needed; `recomp_bundle()` puts it next to the program.
 
 ## Tests and the oracle
 The oracle is QEMU's PowerPC 970 bare metal (`qemu-system-ppc64 -M none

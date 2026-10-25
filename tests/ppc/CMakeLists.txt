@@ -64,10 +64,15 @@ add_custom_command(OUTPUT ${_funcs} "${_gen}/table.cpp" "${_gen}/forms.cpp" "${_
   DEPENDS recomp_lift_ppc "${_bin}/fixture.elf"
   COMMENT "Lifting the PowerPC fixture")
 
-recomp_add_lifted_ppc_files(ppc_fixture_code ${_funcs} "${_gen}/table.cpp")
-add_executable(ppc_fixture fixture_main.cpp "${RECOMP_ROOT}/tools/lifter_ppc/elf.cpp" $<TARGET_OBJECTS:ppc_fixture_code>)
-target_include_directories(ppc_fixture PRIVATE "${_src}/oracle" "${RECOMP_ROOT}/tools/lifter_ppc")
-target_link_libraries(ppc_fixture PRIVATE recomp_ppc)
+add_library(ppc_fixture_platform SHARED fixture_platform.cpp)
+target_include_directories(ppc_fixture_platform PRIVATE "${_src}/oracle")
+target_link_libraries(ppc_fixture_platform PUBLIC recomp_ppc)
+recomp_bundle(ppc_fixture_platform)
+recomp_add_lifted_ppc_files(ppc_fixture_code ${_funcs} "${_gen}/table.cpp" LINK ppc_fixture_platform)
+add_executable(ppc_fixture fixture_main.cpp "${RECOMP_ROOT}/tools/lifter_ppc/elf.cpp")
+target_include_directories(ppc_fixture PRIVATE "${RECOMP_ROOT}/tools/lifter_ppc")
+target_link_libraries(ppc_fixture PRIVATE recomp_ppc ppc_fixture_platform ppc_fixture_code)
+recomp_bundle(ppc_fixture)
 
 # --- the form oracle: every form's native stub, bare metal -------------------
 ppc_objects(_forms_objs "${_src}/oracle/crt0.S" "${_src}/oracle/forms_main.c" "${_gen}/forms_native.S"

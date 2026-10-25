@@ -48,7 +48,7 @@ extern const uint32_t kLiftedFunctionCount;
 extern const uint64_t kLiftedTextHash;
 // Hands that table to the runtime (ppc/dispatch.cpp), which as a shared
 // library cannot refer to it; called from ppc/lifted_table.cpp, which
-// recomp_add_lifted_ppc compiles into the game's lifted code.
+// recomp_add_lifted_ppc compiles into each lifted module.
 void RegisterLiftedFunctions(const LiftedFn* fns, uint32_t count, uint64_t text_hash);
 
 // Runtime services called from lifted code. `va` is always the guest

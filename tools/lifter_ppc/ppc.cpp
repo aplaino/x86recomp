@@ -139,6 +139,8 @@ void Primary31(Insn& i) {
     case 339: case 467: case 371:
       i.spr = uint16_t(F(i.raw, 11, 5) | F(i.raw, 16, 5) << 5);
       i.op = xo == 339 ? Op::kMfspr : xo == 467 ? Op::kMtspr : Op::kMftb;
+      // MFSPR from TBL or TBU is MFTB (the ISA's later spelling of it).
+      if (i.op == Op::kMfspr && (i.spr == kTbl || i.spr == kTbu)) i.op = Op::kMftb;
       if (i.op == Op::kMftb && i.spr != kTbl && i.spr != kTbu) i.op = Op::kInvalid;
       return;
     case 512:

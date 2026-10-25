@@ -123,6 +123,13 @@ are the exception: changing those still recompiles every game.
   everything else; the x86 runtime adds the guest state, backtraces and
   crash file to FatalF through `g_fatal_report`.
 
+Console platforms (on the PowerPC core first: src/ppc/ARCHITECTURE.md,
+"Lifted modules") go one step further: a lifted module is a shared
+library of its own too, and recomp_bundle() puts the program and every
+library it loads in one directory, found through an rpath relative to
+them, so each part (lifted code, the runtime, an HLE module) is a file
+that can be replaced alone. The x86 path may follow.
+
 Game-specific patches to lifted code (fixes, enhancements such as
 widescreen) live in the game project as hand-written replacements of
 specific lifted functions. `replace <va>` in a manifest makes the lifter
