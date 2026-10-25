@@ -101,8 +101,18 @@ recomp_add_lifted_ppc_files(xbox360_title_code "${_title_gen}/funcs_000.cpp" "${
 add_executable(xbox360_title title_main.cpp)
 target_link_libraries(xbox360_title PRIVATE recomp_xbox360 recomp_xbox360_xboxkrnl xbox360_title_code)
 recomp_bundle(xbox360_title)
-add_test(NAME xbox360_runtime COMMAND xbox360_title "${_bin}/title.xex")
-set_tests_properties(xbox360_runtime PROPERTIES FAIL_REGULAR_EXPRESSION "FAIL|fatal" TIMEOUT 120)
+# Its disc (the files title.c reads) and a data directory, emptied before
+# each run.
+set(_title_game "${CMAKE_CURRENT_BINARY_DIR}/title_game")
+set(_title_data "${CMAKE_CURRENT_BINARY_DIR}/title_data")
+file(WRITE "${_title_game}/data.bin" "0123456789ABCDEFGHIJKLMNOPQRSTUV")
+file(WRITE "${_title_game}/Sub/Name.TXT" "hello")
+file(WRITE "${_title_game}/Sub/other.dat" "x")
+add_test(NAME xbox360_runtime_data COMMAND "${CMAKE_COMMAND}" -E rm -rf "${_title_data}")
+set_tests_properties(xbox360_runtime_data PROPERTIES FIXTURES_SETUP xbox360_runtime_data)
+add_test(NAME xbox360_runtime COMMAND xbox360_title "${_bin}/title.xex" "${_title_game}" "${_title_data}")
+set_tests_properties(xbox360_runtime PROPERTIES FAIL_REGULAR_EXPRESSION "FAIL|fatal" TIMEOUT 120
+                     FIXTURES_REQUIRED xbox360_runtime_data)
 
 # --- the form oracle: every form's native stub, bare metal -------------------
 ppc_objects(_forms_objs "${_src}/oracle/crt0.S" "${_src}/oracle/forms_main.c" "${_gen}/forms_native.S"

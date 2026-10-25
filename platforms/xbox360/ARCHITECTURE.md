@@ -292,6 +292,30 @@ without a lock.
   time is the host's, KeTimeStampBundle is kept current every
   millisecond.
 
+### Files
+The file namespace (`src/xbox360/fs.{h,cpp}`) is the kernel's: devices,
+each a host directory, and symbolic links to them.
+- `\Device\CdRom0` is the title's disc, read-only: the directory of its
+  files (`GameConfig::game_dir`, by default the XEX's). GAME: (which xam
+  makes for a title it launches) and D: name it.
+- `\Device\Harddisk0\Partition1` is the hard disk's data partition,
+  writable: `Partition1` in the per-user data directory
+  (`GameConfig::data_dir`, by default $XDG_DATA_HOME/<id>).
+- ObCreateSymbolicLink adds links (`\??\name:`), which may name another.
+  A path is resolved link by link, then on its device component by
+  component, case-insensitively as the console's file systems compare
+  names; "." and ".." never leave the device.
+- A file handle names a kernel object (a notification event, signalled
+  as each I/O on the file completes) with the host file behind it. I/O
+  is carried out at once: an asynchronous request completes before it
+  returns, its event set and its status block written. APC completion
+  routines are not supported yet (fatal).
+- NtQueryDirectoryFile returns one entry per call, the mask applying
+  from the first query, in name order. FileFsAttributeInformation names
+  the disc's file system GDFX and the hard disk's FATX; their allocation
+  units are 2 KiB and 16 KiB.
+- Information classes without a handler are fatal and name the class.
+
 ## Tests and the oracle
 The oracle is QEMU's PowerPC 970 bare metal (`qemu-system-ppc64 -M none
 -cpu 970fx`), switched to 32-bit mode by the test programs' start-up
@@ -331,8 +355,10 @@ memory; any other interrupt fails the run.
   (`xbox360_elf2xex --import` writes its import library), is lifted into
   a lifted module and run on the runtime. It checks what the kernel gives
   it (memory and the physical views, threads, TLS, r13, waits and
-  objects, critical sections, formatting, variables, time) and exits
-  with the number of failed checks.
+  objects, critical sections, formatting, variables, time, files on its
+  disc and on the hard disk) and exits with the number of failed checks.
+  The test writes the disc's files and empties the data directory before
+  each run.
 - Not covered by QEMU: what the 970 does differently from the Xenon
   (DCBZ's size, the undefined cases above, the estimates, the LVLX
   family) and VMX128 beyond its VMX twins. Those wait for a console.
@@ -345,7 +371,7 @@ memory; any other interrupt fails the run.
 4. Runtime: the arena with the physical memory views, process and
    thread bring-up (r13 and the thread's kernel structures), the kernel
    and xam HLE, written against the system's own behaviour. In progress:
-   the libraries and their layout, memory, threads, synchronisation and
-   the first kernel exports are done; next the file system, the title's
-   module (Xex*), timers and APCs, then xam.
+   the libraries and their layout, memory, threads, synchronisation,
+   files and the first kernel exports are done; next the title's module
+   (Xex*), timers and APCs, then xam.
 5. Xenos: the command processor and shaders through gfx::Device.

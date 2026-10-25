@@ -108,6 +108,11 @@ std::string ReadString(uint32_t va) {
   return s;
 }
 
+std::string ReadAnsiString(uint32_t ansi_string) {
+  uint32_t buf = Rd32(ansi_string + 4);
+  return buf ? std::string(reinterpret_cast<const char*>(Mem() + buf), Rd16(ansi_string)) : std::string();
+}
+
 std::u16string ReadString16(uint32_t va) {
   std::u16string s;
   for (uint16_t u; (u = Rd16(va)) != 0; va += 2) s.push_back(char16_t(u));

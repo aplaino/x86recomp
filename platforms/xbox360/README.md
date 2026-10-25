@@ -15,8 +15,8 @@ the same output as on a PowerPC 970 in 32-bit mode, every instruction
 form checked bit for bit against it (VMX128's as their VMX equivalents).
 The runtime maps the console's address space with its physical views,
 runs a title's threads with their kernel structures, and has the
-kernel's memory, thread, synchronisation, string and formatting exports
-that a test title checks; files, the title's module, timers and xam are
+kernel's memory, thread, synchronisation, file, string and formatting
+exports that a test title checks; the title's module, timers and xam are
 next.
 
 ## Using it
