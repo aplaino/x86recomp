@@ -30,12 +30,19 @@
       "cacheVariables": {
         "RECOMP_X86": "OFF", "RECOMP_PLATFORM_WIN32": "OFF", "RECOMP_HOST": "OFF", "RECOMP_PPC": "ON"
       }
+    },
+    {
+      "name": "orbis",
+      "inherits": "debug",
+      "binaryDir": "${sourceDir}/out/build/orbis",
+      "cacheVariables": { "RECOMP_PLATFORM_WIN32": "OFF", "RECOMP_PLATFORM_ORBIS": "ON" }
     }
   ],
   "buildPresets": [
     { "name": "debug", "configurePreset": "debug" },
     { "name": "release", "configurePreset": "release" },
     { "name": "x86", "configurePreset": "x86" },
-    { "name": "ppc", "configurePreset": "ppc" }
+    { "name": "ppc", "configurePreset": "ppc" },
+    { "name": "orbis", "configurePreset": "orbis" }
   ]
 }
