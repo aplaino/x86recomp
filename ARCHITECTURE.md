@@ -1156,6 +1156,23 @@ libraries as recomp_<name>_* shared libraries, its docs and tests), with
 its own CMakeLists.txt that the top level includes only when the option
 is on. Game projects for that platform turn it on; nothing else does.
 
+The x86 path is its own option, RECOMP_X86 (default on): a game for
+another CPU turns it off and builds without the x86 lifter, CPU model or
+Win32 HLE.
+
+Guest and host are separate axes. Every guest's lifted code is portable
+C++, so each one runs on every host (Linux x86-64, macOS arm64), and
+what a native program needs on its host is one host layer for all of
+them (cmake/host.cmake, RECOMP_HOST, on by default): SDL3, ffmpeg,
+LLVM's demanglers, gfx::Device on Vulkan or Metal with the shader
+compilers, the software mixer and logging (recomp_log). The x86 path
+and every platform module build on it. RECOMP_HOST off is only for
+CPU-only test builds, such as a lifter's tests cross built for a host
+whose sysroot has none of those libraries.
+
+Each guest option is independent, so one tree can build the x86 path
+and any console platforms together.
+
 ## Roadmap
 - 64-bit guests (above).
 - EAX for games on DirectSound3D (IDirectSound3DBuffer property sets),
