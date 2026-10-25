@@ -16,6 +16,7 @@ namespace {
 constexpr uint32_t kPtLoad = 1, kPtDynamic = 2, kPtTls = 7;
 constexpr uint32_t kPtGnuEhFrame = 0x6474E550;
 constexpr uint32_t kPtSceRelro = 0x61000010, kPtSceDynlibData = 0x61000000;
+constexpr uint32_t kPtSceProcParam = 0x61000001;
 constexpr uint32_t kPfX = 1, kPfW = 2;
 
 constexpr int64_t kDtInit = 0x0C, kDtFini = 0x0D;
@@ -188,6 +189,8 @@ bool ElfImage::Map(const std::string& path, GuestMemory& mem, std::string* err, 
       segments.push_back({image_base + p.va, p.memsz, p.flags});
     }
   entry = e_entry + image_base;
+  for (const Ph& p : phs_)
+    if (p.type == kPtSceProcParam) proc_param = image_base + p.va;
   for (const Ph& p : phs_)
     if (p.type == kPtTls && p.memsz) {
       tls.init_va = image_base + p.va;

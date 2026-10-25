@@ -35,7 +35,9 @@ run(sys.executable, sce, o("prx.so"), o("prx.elf"), "--prx", "--name", "libTestP
     "--lib", "libkernel=" + o("libkernel.so"))
 
 run(clang, *cflags, os.path.join(here, "eboot.c"), "-o", o("eboot.o"))
+run(clang, *cflags, os.path.join(here, "kernel.c"), "-o", o("kernel.o"))
 run(lld, "-pie", "--no-dynamic-linker", "--eh-frame-hdr", "-e", "_start", o("eboot.o"),
-    o("libTest.so"), o("prx.so"), "-o", o("eboot.so"))
+    o("kernel.o"), o("libTest.so"), o("prx.so"), o("libkernel.so"), "-o", o("eboot.so"))
 run(sys.executable, sce, o("eboot.so"), o("eboot.elf"), "--name", "eboot",
-    "--lib", "libTest=" + o("libTest.so"), "--lib", "libTestPrx=" + o("prx.so"))
+    "--lib", "libTest=" + o("libTest.so"), "--lib", "libTestPrx=" + o("prx.so"),
+    "--lib", "libkernel=" + o("libkernel.so"))
