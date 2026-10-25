@@ -35,4 +35,14 @@ void FreeHandle(gaddr h);
 gaddr ErrnoAddr(const Ctx& c);
 void SetErrno(const Ctx& c, int e);
 
+// Event queues (sceKernelCreateEqueue): FreeBSD kqueues, small integers
+// like the descriptors they are (other libraries pass them on as ints).
+// Other system libraries' HLE adds the events their objects deliver
+// (filter, ident) and triggers them; a triggered event is returned by
+// one wait (EV_CLEAR) with the data of its last trigger.
+bool AddEvent(uint32_t eq, uint64_t ident, int16_t filter, uint64_t udata);
+bool DeleteEvent(uint32_t eq, uint64_t ident, int16_t filter);
+// Triggers (ident, filter) in every queue it was added to.
+void TriggerEvent(uint64_t ident, int16_t filter, int64_t data);
+
 }  // namespace recomp::orbis::kernel

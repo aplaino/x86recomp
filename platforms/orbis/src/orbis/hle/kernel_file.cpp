@@ -13,8 +13,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <set>
 #include <string>
@@ -50,6 +52,18 @@ int FromHost(int e) {
 
 std::mutex g_mu;
 std::set<int> g_fds;  // host fds the guest opened
+// Directories being read (getdents): their entries, sorted by name for
+// reproducible runs, and how many the guest has had.
+struct DirEntry {
+  std::string name;
+  uint32_t ino;
+  uint8_t type;
+};
+struct DirRead {
+  std::vector<DirEntry> entries;
+  size_t next = 0;
+};
+std::map<int, DirRead> g_dirs;
 
 bool Owned(int fd) {
   std::lock_guard<std::mutex> l(g_mu);
@@ -119,6 +133,7 @@ int64_t Close(int fd) {
   {
     std::lock_guard<std::mutex> l(g_mu);
     if (!g_fds.erase(fd)) return -kEBADF;
+    g_dirs.erase(fd);
   }
   return ::close(fd) == 0 ? 0 : -FromHost(errno);
 }
@@ -160,6 +175,51 @@ int64_t Fstat(int fd, gaddr out) {
   if (::fstat(fd, &st) != 0) return -FromHost(errno);
   PutStat(out, st);
   return 0;
+}
+
+// getdents(2): FreeBSD 9's struct dirent records (d_fileno 4, d_reclen 2,
+// d_type 1, d_namlen 1, the name and its NUL padded to 4 bytes), as many
+// whole ones as fit; 0 at the end. *pos (if set) gets the position before.
+int64_t Getdents(int fd, gaddr buf, uint64_t n, gaddr pos) {
+  if (!Owned(fd)) return -kEBADF;
+  std::lock_guard<std::mutex> l(g_mu);
+  auto it = g_dirs.find(fd);
+  if (it == g_dirs.end()) {
+    const int dup = ::dup(fd);
+    DIR* d = dup < 0 ? nullptr : ::fdopendir(dup);
+    if (!d) {
+      const int e = errno;
+      if (dup >= 0) ::close(dup);
+      return -(e == ENOTDIR ? kEINVAL : FromHost(e));
+    }
+    DirRead r;
+    while (const dirent* e = ::readdir(d)) {
+      const uint8_t type = e->d_type == DT_DIR ? 4 : e->d_type == DT_REG ? 8 : e->d_type == DT_LNK ? 10 : 0;
+      r.entries.push_back({e->d_name, uint32_t(e->d_ino), type});
+    }
+    ::closedir(d);
+    std::sort(r.entries.begin(), r.entries.end(),
+              [](const DirEntry& a, const DirEntry& b) { return a.name < b.name; });
+    it = g_dirs.emplace(fd, std::move(r)).first;
+  }
+  DirRead& r = it->second;
+  if (pos) Wr64(pos, r.next);
+  uint64_t at = 0;
+  for (; r.next < r.entries.size(); r.next++) {
+    const DirEntry& e = r.entries[r.next];
+    const uint32_t len = uint32_t(std::min<size_t>(e.name.size(), 255));
+    const uint32_t rec = 8 + ((len + 4) & ~3u);
+    if (at + rec > n) break;
+    std::memset(GPtr(buf + at), 0, rec);
+    Wr32(buf + at, e.ino);
+    Wr16(buf + at + 4, uint16_t(rec));
+    GPtr(buf + at)[6] = e.type;
+    GPtr(buf + at)[7] = uint8_t(len);
+    std::memcpy(GPtr(buf + at + 8), e.name.data(), len);
+    at += rec;
+  }
+  if (!at && r.next < r.entries.size()) return -kEINVAL;  // no room for one record
+  return int64_t(at);
 }
 
 // read/write/pread/pwrite through a host buffer.
@@ -242,6 +302,15 @@ ORBIS_HLE("libkernel", sceKernelLseek, 3) {
 }
 ORBIS_HLE("libkernel", lseek, 3) {
   return Posix(c, Lseek(int(Arg(c, 0)), int64_t(Arg(c, 1)), int(Arg(c, 2))));
+}
+
+// int sceKernelGetdents(int fd, char* buf, int nbytes)
+ORBIS_HLE("libkernel", sceKernelGetdents, 3) {
+  return Sce(Getdents(int(Arg(c, 0)), Arg(c, 1), uint32_t(Arg(c, 2)), 0));
+}
+// int sceKernelGetdirentries(int fd, char* buf, int nbytes, long* basep)
+ORBIS_HLE("libkernel", sceKernelGetdirentries, 4) {
+  return Sce(Getdents(int(Arg(c, 0)), Arg(c, 1), uint32_t(Arg(c, 2)), Arg(c, 3)));
 }
 
 ORBIS_HLE("libkernel", sceKernelStat, 2) { return Sce(Stat(GStr(Arg(c, 0)), Arg(c, 1))); }

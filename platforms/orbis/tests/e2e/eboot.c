@@ -8,8 +8,10 @@ int test_check(int id, long got, long want);
 int test_double(int id, double d, long n);  // d in xmm0, n in rsi
 extern int test_value;                      // a data export: 1234
 
-// kernel.c: the libkernel HLE's checks (40 on).
+// kernel.c: the libkernel HLE's checks (40 on); system.c: the other
+// libraries' (70 on).
 int kernel_checks(void);
+int system_checks(void);
 
 // libTestPrx (prx.c)
 int prx_add(int a, int b);
@@ -70,5 +72,5 @@ long _start(struct args* a, void (*cleanup)(void)) {
 
   static const long want[] = {11, 13, 12, 28, 12, 23, 34, -1};
   for (int k = 0; k < 8; k++) failed += test_check(16 + k, sw(k, 1), want[k]);
-  return failed + kernel_checks();
+  return failed + kernel_checks() + system_checks();
 }

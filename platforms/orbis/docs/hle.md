@@ -34,6 +34,34 @@ library.
   confirm), libSceUserService (one user, id 1, "Player"),
   libSceSysmodule (system modules are HLE: loading one records it),
   libSceScreenShot (the system takes none).
+  Event queues: small integers, as the kqueue descriptors they are; an
+  event is returned once per trigger (EV_CLEAR) with its last data.
+  Directories: getdents/getdirentries return FreeBSD 9's struct dirent
+  records, sorted by name.
+- recomp_orbis_libc_internal: also the memory functions (memcpy,
+  memset, malloc and free on a heap of its own).
+- recomp_orbis_fiber: libSceFiber, fibers as host coroutines on the
+  game's context memory. The SceFiber block gets 11.00's magic words and
+  idle state only.
+- recomp_orbis_videoout: libSceVideoOut's main port (handle 1). Flips
+  queue and run at the vblank the flip rate allows, on the host thread
+  (orbis/host.h); the flip event's ident is 6 << 48 | handle << 40 and
+  its data the flip argument << 16 | 1 << 12 (one flip reported). Linear
+  A8R8G8B8 and A8B8G8R8 buffers are shown; tiled ones are fatal until
+  the GPU draws.
+- recomp_orbis_gnm: libSceGnmDriver. Its packet builders write what
+  11.00's do (the same dwords; a padding NOP's body is left alone, the
+  NOP-wrapped context registers of the Update*Shader functions included,
+  which the command processor applies as SET_CONTEXT_REG). Submissions
+  run on the command processor (orbis/gpu/cp.h); submit-and-flip
+  rewrites the game's flip packet as 11.00 does and flips once the
+  submission is done. Only the graphics end-of-pipe event (0x40) exists;
+  its data is the id (a timestamp of 0). Mip statistics are accepted and
+  never written.
+- recomp_orbis_system also: libScePlayGo (the game is installed in full:
+  every chunk local, nothing to do, ETAs 0) and libSceDiscMap (a disc
+  game's file locations from its sce_discmap.plt: MD5 of the path below
+  /app0/, 24-bit block, location and length; every block is on the HDD).
 - The loader (orbis/process.cpp) provides __tls_get_addr.
 
 ## Not measured on hardware yet
@@ -43,3 +71,7 @@ library.
 - sceKernelGetTscFrequency: 3 GHz, the rate of the core's rdtsc model
   (lifted.h kTscHz); the console's own TSC runs at its CPU clock.
 - The signed-in user's id and name.
+- The display's refresh (60 Hz) and the flip event's data below bit 16.
+- The GPU's clock for timestamps (the 100 MHz reference clock).
+- PlayGo's chunk count (every id below 1000 is accepted) and its
+  default install speed (full).
