@@ -38,13 +38,13 @@ endif()
 
 # The host layer (cmake/host.cmake): what a native program needs on its
 # host, whatever its guest CPU. SDL3 (windows, input, audio output),
-# ffmpeg (movies, compressed audio), LLVM's demanglers (Microsoft and
-# Itanium names), gfx::Device on Vulkan or Metal with the shader
+# ffmpeg (movies, compressed audio), FreeType (console font libraries),
+# LLVM's demanglers (Microsoft and Itanium names), gfx::Device on Vulkan or Metal with the shader
 # compilers, the software mixer and logging; the guests' libraries and
 # platform modules link what they use. Off leaves a CPU-only build (the
 # AArch64 lifter tests cross built for an arm64 host whose sysroot has
 # none of those libraries); no product builds without it.
-option(RECOMP_HOST "Host layer: SDL3, ffmpeg, LLVM demangling, gfx::Device, audio" ON)
+option(RECOMP_HOST "Host layer: SDL3, ffmpeg, FreeType, LLVM demangling, gfx::Device, audio" ON)
 if(RECOMP_X86 AND NOT RECOMP_HOST)
   message(FATAL_ERROR "RECOMP_X86 needs RECOMP_HOST")
 endif()

@@ -14,7 +14,8 @@ HLE choices and the values not measured on hardware in docs/hle.md.
 ## Constraints
 - Host services come from the shared host layer (cmake/host.cmake):
   the GPU front end through gfx::Device, audio through the software
-  mixer, windows and input through SDL3, movies through ffmpeg; never
+  mixer, windows and input through SDL3, movies through ffmpeg, fonts
+  through FreeType; never
   from an HLE file straight to a host graphics or audio API, and no
   host library outside the layer.
 - System libraries are reimplemented (HLE), never lifted from firmware
