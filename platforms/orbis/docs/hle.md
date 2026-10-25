@@ -41,8 +41,9 @@ library.
 - recomp_orbis_libc_internal: also the memory functions (memcpy,
   memset, malloc and free on a heap of its own).
 - recomp_orbis_fiber: libSceFiber, fibers as host coroutines on the
-  game's context memory. The SceFiber block gets 11.00's magic words and
-  idle state only.
+  game's context memory, or, without one, on the stack of the thread
+  that first runs them (below its call, as 11.00 does). The SceFiber
+  block gets 11.00's magic words and idle state only.
 - recomp_orbis_videoout: libSceVideoOut's main port (handle 1). Flips
   queue and run at the vblank the flip rate allows, on the host thread
   (orbis/host.h); the flip event's ident is 6 << 48 | handle << 40 and
@@ -65,8 +66,15 @@ library.
 - recomp_orbis_audio: libSceAudioOut. Ports numbered and checked as
   11.00 does; a port holds one buffer and Output returns once the system
   has taken the previous one (every `length` samples at 48 kHz on the
-  host's clock, so a run without an audio device keeps time); samples go
-  to an SDL audio stream per port, scaled by the port's volumes.
+  host's clock, so a run without an audio device keeps time). Samples
+  go to the software mixer (runtime/audio), a queue-fed voice per port,
+  scaled by the port's volumes; 8 channels are folded to stereo.
+- recomp_orbis_avplayer: libSceAvPlayer on ffmpeg, reading through the
+  game's file callbacks on a guest service thread; video as NV12 in the
+  game's texture memory (pitch: the width rounded up to 64), released
+  by the player's clock; audio as 16-bit chunks of 1024 frames; ready,
+  play and stop events. Its structures are 11.00's; the pixels are
+  ffmpeg's decoders'.
 - recomp_orbis_savedata: libSceSaveData on DataDir()/savedata/<user>/
   (each directory with a .meta of its blocks and SceSaveDataParam, and
   its icon .png); a mount maps /savedataN onto it through libkernel's

@@ -5,7 +5,9 @@
 // the next one's. The SceFiber block (256 bytes, 8-aligned) is the
 // game's: it gets the magic words libSceFiber 11.00 checks and its idle
 // state; the rest of its fields are libSceFiber's own and stay unwritten.
-// Checks and error codes are 11.00's.
+// Checks and error codes are 11.00's. A fiber made without context memory
+// runs on the stack of the thread that first runs it, below that call's
+// frame, as libSceFiber starts it.
 
 #include <sys/mman.h>
 
@@ -37,6 +39,7 @@ struct Fiber {
   Ctx saved;  // its registers while another runs
   bool running = false;
   uint64_t arg_in = 0;  // what the switch that resumes it passes
+  gaddr stack_top = 0;  // without context memory: where it starts
 };
 
 // The calling thread's fibers: its own context, its registers while a
@@ -77,7 +80,7 @@ uint32_t Lookup(gaddr f, Fiber** out) {
 void Start(void* arg) {
   Fiber* f = static_cast<Fiber*>(arg);
   Ctx& c = CurrentThread()->ctx;
-  c.rsp = (f->context + f->context_size) & ~uint64_t(15);
+  c.rsp = f->context ? (f->context + f->context_size) & ~uint64_t(15) : f->stack_top;
   CallGuest(c, f->entry, {f->arg_init, f->arg_in});
   FatalF("fiber %s returned from its entry function", f->name.c_str());
 }
@@ -91,6 +94,8 @@ void SwitchTo(Ctx& c, platform::Coroutine* from, Ctx* from_saved, Fiber* to, uin
   to->running = true;
   to->arg_in = arg;
   if (!to->co) {
+    // Below the frame of the call that starts it (a red zone further).
+    if (!to->context) to->stack_top = (c.rsp - 0x100) & ~uint64_t(15);
     to->host_stack = mmap(nullptr, kHostStack, PROT_READ | PROT_WRITE,
                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (to->host_stack == MAP_FAILED) FatalF("fiber %s: no host stack", to->name.c_str());
@@ -120,7 +125,6 @@ ORBIS_HLE("libSceFiber", _sceFiberInitializeImpl, 8) {
   if (size - 1 < 0x1FF) return kErrRange;
   if (!context != !size || size & 15) return kErrInvalid;
   if (opt && recomp::Rd32(opt) != kOptMagic) return kErrInvalid;
-  if (!context) recomp::FatalF("fibers without context memory not implemented yet");
   auto fb = std::make_unique<Fiber>();
   fb->guest = f;
   fb->entry = entry;
