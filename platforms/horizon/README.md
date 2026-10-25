@@ -38,12 +38,14 @@ recomp_lift_a64 --image module.nro --out generated
 
 ## Requirements
 
-Linux x86-64, or macOS on Apple Silicon. Clang, LLD and CMake/Ninja. For
-the tests: Python 3 with `unicorn` in the repository's `.venv/`
+Linux x86-64, or macOS on Apple Silicon. Clang, LLD and CMake/Ninja, and
+the host layer every guest shares: SDL3, ffmpeg, LLVM (its demangler),
+glslang (and SPIRV-Cross on macOS). For the tests: Python 3 with `unicorn` in the repository's `.venv/`
 (gitignored); Unicorn is used by tests only, never by a product. An arm64
 host build can be checked on x86-64 with crossdev's
 `aarch64-unknown-linux-gnu` toolchain and `qemu-aarch64` (the
-`horizon-aarch64-qemu` preset). The fixtures the tests need are checked
+`horizon-aarch64-qemu` preset, CPU-only: the lifter and runtime without
+the host layer). The fixtures the tests need are checked
 in as assembly and C built with clang's integrated assembler and LLD.
 
 No game code, assets, keys or firmware are in this repository or in any

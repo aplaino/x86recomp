@@ -12,8 +12,9 @@ src/a64) follows these rules too.
   with -DRECOMP_PYTHON=...), never from a system Python.
 - arm64 host build on x86-64: `cmake --preset horizon-aarch64-qemu`
   (crossdev's aarch64-unknown-linux-gnu sysroot, run under
-  qemu-aarch64). Run its ctest after changes to a64/lifted.h, the
-  emitter or the runtime.
+  qemu-aarch64; CPU-only, RECOMP_HOST off, as the sysroot has no SDL3,
+  ffmpeg or LLVM). Run its ctest after changes to a64/lifted.h, the
+  emitter or the runtime. The host layer on arm64 is checked on macOS.
 - Changes to the top-level CMakeLists.txt or anything shared with the x86
   path: also build and test the default preset (x86) with
   -DRECOMP_PLATFORM_HORIZON=ON, so both build in one tree.
@@ -36,8 +37,11 @@ src/a64) follows these rules too.
   changes, no assumption of 4 KiB host pages, no Linux-only
   syscalls/flags outside the platform layer (src/a64/platform.h; guard
   with #ifdef).
-- NVN talks to Vulkan and Metal through the internal device interface,
-  never from an HLE file straight to a host graphics API.
+- Host services come from the shared host layer (cmake/host.cmake):
+  NVN through gfx::Device, audio through the software mixer, windows
+  and input through SDL3, movies through ffmpeg; never from an HLE file
+  straight to a host graphics or audio API, and no second copy of a
+  host library for the Switch.
 - Floating point is modelled exactly (SoftFloat ARM specialisation under
   the thread's FPCR; FPSR flags). Host float/double only inside
   proven-exact fast paths, each with its proof next to the code, a

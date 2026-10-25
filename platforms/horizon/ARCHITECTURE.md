@@ -21,7 +21,11 @@ ARCHITECTURE.md, "Console platforms"), built only with
   (libraries `recomp_horizon_*`), with their tests and docs.
 Paths below are relative to `platforms/horizon` unless they start with
 `src/a64` or `tools/lifter_a64`. A Switch game project turns
-`RECOMP_X86` off: it needs none of the x86 path's code or dependencies.
+`RECOMP_X86` off: it needs none of the x86 path's code. It keeps the host
+layer every guest shares (the top-level ARCHITECTURE.md, "Console
+platforms"): SDL3 for windows, input and audio output, ffmpeg for
+movies, LLVM's Itanium demangler for the SDK's import names,
+gfx::Device for NVN on Vulkan and Metal, and the software mixer.
 
 The module keeps the x86 path's shape wherever the guest allows: one
 C++ function per guest function, registers cached in locals, a
