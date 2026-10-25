@@ -29,7 +29,7 @@ add_library(recomp_orbis_fiber SHARED src/orbis/hle/fiber.cpp)
 target_link_libraries(recomp_orbis_fiber PUBLIC recomp_orbis)
 # libSceAudioOut (and the audio libraries on it).
 add_library(recomp_orbis_audio SHARED src/orbis/hle/audioout.cpp)
-target_link_libraries(recomp_orbis_audio PUBLIC recomp_orbis)
+target_link_libraries(recomp_orbis_audio PUBLIC recomp_orbis recomp_audio)
 add_library(recomp_orbis_savedata SHARED src/orbis/hle/savedata.cpp)
 target_link_libraries(recomp_orbis_savedata PUBLIC recomp_orbis_kernel)
 # libScePad on SDL gamepads and the keyboard.
@@ -39,6 +39,9 @@ target_link_libraries(recomp_orbis_pad PUBLIC recomp_orbis)
 find_package(Freetype REQUIRED)
 add_library(recomp_orbis_font SHARED src/orbis/hle/font.cpp)
 target_link_libraries(recomp_orbis_font PUBLIC recomp_orbis PRIVATE Freetype::Freetype)
+# libSceAvPlayer on ffmpeg.
+add_library(recomp_orbis_avplayer SHARED src/orbis/hle/avplayer.cpp)
+target_link_libraries(recomp_orbis_avplayer PUBLIC recomp_orbis PRIVATE PkgConfig::FFMPEG)
 # Networking (libSceNet, libSceNetCtl): no connection.
 add_library(recomp_orbis_net SHARED src/orbis/hle/net.cpp)
 target_link_libraries(recomp_orbis_net PUBLIC recomp_orbis_kernel)

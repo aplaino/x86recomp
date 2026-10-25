@@ -4,11 +4,10 @@
 // 17-20, aux 23). A port holds one buffer: Output copies the game's into
 // it and returns at once if it was free, else once the system mixer has
 // taken the one before, every `length` samples at 48 kHz. That clock is
-// the host's, so a run without an audio device keeps time; the samples go
-// to an SDL audio stream per port (scaled by the port's volumes, as float
-// at 48 kHz, which SDL mixes and downmixes for the host's device).
-
-#include <SDL3/SDL.h>
+// the host's, so a run without an audio device keeps time. The samples
+// go to the software mixer (runtime/audio), a voice per port fed by a
+// queue, scaled by the port's volumes; 8 channels are folded to stereo
+// (front, centre and surrounds at -3 dB, LFE dropped).
 
 #include <chrono>
 #include <cstring>
@@ -17,7 +16,7 @@
 #include <vector>
 
 #include "orbis/hle.h"
-#include "orbis/host.h"
+#include "runtime/audio/mixer.h"
 #include "runtime/hle/kernel32_state.h"
 #include "runtime/log.h"
 #include "runtime/runtime.h"
@@ -44,13 +43,15 @@ struct Port {
   uint32_t pad_mix_level = 0;
   Clock::time_point start;  // when the buffer in the slot starts playing
   bool queued = false;
-  SDL_AudioStream* stream = nullptr;
+  // The mixer's voice and its queue (the mixer owns neither).
+  std::unique_ptr<recomp::audio::Voice> voice;
+  recomp::audio::QueueSource* queue = nullptr;
 };
 
 std::mutex g_mu;
 bool g_init = false;
 Port g_ports[kSlots];
-bool g_audio_up = false, g_audio_ok = false;
+bool g_audio_up = false;
 
 // Slots of each port type, first choice first.
 std::vector<int> SlotsOf(uint32_t type) {
@@ -79,14 +80,11 @@ Port* Find(uint32_t h, uint32_t* err) {
   return &g_ports[slot];
 }
 
-// The port's samples as float with its volumes, to its stream (host
-// thread work is not needed: SDL streams take data from any thread).
+// The port's samples as float stereo with its volumes, to its voice.
 void Play(Port& p, recomp::gaddr buf) {
-  if (!g_audio_ok || !p.stream) return;
-  const size_t n = size_t(p.length) * p.channels;
-  std::vector<float> out(n);
+  if (!p.queue) return;
   const uint8_t* src = recomp::GPtr(buf);
-  for (size_t i = 0; i < n; i++) {
+  auto sample = [&](size_t i) {
     float v;
     if (p.is_float) {
       std::memcpy(&v, src + 4 * i, 4);
@@ -95,23 +93,54 @@ void Play(Port& p, recomp::gaddr buf) {
       std::memcpy(&s, src + 2 * i, 2);
       v = float(s) / 32768.0f;
     }
-    out[i] = v * p.volume[i % p.channels];
+    return v * p.volume[i % p.channels];
+  };
+  std::vector<float> out(size_t(p.length) * 2);
+  constexpr float kHalf = 0.70710678f;
+  for (size_t f = 0; f < p.length; f++) {
+    const size_t i = f * p.channels;
+    float l, r;
+    if (p.channels == 1) {
+      l = r = sample(i);
+    } else if (p.channels == 2) {
+      l = sample(i);
+      r = sample(i + 1);
+    } else {  // L, R, C, LFE, LS, RS, LB, RB
+      const float c = sample(i + 2) * kHalf;
+      l = sample(i) + c + (sample(i + 4) + sample(i + 6)) * kHalf;
+      r = sample(i + 1) + c + (sample(i + 5) + sample(i + 7)) * kHalf;
+    }
+    out[2 * f] = l;
+    out[2 * f + 1] = r;
   }
-  SDL_PutAudioStreamData(p.stream, out.data(), int(n * sizeof(float)));
+  p.queue->Push(out.data(), int(p.length));
 }
 
-void OpenStream(Port& p) {
-  recomp::orbis::RunOnHost([&] {
-    if (!g_audio_up) {
-      g_audio_up = true;
-      g_audio_ok = SDL_InitSubSystem(SDL_INIT_AUDIO);
-      if (!g_audio_ok) recomp::WarnF("audio: no host audio (%s); running silent\n", SDL_GetError());
-    }
-    if (!g_audio_ok) return;
-    const SDL_AudioSpec spec{SDL_AUDIO_F32, p.channels, 48000};
-    p.stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
-    if (p.stream) SDL_ResumeAudioStreamDevice(p.stream);
-  });
+// The port's voice in the mixer (opened at 48 kHz with the first port).
+void OpenVoice(Port& p) {
+  recomp::audio::Mixer& m = recomp::audio::GetMixer();
+  if (!g_audio_up) {
+    g_audio_up = true;
+    if (m.rate() == 0 && !m.Open(48000))
+      recomp::WarnF("audio: no host audio device; running silent\n");
+  }
+  if (m.rate() == 0) return;
+  auto q = std::make_unique<recomp::audio::QueueSource>(2, 48000);
+  p.queue = q.get();
+  p.voice = std::make_unique<recomp::audio::Voice>();
+  p.voice->src = std::move(q);
+  p.voice->dsound = true;  // linear volume, centred: unity gain
+  p.voice->pan = 0;
+  std::lock_guard<std::mutex> l(m.mu());
+  p.voice->state = recomp::audio::Voice::State::Playing;
+  m.Add(p.voice.get());
+}
+
+void CloseVoice(Port& p) {
+  if (!p.voice) return;
+  recomp::audio::Mixer& m = recomp::audio::GetMixer();
+  std::lock_guard<std::mutex> l(m.mu());
+  m.Remove(p.voice.get());
 }
 
 // Puts buf (null: nothing, a wait for the slot) into the port's slot,
@@ -180,7 +209,7 @@ ORBIS_HLE("libSceAudioOut", sceAudioOutOpen, 6) {
     p.format = format;
     p.channels = kChannels[format];
     p.is_float = format >= 3;
-    OpenStream(p);
+    OpenVoice(p);
     return 0x20000000 | p.type << 16 | uint32_t(s);
   }
   return kErrPortFull;
@@ -192,7 +221,7 @@ ORBIS_HLE("libSceAudioOut", sceAudioOutClose, 1) {
   uint32_t err;
   Port* p = Find(uint32_t(Arg(c, 0)), &err);
   if (!p) return err;
-  if (p->stream) SDL_DestroyAudioStream(p->stream);
+  CloseVoice(*p);
   *p = Port{};
   return 0;
 }
