@@ -44,10 +44,12 @@ struct Known {
 // The profile's own settings the runtime knows, as a profile that has
 // written none reads them.
 constexpr Known kProfileSettings[] = {
+    {0x10040002, kSourceNoValue, 0},   // y axis inverted
     {0x10040003, kSourceDefault, 3},   // controller vibration on (Xenia's default)
     {0x1004000C, kSourceNoValue, 0},   // voice muted
     {0x1004000D, kSourceNoValue, 0},   // voice through the speakers
     {0x1004000E, kSourceNoValue, 0},   // voice volume
+    {0x10040018, kSourceNoValue, 0},   // control sensitivity
 };
 // A title's own settings (title specific 1-3, 1000 bytes each).
 bool TitleSpecific(uint32_t id) { return id == 0x63E83FFF || id == 0x63E83FFE || id == 0x63E83FFD; }

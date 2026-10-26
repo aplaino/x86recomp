@@ -959,6 +959,10 @@ static void Users(void) {
   u32 ov[7] = {0, 0, 0, 0, 0, 0, 0};
   CHECK(XamUserReadProfileSettings9(0xFFFE07D1, 0, 0, 0, 4, ids, &size, results, ov) == 0x3E5 && ov[0] == 0);
   CHECK(XamUserReadProfileSettings9(0xFFFE07D1, 0, 0, 0, 0, ids, &size, results, 0) == 0x57);
+  u32 gamer[2] = {0x10040002, 0x10040018};  // y axis inverted, control sensitivity: not written
+  size = 2 * 0x28 + 8;
+  CHECK(XamUserReadProfileSettings9(0, 0, 0, 0, 2, gamer, &size, results, 0) == 0 && results[0] == 2 &&
+        *At(settings) == 0 && *At(settings + 0x28) == 0 && *At(settings + 0x28 + 0x10) == 0x10040018);
 
   // Title settings written as a title saves them: the three title-specific
   // settings at once, the last one empty with an address (a zero-length

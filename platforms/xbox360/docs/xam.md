@@ -155,7 +155,9 @@ only a console can settle.
   that write, rexglue-sdk#502). The runtime test title makes that write;
   under -O3 and UBSan the planted memcpy is reported.
 - A setting not written reads as NO_VALUE, except controller vibration,
-  DEFAULT 3 (Xenia's); a title's own settings with no bytes. An id not
+  DEFAULT 3 (Xenia's); a title's own settings with no bytes. The
+  profile's settings listed: y axis inverted, vibration, voice muted,
+  voice through the speakers, voice volume, control sensitivity. An id not
   listed is fatal. Title 0 is the running title (chosen). Console check.
 
 ## Notifications
