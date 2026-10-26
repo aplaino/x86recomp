@@ -75,6 +75,7 @@ __xex_import_slot_\name:
   FUNCTION 254, NtWaitForMultipleObjectsEx
   FUNCTION 272, ObReferenceObjectByHandle
   FUNCTION 261, ObDereferenceObject
+  FUNCTION 299, RtlImageXexHeaderField
   FUNCTION 293, RtlEnterCriticalSection
   FUNCTION 294, RtlFillMemoryUlong
   FUNCTION 300, RtlInitAnsiString
@@ -86,6 +87,11 @@ __xex_import_slot_\name:
   FUNCTION 338, KeTlsAlloc
   FUNCTION 340, KeTlsGetValue
   FUNCTION 341, KeTlsSetValue
+  FUNCTION 404, XexCheckExecutablePrivilege
+  FUNCTION 405, XexGetModuleHandle
+  FUNCTION 406, XexGetModuleSection
+  FUNCTION 407, XexGetProcedureAddress
   VARIABLE 27, ExThreadObjectType
   VARIABLE 173, KeTimeStampBundle
   VARIABLE 344, XboxKrnlVersion
+  VARIABLE 403, XexExecutableModuleHandle

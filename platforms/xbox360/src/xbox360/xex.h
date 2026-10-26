@@ -48,6 +48,9 @@ struct XexModule {
   uint32_t stack_size = 0;  // the main thread's, 0 if the XEX does not say
   XexTls tls;
   std::string original_name;
+  // The file's headers (its first header_size bytes), which the loader
+  // keeps in memory for RtlImageXexHeaderField.
+  std::vector<uint8_t> headers;
   std::vector<uint8_t> image;  // the loaded image, `base` at offset 0
   std::vector<XexSection> sections;
   std::vector<XexFunction> functions;

@@ -1,6 +1,6 @@
 // xbox360_elf2xex: builds a XEX2 from a big-endian PowerPC ELF linked at its
 // load address, for the test fixtures (platforms/xbox360/tests).
-//   xbox360_elf2xex <in.elf> <out.xex> [--import <module>]...
+//   xbox360_elf2xex <in.elf> <out.xex> [--import <module>]... [--header <key>=<value>]...
 // The XEX is unencrypted and stored uncompressed: the image holds a PE
 // header (one page at the load address), the ELF's allocated sections at
 // their addresses, and a .pdata built from its sized function symbols,
@@ -8,11 +8,15 @@
 // the program labels with symbols named __xex_import*: each is an import
 // record as a title's are (type << 24 | library << 16 | ordinal, type 0 a
 // variable's slot, 1 a function's thunk), the library being the index of
-// a --import module in the order given.
+// a --import module in the order given. Resources are the sized symbols
+// named __xex_resource_<name> (a name of up to 8 characters). --header
+// adds an optional header whose value is held in the header table (a key
+// whose low byte is 0 or 1).
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -55,9 +59,24 @@ constexpr uint32_t kPage = 0x1000;
 
 int main(int argc, char** argv) {
   std::vector<std::string> libraries;
-  for (int k = 3; k + 1 < argc && !std::strcmp(argv[k], "--import"); k += 2) libraries.push_back(argv[k + 1]);
-  if (argc < 3 || argc != 3 + 2 * int(libraries.size())) {
-    std::fprintf(stderr, "usage: xbox360_elf2xex in.elf out.xex [--import module]...\n");
+  std::vector<std::pair<uint32_t, uint32_t>> inline_headers;  // key, value
+  bool usage = argc < 3;
+  for (int k = 3; k < argc && !usage; k += 2) {
+    if (k + 1 >= argc) {
+      usage = true;
+    } else if (!std::strcmp(argv[k], "--import")) {
+      libraries.push_back(argv[k + 1]);
+    } else if (!std::strcmp(argv[k], "--header")) {
+      char* end = nullptr;
+      unsigned long key = std::strtoul(argv[k + 1], &end, 0);
+      if (*end != '=' || (key & 0xFF) > 1) usage = true;
+      else inline_headers.emplace_back(uint32_t(key), uint32_t(std::strtoul(end + 1, nullptr, 0)));
+    } else {
+      usage = true;
+    }
+  }
+  if (usage) {
+    std::fprintf(stderr, "usage: xbox360_elf2xex in.elf out.xex [--import module]... [--header key=value]...\n");
     return 2;
   }
   Elf e;
@@ -76,6 +95,11 @@ int main(int argc, char** argv) {
   std::vector<Section> secs;
   std::vector<std::pair<uint32_t, uint32_t>> funcs;  // start, size
   std::vector<uint32_t> records;                      // import records' addresses
+  struct Resource {
+    std::string name;
+    uint32_t va, size;
+  };
+  std::vector<Resource> resources;
   for (uint32_t k = 0; k < shnum; k++) {
     uint32_t type = uint32_t(sh(k, 4, 4));
     uint64_t flags = sh(k, 8, 8), addr = sh(k, 16, 8), off = sh(k, 24, 8), size = sh(k, 32, 8);
@@ -87,6 +111,13 @@ int main(int argc, char** argv) {
         if ((info & 0xF) == 2 && sz && value) funcs.emplace_back(uint32_t(value), uint32_t(sz));
         const char* name = reinterpret_cast<const char*>(&e.d[names + e.U(s, 4)]);
         if (!std::strncmp(name, "__xex_import", 12)) records.push_back(uint32_t(value));
+        if (!std::strncmp(name, "__xex_resource_", 15)) {
+          if (std::strlen(name + 15) > 8 || !sz) {
+            std::fprintf(stderr, "xbox360_elf2xex: %s: a resource needs a size and a name of up to 8 characters\n", name);
+            return 1;
+          }
+          resources.push_back({name + 15, uint32_t(value), uint32_t(sz)});
+        }
       }
     }
     if (!(flags & 2) || !size) continue;  // SHF_ALLOC
@@ -156,24 +187,27 @@ int main(int argc, char** argv) {
   }
 
   // XEX2: header, the optional headers (file format, entry point, image
-  // base, import libraries), the file format info (unencrypted, stored),
-  // the security info, the import libraries.
+  // base, import libraries, resources, those of --header), the file format
+  // info (unencrypted, stored), the security info, the import libraries,
+  // the resources.
   std::vector<uint8_t> x;
-  const uint32_t ffi = 0x40, security = 0x100, imports = 0x400, header_size = 0x1000;
+  const uint32_t ffi = 0x80, security = 0x100, imports = 0x400, header_size = 0x1000;
   x.resize(header_size);
   std::memcpy(&x[0], "XEX2", 4);
   PutBe(x, 4, 1, 4);  // a title
   PutBe(x, 8, header_size, 4);
   PutBe(x, 16, security, 4);
-  PutBe(x, 20, libraries.empty() ? 3 : 4, 4);
-  PutBe(x, 24, 0x000003FF, 4);
-  PutBe(x, 28, ffi, 4);
-  PutBe(x, 32, 0x00010100, 4);
-  PutBe(x, 36, entry, 4);
-  PutBe(x, 40, 0x00010201, 4);
-  PutBe(x, 44, base, 4);
-  PutBe(x, 48, 0x000103FF, 4);
-  PutBe(x, 52, imports, 4);
+  std::vector<std::pair<uint32_t, uint32_t>> headers = {{0x000003FF, ffi}, {0x00010100, uint32_t(entry)},
+                                                        {0x00010201, uint32_t(base)}};
+  if (!libraries.empty()) headers.emplace_back(0x000103FF, imports);
+  uint32_t resource_info = 0;  // placed after the import libraries
+  if (!resources.empty()) headers.emplace_back(0x000002FF, 0);
+  headers.insert(headers.end(), inline_headers.begin(), inline_headers.end());
+  if (24 + 8 * headers.size() > ffi) {
+    std::fprintf(stderr, "xbox360_elf2xex: too many optional headers\n");
+    return 1;
+  }
+  PutBe(x, 20, headers.size(), 4);
   PutBe(x, ffi, 8, 4);  // info size; encryption 0, compression 0 follow
   // The import libraries: the size, the names' size and count, the names
   // (NUL-terminated, padded to words), then per library its size, digest,
@@ -199,10 +233,29 @@ int main(int argc, char** argv) {
       at += size;
     }
     PutBe(x, imports, at - imports, 4);
-    if (at > header_size) {
-      std::fprintf(stderr, "xbox360_elf2xex: too many imports\n");
-      return 1;
+    resource_info = at;
+  } else {
+    resource_info = imports;
+  }
+  if (!resources.empty()) {
+    PutBe(x, resource_info, 4 + 16 * resources.size(), 4);
+    for (size_t r = 0; r < resources.size(); r++) {
+      uint32_t at = resource_info + 4 + 16 * uint32_t(r);
+      if (at + 16 > header_size) break;
+      std::memcpy(&x[at], resources[r].name.c_str(), resources[r].name.size());
+      PutBe(x, at + 8, resources[r].va, 4);
+      PutBe(x, at + 12, resources[r].size, 4);
     }
+    for (auto& h : headers)
+      if (h.first == 0x000002FF) h.second = resource_info;
+  }
+  if (resource_info + (resources.empty() ? 0 : 4 + 16 * resources.size()) > header_size) {
+    std::fprintf(stderr, "xbox360_elf2xex: too many imports and resources\n");
+    return 1;
+  }
+  for (size_t h = 0; h < headers.size(); h++) {
+    PutBe(x, 24 + 8 * h, headers[h].first, 4);
+    PutBe(x, 28 + 8 * h, headers[h].second, 4);
   }
   PutBe(x, security, 0x184, 4);
   PutBe(x, security + 4, img.size(), 4);

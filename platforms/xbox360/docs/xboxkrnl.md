@@ -78,6 +78,37 @@ here; on the console a KPCR belongs to a hardware thread.
 - Handles: multiples of 4 from 0xF8000004; -2 the current thread, -1 the
   current process.
 
+## Modules
+- XexExecutableModuleHandle holds the address of the title's loader entry
+  (LDR_DATA_TABLE_ENTRY), whose 0x58 is the address of its XEX headers
+  in memory: xam and a title read both so, then pass the headers to
+  RtlImageXexHeaderField. The entry's other fields (image base 0x1C and
+  size 0x20, full and base names 0x24 and 0x2C as UNICODE_STRINGs, entry
+  point 0x3C, load count 0x40, time stamp 0x50) are Xenia's layout. Here
+  DllBase (0x18) is the image base, as NT has it (Xenia leaves it 0), the
+  full name is `\Device\CdRom0\` and the file's name, and the entry is in
+  no list of loaded modules. Console check.
+- RtlImageXexHeaderField(headers, key): for a key whose low byte is 1 the
+  address of the dword in the header table (a title reads the workspace
+  size, 0x00020401, through it), for larger data the address of the data
+  (xam reads the execution info's title id at 0xC). For low byte 0 the
+  value itself, as Xenia and ReXGlue have it; no caller in xam shows it.
+  0 for a key the headers lack. Console check.
+- XexGetModuleHandle(name, handle) returns an NTSTATUS: xam's callers test
+  it for < 0, and one zeroes the handle first and tests that. A null name
+  is the title's module (xam and a title ask so). For a module that is not
+  loaded Xenia and ReXGlue return ERROR_NOT_FOUND (0x490), which those
+  callers would take for success; here STATUS_DLL_NOT_FOUND and a zero
+  handle. xam asks for `xam.xex` by name: the system modules' entries are
+  not modelled yet, so asking for one is fatal. Console check.
+- XexGetModuleSection(handle, name, data, size) finds the module's XEX
+  resources (header 0x000002FF: name[8], address, size each), by exact
+  name. XexGetProcedureAddress(handle, ordinal, address) by ordinal; a
+  value above 0xFFFF names an export by a string. Failures are Xenia's
+  STATUS_NOT_FOUND and STATUS_DRIVER_ENTRYPOINT_NOT_FOUND. Console check.
+- XexCheckExecutablePrivilege(n) is bit n of the system flags header
+  (0x00030000), as in Xenia and ReXGlue.
+
 ## Files
 - Device names: xam opens `\Device\CdRom0\default.xex` and makes the
   `\??\GAME:` link; `\Device\Harddisk0\Partition1` is the hard
