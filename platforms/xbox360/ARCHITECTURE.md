@@ -286,8 +286,8 @@ returns.
   memory and their headers are their state: guest code initialises
   events itself. Every signal and every check of a wait is made under one
   dispatcher lock, and any change wakes every waiter to look again.
-  Timers, queues and APCs are not there yet; alertable waits are not
-  woken.
+  Timers are signalled by a host thread at their due time and period;
+  queues and APCs are not there yet, and alertable waits are not woken.
 - Handles name objects by guest address and hold references; objects the
   kernel created (NtCreateEvent, threads) go with their last reference.
 - Critical sections follow the kernel's algorithm on the guest structure;
@@ -422,7 +422,8 @@ memory; any other interrupt fails the run.
   disc and on the hard disk, its module and XEX headers, the settings and
   the video mode, the GPU's registers, interrupts and a ring buffer's
   packets, string conversions, an audio client, xam's startup exports and
-  messages) and exits with the number of failed checks. It runs with SDL's dummy audio driver.
+  messages, users, profile settings, notifications, timers) and exits with
+  the number of failed checks. It runs with SDL's dummy audio driver.
   The test writes the disc's files and empties the data directory before
   each run.
 - Not covered by QEMU: what the 970 does differently from the Xenon
@@ -440,9 +441,9 @@ memory; any other interrupt fails the run.
    the libraries and their layout, memory, threads, synchronisation,
    files, the title's module, the settings, the display driver with a
    command processor that executes the ring buffer without drawing, and
-   the audio render driver, the kernel exports and xam's startup ones
-   (the loader, networking, memory, messages and the music player's) are
-   done; next xam's users, profiles, notifications and content, the XGI
-   and XLiveBase messages, timers, XMA decoding and APCs.
+   the audio render driver, timers, the kernel exports and xam's startup
+   ones (the loader, networking, memory, messages, the music player's,
+   users, profile settings, notifications) are done; next xam's content,
+   the XGI and XLiveBase messages, XMA decoding and APCs.
 5. Xenos: drawing, shaders and presentation through gfx::Device, behind
    the command processor (which runs the ring buffer already).

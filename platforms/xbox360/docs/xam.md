@@ -59,3 +59,60 @@ only a console can settle.
   it back) with E_INVALIDARG; with no user music here the title keeps
   playback. XMPGetPlaybackController (0x7001B, {client, *controller,
   *locked}): the title's (0), unlocked. Message names are Xenia's.
+
+## Users
+- Four slots; xam keeps a profile's state per slot: signed in locally
+  (bit 0), to Live (bit 1), with its offline XUID at 8 and online XUID at
+  0x3C. Here the game project's profile (GameConfig::profile, "Player"
+  unless it says otherwise) is signed in locally in slot 0, with the
+  offline XUID 0xE000000000000001 (chosen; offline XUIDs have 0xE0 at the
+  top); none is signed in to Live.
+- XamUserGetSigninState(slot): 0, 1 (locally) or 2 (Live).
+  XamUserGetXUID(slot, types, *xuid) returns an HRESULT: E_INVALIDARG for
+  a slot past 3, ERROR_NOT_LOGGED_ON (0x80070525) when the slot has no
+  profile or no XUID of the types asked (1 offline, 2 and 4 online), and
+  always writes the XUID (0 on failure). XamUserGetName(slot, buffer,
+  size) converts the name (RtlUnicodeToMultiByteN) into size - 1 bytes
+  and a NUL, returning a Win32 code. All from xam's code.
+
+## Profile settings
+- XamUserReadProfileSettings(title, slot, XUID count, XUIDs, count, ids,
+  *size, results, overlapped) is xam's: it inserts a flags argument (0)
+  and calls its Ex form, which refuses no ids, more than 32, a missing
+  size pointer, or a size without a buffer (ERROR_INVALID_PARAMETER); sizes
+  the results (0x28 bytes per setting and user, plus the string's or
+  bytes' size for types 4 and 6, plus 8); writes the size only when the
+  caller passed 0 and returns ERROR_INSUFFICIENT_BUFFER when it is short;
+  then sends the XGI app (0xFB) message 0xB000C with the request {title,
+  slot, XUID count, XUIDs, count, ids, buffer size, results, flags}, and
+  returns ERROR_IO_PENDING with an XOVERLAPPED, otherwise ERROR_SUCCESS or
+  ERROR_FUNCTION_FAILED by the last error.
+- The results: XUSER_READ_PROFILE_SETTING_RESULT (the settings' count,
+  their address), then XUSER_PROFILE_SETTING per setting and user
+  (source, the slot or XUID at 8, the id at 0x10, XUSER_DATA at 0x18: its
+  type byte, the value or a size and an address at 0x20), then the
+  strings' and bytes' space.
+- The local profile has stored nothing: the profile's own settings (title
+  0xFFFE07D1) read as NO_VALUE except controller vibration, DEFAULT 3
+  (Xenia's); a title's own settings (title specific 1-3) as NO_VALUE with
+  no bytes. An id not listed is fatal. Title 0 is the running title
+  (chosen). Console check.
+
+## Notifications
+- An id is an area (bits 25-30), a version (16-24) and a number.
+  XamNotifyCreateListener(areas, highest version) makes a listener for
+  the areas of the mask, up to that version (10 at most): an object with
+  an event (synchronization, signalled while a notification is pending)
+  and a pending set holding each id once with its latest value, walked by
+  area and number (xam's code). A broadcast reaches each listener whose
+  areas and version take it.
+- A new listener gets what the system's own listener still holds pending
+  (xam copies it). What that is when a title starts is Xenia's choice for
+  a title's first listeners: XN_SYS_UI (9) 0, XN_SYS_SIGNINCHANGED (0xA)
+  the signed-in slots' mask, XN_LIVE_CONNECTIONCHANGED (0x02000001)
+  XONLINE_S_LOGON_DISCONNECTED (0x001510F1), XN_LIVE_LINKSTATE_CHANGED
+  (0x02000003) 0. Console check.
+- XNotifyGetNext(listener, id or 0, *id, *value) zeroes both, then takes
+  the first pending notification (of that id) and returns TRUE; the event
+  is cleared when none is left. XNotifyPositionUI positions the system's
+  notification popups, of which there are none here.

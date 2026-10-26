@@ -20,6 +20,9 @@ struct GameConfig {
   // \Device\Harddisk0\Partition1: empty for the per-user data directory,
   // $XDG_DATA_HOME/<id> (on macOS ~/Library/Application Support/<id>).
   std::string data_dir;
+  // The local profile signed in as player 1 when the title starts, its
+  // gamertag; empty for none signed in.
+  std::string profile = "Player";
 };
 
 // Loads the title into the guest address space, binds its imports to the

@@ -4,10 +4,9 @@
 // 64-bit ELFv2 ABI like the fixture, so pointers are 64-bit here while
 // the guest's structures hold 32-bit ones (uint32_t fields), and calls
 // into the kernel pass at most eight arguments: ELFv2's parameter area is
-// not the Xenon's (start.S's sprintf9 makes the one call that needs it).
-// Reports each
-// failed check with DbgPrint and returns their number, which the title's
-// end makes the process's exit status.
+// not the Xenon's (start.S's XENON9 and XENON10 wrappers make the calls
+// that need more). Reports each failed check with DbgPrint and returns
+// their number, which the title's end makes the process's exit status.
 
 #include <stdint.h>
 
@@ -98,6 +97,9 @@ u32 XAudioSubmitRenderDriverFrame(u32 driver, float* samples);
 u32 XAudioGetVoiceCategoryVolumeChangeMask(u32 driver, u32* mask);
 u32 XAudioGetVoiceCategoryVolume(u32 category, u32* volume);
 u32 MmQueryStatistics(u32* statistics);
+u32 NtCreateTimer(u32* handle, void* attributes, u32 type);
+u32 NtSetTimerEx(u32 handle, int64_t* due, void* apc, u32 mode, void* context, u32 resume, u32 period, u32* previous);
+u32 NtCancelTimer(u32 handle, u32* current);
 u32 XGetAVPack(void);     // xam
 u32 XGetVideoMode(u32* mode);  // xam
 u32 XGetGameRegion(void);
@@ -109,6 +111,13 @@ u32 NetDll_XNetStartup(u32 caller, void* parameters);
 u32 XamAlloc(u32 attributes, u32 size, u32* address);
 u32 XamFree(u32 address);
 u32 XMsgInProcessCall(u32 app, u32 message, void* p1, void* p2);
+u32 XamUserGetSigninState(u32 slot);
+u32 XamUserGetXUID(u32 slot, u32 types, uint64_t* xuid);
+u32 XamUserGetName(u32 slot, char* buffer, u32 size);
+u32 XamUserReadProfileSettings(void);  // through XamUserReadProfileSettings9
+u32 XamNotifyCreateListener(uint64_t areas, u32 version);
+u32 XNotifyGetNext(u32 listener, u32 match, u32* id, u32* value);
+u32 XNotifyPositionUI(u32 position);
 u32 XMsgStartIORequest(u32 app, u32 message, u32* overlapped, void* buffer, u32 size);
 u32 XMsgStartIORequestEx(u32 app, u32 message, u32* overlapped, void* buffer, u32 size, void* xparams);
 extern u32 __imp_NtClose, __imp_ExThreadObjectType, __imp_KeTimeStampBundle, __imp_XboxKrnlVersion,
@@ -123,6 +132,8 @@ u32 NtCreateFile9(u32* handle, u32 access, void* attributes, u32* io, void* size
                   u32 share, u32 disposition, u32 options);
 u32 NtQueryDirectoryFile9(u32 handle, u32 event, void* apc, void* context, u32* io, void* info, u32 length,
                           void* mask, u32 restart);
+u32 XamUserReadProfileSettings9(u32 title, u32 slot, u32 xuid_count, void* xuids, u32 count, u32* ids, u32* size,
+                                void* results, u32* overlapped);
 u32 VdSwap10(volatile u32* words, u32* fetch, u32 writeback, void* system, u32 value, u32* front, u32* format,
              u32* color_space, u32* width, u32* height);
 void interrupt_entry(void);
@@ -780,9 +791,78 @@ static void Xam(void) {
   NtClose(e);
 }
 
+// ---- users, profile settings, notifications ------------------------------------
+// tests/CMakeLists.txt runs the title with the default profile, "Player",
+// signed in as player 1.
+static void Users(void) {
+  CHECK(XamUserGetSigninState(0) == 1 && XamUserGetSigninState(1) == 0);
+  uint64_t xuid = 1;
+  CHECK(XamUserGetXUID(0, 1, &xuid) == 0 && xuid == 0xE000000000000001ull);
+  CHECK(XamUserGetXUID(0, 2, &xuid) == 0x80070525 && xuid == 0);
+  CHECK(XamUserGetXUID(5, 1, &xuid) == 0x80070057);
+  char name[16];
+  CHECK(XamUserGetName(0, name, sizeof name) == 0 && Memeq(name, "Player", 7));
+  CHECK(XamUserGetName(0, name, 4) == 0 && Memeq(name, "Pla", 4));
+  CHECK(XamUserGetName(1, name, sizeof name) == 0x525 && name[0] == 0);
+
+  // Profile settings: the size first, then the settings.
+  u32 ids[4] = {0x1004000C, 0x1004000D, 0x1004000E, 0x10040003}, size = 0;
+  CHECK(XamUserReadProfileSettings9(0xFFFE07D1, 0, 0, 0, 4, ids, &size, 0, 0) == 0x7A && size == 4 * 0x28 + 8);
+  static u32 results[(4 * 0x28 + 8) / 4];
+  CHECK(XamUserReadProfileSettings9(0xFFFE07D1, 0, 0, 0, 4, ids, &size, results, 0) == 0);
+  u32 settings = (u32)(uintptr_t)results + 8;
+  CHECK(results[0] == 4 && results[1] == settings);
+  CHECK(*At(settings) == 0 && *At(settings + 0x10) == 0x1004000C && (*At(settings + 0x18) >> 24) == 1);
+  CHECK(*At(settings + 3 * 0x28) == 1 && *At(settings + 3 * 0x28 + 0x20) == 3);
+  u32 ov[7] = {0, 0, 0, 0, 0, 0, 0};
+  CHECK(XamUserReadProfileSettings9(0xFFFE07D1, 0, 0, 0, 4, ids, &size, results, ov) == 0x3E5 && ov[0] == 0);
+  CHECK(XamUserReadProfileSettings9(0xFFFE07D1, 0, 0, 0, 0, ids, &size, results, 0) == 0x57);
+
+  // A new listener holds what the system has pending: the UI is not
+  // showing, player 1 signed in; a Live listener: disconnected, no link.
+  u32 h = XamNotifyCreateListener(1, 1), id = 0, value = 9;
+  CHECK(h != 0 && XNotifyGetNext(h, 0, &id, &value) == 1 && id == 9 && value == 0);
+  CHECK(XNotifyGetNext(h, 0, &id, &value) == 1 && id == 0xA && value == 1);
+  CHECK(XNotifyGetNext(h, 0, &id, &value) == 0 && id == 0);
+  int64_t zero = 0;
+  CHECK(NtWaitForSingleObjectEx(h, 1, 0, &zero) == kStatusTimeout);
+  NtClose(h);
+  h = XamNotifyCreateListener(2, 1);
+  CHECK(NtWaitForSingleObjectEx(h, 1, 0, &zero) == 0);
+  CHECK(XNotifyGetNext(h, 0x02000003, &id, &value) == 1 && id == 0x02000003 && value == 0);
+  CHECK(XNotifyGetNext(h, 0, &id, &value) == 1 && id == 0x02000001 && value == 0x001510F1);
+  NtClose(h);
+  CHECK(XNotifyPositionUI(1) == 0);
+}
+
+// ---- timers --------------------------------------------------------------------
+static void Timers(void) {
+  u32 t = 0, previous = 9;
+  int64_t zero = 0, due = -200000, fifty_ms = -500000;  // 20 ms
+  CHECK(NtCreateTimer(&t, 0, 0) == 0);
+  CHECK(NtSetTimerEx(t, &due, 0, 0, 0, 0, 0, &previous) == 0 && previous == 0);
+  CHECK(NtWaitForSingleObjectEx(t, 1, 0, &zero) == kStatusTimeout);
+  CHECK(NtWaitForSingleObjectEx(t, 1, 0, &fifty_ms) == 0);
+  // A notification timer stays signalled.
+  CHECK(NtWaitForSingleObjectEx(t, 1, 0, &zero) == 0);
+  NtClose(t);
+  // A periodic synchronization timer: a signal every 10 ms, one per wait.
+  u32 s = 0, current = 9;
+  int64_t ten_ms = -100000;
+  CHECK(NtCreateTimer(&s, 0, 1) == 0 && NtSetTimerEx(s, &ten_ms, 0, 0, 0, 0, 10, 0) == 0);
+  int fired = 0;
+  for (int k = 0; k < 5; k++) fired += NtWaitForSingleObjectEx(s, 1, 0, &fifty_ms) == 0;
+  CHECK(fired == 5);
+  CHECK(NtCancelTimer(s, &current) == 0 && current == 0);
+  CHECK(NtWaitForSingleObjectEx(s, 1, 0, &fifty_ms) == kStatusTimeout);
+  NtClose(s);
+}
+
 int main(void) {
   Modules();
   Xam();
+  Users();
+  Timers();
   Console();
   Gpu();
   Conversions();

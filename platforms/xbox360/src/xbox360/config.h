@@ -5,6 +5,7 @@
 // exist; reading any other is fatal and names it.
 
 #include <cstdint>
+#include <string>
 
 namespace recomp::xbox360 {
 
@@ -14,6 +15,17 @@ constexpr uint16_t kXConfigSecured = 2, kXConfigUser = 3;
 // Setting `setting` of `category`: its bytes (big-endian, as the console
 // stores them) and size; false if there is no such setting here.
 bool XConfigSetting(uint16_t category, uint16_t setting, const uint8_t*& data, uint16_t& size);
+
+// The users signed in (4 slots): a local profile in slot 0 (player 1)
+// unless the game project starts with none; its offline XUID.
+struct Profile {
+  std::string gamertag;
+  uint64_t xuid;
+};
+constexpr uint32_t kUserSlots = 4;
+void SetSignedInProfile(const std::string& gamertag);
+// The profile signed in at `slot`, nullptr if none.
+const Profile* SignedInProfile(uint32_t slot);
 
 // XGetGameRegion: the console's game region, the games it plays (the
 // XEX's region mask's bits for it).

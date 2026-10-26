@@ -17,10 +17,11 @@ The runtime maps the console's address space with its physical views,
 runs a title's threads with their kernel structures, and has the
 kernel's memory, thread, synchronisation, file, module, settings,
 display and audio driver, string and formatting exports and the first of
-xam's startup ones and its message dispatch, with a GPU command
-processor that executes a title's ring buffer without drawing and audio
-output through SDL3, which a test title checks; xam's users, profiles,
-notifications and content, XMA decoding and timers follow.
+xam's startup ones (users with a local profile signed in, profile
+settings, notifications) and its message dispatch, timers, with a GPU
+command processor that executes a title's ring buffer without drawing
+and audio output through SDL3, which a test title checks; xam's content,
+the Live apps' messages and XMA decoding follow.
 
 ## Using it
 

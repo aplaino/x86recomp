@@ -159,6 +159,60 @@ uint32_t Delay(int64_t timeout, bool /*alertable*/) {
   return kStatusSuccess;
 }
 
+// ---- timers -------------------------------------------------------------
+// One host thread signals the timers that are due.
+namespace {
+struct Due {
+  Clock::time_point at;
+  uint32_t period_ms;
+};
+std::mutex g_timers;
+std::condition_variable g_timers_changed;
+std::unordered_map<uint32_t, Due> g_due;  // timer -> when
+bool g_timer_thread = false;
+
+void Timers() {
+  std::unique_lock<std::mutex> l(g_timers);
+  for (;;) {
+    auto next = g_due.end();
+    for (auto it = g_due.begin(); it != g_due.end(); ++it)
+      if (next == g_due.end() || it->second.at < next->second.at) next = it;
+    if (next == g_due.end()) {
+      g_timers_changed.wait(l);
+      continue;
+    }
+    if (Clock::now() < next->second.at) {
+      g_timers_changed.wait_until(l, next->second.at);
+      continue;
+    }
+    uint32_t timer = next->first;
+    if (next->second.period_ms)
+      next->second.at += std::chrono::milliseconds(next->second.period_ms);
+    else
+      g_due.erase(next);
+    SetSignal(timer, 1);
+  }
+}
+}  // namespace
+
+bool SetTimer(uint32_t timer, int64_t due, uint32_t period_ms) {
+  SetSignal(timer, 0);
+  std::lock_guard<std::mutex> g(g_timers);
+  if (!g_timer_thread) {
+    std::thread(Timers).detach();
+    g_timer_thread = true;
+  }
+  bool was = g_due.count(timer) != 0;
+  g_due[timer] = {Deadline(due), period_ms};
+  g_timers_changed.notify_all();
+  return was;
+}
+
+bool CancelTimer(uint32_t timer) {
+  std::lock_guard<std::mutex> g(g_timers);
+  return g_due.erase(timer) != 0;
+}
+
 // ---- handles ------------------------------------------------------------
 namespace {
 struct Owned {

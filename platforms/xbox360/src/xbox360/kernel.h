@@ -88,6 +88,14 @@ uint32_t Wait(const uint32_t* objs, uint32_t count, bool wait_all, const int64_t
               bool alertable);
 // KeDelayExecutionThread: a wait on nothing.
 uint32_t Delay(int64_t timeout, bool alertable);
+// KTIMER (0x28 bytes): a notification or synchronization timer's header.
+// SetTimer (KeSetTimerEx) clears it and signals it at `due` (as a wait's
+// timeout: negative relative, otherwise absolute), then every `period_ms`
+// if that is not 0; it returns whether the timer was already set.
+// CancelTimer stops it, returning the same.
+constexpr uint32_t kTimerSize = 0x28;
+bool SetTimer(uint32_t timer, int64_t due, uint32_t period_ms);
+bool CancelTimer(uint32_t timer);
 
 // ---- handles ------------------------------------------------------------
 // A handle names a dispatcher object (or another kernel object) by its
@@ -128,6 +136,7 @@ Thread* ThreadOf(uint32_t kthread);
 uint32_t ThreadId(const Thread* t);
 // The thread's last error (RtlSetLastError, GetLastError read it inline).
 void SetLastError(uint32_t error);
+uint32_t LastError();
 // The guest address of a thread's dynamic TLS slots (KeTlsGetValue).
 uint32_t TlsSlots(const Thread* t);
 // Its processor (KPCR and KTHREAD), 0-5.
@@ -175,6 +184,7 @@ constexpr uint32_t kLdrXexHeader = 0x58;
 // started as (what XexGetModuleHandle matches). Before BindImports.
 void LoadExecutableModule(const XexModule& m, const std::string& name);
 uint32_t ExecutableModule();  // its loader entry, 0 before
+uint32_t ExecutableTitleId();  // its XEX's execution info's
 const std::string& ExecutableModuleName();
 // Export `ordinal` of the title's module, 0 if it has none.
 uint32_t ExecutableExport(uint32_t ordinal);

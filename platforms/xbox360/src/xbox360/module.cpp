@@ -20,7 +20,7 @@ constexpr uint32_t kLdrSize = 0x64, kLdrInLoadOrder = 0x0, kLdrInMemoryOrder = 0
 // Optional header: the image's checksum and time stamp.
 constexpr uint32_t kXexChecksumTimestamp = 0x00018002;
 
-uint32_t g_ldr;
+uint32_t g_ldr, g_title_id;
 std::string g_name;
 std::vector<uint32_t> g_exports;
 uint32_t g_export_base;
@@ -60,12 +60,14 @@ void LoadExecutableModule(const XexModule& m, const std::string& name) {
     Wr32(ldr + kLdrTimeDateStamp, Rd32(stamp + 4));
   Wr32(ldr + kLdrXexHeader, header);
   g_ldr = ldr;
+  g_title_id = m.title_id;
   g_name = name;
   g_exports = m.exports;
   g_export_base = m.export_base;
 }
 
 uint32_t ExecutableModule() { return g_ldr; }
+uint32_t ExecutableTitleId() { return g_title_id; }
 const std::string& ExecutableModuleName() { return g_name; }
 
 uint32_t ExecutableExport(uint32_t ordinal) {
