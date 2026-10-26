@@ -62,6 +62,23 @@ interrupt_entry:
   blr
   .size interrupt_entry, .-interrupt_entry
 
+// audio_entry(*argument): the audio render driver's callback, into
+// title.c's AudioCallback.
+  .globl audio_entry
+  .type audio_entry, @function
+audio_entry:
+  mflr 0
+  std 0, 16(1)
+  stdu 1, -32(1)
+  TOC
+  bl AudioCallback
+  nop
+  addi 1, 1, 32
+  ld 0, 16(1)
+  mtlr 0
+  blr
+  .size audio_entry, .-audio_entry
+
 // mftb, for the time base check.
   .globl time_base
   .type time_base, @function

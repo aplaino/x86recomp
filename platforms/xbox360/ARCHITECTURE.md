@@ -91,7 +91,8 @@ tininess detected before rounding, and the PowerPC's own rules on top:
 - LFS and STFS convert by the ISA's bit-level algorithms (no rounding,
   SNaNs kept).
 - An exception whose enable bit is set, and FPSCR[NI], are fatal errors
-  until their semantics are modelled.
+  until their semantics are modelled, whether or not the thread enabled
+  traps (KeEnableFpuExceptions, MSR[FE0/FE1] on the console).
 FRES and FRSQRTE are estimates whose exact values are the CPU's own: the
 model returns the correctly rounded reciprocal (square root), as QEMU's
 970 does; the Xenon's tables wait for a console. FCTIW(Z)'s high word is
@@ -338,6 +339,17 @@ and titles see of the Xenos, without drawing yet (docs/xenos.md):
 Drawing (milestone 5) adds a renderer behind the same command processor,
 through gfx::Device.
 
+### Audio
+The audio render driver (`src/xbox360/audio.{h,cpp}`, docs/xboxkrnl.md
+"Audio") is a kernel thread that calls each registered client's
+callback once per frame of 256 samples of 5.1 at 48 kHz, paced by the
+host clock and held back by the host's queue. Submitted frames go to
+SDL3 (the host layer), one stream per client on the default playback
+device, which mixes them and downmixes to the device; the floats are
+handed over unchanged. With no device the frames are dropped and the
+callbacks keep their pace. XMA decoding (the XMA* exports) is not there
+yet.
+
 ### Files
 The file namespace (`src/xbox360/fs.{h,cpp}`) is the kernel's: devices,
 each a host directory, and symbolic links to them.
@@ -405,7 +417,8 @@ memory; any other interrupt fails the run.
   objects, critical sections, formatting, variables, time, files on its
   disc and on the hard disk, its module and XEX headers, the settings and
   the video mode, the GPU's registers, interrupts and a ring buffer's
-  packets) and exits with the number of failed checks.
+  packets, string conversions, an audio client) and exits with the number
+  of failed checks. It runs with SDL's dummy audio driver.
   The test writes the disc's files and empties the data directory before
   each run.
 - Not covered by QEMU: what the 970 does differently from the Xenon
@@ -423,8 +436,8 @@ memory; any other interrupt fails the run.
    the libraries and their layout, memory, threads, synchronisation,
    files, the title's module, the settings, the display driver with a
    command processor that executes the ring buffer without drawing, and
-   the first kernel and xam exports are done; next the rest of what a
-   title's startup calls (the audio driver, strings, xam's users and
-   content), timers and APCs.
+   the audio render driver, and the first kernel and xam exports are
+   done; next xam (users, content, notifications, messages), XMA
+   decoding, timers and APCs.
 5. Xenos: drawing, shaders and presentation through gfx::Device, behind
    the command processor (which runs the ring buffer already).

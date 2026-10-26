@@ -18,7 +18,8 @@ constexpr uint32_t kStatusSuccess = 0, kStatusAbandoned = 0x80, kStatusAlerted =
                    kStatusTimeout = 0x102, kStatusPending = 0x103,
                    kStatusUnsuccessful = 0xC0000001, kStatusNotImplemented = 0xC0000002,
                    kStatusInvalidHandle = 0xC0000008, kStatusInvalidParameter = 0xC000000D,
-                   kStatusBufferTooSmall = 0xC0000023, kStatusInvalidParameter3 = 0xC00000F1,
+                   kStatusBufferTooSmall = 0xC0000023, kStatusInvalidParameter2 = 0xC00000F0,
+                   kStatusInvalidParameter3 = 0xC00000F1,
                    kStatusNoMemory = 0xC0000017, kStatusConflictingAddresses = 0xC0000018,
                    kStatusObjectTypeMismatch = 0xC0000024,
                    kStatusInvalidPageProtection = 0xC0000045, kStatusMutantNotOwned = 0xC0000046,
@@ -143,9 +144,10 @@ constexpr uint8_t kDispatchLevel = 2;
 // that it can call guest code (CallDpc); it does not keep the process
 // alive.
 Thread* CreateSystemThread(void (*body)(void* arg), void* arg);
-// Calls guest function fn(a0, a1) on the current system thread as a DPC
-// does: at DISPATCH_LEVEL, the KPCR's DPC-active flag set, on processor
-// `cpu`. Returns r3.
+// Calls guest function fn(a0, a1) on the current system thread, returning
+// r3: CallGuest as a thread does, CallDpc as a DPC does (at
+// DISPATCH_LEVEL, the KPCR's DPC-active flag set, on processor `cpu`).
+uint32_t CallGuest(uint32_t fn, uint32_t a0, uint32_t a1);
 uint32_t CallDpc(uint32_t fn, uint32_t a0, uint32_t a1, uint32_t cpu);
 
 // The title process (KeGetCurrentProcessType): kTitleProcess.

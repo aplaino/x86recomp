@@ -12,7 +12,7 @@ namespace recomp::xbox360 {
 namespace {
 
 constexpr const char* kKrnl = "xboxkrnl.exe";
-constexpr uint32_t kKtApcDisable = 0xB0;
+constexpr uint32_t kKtApcDisable = 0xB0, kKtFpuExceptions = 0x71;
 
 Thread* ThreadArg(ppc::Ctx& c, uint32_t kthread) {
   Thread* t = ThreadOf(kthread);
@@ -133,6 +133,16 @@ HLE(kKrnl, 131, KeQueryPerformanceFrequency) { return kTimeBaseFrequency; }
 
 HLE(kKrnl, 132, KeQuerySystemTime) {
   Wr64(Arg(c, 0), SystemTime());
+  return 0;
+}
+
+// KeEnableFpuExceptions(enable): whether the thread's enabled
+// floating-point exceptions (FPSCR's enable bits) trap; the flag is the
+// KTHREAD's (Xenia's layout). The CPU model stops on an enabled exception
+// either way, until traps are modelled (ARCHITECTURE.md, "Floating
+// point"); with the flag clear the console would carry on.
+HLE(kKrnl, 93, KeEnableFpuExceptions) {
+  Wr8(KThread(CurrentThread()) + kKtFpuExceptions, Arg(c, 0) != 0);
   return 0;
 }
 

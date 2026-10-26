@@ -86,6 +86,17 @@ u32 VdQueryVideoMode(u32* mode);
 u32 VdEnableRingBufferRPtrWriteBack(u32 pa, u32 block_log2);
 u32 VdInitializeRingBuffer(u32 pa, u32 size_log2);
 u32 VdSetGraphicsInterruptCallback(void* callback, u32 user);
+u32 KeEnableFpuExceptions(u32 enable);
+u32 RtlMultiByteToUnicodeN(uint16_t* dest, u32 dest_bytes, u32* written, const char* src, u32 src_bytes);
+u32 RtlUnicodeToMultiByteN(char* dest, u32 dest_bytes, u32* written, const uint16_t* src, u32 src_bytes);
+u32 RtlUnicodeStringToAnsiString(void* ansi, void* unicode, u32 allocate);
+u32 RtlFreeAnsiString(void* ansi);
+u32 RtlNtStatusToDosError(u32 status);
+u32 XAudioRegisterRenderDriverClient(u32* registration, u32* driver);
+u32 XAudioUnregisterRenderDriverClient(u32 driver);
+u32 XAudioSubmitRenderDriverFrame(u32 driver, float* samples);
+u32 XAudioGetVoiceCategoryVolumeChangeMask(u32 driver, u32* mask);
+u32 XAudioGetVoiceCategoryVolume(u32 category, u32* volume);
 u32 XGetAVPack(void);     // xam
 u32 XGetVideoMode(u32* mode);  // xam
 extern u32 __imp_NtClose, __imp_ExThreadObjectType, __imp_KeTimeStampBundle, __imp_XboxKrnlVersion,
@@ -103,6 +114,7 @@ u32 NtQueryDirectoryFile9(u32 handle, u32 event, void* apc, void* context, u32* 
 u32 VdSwap10(volatile u32* words, u32* fetch, u32 writeback, void* system, u32 value, u32* front, u32* format,
              u32* color_space, u32* width, u32* height);
 void interrupt_entry(void);
+void audio_entry(void);
 uint64_t time_base(void);
 uint64_t pcr(void);
 
@@ -663,10 +675,67 @@ static void Gpu(void) {
   CHECK(WaitFor(At(data + 0x64), 9) && WaitFor(At(data), w) && *Reg(0x1C4) == w);
 }
 
+// ---- strings, statuses, the FPU flag ------------------------------------------
+static void Conversions(void) {
+  uint16_t wide[8];
+  u32 written = 0;
+  CHECK(RtlMultiByteToUnicodeN(wide, sizeof wide, &written, "abc\xE9", 4) == 0 && written == 8 && wide[0] == 'a' &&
+        wide[3] == 0xE9);
+  CHECK(RtlMultiByteToUnicodeN(wide, 4, &written, "abcdef", 6) == 0 && written == 4);
+  static const uint16_t hi[3] = {'h', 'i', 0x263A};
+  char narrow[8];
+  CHECK(RtlUnicodeToMultiByteN(narrow, sizeof narrow, &written, hi, 6) == 0 && written == 3 &&
+        Memeq(narrow, "hi?", 3));
+  struct Ansi u = {6, 6, (u32)(uintptr_t)hi}, a = {0, 0, 0};
+  CHECK(RtlUnicodeStringToAnsiString(&a, &u, 1) == 0 && a.length == 3 && Memeq((void*)(uintptr_t)a.buffer, "hi?", 4));
+  RtlFreeAnsiString(&a);
+  char small[2];
+  struct Ansi s = {0, 2, (u32)(uintptr_t)small};
+  CHECK(RtlUnicodeStringToAnsiString(&s, &u, 0) == 0x80000005 && s.length == 1 && Memeq(small, "h", 2));
+  CHECK(RtlNtStatusToDosError(0) == 0 && RtlNtStatusToDosError(0xC0000034) == 2 &&
+        RtlNtStatusToDosError(0x80070005) == 5 && RtlNtStatusToDosError(0xC0000135) == 126);
+  volatile uint8_t* fpu = (volatile uint8_t*)(uintptr_t)(*At((u32)pcr() + 0x100) + 0x71);
+  KeEnableFpuExceptions(1);
+  CHECK(*fpu == 1);
+  KeEnableFpuExceptions(0);
+  CHECK(*fpu == 0);
+}
+
+// ---- audio ---------------------------------------------------------------------
+// The render driver's callback (start.S's audio_entry), given a pointer to
+// the client's argument.
+static volatile u32 audio_calls, audio_arg;
+void AudioCallback(u32 arg) {
+  audio_calls++;
+  audio_arg = *At(arg);
+}
+
+static void Audio(void) {
+  u32 registration[2] = {(u32)(uintptr_t)audio_entry, 0x1357}, driver = 0;
+  CHECK(XAudioRegisterRenderDriverClient(registration, &driver) == 0 && (driver >> 16) == 0x4155);
+  // A frame every 256 samples at 48 kHz: about 19 in 100 ms.
+  int64_t hundred_ms = -1000000;
+  KeDelayExecutionThread(1, 0, &hundred_ms);
+  u32 calls = audio_calls;
+  CHECK(calls >= 10 && calls <= 30 && audio_arg == 0x1357);
+  static float frame[6 * 256];
+  CHECK(XAudioSubmitRenderDriverFrame(driver, frame) == 0);
+  u32 mask = 1, volume = 0;
+  CHECK(XAudioGetVoiceCategoryVolumeChangeMask(driver, &mask) == 0 && mask == 0);
+  CHECK(XAudioGetVoiceCategoryVolume(0, &volume) == 0 && volume == 0x3F800000);
+  CHECK(XAudioUnregisterRenderDriverClient(driver) == 0);
+  // At most a callback already under way after that.
+  calls = audio_calls;
+  KeDelayExecutionThread(1, 0, &hundred_ms);
+  CHECK(audio_calls - calls <= 1);
+}
+
 int main(void) {
   Modules();
   Console();
   Gpu();
+  Conversions();
+  Audio();
   Memory();
   Physical();
   Threads();
