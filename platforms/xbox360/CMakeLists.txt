@@ -63,6 +63,7 @@ add_library(recomp_xbox360_xam SHARED
   src/xbox360/xam/notify.cpp
   src/xbox360/xam/profile.cpp
   src/xbox360/xam/user.cpp
+  src/xbox360/xam/xlivebase.cpp
   src/xbox360/xam/xmp.cpp)
 foreach(_m xboxkrnl xam)
   target_link_libraries(recomp_xbox360_${_m} PUBLIC recomp_xbox360)

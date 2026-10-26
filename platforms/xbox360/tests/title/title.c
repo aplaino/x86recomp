@@ -244,6 +244,21 @@ static void Memory(void) {
   CHECK(base >= 0x40000000 && base < 0x80000000 && (base & 0xFFFF) == 0 && size == 0x10000);
   rel = 0;
   CHECK(NtFreeVirtualMemory(&base, &rel, kMemRelease, 0) == 0);
+  // ... and commits and decommits whole 64 KiB pages in it, as a heap
+  // that grows by the sizes it gets back relies on.
+  base = 0;
+  size = 0x100000;
+  CHECK(NtAllocateVirtualMemory(&base, &size, kMemReserve | kMemLargePages, kPageReadWrite, 0) == 0);
+  b2 = base;
+  s2 = 0x20E50;
+  CHECK(NtAllocateVirtualMemory(&b2, &s2, kMemCommit | kMemLargePages, kPageReadWrite, 0) == 0 && b2 == base &&
+        s2 == 0x30000);
+  b2 = base + 0x10100;
+  s2 = 0x100;
+  CHECK(NtFreeVirtualMemory(&b2, &s2, kMemDecommit, 0) == 0 && b2 == base + 0x10000 && s2 == 0x10000);
+  CHECK(NtQueryVirtualMemory(base + 0x10000, info, 0) == 0 && info[4] == kMemReserve && info[3] == 0x10000);
+  rel = 0;
+  CHECK(NtFreeVirtualMemory(&base, &rel, kMemRelease, 0) == 0 && rel == 0x100000);
   // The kernel pool.
   u32 p = ExAllocatePool(100);
   CHECK(p != 0 && (p & 15) == 0);
@@ -896,6 +911,12 @@ static void Xam(void) {
   u32 controller = 9, locked = 9;
   u32 get[3] = {2, (u32)(uintptr_t)&controller, (u32)(uintptr_t)&locked};
   CHECK(XMsgInProcessCall(0xFA, 0x7001B, get, 0) == 0 && controller == 0 && locked == 0);
+  u32 logon = 0;
+  CHECK(XMsgInProcessCall(0xFC, 0x58004, &logon, 0) == 0 && logon == 1);
+  u32 context[6] = {0, 0, 0, 0, 0x8001, 3};  // XUserSetContextEx: user 0, presence 3
+  CHECK(XMsgInProcessCall(0xFB, 0xB0006, context, (void*)sizeof context) == 0);
+  u32 request[4] = {0};
+  CHECK(XMsgInProcessCall(0xFC, 0x58020, (void*)(uintptr_t)logon, request) == 0x80004005);
   u32 set[3] = {2, 0, 1};
   CHECK(XMsgStartIORequestEx(0xFA, 0x7001A, 0, set, sizeof set, 0) == 0);
   u32 e = 0, ov[7] = {0, 0, 0, 0, 0, 0, 0};

@@ -68,7 +68,10 @@ here; on the console a KPCR belongs to a hardware thread.
   alignment and the bounds apply to the physical address.
 - NtAllocateVirtualMemory and NtFreeVirtualMemory follow NT: base and
   size in and out, MEM_RESERVE / MEM_COMMIT, MEM_DECOMMIT / MEM_RELEASE
-  (size 0 releases the whole reservation). MEM_COMMIT with no base
+  (size 0 releases the whole reservation), in whole pages of the region's
+  own size: 64 KiB in the large-page heap from 0x40000000, for commits
+  and decommits too (a title's heap grows by the size a commit returns,
+  and decommits 64 KiB at a time). MEM_COMMIT with no base
   reserves the region as well (titles' heaps commit that way, with
   MEM_TOP_DOWN); a commit outside a reservation fails. The first 64 KiB
   are never mapped (a null pointer faults), and no call commits, protects

@@ -43,8 +43,10 @@ HLE(kKrnl, 204, NtAllocateVirtualMemory) {
     base = Reserve(h, base, size, page, type & kMemTopDown);
     if (!base) return fixed ? kStatusConflictingAddresses : kStatusNoMemory;
   } else {
-    uint32_t end = (base + size + 0xFFF) & ~0xFFFu;
-    base &= ~0xFFFu;
+    // Whole pages of the region's own size: 64 KiB in the large-page
+    // heap, as a title's heap expects of the size it gets back.
+    uint32_t end = (base + size + page - 1) & ~(page - 1);
+    base &= ~(page - 1);
     size = end - base;
   }
   if ((type & kMemCommit) && !Commit(base, size, protect)) {
@@ -71,10 +73,15 @@ HLE(kKrnl, 220, NtFreeVirtualMemory) {
   }
   if (!(type & kMemDecommit)) return kStatusInvalidParameter;
   RegionInfo r;
-  if (!Query(base, r) || r.state == kMemFree) return kStatusMemoryNotAllocated;
+  Heap h;
+  if (!Query(base, r) || r.state == kMemFree || !HeapOf(base, h)) return kStatusMemoryNotAllocated;
   if (!size) size = r.alloc_base + ReservationSize(r.alloc_base) - base;
+  // Whole pages of the region's size, as a commit takes them.
+  uint32_t page = HeapPageSize(h), end = (base + size + page - 1) & ~(page - 1);
+  base &= ~(page - 1);
+  size = end - base;
   if (!Decommit(base, size)) return kStatusMemoryNotAllocated;
-  Wr32(base_ptr, base & ~0xFFFu);
+  Wr32(base_ptr, base);
   Wr32(size_ptr, size);
   return kStatusSuccess;
 }

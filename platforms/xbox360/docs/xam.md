@@ -30,6 +30,15 @@ only a console can settle.
   does for a user without a device (for a gamepad and, through
   HidGetCapabilities, a keyboard).
 
+## Live (XLiveBase, app 0xFC)
+- xam's handler for app 0xFC forwards each message to an object that
+  xlivebase.xex registers (and answers 0 while there is none); that module
+  is in the console's flash, not in the system update, so its behaviour is
+  unknown here. Message 0x58004 (a word in p1) writes 1 and succeeds, as
+  Xenia has it (it calls it XLiveBaseGetLogonId); a title passes the word
+  on to its next online requests. 0x58020, which enumerates the friends
+  list, fails with E_FAIL, as in Xenia. Console check.
+
 ## Networking
 - There is no network interface: a console with no cable. NetDll_* take
   the caller first, a title (1) or the system (2), and refuse others with
@@ -105,6 +114,10 @@ only a console can settle.
   always writes the XUID (0 on failure). XamUserGetName(slot, buffer,
   size) converts the name (RtlUnicodeToMultiByteN) into size - 1 bytes
   and a NUL, returning a Win32 code. All from xam's code.
+
+- XUserSetContextEx (XGI 0xB0006: user, XUID, context id, value)
+  succeeds, as xam's does whether or not the user exists; xam keeps the
+  value for presence and Live sessions, which nothing reads here.
 
 ## Profile settings
 - XamUserReadProfileSettings(title, slot, XUID count, XUIDs, count, ids,
