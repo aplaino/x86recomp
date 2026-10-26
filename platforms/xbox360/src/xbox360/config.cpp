@@ -1,6 +1,7 @@
 #include "xbox360/config.h"
 
 #include <bit>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <string>
@@ -78,9 +79,11 @@ bool XConfigSetting(uint16_t category, uint16_t setting, const uint8_t*& data, u
   return false;
 }
 
-void SetSignedInProfile(const std::string& gamertag) {
+void SetSignedInProfile(const std::string& gamertag, const std::filesystem::path& data_dir) {
+  char xuid[17];
+  std::snprintf(xuid, sizeof xuid, "%016llX", static_cast<unsigned long long>(kLocalXuid));
   g_signed_in = !gamertag.empty();
-  g_profile = {gamertag, kLocalXuid};
+  g_profile = {gamertag, kLocalXuid, data_dir / "profiles" / xuid};
 }
 
 const Profile* SignedInProfile(uint32_t slot) { return slot == 0 && g_signed_in ? &g_profile : nullptr; }

@@ -1,0 +1,12 @@
+# xbox360_runtime_profile: the title settings tests/title wrote, by size.
+foreach(_pair "63E83FFF;1000" "63E83FFE;10" "63E83FFD;0")
+  list(GET _pair 0 _id)
+  list(GET _pair 1 _size)
+  if(NOT EXISTS "${DIR}/${_id}")
+    message(FATAL_ERROR "${DIR}/${_id} was not saved")
+  endif()
+  file(SIZE "${DIR}/${_id}" _got)
+  if(NOT _got EQUAL _size)
+    message(FATAL_ERROR "${DIR}/${_id} is ${_got} bytes, not ${_size}")
+  endif()
+endforeach()

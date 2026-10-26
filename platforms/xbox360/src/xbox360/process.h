@@ -21,7 +21,8 @@ struct GameConfig {
   // $XDG_DATA_HOME/<id> (on macOS ~/Library/Application Support/<id>).
   std::string data_dir;
   // The local profile signed in as player 1 when the title starts, its
-  // gamertag; empty for none signed in.
+  // gamertag; empty for none signed in. Its settings are kept in the data
+  // directory's profiles/<XUID>.
   std::string profile = "Player";
 };
 

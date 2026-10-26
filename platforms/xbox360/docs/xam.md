@@ -92,11 +92,27 @@ only a console can settle.
   (source, the slot or XUID at 8, the id at 0x10, XUSER_DATA at 0x18: its
   type byte, the value or a size and an address at 0x20), then the
   strings' and bytes' space.
-- The local profile has stored nothing: the profile's own settings (title
-  0xFFFE07D1) read as NO_VALUE except controller vibration, DEFAULT 3
-  (Xenia's); a title's own settings (title specific 1-3) as NO_VALUE with
-  no bytes. An id not listed is fatal. Title 0 is the running title
-  (chosen). Console check.
+- XamUserWriteProfileSettings(title, slot, count, settings, overlapped)
+  is xam's: it refuses no settings and any id a title may not write
+  (ERROR_INVALID_PARAMETER): the profile's own (number below 0x58) and,
+  for any title but the dashboard, title specific 1-3. It sends the XGI
+  app's message 0xB000D with {?, title, slot, count, settings} (xam leaves
+  the first word unset) and returns as the read does.
+- What a title writes is kept as the profile keeps it: the profile's own
+  settings for the profile (read under 0xFFFE07D1), a title's own for that
+  title, source TITLE when read back. They are saved in the data
+  directory, profiles/<XUID>/<title>/<id>, a file each holding the
+  string's or bytes' own bytes or the 8 bytes XUSER_DATA holds a number
+  in; the console keeps them in the profile's package. A string or bytes
+  of size 0 is stored empty, address or not: a title writes title
+  specific 3 with 0 bytes and an address when it saves its settings, and
+  memcpy into an empty std::vector's data(), which may be null, is
+  undefined even for 0 bytes (another HLE corrupted its heap on exactly
+  that write, rexglue-sdk#502). The runtime test title makes that write;
+  under -O3 and UBSan the planted memcpy is reported.
+- A setting not written reads as NO_VALUE, except controller vibration,
+  DEFAULT 3 (Xenia's); a title's own settings with no bytes. An id not
+  listed is fatal. Title 0 is the running title (chosen). Console check.
 
 ## Notifications
 - An id is an area (bits 25-30), a version (16-24) and a number.
