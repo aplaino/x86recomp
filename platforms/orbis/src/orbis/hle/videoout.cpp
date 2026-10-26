@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "orbis/gpu/cp.h"
+#include "orbis/gpu/renderer.h"
 #include "orbis/hle.h"
 #include "orbis/hle/kernel.h"
 #include "orbis/host.h"
@@ -118,11 +119,17 @@ void Show(Port& p, const Flip& f) {
     h = int(a.height);
     px.resize(size_t(w) * h * 4);
     if (a.tiling != kTilingLinear) {
-      // Only the GPU writes tiled buffers, and it does not draw yet: they
-      // hold nothing to show.
-      static bool warned = false;
-      if (!warned) WarnF("videoout: tiled buffers are shown black until the GPU draws\n");
-      warned = true;
+      // Only the GPU writes tiled buffers: its colour target at the
+      // buffer's address is what to show (black if it has drawn none).
+      const gfx::TextureId t = gpu::TargetAt(f.addr, uint32_t(w), uint32_t(h));
+      if (t && p.window && w == p.w && h == p.h) {
+        gpu::Exclusive([&] {
+          p.dev->SetRenderTarget(0, 0);
+          p.dev->DrawImage(t, {0, 0, w, h});
+          hle::PresentFrame(*p.dev, w, h);
+        });
+        return;
+      }
       std::fill(px.begin(), px.end(), uint8_t(0));
       goto show;
     }
@@ -210,16 +217,24 @@ ORBIS_HLE("libSceVideoOut", sceVideoOutOpen, 4) {
   if (bus != 0 || Arg(c, 2) != 0 || Arg(c, 3))
     recomp::FatalF("sceVideoOutOpen: bus %u index %d param %llX not implemented yet", bus,
                    int(Arg(c, 2)), (unsigned long long)Arg(c, 3));
-  std::lock_guard<std::mutex> l(g_mu);
-  if (g_port.open) return uint32_t(kErrResourceBusy);
-  g_port.open = true;
-  if (!g_port.labels) {
-    g_port.labels = recomp::g_proc->vm.Reserve(0, recomp::GuestMemory::kPageSize);
-    if (!g_port.labels ||
-        !recomp::g_proc->vm.Commit(g_port.labels, recomp::GuestMemory::kPageSize, recomp::Prot::RW))
-      recomp::FatalF("sceVideoOutOpen: out of guest memory");
-    std::thread(VblankThread).detach();
+  {
+    std::lock_guard<std::mutex> l(g_mu);
+    if (g_port.open) return uint32_t(kErrResourceBusy);
+    g_port.open = true;
+    if (!g_port.labels) {
+      g_port.labels = recomp::g_proc->vm.Reserve(0, recomp::GuestMemory::kPageSize);
+      if (!g_port.labels ||
+          !recomp::g_proc->vm.Commit(g_port.labels, recomp::GuestMemory::kPageSize, recomp::Prot::RW))
+        recomp::FatalF("sceVideoOutOpen: out of guest memory");
+      std::thread(VblankThread).detach();
+    }
   }
+  // The window and its device now: the GPU draws with it before the
+  // first flip.
+  recomp::orbis::RunOnHost([] {
+    if (!g_port.window) OpenWindow(g_port, 1920, 1080);
+  });
+  recomp::orbis::gpu::SetDevice(g_port.dev.get());
   return kHandle;
 }
 

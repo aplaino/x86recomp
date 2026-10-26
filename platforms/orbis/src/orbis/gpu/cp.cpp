@@ -15,6 +15,7 @@
 #include <mutex>
 #include <thread>
 
+#include "orbis/gpu/renderer.h"
 #include "orbis/hle/kernel.h"
 #include "runtime/hle/kernel32_state.h"
 #include "runtime/log.h"
@@ -37,16 +38,9 @@ enum Op : uint32_t {
   kWaitOnDeCounterDiff = 0x88,
 };
 
-// Register offsets (dwords) of each SET_*_REG space.
-constexpr uint32_t kRegSpace = 0x400;
 // NOP bodies that start with 0xC01E0000 | offset carry context register
 // values (sceGnm*Update*Shader): applied as SET_CONTEXT_REG.
 constexpr uint32_t kNopContextRegs = 0xC01E0000;
-
-struct Regs {
-  uint32_t config[kRegSpace] = {}, context[kRegSpace] = {}, sh[kRegSpace] = {},
-           uconfig[kRegSpace] = {};
-};
 
 // One engine's instruction stream: the buffer, and the indirect buffers it
 // called (their return points).
@@ -58,8 +52,35 @@ struct Stream {
   bool done() const { return stack.empty(); }
 };
 
+// CLEAR_STATE's context registers: zero but where the Sea Islands
+// clear state (as AMD publishes it) has other values: the scissors open
+// (top-left 0 with the window offset disabled, bottom-right 16384), the
+// target and shader masks all on, the viewports' depth ranges 0-1.
+void ClearState(uint32_t* cx) {
+  std::memset(cx, 0, 4 * kRegSpace);
+  cx[0x00D] = 0x40004000;  // PA_SC_SCREEN_SCISSOR_BR
+  cx[0x081] = 0x80000000;  // PA_SC_WINDOW_SCISSOR_TL
+  cx[0x082] = 0x40004000;
+  cx[0x083] = 0xFFFF;      // PA_SC_CLIPRECT_RULE
+  for (int i = 0; i < 4; i++) cx[0x085 + 2 * i] = 0x40004000;  // PA_SC_CLIPRECT_n_BR
+  cx[0x08C] = 0xAAAAAAAA;  // PA_SC_EDGERULE
+  cx[0x08E] = 0xFFFFFFFF;  // CB_TARGET_MASK
+  cx[0x08F] = 0xFFFFFFFF;  // CB_SHADER_MASK
+  cx[0x090] = 0x80000000;  // PA_SC_GENERIC_SCISSOR_TL
+  cx[0x091] = 0x40004000;
+  for (int i = 0; i < 16; i++) {
+    cx[0x094 + 2 * i] = 0x80000000;  // PA_SC_VPORT_SCISSOR_n_TL
+    cx[0x095 + 2 * i] = 0x40004000;
+    cx[0x0B5 + 2 * i] = 0x3F800000;  // PA_SC_VPORT_ZMAX_n
+  }
+}
+
 struct Engines {
+  Engines() { ClearState(regs.context); }
   Regs regs;
+  // The draw packets' state: the index buffer, its index size, instances.
+  gaddr index_base = 0;
+  uint32_t index_size = 2, instances = 1;
   uint8_t ce_ram[48 * 1024] = {};
   uint64_t ce_count = 0, de_count = 0;
   bool warned_draw = false, warned_dispatch = false;
@@ -134,12 +155,14 @@ bool Step(Engines& e, Stream& s, bool ce) {
     case kSetContextReg: SetRegs(e.regs.context, "context", d[0] & 0xFFFF, &d[1], n - 1); break;
     case kSetShReg: SetRegs(e.regs.sh, "SH", d[0] & 0xFFFF, &d[1], n - 1); break;
     case kSetUconfigReg: SetRegs(e.regs.uconfig, "uconfig", d[0] & 0xFFFF, &d[1], n - 1); break;
-    case kClearState: std::memset(e.regs.context, 0, sizeof e.regs.context); break;
+    case kClearState: ClearState(e.regs.context); break;
     // State and cache control: nothing to do where memory is coherent.
-    case kContextControl: case kAcquireMem: case kSurfaceSync: case kIndexType:
-    case kIndexBase: case kIndexBufferSize: case kNumInstances: case kSetBase:
-    case kSetPredication:
+    case kContextControl: case kAcquireMem: case kSurfaceSync: case kIndexBufferSize:
+    case kSetBase: case kSetPredication:
       break;
+    case kIndexType: e.index_size = (d[0] & 3) == 1 ? 4 : 2; break;
+    case kIndexBase: e.index_base = (d[0] & ~1u) | uint64_t(d[1] & 0xFFFF) << 32; break;
+    case kNumInstances: e.instances = d[0]; break;
     case kEventWrite: {
       // Flushes, partial flushes and cache actions only: the events that
       // write query results are not implemented yet.
@@ -147,13 +170,24 @@ bool Step(Engines& e, Stream& s, bool ce) {
       if (n > 1) FatalF("GPU: EVENT_WRITE of event %02X with an address not implemented yet", type);
       break;
     }
-    case kDrawIndex2: case kDrawIndexAuto: case kDrawIndexOffset2: case kDrawIndirect:
-    case kDrawIndexIndirect:
-      if (!e.warned_draw) WarnF("GPU: drawing is not implemented yet; draws are skipped\n");
+    case kDrawIndex2:  // max size, index buffer, count, initiator
+      Draw(e.regs, {d[3], e.instances, d[1] | uint64_t(d[2] & 0xFFFF) << 32, e.index_size});
+      break;
+    case kDrawIndexOffset2:  // max size, offset in indices, count, initiator
+      Draw(e.regs, {d[2], e.instances, e.index_base + uint64_t(d[1]) * e.index_size, e.index_size});
+      break;
+    case kDrawIndexAuto:  // count, initiator
+      Draw(e.regs, {d[0], e.instances, 0, 2});
+      break;
+    case kDrawIndirect: case kDrawIndexIndirect:
+      if (!e.warned_draw) WarnF("GPU: indirect draws are not implemented yet; they are skipped\n");
       e.warned_draw = true;
       break;
-    case kDispatchDirect: case kDispatchIndirect:
-      if (!e.warned_dispatch) WarnF("GPU: compute is not implemented yet; dispatches are skipped\n");
+    case kDispatchDirect:  // groups x, y, z, initiator
+      Dispatch(e.regs, d.data());
+      break;
+    case kDispatchIndirect:
+      if (!e.warned_dispatch) WarnF("GPU: indirect dispatches are not implemented yet; they are skipped\n");
       e.warned_dispatch = true;
       break;
     case kWriteData: {
@@ -299,6 +333,7 @@ void GraphicsThread() {
       Q().cv.wait(l, [] { return !Q().gfx.empty(); });
       sub = std::move(Q().gfx.front());
     }
+    NextSubmission();
     for (size_t i = 0; i < sub.dcbs.size(); i++) {
       Stream de, ce;
       de.stack.push_back({sub.dcbs[i].addr, sub.dcbs[i].addr + 4 * uint64_t(sub.dcbs[i].dwords)});

@@ -1758,7 +1758,7 @@ void r_color0(inout vec4 c) {
     if (tb) SDL_ReleaseGPUTransferBuffer(dev_, tb);
   }
 
-  void PresentImage(TextureId id, const Rect& r) override {
+  void DrawImage(TextureId id, const Rect& r) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     auto it = textures_.find(id);
     if (it == textures_.end()) return;
@@ -1789,13 +1789,6 @@ void r_color0(inout vec4 c) {
     SDL_SetGPUViewport(rp, &vp);
     SDL_DrawGPUPrimitives(rp, 3, 1, 0, 0);
     SDL_EndGPURenderPass(rp);
-    SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
-    SDL_GPUTextureLocation s{}, dl{};
-    s.texture = backbuffer_;
-    dl.texture = front_;
-    SDL_CopyGPUTextureToTexture(cp, &s, &dl, Uint32(bb_w_), Uint32(bb_h_), 1, false);
-    SDL_EndGPUCopyPass(cp);
-    Show(cmd);
     Submit(cmd);
   }
 
@@ -3366,7 +3359,7 @@ void r_color0(inout vec4 c) {
     return p;
   }
 
-  // PresentImage's: a triangle over the back buffer fetching the image's
+  // DrawImage's: a triangle over the back buffer fetching the image's
   // texels where the region maps (clamped to it), encoded back to sRGB for
   // sRGB images, so the back buffer holds the stored values.
   void CreatePresentPipeline() {

@@ -170,7 +170,8 @@ int main() {
   for (uint32_t i = 0; i < 16; i++) ok &= iv[i] == i * 10;
   Check(ok, "a dispatch's storage image reads back");
 
-  dev->PresentImage(rt, {0, 0, 4, 4});
+  dev->DrawImage(rt, {0, 0, 4, 4});
+  dev->Present();
   dev.reset();
   SDL_DestroyWindow(w);
   SDL_Quit();

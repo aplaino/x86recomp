@@ -19,7 +19,7 @@ void Device::ClearImage(TextureId, int, const Color&) {}
 void Device::ClearDepth(DepthId, float, int) {}
 void Device::DrawProgram(const ProgramDraw&) {}
 void Device::DispatchProgram(const ProgramDispatch&) {}
-void Device::PresentImage(TextureId, const Rect&) {}
+void Device::DrawImage(TextureId, const Rect&) {}
 
 uint32_t BitsPerPixel(Format f) {
   switch (f) {

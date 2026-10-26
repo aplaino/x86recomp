@@ -1222,9 +1222,18 @@ The seams (core, generic):
   libSceGnmDriver submits on host threads, one per queue (graphics, each
   mapped compute ring), beside the CPU: the packets that write memory the
   CPU sees, the waits and the end-of-pipe interrupts (as event queue
-  events) are exact, register writes are kept; drawing and dispatching
-  are not implemented yet. libSceGnmDriver's HLE writes the same packets
-  into the game's command buffers as the 11.00 driver does.
+  events) are exact, register writes are kept. Draws and dispatches go to
+  gfx::Device's programs (orbis/gpu/renderer.h): a stage's scalar
+  instructions run on the CPU with its user data and guest memory to find
+  the descriptors (buffers, textures, samplers, the fetch shader it calls)
+  its memory instructions use, then the stage translates to GLSL
+  (orbis/gpu/shader.h, decoding in orbis/gpu/gcn.h) once per code and
+  formats: one lane per invocation, branches as a switch over blocks,
+  memory by guest address on the ranges each draw binds. Targets are
+  device images keyed by guest address, so render-to-texture and the
+  display need no copies through guest memory; VideoOut shows the target
+  at a flipped buffer's address. libSceGnmDriver's HLE writes the same
+  packets into the game's command buffers as the 11.00 driver does.
 - System libraries' HLE (platforms/orbis/src/orbis/hle, one shared
   library per library or family: recomp_orbis_kernel, ..._system, ...)
   registers by name; platforms/orbis/docs/hle.md has their choices and
