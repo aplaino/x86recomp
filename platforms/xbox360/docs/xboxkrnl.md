@@ -46,7 +46,10 @@ here; on the console a KPCR belongs to a hardware thread.
 - ExCreateThread(handle, stack size, thread id, XAPI startup, start,
   context, flags): with a startup routine the thread runs
   `startup(start, context)`, otherwise `start(context)`; the result is the
-  exit status. Flag 1 creates it suspended.
+  exit status. Flag 1 creates it suspended. With flag 0x80 *handle is
+  the KTHREAD, not a handle (Xenia's; a title hands it straight to
+  KeSetBasePriorityThread), referenced for the caller as a handle would
+  be (chosen). Console check.
 - A stack size of 0 takes the title's (the XEX's default stack size
   header); without one 1 MiB, as Xenia chose. At least 16 KiB, in whole
   4 KiB pages. Console check.
@@ -65,7 +68,11 @@ here; on the console a KPCR belongs to a hardware thread.
   alignment and the bounds apply to the physical address.
 - NtAllocateVirtualMemory and NtFreeVirtualMemory follow NT: base and
   size in and out, MEM_RESERVE / MEM_COMMIT, MEM_DECOMMIT / MEM_RELEASE
-  (size 0 releases the whole reservation).
+  (size 0 releases the whole reservation). MEM_COMMIT with no base
+  reserves the region as well (titles' heaps commit that way, with
+  MEM_TOP_DOWN); a commit outside a reservation fails. The first 64 KiB
+  are never mapped (a null pointer faults), and no call commits, protects
+  or frees them.
 
 ## Objects
 - DISPATCHER_HEADER: type (byte 0), absolute (1, a critical section's
@@ -228,7 +235,10 @@ here; on the console a KPCR belongs to a hardware thread.
   `\??\GAME:` link; `\Device\Harddisk0\Partition1` is the hard
   disk's data partition. D: as Xenia has it.
 - Paths in OBJECT_ATTRIBUTES (RootDirectory, ObjectName, Attributes) are
-  ANSI_STRINGs, not Unicode; links are named `\??\name:`.
+  ANSI_STRINGs, not Unicode; links are named `\??\name:`. A RootDirectory
+  of -3 (ObDosDevices) looks the name up among the links, as `\??\`
+  does: XAPI's file functions open `D:\...` that way (xam's
+  GetFileAttributesExA passes it, with OBJ_CASE_INSENSITIVE).
 - NtCreateFile(handle, access, attributes, io status, allocation size,
   file attributes, share, disposition, options) takes nine arguments;
   dispositions, options and IO_STATUS_BLOCK.Information are NT's.

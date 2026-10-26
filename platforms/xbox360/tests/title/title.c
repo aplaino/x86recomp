@@ -157,7 +157,7 @@ uint64_t time_base(void);
 uint64_t pcr(void);
 
 enum {
-  kMemCommit = 0x1000, kMemReserve = 0x2000, kMemDecommit = 0x4000, kMemRelease = 0x8000,
+  kMemCommit = 0x1000, kMemReserve = 0x2000, kMemDecommit = 0x4000, kMemRelease = 0x8000, kMemTopDown = 0x100000,
   kMemLargePages = 0x20000000, kMem16MbPages = 0x80000000, kPageReadWrite = 0x04,
   kStatusTimeout = 0x102, kStatusConflictingAddresses = 0xC0000018, kStatusInvalidHandle = 0xC0000008,
   kStatusMutantNotOwned = 0xC0000046, kStatusEndOfFile = 0xC0000011, kStatusAccessDenied = 0xC0000022,
@@ -221,6 +221,19 @@ static void Memory(void) {
   CHECK(NtAllocateVirtualMemory(&b3, &s3, kMemReserve, kPageReadWrite, 0) == kStatusConflictingAddresses);
   u32 rel = 0;
   CHECK(NtFreeVirtualMemory(&base, &rel, kMemRelease, 0) == 0 && rel == 0x3000);
+  // A commit with no base reserves too (top down here, as a title's heap
+  // asks); none reaches the never-mapped first 64 KiB.
+  base = 0;
+  size = 0xFFFC;
+  CHECK(NtAllocateVirtualMemory(&base, &size, kMemCommit | kMemTopDown, kPageReadWrite, 0) == 0);
+  CHECK(base >= 0x10000 && base < 0x40000000 && size == 0x10000);
+  *At(base + 0xFFF8) = 0x55AA55AA;
+  CHECK(*At(base + 0xFFF8) == 0x55AA55AA);
+  rel = 0;
+  CHECK(NtFreeVirtualMemory(&base, &rel, kMemRelease, 0) == 0 && rel == 0x10000);
+  b2 = 0x1000;
+  s2 = 0x1000;
+  CHECK(NtAllocateVirtualMemory(&b2, &s2, kMemCommit, kPageReadWrite, 0) != 0);
   // Large pages: 64 KiB granularity from 0x40000000.
   base = 0;
   size = 0x1000;
@@ -335,6 +348,15 @@ static void Threads(void) {
   CHECK(*At(obj + 0x140) == 42);
   ObDereferenceObject(obj);
   CHECK(NtClose(h) == 0 && NtClose(h) == kStatusInvalidHandle);
+  // Flag 0x80: the KTHREAD in place of a handle.
+  u32 kt = 0;
+  CHECK(ExCreateThread(&kt, 0, &id, (void*)thread_startup, (void*)Probe, (void*)(uintptr_t)43, 0x80) == 0);
+  CHECK(kt != 0 && (*At(kt) >> 24) == 6 && *At(kt + 0x14C) == id);
+  KeDelayExecutionThread(1, 0, &ten_ms);
+  KeSetEvent(shared.event, 1, 0);
+  CHECK(KeWaitForSingleObject((void*)(uintptr_t)kt, 3, 1, 0, 0) == 0 && shared.kthread == kt);
+  CHECK(*At(kt + 0x140) == 43);
+  ObDereferenceObject(kt);
 
   // Four threads contending for a critical section.
   RtlInitializeCriticalSection(shared.cs);
@@ -462,12 +484,13 @@ static u32 OpenPath(u32* h, const char* path, u32 access, u32 disposition, u32 o
   return NtCreateFile9(h, access, &a, io, 0, 0x80, 7, disposition, options);
 }
 
-static u32 QueryFull(const char* path, uint64_t* info) {
+static u32 QueryFullIn(u32 root, const char* path, uint64_t* info) {
   struct Ansi name;
   RtlInitAnsiString(&name, path);
-  struct Attributes a = {0, (u32)(uintptr_t)&name, 0};
+  struct Attributes a = {root, (u32)(uintptr_t)&name, 0x40};
   return NtQueryFullAttributesFile(&a, info);
 }
+static u32 QueryFull(const char* path, uint64_t* info) { return QueryFullIn(0, path, info); }
 
 static void Files(void) {
   u32 h = 0, d = 0, io[2];
@@ -522,6 +545,9 @@ static void Files(void) {
   v = 4;
   CHECK(NtSetInformationFile(h, io, &v, 8, 20) == 0);
   CHECK(NtFlushBuffersFile(h, io) == 0);
+  // XAPI's root: the DOS devices directory (ObDosDevices, -3), as xam's
+  // GetFileAttributesExA passes it.
+  CHECK(QueryFullIn(0xFFFFFFFD, "D:\\data.bin", info) == 0 && info[5] == 32);
   CHECK(QueryFull("hdd:\\DIR\\F.BIN", info) == 0 && info[5] == 4 && (info[6] >> 32) == 0x80);
   // An asynchronous read completes with its event set.
   u32 e = 0;

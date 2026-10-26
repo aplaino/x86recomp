@@ -21,6 +21,10 @@ namespace {
 using ppc::Fatal;
 
 constexpr uint32_t kPage = 0x1000;
+// The first 64 KiB, never mapped, as on the console: a null pointer faults.
+// A reservation of the runtime's that no guest call can commit, protect or
+// free.
+constexpr uint32_t kNullGuard = 0x10000;
 constexpr uint32_t kPhysical64kBase = 0xA0000000, kPhysical16mBase = 0xC0000000,
                    kPhysical4kBase = 0xE0000000;
 
@@ -137,7 +141,7 @@ uint32_t ReserveLocked(Heap h, uint32_t va, uint32_t size, uint32_t align, uint6
 bool InOneReservation(uint32_t& va, uint32_t& size) {
   uint64_t end = (uint64_t(va) + size + kPage - 1) & ~uint64_t(kPage - 1);
   va &= ~(kPage - 1);
-  if (end <= va || end > (1ull << 32)) return false;
+  if (end <= va || end > (1ull << 32) || va < kNullGuard) return false;
   size = uint32_t(end - va);
   const Page& first = g_pages[va / kPage];
   if (first.state == kFree) return false;
@@ -168,10 +172,8 @@ void MapGuestMemory() {
   g_pages = static_cast<Page*>(std::calloc(size_t(1) << 20, sizeof(Page)));
   g_frames.assign(kPhysicalSize / kPage, 0);
   if (!g_pages) Fatal(nullptr, "out of host memory for the guest page table");
-  // The first 64 KiB are never mapped, as on the console: a null pointer
-  // faults.
-  Claim(Heap::kVirtual4k, 0, 0x10000);
-  if (mprotect(g_mem, 0x10000, PROT_NONE) != 0)
+  Claim(Heap::kVirtual4k, 0, kNullGuard);
+  if (mprotect(g_mem, kNullGuard, PROT_NONE) != 0)
     Fatal(nullptr, "cannot protect guest page 0: %s", std::strerror(errno));
 }
 
@@ -231,7 +233,7 @@ bool Decommit(uint32_t va, uint32_t size) {
 uint32_t Release(uint32_t va) {
   std::lock_guard<std::mutex> g(g_lock);
   const Page& first = g_pages[va / kPage];
-  if (va % kPage || first.state == kFree || first.base != va) return 0;
+  if (va % kPage || va < kNullGuard || first.state == kFree || first.base != va) return 0;
   uint32_t n = first.pages;
   Heap h;
   bool physical = HeapOf(va, h) && IsPhysical(h);

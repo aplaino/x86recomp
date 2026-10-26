@@ -12,7 +12,7 @@ namespace recomp::xbox360 {
 namespace {
 
 constexpr const char* kKrnl = "xboxkrnl.exe";
-constexpr uint32_t kKtApcDisable = 0xB0, kKtFpuExceptions = 0x71;
+constexpr uint32_t kKtApcDisable = 0xB0, kKtFpuExceptions = 0x71, kCreateKThread = 0x80;
 
 Thread* ThreadArg(ppc::Ctx& c, uint32_t kthread) {
   Thread* t = ThreadOf(kthread);
@@ -30,11 +30,18 @@ std::vector<uint32_t> g_terminate_routines;
 }  // namespace
 
 // ExCreateThread(*handle, stack_size, *thread_id, xapi_startup, start,
-// context, flags).
+// context, flags). With flag 0x80 *handle is the KTHREAD itself, not a
+// handle (Xenia's; a title passes it on to KeSetBasePriorityThread), with
+// a reference the caller drops as it would close the handle (chosen).
 HLE(kKrnl, 13, ExCreateThread) {
-  uint32_t handle_ptr = Arg(c, 0), id_ptr = Arg(c, 2);
-  Thread* t = CreateThread({Arg(c, 1), Arg(c, 3), Arg(c, 4), Arg(c, 5), Arg(c, 6)});
-  if (handle_ptr) Wr32(handle_ptr, NewHandle(KThread(t)));
+  uint32_t handle_ptr = Arg(c, 0), id_ptr = Arg(c, 2), flags = Arg(c, 6);
+  Thread* t = CreateThread({Arg(c, 1), Arg(c, 3), Arg(c, 4), Arg(c, 5), flags});
+  if (handle_ptr && flags & kCreateKThread) {
+    Reference(KThread(t));
+    Wr32(handle_ptr, KThread(t));
+  } else if (handle_ptr) {
+    Wr32(handle_ptr, NewHandle(KThread(t)));
+  }
   if (id_ptr) Wr32(id_ptr, ThreadId(t));
   return kStatusSuccess;
 }

@@ -32,11 +32,14 @@ HLE(kKrnl, 204, NtAllocateVirtualMemory) {
   Heap h = type & (kMemLargePages | kMem16MbPages) ? Heap::kVirtual64k : Heap::kVirtual4k;
   if (base && !HeapOf(base, h)) return kStatusInvalidParameter;
   uint32_t page = HeapPageSize(h);
-  if (type & kMemReserve) {
+  bool reserved = false;
+  // A commit with no base reserves the region too (NT's, Xenia's).
+  if (type & kMemReserve || !base) {
     uint32_t end = (base + size + page - 1) & ~(page - 1);
     base &= ~(page - 1);
     size = end - base;
     bool fixed = base != 0;
+    reserved = true;
     base = Reserve(h, base, size, page, type & kMemTopDown);
     if (!base) return fixed ? kStatusConflictingAddresses : kStatusNoMemory;
   } else {
@@ -45,7 +48,7 @@ HLE(kKrnl, 204, NtAllocateVirtualMemory) {
     size = end - base;
   }
   if ((type & kMemCommit) && !Commit(base, size, protect)) {
-    if (type & kMemReserve) Release(base);
+    if (reserved) Release(base);
     return kStatusMemoryNotAllocated;
   }
   Wr32(base_ptr, base);

@@ -111,16 +111,24 @@ uint32_t Complete(uint32_t handle, uint32_t event, uint32_t io_status, uint32_t 
   return status;
 }
 
-// The path OBJECT_ATTRIBUTES name (RootDirectory, ObjectName, Attributes),
-// relative to the root directory's handle if it has one.
-uint32_t PathOf(uint32_t attributes, Location& loc) {
-  std::string name = ReadAnsiString(Rd32(attributes + 4));
-  if (uint32_t root = Rd32(attributes)) {
+// `name` relative to a RootDirectory: none (0), the DOS devices directory
+// (ObDosDevices, -3: where XAPI's file functions look up "D:\\..."; xam's
+// GetFileAttributesExA passes it) or a directory's handle.
+uint32_t ResolveIn(uint32_t root, std::string name, Location& loc) {
+  constexpr uint32_t kObDosDevices = 0xFFFFFFFD;
+  if (root == kObDosDevices) {
+    name = "\\??\\" + name;
+  } else if (root) {
     File* dir = FileOf(root);
     if (!dir) return kStatusInvalidHandle;
     name = dir->loc.guest + "\\" + name;
   }
   return Resolve(name, loc);
+}
+
+// The path OBJECT_ATTRIBUTES name (RootDirectory, ObjectName, Attributes).
+uint32_t PathOf(uint32_t attributes, Location& loc) {
+  return ResolveIn(Rd32(attributes), ReadAnsiString(Rd32(attributes + 4)), loc);
 }
 
 void RefuseApc(ppc::Ctx& c, uint32_t apc, const char* what) {
@@ -341,13 +349,7 @@ HLE(kKrnl, 247, NtSetInformationFile) {
       // FILE_RENAME_INFORMATION: replace if it exists, a root directory, the
       // new name (ANSI_STRING).
       Location to;
-      std::string name = ReadAnsiString(info + 8);
-      if (uint32_t root = Rd32(info + 4)) {
-        File* dir = FileOf(root);
-        if (!dir) return done(kStatusInvalidHandle, 0);
-        name = dir->loc.guest + "\\" + name;
-      }
-      uint32_t s = Resolve(name, to);
+      uint32_t s = ResolveIn(Rd32(info + 4), ReadAnsiString(info + 8), to);
       if (s != kStatusSuccess) return done(s, 0);
       if (to.device != f->loc.device) return done(kStatusAccessDenied, 0);
       if (to.exists && !Rd32(info)) return done(kStatusObjectNameCollision, 0);
