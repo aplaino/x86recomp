@@ -15,6 +15,7 @@ gaddr LabelAddress(int handle);
 
 // Queues a flip as sceVideoOutSubmitFlip does, from the GPU's end of pipe
 // (sceGnmSubmitAndFlipCommandBuffers); returns its result.
-int32_t SubmitFlip(int handle, int index, uint32_t mode, int64_t arg);
+// `after`: the number of graphics submissions the GPU finishes first.
+int32_t SubmitFlip(int handle, int index, uint32_t mode, int64_t arg, uint64_t after = 0);
 
 }  // namespace recomp::orbis::videoout
