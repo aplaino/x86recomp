@@ -54,7 +54,8 @@ library.
   11.00's do (the same dwords; a padding NOP's body is left alone, the
   NOP-wrapped context registers of the Update*Shader functions included,
   which the command processor applies as SET_CONTEXT_REG). Submissions
-  run on the command processor (orbis/gpu/cp.h); submit-and-flip
+  run on the command processor (orbis/gpu/cp.h, the library
+  recomp_orbis_gpu); submit-and-flip
   rewrites the game's flip packet as 11.00 does and flips once the
   submission is done. Only the graphics end-of-pipe event (0x40) exists;
   its data is the id (a timestamp of 0). Mip statistics are accepted and

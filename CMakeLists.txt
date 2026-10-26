@@ -24,6 +24,28 @@ if(NOT APPLE)
   string(APPEND CMAKE_SHARED_LINKER_FLAGS " -Wl,--no-undefined")
 endif()
 
+# recomp_bundle(<target>...): programs and the shared libraries they load
+# sit side by side in RECOMP_BUNDLE_DIR, found through an rpath relative
+# to themselves ($ORIGIN, @loader_path on macOS), so the directory can be
+# moved or installed as a whole and one library (a lifted module, the
+# runtime, an HLE module) replaced alone. Used by the console platforms
+# and their game projects.
+set(RECOMP_BUNDLE_DIR "${CMAKE_BINARY_DIR}/bin" CACHE PATH
+    "Where recomp_bundle() puts programs and their shared libraries")
+if(APPLE)
+  set(RECOMP_BUNDLE_RPATH "@loader_path" CACHE INTERNAL "")
+else()
+  set(RECOMP_BUNDLE_RPATH "$ORIGIN" CACHE INTERNAL "")
+endif()
+function(recomp_bundle)
+  set_target_properties(${ARGN} PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${RECOMP_BUNDLE_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY "${RECOMP_BUNDLE_DIR}"
+    BUILD_RPATH "${RECOMP_BUNDLE_RPATH}"
+    INSTALL_RPATH "${RECOMP_BUNDLE_RPATH}"
+    BUILD_RPATH_USE_ORIGIN ON)
+endfunction()
+
 # --- guests and host -------------------------------------------------------
 # Guests: RECOMP_X86 is everything at the end of this file, the x86 lifter
 # and CPU model with the Win32 HLE (PC games); each console platform is a
@@ -239,20 +261,45 @@ target_link_libraries(recomp_sdl2 PUBLIC recomp_runtime SDL3::SDL3)
 add_library(recomp_dbghelp SHARED src/runtime/hle/dbghelp.cpp)
 target_link_libraries(recomp_dbghelp PUBLIC recomp_runtime PRIVATE recomp_demangle)
 
-# recomp_add_lifted(<target> <dir>): an OBJECT library of the lifter's
-# output in <dir> (globbed, so re-run cmake after lifting), with the
-# registration of its function table (runtime/lifted_table.cpp). Defines
-# nothing when <dir> has no lifted code yet.
+# recomp_add_lifted(<target> <dir> [LINK <platform library>]): the
+# lifter's output in <dir> (globbed, so re-run cmake after lifting), with
+# the registration of its function table (runtime/lifted_table.cpp).
+# Defines nothing when <dir> has no lifted code yet. Without LINK, an
+# OBJECT library the game's executable takes in. With LINK (the console
+# platforms), a shared library of its own, a lifted module, linked to the
+# platform library under what lifted code calls: its symbols stay inside
+# it (calls between lifted functions are direct, and the dynamic symbol
+# table holds none of them), recomp_bundle() puts it beside the program,
+# and the program links it --no-as-needed, as nothing in it refers to it.
 function(recomp_add_lifted target dir)
   file(GLOB _gen CONFIGURE_DEPENDS "${dir}/*.cpp")
   if(NOT _gen)
     return()
   endif()
-  # Lifted code is always optimised: at -O0 it would be unusably slow and
-  # debug info for 100+ MB of generated source is not useful.
-  add_library(${target} OBJECT ${_gen} "${RECOMP_ROOT}/src/runtime/lifted_table.cpp")
+  recomp_add_lifted_files(${target} ${_gen} ${ARGN})
+endfunction()
+# The same over a known list of generated files (a build-time lift):
+# recomp_add_lifted_files(<target> <file>... [LINK <platform library>]).
+function(recomp_add_lifted_files target)
+  cmake_parse_arguments(PARSE_ARGV 1 _l "" "" "LINK")
+  if(_l_LINK)
+    add_library(${target} SHARED ${_l_UNPARSED_ARGUMENTS}
+                "${RECOMP_ROOT}/src/runtime/lifted_table.cpp")
+    set_target_properties(${target} PROPERTIES CXX_VISIBILITY_PRESET hidden
+                          VISIBILITY_INLINES_HIDDEN ON)
+    target_link_libraries(${target} PRIVATE ${_l_LINK})
+    if(NOT APPLE)
+      target_link_options(${target} INTERFACE "LINKER:--no-as-needed")
+    endif()
+    recomp_bundle(${target})
+  else()
+    add_library(${target} OBJECT ${_l_UNPARSED_ARGUMENTS}
+                "${RECOMP_ROOT}/src/runtime/lifted_table.cpp")
+  endif()
   target_include_directories(${target} PRIVATE "${RECOMP_ROOT}/src")
   target_compile_features(${target} PRIVATE cxx_std_20)
+  # Lifted code is always optimised: at -O0 it would be unusably slow and
+  # debug info for 100+ MB of generated source is not useful.
   # -fnon-call-exceptions: guest access violations are raised from the
   # SIGSEGV handler and may unwind (GuestResume) out of the faulting frame.
   target_compile_options(${target} PRIVATE -O2 -g0 -fno-strict-aliasing

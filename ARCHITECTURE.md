@@ -1217,7 +1217,8 @@ The seams (core, generic):
 - The Orbis host thread (orbis/host.h): the process main thread brings
   up SDL video, owns the window and its events and runs what the HLE
   posts to it (presentation); guest threads never touch SDL.
-- The GPU (orbis/gpu/cp.h): the command processor runs the PM4 buffers
+- The GPU (orbis/gpu/cp.h, the library recomp_orbis_gpu): the command
+  processor runs the PM4 buffers
   libSceGnmDriver submits on host threads, one per queue (graphics, each
   mapped compute ring), beside the CPU: the packets that write memory the
   CPU sees, the waits and the end-of-pipe interrupts (as event queue
@@ -1231,6 +1232,17 @@ The seams (core, generic):
   without a handler: <ID>_NID_NAMES is a local file of symbol names
   (one per line) that the loader hashes, so an unimplemented import's
   error shows its name.
+- Programs and libraries follow the Xbox 360's layout
+  (platforms/xbox360/ARCHITECTURE.md, "Programs and libraries"): a
+  game's lifted code is a lifted module, a shared library of its own
+  with hidden symbols (`recomp_add_lifted(<target> <dir> LINK
+  recomp_orbis)`), the executable holds `main()` and little else, and
+  recomp_bundle() puts both beside the loader, each HLE library, the
+  GPU, the x86 core and the host layer under them in one directory. The
+  libraries the platform builds link with CMAKE_LINK_DEPENDS_NO_SHARED,
+  as its game projects do, so a GPU change rebuilds and relinks
+  recomp_orbis_gpu alone, an audio fix recomp_orbis_audio or
+  recomp_orbis_ngs2 alone, and a re-lift the lifted module alone.
 
 Layout: platforms/<name>/ (its loader, ABI glue, process bring-up and HLE
 libraries as recomp_<name>_* shared libraries, its docs and tests), with

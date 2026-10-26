@@ -1,6 +1,15 @@
 # The PS4 (Orbis OS) platform module (ARCHITECTURE.md, "Console
 # platforms"): built only with RECOMP_PLATFORM_ORBIS.
 
+# A program is a directory of shared libraries beside a small executable
+# (ARCHITECTURE.md, "Console platforms"): the lifted modules, the loader,
+# each system library's HLE, the GPU, the x86 core and the host layer
+# under them, each replaced alone. A library's change relinks nothing
+# that links it.
+set(CMAKE_LINK_DEPENDS_NO_SHARED ON)
+recomp_bundle(recomp_image recomp_x87 recomp_runtime recomp_log recomp_gfx recomp_hlsl
+              recomp_audio)
+
 # Orbis ELF mapping and NIDs, for the lifter and the runtime.
 add_library(recomp_orbis_image SHARED
   src/orbis/elf_image.cpp
@@ -53,9 +62,17 @@ add_library(recomp_orbis_np SHARED src/orbis/hle/np_manager.cpp src/orbis/hle/np
 target_link_libraries(recomp_orbis_np PUBLIC recomp_orbis)
 add_library(recomp_orbis_videoout SHARED src/orbis/hle/videoout.cpp)
 target_link_libraries(recomp_orbis_videoout PUBLIC recomp_orbis_kernel)
-# libSceGnmDriver and the GPU's command processor (orbis/gpu).
-add_library(recomp_orbis_gnm SHARED src/orbis/hle/gnm_driver.cpp src/orbis/gpu/cp.cpp)
-target_link_libraries(recomp_orbis_gnm PUBLIC recomp_orbis_videoout)
+# The GPU (orbis/gpu): the command processor, beside the CPU.
+add_library(recomp_orbis_gpu SHARED src/orbis/gpu/cp.cpp)
+target_link_libraries(recomp_orbis_gpu PUBLIC recomp_orbis_kernel)
+# libSceGnmDriver, which submits to the GPU.
+add_library(recomp_orbis_gnm SHARED src/orbis/hle/gnm_driver.cpp)
+target_link_libraries(recomp_orbis_gnm PUBLIC recomp_orbis_videoout recomp_orbis_gpu)
+recomp_bundle(recomp_orbis_image recomp_orbis recomp_orbis_kernel recomp_orbis_libc_internal
+              recomp_orbis_system recomp_orbis_fiber recomp_orbis_audio recomp_orbis_ngs2
+              recomp_orbis_savedata recomp_orbis_pad recomp_orbis_font recomp_orbis_avplayer
+              recomp_orbis_net recomp_orbis_np recomp_orbis_videoout recomp_orbis_gpu
+              recomp_orbis_gnm)
 
 # recomp_lift reads Orbis ELFs.
 target_sources(recomp_lift PRIVATE lifter/orbis_reader.cpp)
@@ -64,6 +81,7 @@ target_link_libraries(recomp_lift PRIVATE recomp_orbis_image)
 
 add_executable(orbis_image_test tests/orbis_image_test.cpp)
 target_link_libraries(orbis_image_test PRIVATE recomp_orbis_image)
+recomp_bundle(orbis_image_test)
 add_test(NAME orbis_image COMMAND orbis_image_test)
 
 # orbis_process_test: tests/e2e (C for FreeBSD x86-64, linked by ld.lld
@@ -88,13 +106,13 @@ if(RECOMP_LD_LLD AND Python3_FOUND AND CMAKE_C_COMPILER_ID MATCHES "Clang")
     COMMAND ${CMAKE_COMMAND} -E touch ${_gen}
     DEPENDS recomp_lift "${_e2e}/eboot.elf" "${_e2e}/prx.elf"
     VERBATIM)
-  set_source_files_properties(${_gen} PROPERTIES COMPILE_OPTIONS
-    "-O2;-g0;-fno-strict-aliasing;-fnon-call-exceptions;${RECOMP_X87_FP_FLAGS};${RECOMP_FAULT_FRAME_FLAGS}")
-  add_executable(orbis_process_test tests/orbis_process_test.cpp ${_gen}
-                 "${RECOMP_ROOT}/src/runtime/lifted_table.cpp")
-  target_link_libraries(orbis_process_test PRIVATE recomp_orbis recomp_orbis_kernel
-                        recomp_orbis_fiber recomp_orbis_gnm recomp_orbis_savedata
-                        recomp_orbis_audio recomp_orbis_pad recomp_orbis_np recomp_orbis_ngs2)
+  recomp_add_lifted_files(orbis_process_lifted ${_gen} LINK recomp_orbis)
+  add_executable(orbis_process_test tests/orbis_process_test.cpp)
+  target_link_libraries(orbis_process_test PRIVATE orbis_process_lifted recomp_orbis
+                        recomp_orbis_kernel recomp_orbis_fiber recomp_orbis_gnm
+                        recomp_orbis_savedata recomp_orbis_audio recomp_orbis_pad recomp_orbis_np
+                        recomp_orbis_ngs2)
+  recomp_bundle(orbis_process_test)
   add_test(NAME orbis_process COMMAND orbis_process_test "${_e2e}/eboot.elf" "${_e2e}/prx.elf")
   set_tests_properties(orbis_process PROPERTIES TIMEOUT 60)  # a hang is a failure
 endif()
