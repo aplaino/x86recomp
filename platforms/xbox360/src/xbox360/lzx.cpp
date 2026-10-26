@@ -22,7 +22,8 @@ struct Slots {
   uint32_t base[51];
   Slots() {
     for (int i = 0, j = 0; i < 51; i += 2) {
-      extra[i] = extra[i + 1] = uint8_t(j);
+      extra[i] = uint8_t(j);
+      if (i + 1 < 51) extra[i + 1] = uint8_t(j);
       if (i != 0 && j < 17) j++;
     }
     for (uint32_t i = 0, j = 0; i < 51; i++) {
@@ -261,7 +262,7 @@ class Decoder {
         err = "LZX: uncompressed block runs past the input";
         return false;
       }
-      std::memcpy(out_->data() + pos_, b_.data() + raw_, n);
+      if (n) std::memcpy(out_->data() + pos_, b_.data() + raw_, n);
       pos_ += n;
       raw_ += n;
       made = n;
