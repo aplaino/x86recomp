@@ -212,20 +212,45 @@ if(DXVK_NATIVE_DIR)
   target_compile_definitions(recomp_x86 PUBLIC RECOMP_HAVE_D3D9)
 endif()
 
-# recomp_add_lifted(<target> <dir>): an OBJECT library of the lifter's
-# output in <dir> (globbed, so re-run cmake after lifting), with the
-# registration of its function table (x86/lifted_table.cpp). Defines
-# nothing when <dir> has no lifted code yet.
+# recomp_add_lifted(<target> <dir> [LINK <platform library>]): the
+# lifter's output in <dir> (globbed, so re-run cmake after lifting), with
+# the registration of its function table (x86/lifted_table.cpp).
+# Defines nothing when <dir> has no lifted code yet. Without LINK, an
+# OBJECT library the game's executable takes in. With LINK (the console
+# platforms), a shared library of its own, a lifted module, linked to the
+# platform library under what lifted code calls: its symbols stay inside
+# it (calls between lifted functions are direct, and the dynamic symbol
+# table holds none of them), recomp_bundle() puts it beside the program,
+# and the program links it --no-as-needed, as nothing in it refers to it.
 function(recomp_add_lifted target dir)
   file(GLOB _gen CONFIGURE_DEPENDS "${dir}/*.cpp")
   if(NOT _gen)
     return()
   endif()
-  # Lifted code is always optimised: at -O0 it would be unusably slow and
-  # debug info for 100+ MB of generated source is not useful.
-  add_library(${target} OBJECT ${_gen} "${RECOMP_ROOT}/src/x86/lifted_table.cpp")
+  recomp_add_lifted_files(${target} ${_gen} ${ARGN})
+endfunction()
+# The same over a known list of generated files (a build-time lift):
+# recomp_add_lifted_files(<target> <file>... [LINK <platform library>]).
+function(recomp_add_lifted_files target)
+  cmake_parse_arguments(PARSE_ARGV 1 _l "" "" "LINK")
+  if(_l_LINK)
+    add_library(${target} SHARED ${_l_UNPARSED_ARGUMENTS}
+                "${RECOMP_ROOT}/src/x86/lifted_table.cpp")
+    set_target_properties(${target} PROPERTIES CXX_VISIBILITY_PRESET hidden
+                          VISIBILITY_INLINES_HIDDEN ON)
+    target_link_libraries(${target} PRIVATE ${_l_LINK})
+    if(NOT APPLE)
+      target_link_options(${target} INTERFACE "LINKER:--no-as-needed")
+    endif()
+    recomp_bundle(${target})
+  else()
+    add_library(${target} OBJECT ${_l_UNPARSED_ARGUMENTS}
+                "${RECOMP_ROOT}/src/x86/lifted_table.cpp")
+  endif()
   target_include_directories(${target} PRIVATE "${RECOMP_ROOT}/src")
   target_compile_features(${target} PRIVATE cxx_std_20)
+  # Lifted code is always optimised: at -O0 it would be unusably slow and
+  # debug info for 100+ MB of generated source is not useful.
   # -fnon-call-exceptions: guest access violations are raised from the
   # SIGSEGV handler and may unwind (GuestResume) out of the faulting frame.
   target_compile_options(${target} PRIVATE -O2 -g0 -fno-strict-aliasing
