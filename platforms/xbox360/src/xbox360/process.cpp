@@ -9,6 +9,7 @@
 #include "ppc/dispatch.h"
 #include "ppc/fatal.h"
 #include "xbox360/fs.h"
+#include "xbox360/gpu.h"
 #include "xbox360/hle.h"
 #include "xbox360/kernel.h"
 #include "xbox360/memory.h"
@@ -80,6 +81,7 @@ void RunProcess(const GameConfig& cfg) {
   BindImports(m);
   SetProcessInfo({m.tls.slots ? m.tls.slots : kDefaultTlsSlots, m.tls.data_size, m.tls.raw_data,
                   m.tls.raw_size, m.stack_size ? m.stack_size : kDefaultStackSize});
+  StartGpu();
   CreateThread({0, 0, m.entry, 0, 0, true});
   // The title runs on its own threads; this one waits for the end, which
   // ExitProcess makes.

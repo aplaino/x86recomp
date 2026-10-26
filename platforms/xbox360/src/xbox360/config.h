@@ -17,8 +17,14 @@ bool XConfigSetting(uint16_t category, uint16_t setting, const uint8_t*& data, u
 
 // HalGetCurrentAVPack: the cable the console's display is on.
 uint32_t AvPack();
-// VdQueryVideoMode: the display's mode as an X_VIDEO_MODE (0x30 bytes) at
-// `va`.
+// The display's mode; VdQueryVideoMode writes it as an X_VIDEO_MODE (0x30
+// bytes) at `va`.
+struct VideoMode {
+  uint32_t width, height;
+  bool interlaced, widescreen, high_definition;
+  uint32_t refresh_hz, standard;
+};
+VideoMode CurrentVideoMode();
 constexpr uint32_t kVideoModeSize = 0x30;
 void WriteVideoMode(uint32_t va);
 

@@ -45,6 +45,23 @@ thread_startup:
   blr
   .size thread_startup, .-thread_startup
 
+// interrupt_entry(source, user): the graphics interrupt callback, into
+// title.c's GraphicsInterrupt.
+  .globl interrupt_entry
+  .type interrupt_entry, @function
+interrupt_entry:
+  mflr 0
+  std 0, 16(1)
+  stdu 1, -32(1)
+  TOC
+  bl GraphicsInterrupt
+  nop
+  addi 1, 1, 32
+  ld 0, 16(1)
+  mtlr 0
+  blr
+  .size interrupt_entry, .-interrupt_entry
+
 // mftb, for the time base check.
   .globl time_base
   .type time_base, @function
@@ -84,3 +101,26 @@ pcr:
   XENON9 sprintf9, sprintf
   XENON9 NtCreateFile9, NtCreateFile
   XENON9 NtQueryDirectoryFile9, NtQueryDirectoryFile
+
+// The same with ten: the ninth and tenth to r1 + 0x50 and r1 + 0x58.
+  .macro XENON10 name, target
+  .globl \name
+  .type \name, @function
+\name:
+  mflr 0
+  std 0, 16(1)
+  ld 11, 96(1)
+  ld 12, 104(1)
+  stdu 1, -128(1)
+  std 11, 0x50(1)
+  std 12, 0x58(1)
+  bl \target
+  nop
+  addi 1, 1, 128
+  ld 0, 16(1)
+  mtlr 0
+  blr
+  .size \name, .-\name
+  .endm
+
+  XENON10 VdSwap10, VdSwap

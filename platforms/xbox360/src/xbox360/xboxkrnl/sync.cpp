@@ -12,8 +12,6 @@ namespace {
 
 constexpr const char* kKrnl = "xboxkrnl.exe";
 constexpr uint32_t kMaxWaitObjects = 64;
-constexpr uint32_t kPcrIrql = 0x18;
-constexpr uint8_t kDispatchLevel = 2;
 
 // A wait's timeout argument: a pointer to a LARGE_INTEGER, or 0 for none.
 const int64_t* Timeout(uint32_t ptr, int64_t& storage) {
