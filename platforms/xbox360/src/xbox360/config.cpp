@@ -61,6 +61,11 @@ uint32_t Value(uint16_t category, uint16_t setting) {
   return uint32_t(d[0]) << 24 | uint32_t(d[1]) << 16 | uint32_t(d[2]) << 8 | d[3];
 }
 
+// An offline XUID (0xE0 in the top byte): the profile's own, chosen.
+constexpr uint64_t kLocalXuid = 0xE000000000000001;
+Profile g_profile;
+bool g_signed_in = false;
+
 }  // namespace
 
 bool XConfigSetting(uint16_t category, uint16_t setting, const uint8_t*& data, uint16_t& size) {
@@ -72,6 +77,13 @@ bool XConfigSetting(uint16_t category, uint16_t setting, const uint8_t*& data, u
     }
   return false;
 }
+
+void SetSignedInProfile(const std::string& gamertag) {
+  g_signed_in = !gamertag.empty();
+  g_profile = {gamertag, kLocalXuid};
+}
+
+const Profile* SignedInProfile(uint32_t slot) { return slot == 0 && g_signed_in ? &g_profile : nullptr; }
 
 // North America (NTSC-U), with the AV region.
 uint16_t GameRegion() { return 0x00FF; }

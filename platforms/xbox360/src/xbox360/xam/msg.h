@@ -17,6 +17,10 @@ namespace recomp::xbox360 {
 constexpr uint32_t kXmpApp = 0xFA, kXgiApp = 0xFB, kXLiveBaseApp = 0xFC;
 
 using XMsgFn = uint32_t (*)(ppc::Ctx& c, uint32_t p1, uint32_t p2);
+// XMsgStartIORequest for xam's own callers (its exports that send a
+// request): S_OK, the request completed.
+uint32_t StartXMsgRequest(ppc::Ctx& c, uint32_t app, uint32_t message, uint32_t overlapped, uint32_t buffer,
+                          uint32_t size);
 struct XMsgRegistrar {
   XMsgRegistrar(uint32_t app, uint32_t message, const char* name, XMsgFn fn);
 };

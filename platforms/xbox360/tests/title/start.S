@@ -118,6 +118,7 @@ pcr:
   XENON9 sprintf9, sprintf
   XENON9 NtCreateFile9, NtCreateFile
   XENON9 NtQueryDirectoryFile9, NtQueryDirectoryFile
+  XENON9 XamUserReadProfileSettings9, XamUserReadProfileSettings
 
 // The same with ten: the ninth and tenth to r1 + 0x50 and r1 + 0x58.
   .macro XENON10 name, target

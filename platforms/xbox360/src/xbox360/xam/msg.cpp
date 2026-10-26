@@ -56,9 +56,9 @@ HLE(kXam, 500, XMsgInProcessCall) { return Send(c, Arg(c, 0), Arg(c, 1), Arg(c, 
 // code) in word 0, the length 0 in word 1, the HRESULT as the extended
 // error in word 6, its event set. Without one xam waits for the request
 // and leaves the HRESULT as the thread's last error, returning S_OK.
-uint32_t StartIORequest(ppc::Ctx& c) {
-  uint32_t app = Arg(c, 0), message = Arg(c, 1), ov = Arg(c, 2);
-  uint32_t hr = Send(c, app, message, Arg(c, 3), Arg(c, 4));
+uint32_t StartXMsgRequest(ppc::Ctx& c, uint32_t app, uint32_t message, uint32_t ov, uint32_t buffer,
+                          uint32_t size) {
+  uint32_t hr = Send(c, app, message, buffer, size);
   if (!ov) {
     SetLastError(hr);
     return 0;
@@ -74,7 +74,11 @@ uint32_t StartIORequest(ppc::Ctx& c) {
   }
   return 0;
 }
-HLE(kXam, 508, XMsgStartIORequestEx) { return StartIORequest(c); }
-HLE(kXam, 503, XMsgStartIORequest) { return StartIORequest(c); }
+HLE(kXam, 508, XMsgStartIORequestEx) {
+  return StartXMsgRequest(c, Arg(c, 0), Arg(c, 1), Arg(c, 2), Arg(c, 3), Arg(c, 4));
+}
+HLE(kXam, 503, XMsgStartIORequest) {
+  return StartXMsgRequest(c, Arg(c, 0), Arg(c, 1), Arg(c, 2), Arg(c, 3), Arg(c, 4));
+}
 
 }  // namespace recomp::xbox360

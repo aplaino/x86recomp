@@ -180,6 +180,20 @@ here; on the console a KPCR belongs to a hardware thread.
 - ExLoadedCommandLine is the title's name in quotes (Xenia's), 1024
   bytes; a title's C runtime splits it into argv. Console check.
 
+## Timers
+- NtCreateTimer(*handle, attributes, type): a KTIMER (0x28 bytes), a
+  notification (0) or synchronization (1) timer, not set; named timers
+  are not supported yet.
+- NtSetTimerEx(handle, *due, APC routine, APC mode, APC context, resume,
+  period, *previous): clears the timer and signals it at the due time (a
+  wait's timeout: negative relative, otherwise absolute), then every
+  period milliseconds; the previous state is whether it was signalled.
+  NtCancelTimer(handle, *current) stops it. A synchronization timer is
+  reset by the wait it satisfies. Timer APCs are not supported yet
+  (fatal); resume (waking the console from standby) does not apply. A
+  title's waitable timers (CreateWaitableTimer, SetWaitableTimer) come
+  here.
+
 ## Files
 - FscSetCacheElementCount sizes the file system cache; file data is
   cached by the host here, so it succeeds and changes nothing.

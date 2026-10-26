@@ -8,6 +8,7 @@
 
 #include "ppc/dispatch.h"
 #include "ppc/fatal.h"
+#include "xbox360/config.h"
 #include "xbox360/fs.h"
 #include "xbox360/gpu.h"
 #include "xbox360/hle.h"
@@ -74,6 +75,7 @@ void RunProcess(const GameConfig& cfg) {
   if (!LoadXex(cfg.xex, m, err)) Fatal(nullptr, "%s", err.c_str());
   if (!ppc::HasLiftedModule(TextHash(m)))
     Fatal(nullptr, "%s is not the module this program was lifted from", cfg.xex.c_str());
+  SetSignedInProfile(cfg.profile);
   MapGuestMemory();
   MountFiles(cfg);
   MapImage(m);

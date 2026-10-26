@@ -57,6 +57,7 @@ __xex_import_slot_\name:
   FUNCTION 196, MmQueryAddressProtect
   FUNCTION 198, MmQueryStatistics
   FUNCTION 204, NtAllocateVirtualMemory
+  FUNCTION 205, NtCancelTimer
   FUNCTION 207, NtClose
   FUNCTION 210, NtCreateFile
   FUNCTION 219, NtFlushBuffersFile
@@ -72,11 +73,13 @@ __xex_import_slot_\name:
   FUNCTION 260, ObDeleteSymbolicLink
   FUNCTION 209, NtCreateEvent
   FUNCTION 212, NtCreateMutant
+  FUNCTION 215, NtCreateTimer
   FUNCTION 220, NtFreeVirtualMemory
   FUNCTION 238, NtQueryVirtualMemory
   FUNCTION 242, NtReleaseMutant
   FUNCTION 245, NtResumeThread
   FUNCTION 246, NtSetEvent
+  FUNCTION 250, NtSetTimerEx
   FUNCTION 253, NtWaitForSingleObjectEx
   FUNCTION 254, NtWaitForMultipleObjectsEx
   FUNCTION 272, ObReferenceObjectByHandle
@@ -125,6 +128,13 @@ __xex_import_slot_\name:
   FUNCTION 503, XMsgStartIORequest, 1
   FUNCTION 508, XMsgStartIORequestEx, 1
   FUNCTION 642, XamGetSystemVersion, 1
+  FUNCTION 522, XamUserGetXUID, 1
+  FUNCTION 526, XamUserGetName, 1
+  FUNCTION 528, XamUserGetSigninState, 1
+  FUNCTION 537, XamUserReadProfileSettings, 1
+  FUNCTION 650, XamNotifyCreateListener, 1
+  FUNCTION 651, XNotifyGetNext, 1
+  FUNCTION 652, XNotifyPositionUI, 1
   VARIABLE 27, ExThreadObjectType
   VARIABLE 173, KeTimeStampBundle
   VARIABLE 344, XboxKrnlVersion

@@ -28,11 +28,17 @@ void RefuseNamed(ppc::Ctx& c, uint32_t attributes, const char* what) {
     ppc::Fatal(&c, "%s with a name: named objects are not supported yet", what);
 }
 
-uint32_t NewObject(uint32_t size, ObjectType type, int32_t state) {
+uint32_t NewObject(uint32_t size, ObjectType type, int32_t state, void (*destroy)(uint32_t) = SystemFree) {
   uint32_t obj = SystemAlloc(size);
   InitObject(obj, type, state);
-  Own(obj, SystemFree);
+  Own(obj, destroy);
   return obj;
+}
+
+// A timer goes with its last reference, stopped first.
+void DestroyTimer(uint32_t timer) {
+  CancelTimer(timer);
+  SystemFree(timer);
 }
 
 // Guest 32-bit words updated atomically (the lock words of critical
@@ -68,6 +74,39 @@ HLE(kKrnl, 209, NtCreateEvent) {
   uint32_t obj = NewObject(kDispatcherHeaderSize, Arg(c, 2) ? kSynchronizationEvent : kNotificationEvent,
                            Arg(c, 3) ? 1 : 0);
   Wr32(Arg(c, 0), NewHandle(obj));
+  return kStatusSuccess;
+}
+
+// NtCreateTimer(*handle, attributes, type): type 0 notification, 1
+// synchronization, not set.
+HLE(kKrnl, 215, NtCreateTimer) {
+  RefuseNamed(c, Arg(c, 1), "NtCreateTimer");
+  uint32_t obj = NewObject(kTimerSize, Arg(c, 2) ? kSynchronizationTimer : kNotificationTimer, 0, DestroyTimer);
+  Wr32(Arg(c, 0), NewHandle(obj));
+  return kStatusSuccess;
+}
+
+// NtSetTimerEx(handle, *due, APC routine, APC mode, APC context, resume,
+// period in ms, *previous state): the timer is due at *due (a wait's
+// timeout); the previous state is whether it was signalled. Timer APCs
+// are not supported yet; resuming the console from standby does not
+// apply.
+HLE(kKrnl, 250, NtSetTimerEx) {
+  uint32_t obj = HandleObject(Arg(c, 0));
+  if (!obj) return kStatusInvalidHandle;
+  if (Arg(c, 2)) ppc::Fatal(&c, "NtSetTimerEx with an APC routine: APCs are not supported yet");
+  uint32_t signalled = Rd32(obj + 4) != 0;
+  SetTimer(obj, int64_t(Rd64(Arg(c, 1))), Arg(c, 6));
+  if (Arg(c, 7)) Wr32(Arg(c, 7), signalled);
+  return kStatusSuccess;
+}
+
+// NtCancelTimer(handle, *current state): whether it is signalled.
+HLE(kKrnl, 205, NtCancelTimer) {
+  uint32_t obj = HandleObject(Arg(c, 0));
+  if (!obj) return kStatusInvalidHandle;
+  CancelTimer(obj);
+  if (Arg(c, 1)) Wr32(Arg(c, 1), Rd32(obj + 4) != 0);
   return kStatusSuccess;
 }
 
