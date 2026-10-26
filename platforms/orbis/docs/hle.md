@@ -48,8 +48,10 @@ library.
   queue and run at the vblank the flip rate allows, on the host thread
   (orbis/host.h); the flip event's ident is 6 << 48 | handle << 40 and
   its data the flip argument << 16 | 1 << 12 (one flip reported). Linear
-  A8R8G8B8 and A8B8G8R8 buffers are shown; tiled ones are shown black
-  until the GPU draws (only it writes them).
+  A8R8G8B8 and A8B8G8R8 buffers are shown; tiled ones are the GPU's
+  colour target at that address (black before it has drawn one). A flip
+  submitted from the CPU waits until the GPU has finished what was
+  submitted before it, as the console's GPU has by the vblank.
 - recomp_orbis_gnm: libSceGnmDriver. Its packet builders write what
   11.00's do (the same dwords; a padding NOP's body is left alone, the
   NOP-wrapped context registers of the Update*Shader functions included,
@@ -60,6 +62,20 @@ library.
   submission is done. Only the graphics end-of-pipe event (0x40) exists;
   its data is the id (a timestamp of 0). Mip statistics are accepted and
   never written.
+- recomp_orbis_gpu draws on gfx::Device (orbis/gpu/renderer.h): its
+  shaders translated to GLSL (orbis/gpu/shader.h), colour and depth
+  targets as device images found by their guest address (never written
+  back to guest memory), textures read from guest memory once a
+  submission when they change. CLEAR_STATE loads the Sea Islands clear
+  state's scissors, masks and depth ranges (AMD's published values), not
+  the console's driver's, which are not measured. Not drawn yet: geometry
+  and tessellation stages, fans, rectangle and quad lists, indirect draws
+  and dispatches, compute image stores, cross-lane instructions
+  (ds_swizzle, lane counts), cube, 3D and array textures, mip levels past
+  the first, and textures in tile modes other than linear (8, 31) and 1D
+  thin (13): 2D-tiled (14) and depth-tiled (0) ones need the console's
+  tile mode table and are read as linear. Fast clears through CMASK and
+  HTILE are not modelled; the depth clear of DB_RENDER_CONTROL is.
 - recomp_orbis_system also: libScePlayGo (the game is installed in full:
   every chunk local, nothing to do, ETAs 0) and libSceDiscMap (a disc
   game's file locations from its sce_discmap.plt: MD5 of the path below

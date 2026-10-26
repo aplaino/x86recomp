@@ -848,8 +848,20 @@ struct Translator {
     const char type = ImageType(ref.t);
     const int dims = kind == gfx::TextureKind::Tex2D ? 2 : 3;
     const std::string cast = type == 'f' ? "floatBitsToUint" : "uvec4";
+    // The T#'s destination selects (0, 1, or a component), then DMASK.
     auto write = [&](const std::string& value) {
       Line("r_v4 = " + value + ";");
+      if (in.op != 14 && (ref.t[3] & 0xFFF) != (4 | 5 << 3 | 6 << 6 | 7 << 9) &&
+          !(in.op >= 32 && in.op <= 63 && ((in.op - 32) & 8))) {
+        static const char* kSel[8] = {"0u", "1u", "0u", "0u", "r_t4.x", "r_t4.y", "r_t4.z", "r_t4.w"};
+        const std::string one = type == 'f' ? "0x3F800000u" : "1u";
+        std::string sw = "uvec4(";
+        for (int i = 0; i < 4; i++) {
+          const uint32_t sel = (ref.t[3] >> (3 * i)) & 7;
+          sw += std::string(i ? ", " : "") + (sel == 1 ? one : kSel[sel]);
+        }
+        Line("r_t4 = r_v4; r_v4 = " + sw + ");");
+      }
       uint32_t at = vdata;
       for (int i = 0; i < 4; i++)
         if (dmask & (1u << i)) Line(V(at++) + " = r_v4[" + std::to_string(i) + "];");
@@ -866,7 +878,13 @@ struct Translator {
       std::string c = dims == 2 ? "ivec2(int(" + V(vaddr) + "), int(" + V(vaddr + 1) + "))"
                                 : "ivec3(int(" + V(vaddr) + "), int(" + V(vaddr + 1) + "), int(" + V(vaddr + 2) + "))";
       if (kind == gfx::TextureKind::Cube) return Fail(pc, "a cube image load not translated yet");
-      write(cast + "(texelFetch(" + t + ", " + c + ", int(" + V(vaddr + uint32_t(dims)) + ")))");
+      // Out of the image or its levels: zeros, as the GPU returns.
+      const std::string lod = "int(" + V(vaddr + uint32_t(dims)) + ")";
+      Line("r_v4 = uvec4(0u);");
+      Line("if (" + lod + " < textureQueryLevels(" + t + ") && all(lessThan(uvec" + std::to_string(dims) +
+           "(" + c + "), uvec" + std::to_string(dims) + "(textureSize(" + t + ", " + lod + "))))) r_v4 = " + cast +
+           "(texelFetch(" + t + ", " + c + ", " + lod + "));");
+      write("r_v4");
       return;
     }
     if (in.op == 8) {  // image_store (compute)
@@ -966,7 +984,12 @@ struct Translator {
       return;
     }
     if (target == 12) {
+      // r_misc2.z bit 0: the viewport's y scale is positive (the image
+      // flips); bit 1: OpenGL's clip space (z from -w to w), which the
+      // host's (0 to w) takes halved.
       Line("gl_Position = " + vec + ";");
+      Line("if ((r_misc2.z & 1u) != 0u) gl_Position.y = -gl_Position.y;");
+      Line("if ((r_misc2.z & 2u) != 0u) gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5;");
     } else if (target >= 13 && target <= 15) {
       // Point size, edge flags, clip distances: not used.
     } else if (target >= 32 && target < 64) {
@@ -1001,15 +1024,16 @@ struct Translator {
                    vdst = in.w1 >> 24;
     const std::string a = V(addr);
     switch (in.op) {
-      case 13: Line("r_lds[(" + a + " + " + U(off0 | off1 << 8) + ") >> 2] = " + V(d0) + ";"); return;
+      // Addresses past the LDS: writes dropped, reads zero.
+      case 13: Line("r_lds_wr(" + a + " + " + U(off0 | off1 << 8) + ", " + V(d0) + ");"); return;
       case 14:
-        Line("r_lds[(" + a + " + " + U(off0 * 4) + ") >> 2] = " + V(d0) + ";");
-        Line("r_lds[(" + a + " + " + U(off1 * 4) + ") >> 2] = " + V(d1) + ";");
+        Line("r_lds_wr(" + a + " + " + U(off0 * 4) + ", " + V(d0) + ");");
+        Line("r_lds_wr(" + a + " + " + U(off1 * 4) + ", " + V(d1) + ");");
         return;
-      case 54: Line(V(vdst) + " = r_lds[(" + a + " + " + U(off0 | off1 << 8) + ") >> 2];"); return;
+      case 54: Line(V(vdst) + " = r_lds_rd(" + a + " + " + U(off0 | off1 << 8) + ");"); return;
       case 55:
-        Line(V(vdst) + " = r_lds[(" + a + " + " + U(off0 * 4) + ") >> 2];");
-        Line(V(vdst + 1) + " = r_lds[(" + a + " + " + U(off1 * 4) + ") >> 2];");
+        Line(V(vdst) + " = r_lds_rd(" + a + " + " + U(off0 * 4) + ");");
+        Line(V(vdst + 1) + " = r_lds_rd(" + a + " + " + U(off1 * 4) + ");");
         return;
     }
     Fail(pc, "an LDS instruction not translated yet");
@@ -1420,7 +1444,7 @@ struct Translator {
       const char type = ImageType(ref.t);
       const std::string prefix = type == 'f' ? "" : std::string(1, type == 'u' ? 'u' : 'i');
       if (ref.storage) {
-        std::snprintf(b, sizeof b, "layout(R_IMAGE(%zu), %s) uniform writeonly %simage%s r_img%zu;\n", i,
+        std::snprintf(b, sizeof b, "layout(R_IMAGE(%zu), %s) uniform writeonly %simage%s r_img%zu;\n", ImgSlot(i),
                       type == 'u' ? "r32ui" : type == 'i' ? "r32i" : "rgba8", prefix.c_str(),
                       k == gfx::TextureKind::Tex3D ? "3D" : k == gfx::TextureKind::Tex2DArray ? "2DArray" : "2D", i);
         g += b;
@@ -1453,10 +1477,12 @@ struct Translator {
       const uint32_t lds = ((st.rsrc2 >> 15) & 0x1FF) * 128;
       std::snprintf(b, sizeof b, "shared uint r_lds[%u];\n", std::max(lds, 1u));
       g += b;
+      g += "uint r_lds_rd(uint a) { return (a >> 2) < uint(r_lds.length()) ? r_lds[a >> 2] : 0u; }\n"
+           "void r_lds_wr(uint a, uint v) { if ((a >> 2) < uint(r_lds.length())) r_lds[a >> 2] = v; }\n";
     }
     g += "void main() {\n";
     g += "  uint scc = 0u, m0 = 0u, vcc_lo = 0u, vcc_hi = 0u, exec_lo = 1u, exec_hi = 0u;\n";
-    g += "  uint r_t, r_t2, r_a, r_w, r_w1, r_w2, r_w3, r_unused; uvec4 r_v4; uint r_c[4], r_d[4];\n";
+    g += "  uint r_t, r_t2, r_a, r_w, r_w1, r_w2, r_w3, r_unused; uvec4 r_v4, r_t4; uint r_c[4], r_d[4];\n";
     for (int i = 0; i < 104; i++) {
       const std::string init = i < 16 ? "r_user[" + std::to_string(i / 4) + "][" + std::to_string(i % 4) + "]" : "0u";
       std::snprintf(b, sizeof b, "%ss%d = %s%s", i % 8 ? " " : "  uint ", i, init.c_str(), i % 8 == 7 ? ";\n" : ",");
@@ -1474,6 +1500,12 @@ struct Translator {
     return g;
   }
 
+  size_t ImgSlot(size_t image) const {
+    size_t slot = 0;
+    for (size_t i = 0; i < image; i++)
+      if (res.r.images[i].storage) slot++;
+    return slot;
+  }
   size_t TexSlot(size_t image) const {
     size_t slot = 0;
     for (size_t i = 0; i < image; i++)
@@ -1529,9 +1561,10 @@ struct Translator {
       }
       case Stage::Compute: {
         uint32_t s = user;
+        // r_misc2.w: the first group in x of a dispatch run in parts.
         for (int i = 0; i < 3; i++)
           if (st.rsrc2 & (1u << (7 + i))) {
-            std::snprintf(b, sizeof b, "  s%u = gl_WorkGroupID[%d];\n", s++, i);
+            std::snprintf(b, sizeof b, "  s%u = gl_WorkGroupID[%d]%s;\n", s++, i, i ? "" : " + r_misc2.w");
             g += b;
           }
         if (st.rsrc2 & (1u << 10)) {
@@ -1577,7 +1610,7 @@ Resolved Resolve(const StageState& st) {
     k += Hex(site, sizeof site);
     if (s.image >= 0) {
       const ImageRef& ref = rv.r.images[size_t(s.image)];
-      const uint32_t f[3] = {ref.t[1] & 0x3C000000, ref.t[3] & 0xF0000000, ref.s[0] & 0x7000};
+      const uint32_t f[3] = {ref.t[1] & 0x3C000000, ref.t[3] & 0xF0000FFF, ref.s[0] & 0x7000};
       k += Hex(f, sizeof f);
     }
   }

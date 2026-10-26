@@ -411,10 +411,10 @@ class Device {
   // Runs at once (with what was drawn before it) when it has read-write
   // buffers, which it writes back before returning.
   virtual void DispatchProgram(const ProgramDispatch& d);
-  // Shows `r` of a level 0 colour image in the window as Present shows
-  // the back buffer (after ResetSwapChain to its size): its texels as
-  // they are stored, so an sRGB image's encoded values.
-  virtual void PresentImage(TextureId t, const Rect& r);
+  // Draws `r` of a level 0 colour image into the back buffer from its
+  // top-left corner, for Present to show: its texels as they are stored,
+  // so an sRGB image's encoded values.
+  virtual void DrawImage(TextureId t, const Rect& r);
 };
 
 // Where a src_w x src_h frame is shown in a dst_w x dst_h output: scaled
