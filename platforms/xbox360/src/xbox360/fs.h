@@ -24,11 +24,14 @@ struct Device {
 // FILE_DEVICE_* values.
 constexpr uint32_t kFileDeviceCdRom = 0x02, kFileDeviceDisk = 0x07;
 
+// Devices stay mounted until the process ends (open files refer to them).
 void MountDevice(const Device& d);
 // Links name a path prefix ("GAME:", "\??\GAME:" alike) that stands for a
 // target ("\Device\CdRom0"); a link may name another.
 void CreateSymbolicLink(const std::string& link, const std::string& target);
 bool DeleteSymbolicLink(const std::string& link);
+// A link's target, "" if there is no such link.
+std::string SymbolicLinkTarget(const std::string& link);
 
 // A guest path resolved to a device: the host path (its last component as
 // the guest gave it if no entry has that name yet), the guest path in its
@@ -43,6 +46,13 @@ struct Location {
 // kStatusSuccess, kStatusObjectPathNotFound (no device, or a directory on
 // the way is missing) or kStatusObjectNameInvalid.
 uint32_t Resolve(const std::string& path, Location& out);
+
+// A device's size and free space in its allocation units
+// (FileFsSizeInformation); a read-only device has none free.
+struct VolumeSize {
+  uint64_t total, free;
+};
+VolumeSize QueryVolumeSize(const Device& d);
 
 // The NTSTATUS of a host error.
 uint32_t StatusFromErrno(int err);

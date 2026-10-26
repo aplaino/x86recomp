@@ -47,11 +47,29 @@ only a console can settle.
   xam waits and leaves the extended error as the thread's last error,
   returning the scheduling's status (xam's code).
 - Here every request completes before the call returns, with the
-  handler's HRESULT as the extended error and a Win32 result of 0, the
-  code of a FACILITY_WIN32 HRESULT, or ERROR_FUNCTION_FAILED (chosen: each
-  app makes its own result). Completion routines are fatal (no APCs yet).
+  handler's HRESULT as the extended error and its length (a count of
+  items, a disposition). xam's own app (0xFE) completes every failure
+  with the result ERROR_FUNCTION_FAILED (its content handler's code);
+  the others with 0, the code of a FACILITY_WIN32 HRESULT, or
+  ERROR_FUNCTION_FAILED (chosen: each app makes its own result).
+  Completion routines are fatal (no APCs yet).
+- xam's exports that send a request use XMsgProcessRequest, which returns
+  the extended error without an XOVERLAPPED (a positive last error made
+  HRESULT_FROM_WIN32) and HRESULT_FROM_WIN32(ERROR_IO_PENDING) with one,
+  and return its Win32 code: 0, a FACILITY_WIN32 HRESULT's code, or
+  ERROR_FUNCTION_FAILED (xam's code).
 - Apps titles call: 0xFA (the music player, XMP), 0xFB and 0xFC (Xenia's
-  XGI and XLiveBase).
+  XGI and XLiveBase); xam's own exports call 0xFE, xam's own app.
+
+## Enumerators
+- XamCreateEnumeratorHandle makes an object naming an app, the message
+  that enumerates and the one that closes, the items per call, with the
+  app's state after its 0x18-byte header. XamEnumerate(handle, flags,
+  buffer, size, *items returned, overlapped) sends the enumerating
+  message the request {caller, flags | 0x80000000, the state, buffer,
+  size, items per call, *items returned, overlapped}: ERROR_INVALID_HANDLE
+  for another handle, ERROR_IO_PENDING with an XOVERLAPPED (the length is
+  the items returned). Neither reads the buffer's size (xam's code).
 
 ## The music player
 - XMPSetPlaybackController (0x7001A, {client, controller, locked}): xam
@@ -132,3 +150,75 @@ only a console can settle.
   the first pending notification (of that id) and returns TRUE; the event
   is cleared when none is left. XNotifyPositionUI positions the system's
   notification popups, of which there are none here.
+
+## Content
+- A content package is an STFS file at
+  `Partition1\Content\<XUID>\<title id>\<content type>\<file name>`
+  (XUID and title id in hex, 16 and 8 digits; XUID 0 for content no one
+  user owns), with a header holding its display name and its creator's
+  XUID (xam's path format). Here a package is a host directory there, and
+  its header a file beside it, `<file name>.header`: the XCONTENT_DATA
+  it was created with (0x134 bytes) and the creator's XUID (8 bytes, big
+  endian). Opening a package mounts it as a device
+  (`\Device\Package_...`, as xam names them, the numbers chosen) and links
+  the title's root to it (`\??\<root>:`); open files keep it until the
+  process ends.
+- XCONTENT_DATA: device id, content type, display name (128 UTF-16
+  characters), file name (42). In what an enumeration returns, the file
+  name's first character has bit 7 set for content no one user owns, and
+  a package so named opens as that content (xam's code).
+- The device: one, the hard disk's data partition, id 1 and type 1
+  (XCONTENTDEVICETYPE_HDD) as Xenia gives it, named "Hard Drive"
+  (chosen). xam keeps a table of 20 devices and finds one by id and its
+  class (titles see class 3); a device id of 0 in XamContentCreateEx's
+  data means the first such device. XamContentGetDeviceState(id,
+  overlapped) is 0 or ERROR_DEVICE_NOT_CONNECTED;
+  XamContentGetDeviceData(id, *data) fills XCONTENT_DEVICE_DATA (0x50
+  bytes: id, type, size and free bytes, as the partition's volume
+  reports them, a name of 27 UTF-16 characters, the last 0). xam reports
+  a device of type 0x10 as 2 to titles (xam's code).
+- XamContentCreateEx(user, root, data, flags, *disposition, *license
+  mask, cache size, content size, overlapped): ERROR_INVALID_PARAMETER
+  for an empty file name or one with a character past 0x7F (but for
+  the first's bit 7) and a cache size past 0xEF000, ERROR_INVALID_NAME
+  for a root (after a `\??\` or `\System??\` prefix) with any of
+  ``:;<=>?@!"#$%&'()*+,-./[\]``; zeroes *disposition and *license (xam
+  sets no license bits for a title's own content), then sends xam's app
+  0x20001. The flags' low 4 bits are CREATE_NEW..TRUNCATE_EXISTING:
+  CREATE_NEW refuses an existing package (ERROR_ALREADY_EXISTS),
+  CREATE_ALWAYS deletes it and makes it anew, OPEN_EXISTING and
+  TRUNCATE_EXISTING refuse a missing one (ERROR_PATH_NOT_FOUND),
+  TRUNCATE_EXISTING empties it, OPEN_ALWAYS makes it when missing; others
+  are E_INVALIDARG. The disposition is 1 (created) or 2 (opened), also
+  the XOVERLAPPED's length. Titles may create only some content types
+  (1, 3, 0x4000, 0x10000-0x40000, 0x60000, 0xA0000, 0xB0000, 0xE0000,
+  0xF0000 and 0x100000 up); others, and flag 0x40, open read-only and
+  are ERROR_ACCESS_DENIED to create. The user's XUID owns the package (no
+  user, 0, past slot 3) and is its creator; a slot with no profile is
+  ERROR_NOT_LOGGED_ON (xam's code). A root already in use is
+  ERROR_DUP_NAME before the package is touched (chosen: xam finds it when
+  it links the root, and then undoes what it made). A file name FATX
+  refuses (`\/:*?"<>|`, "." and "..") is ERROR_INVALID_NAME (chosen).
+- XamContentClose(root, overlapped): ERROR_INVALID_NAME as above; the
+  root's link goes. A root with no link is ERROR_FILE_NOT_FOUND, one that
+  names no package E_INVALIDARG (xam's code).
+- XamContentDelete(user, data, overlapped) deletes the package and its
+  header: ERROR_DEVICE_NOT_CONNECTED for a device id not found (0
+  included), ERROR_FILE_NOT_FOUND for no package (xam's code), and
+  ERROR_SHARING_VIOLATION while it is open (chosen; console check).
+- XamContentGetCreator(user, data, *is creator, *creator XUID,
+  overlapped): E_INVALIDARG without *is creator; whether the user's XUID
+  is the creator, set also when the package cannot be read (then whether
+  the user is none) (xam's code).
+- XamContentCreateEnumerator(user, device id (0 for any), content type,
+  flags, items per call, *buffer size, *handle): an enumerator of xam's
+  app (0x20005), the buffer size items * 0x134; ERROR_NOT_LOGGED_ON for
+  a slot with no profile. XamEnumerate returns up to the items per call,
+  ERROR_NO_MORE_FILES when there are none left: the user's packages of
+  the type, then, unless the enumerator's flags have any of 0x7FFFF000
+  (XCONTENTFLAG_ENUM_EXCLUDECOMMON is 0x1000), those no one user owns,
+  which xam's second enumerator returns once the first has none; never
+  both in one call. XamEnumerate's flag 0x80 leaves the display names
+  out (xam's code). Packages come by name here (chosen: FATX lists
+  entries in the order they were made). The enumerator flags 0x10000000,
+  0x20000000 and 0x40000000 (directories and more) are fatal.

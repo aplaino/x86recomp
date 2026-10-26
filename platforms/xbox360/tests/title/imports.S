@@ -136,6 +136,14 @@ __xex_import_slot_\name:
   FUNCTION 650, XamNotifyCreateListener, 1
   FUNCTION 651, XNotifyGetNext, 1
   FUNCTION 652, XNotifyPositionUI, 1
+  FUNCTION 592, XamEnumerate, 1
+  FUNCTION 601, XamContentCreateEx, 1
+  FUNCTION 602, XamContentClose, 1
+  FUNCTION 603, XamContentDelete, 1
+  FUNCTION 604, XamContentCreateEnumerator, 1
+  FUNCTION 606, XamContentGetDeviceData, 1
+  FUNCTION 610, XamContentGetCreator, 1
+  FUNCTION 613, XamContentGetDeviceState, 1
   VARIABLE 27, ExThreadObjectType
   VARIABLE 173, KeTimeStampBundle
   VARIABLE 344, XboxKrnlVersion

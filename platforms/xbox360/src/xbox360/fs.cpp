@@ -1,8 +1,10 @@
 #include "xbox360/fs.h"
 
 #include <dirent.h>
+#include <sys/statvfs.h>
 
 #include <cerrno>
+#include <deque>
 #include <mutex>
 #include <vector>
 
@@ -12,7 +14,7 @@ namespace recomp::xbox360 {
 namespace {
 
 std::mutex g_lock;
-std::vector<Device> g_devices;
+std::deque<Device> g_devices;  // a deque: mounting keeps Location::device valid
 std::vector<std::pair<std::string, std::string>> g_links;  // link (no \??\), target
 
 char Lower(char c) { return c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c; }
@@ -79,6 +81,14 @@ bool DeleteSymbolicLink(const std::string& link) {
   return false;
 }
 
+std::string SymbolicLinkTarget(const std::string& link) {
+  std::lock_guard<std::mutex> g(g_lock);
+  std::string name = StripObjectPrefix(link);
+  for (const auto& l : g_links)
+    if (SameName(l.first, name)) return l.second;
+  return "";
+}
+
 uint32_t Resolve(const std::string& path, Location& out) {
   std::lock_guard<std::mutex> g(g_lock);
   std::string p = StripObjectPrefix(path);
@@ -124,6 +134,13 @@ uint32_t Resolve(const std::string& path, Location& out) {
     out.guest += "\\" + found;
   }
   return kStatusSuccess;
+}
+
+VolumeSize QueryVolumeSize(const Device& d) {
+  struct statvfs vfs;
+  if (statvfs(d.root.c_str(), &vfs) != 0) return {0, 0};
+  return {uint64_t(vfs.f_blocks) * vfs.f_frsize / d.cluster,
+          d.writable ? uint64_t(vfs.f_bavail) * vfs.f_frsize / d.cluster : 0};
 }
 
 uint32_t StatusFromErrno(int err) {

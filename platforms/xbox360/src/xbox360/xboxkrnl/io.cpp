@@ -10,7 +10,6 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -395,14 +394,9 @@ HLE(kKrnl, 239, NtQueryVolumeInformationFile) {
       out = 0x11;
       break;
     case kFsSize: {  // total and free allocation units, sectors per unit, bytes per sector
-      struct statvfs vfs;
-      uint64_t total = 0, free = 0;
-      if (statvfs(d.root.c_str(), &vfs) == 0) {
-        total = uint64_t(vfs.f_blocks) * vfs.f_frsize / d.cluster;
-        free = d.writable ? uint64_t(vfs.f_bavail) * vfs.f_frsize / d.cluster : 0;
-      }
-      Wr64(info, total);
-      Wr64(info + 8, free);
+      VolumeSize size = QueryVolumeSize(d);
+      Wr64(info, size.total);
+      Wr64(info + 8, size.free);
       Wr32(info + 0x10, d.cluster / 0x200);
       Wr32(info + 0x14, 0x200);
       break;

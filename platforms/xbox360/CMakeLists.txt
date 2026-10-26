@@ -51,6 +51,8 @@ add_library(recomp_xbox360_xboxkrnl SHARED
   src/xbox360/xboxkrnl/video.cpp
   src/xbox360/xboxkrnl/xconfig.cpp)
 add_library(recomp_xbox360_xam SHARED
+  src/xbox360/xam/content.cpp
+  src/xbox360/xam/enumerate.cpp
   src/xbox360/xam/info.cpp
   src/xbox360/xam/loader.cpp
   src/xbox360/xam/memory.cpp
