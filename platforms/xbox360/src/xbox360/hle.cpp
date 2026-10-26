@@ -16,6 +16,7 @@ using ppc::Fatal;
 struct Function {
   const char* name;
   HleFn fn;
+  ppc::GuestFn call;
 };
 struct Variable {
   const char* name;
@@ -23,10 +24,15 @@ struct Variable {
   void (*init)(uint32_t va);
   uint32_t va = 0;
 };
+struct Area {
+  uint32_t base, size;
+};
 struct Registry {
   std::map<std::string, std::map<uint32_t, Function>> functions;
   std::map<std::string, std::map<uint32_t, Variable>> variables;
   std::mutex lock;  // variables' allocation
+  std::map<std::string, Area> areas;
+  std::vector<ppc::LiftedFn> exports;  // what MapSystemExports registered
 };
 // Filled before main() by the HLE modules' registrars.
 Registry& R() {
@@ -46,8 +52,9 @@ thread_local std::unordered_map<uint32_t, HleFn> t_thunks;
 
 }  // namespace
 
-Registrar::Registrar(const char* module, uint32_t ordinal, const char* name, HleFn fn) {
-  if (!R().functions[module].emplace(ordinal, Function{name, fn}).second)
+Registrar::Registrar(const char* module, uint32_t ordinal, const char* name, HleFn fn,
+                     ppc::GuestFn call) {
+  if (!R().functions[module].emplace(ordinal, Function{name, fn, call}).second)
     Fatal(nullptr, "two handlers for %s!%u", module, ordinal);
 }
 
@@ -79,6 +86,52 @@ uint32_t VariableAddress(const char* module, uint32_t ordinal) {
     if (v.init) v.init(v.va);
   }
   return v.va;
+}
+
+namespace {
+
+// A call through the address of an export that has no handler: fatal,
+// naming it, as a call to its import is. Lifted code leaves an indirect
+// call's target in CTR.
+void Unhandled(ppc::Ctx& c) {
+  uint32_t target = uint32_t(c.ctr);
+  for (const auto& [module, a] : R().areas)
+    if (target - a.base < a.size)
+      Fatal(&c, "%s has no handler (called through its address from %llx)",
+            ExportName(module.c_str(), (target - a.base) / 4).c_str(), static_cast<unsigned long long>(c.lr));
+  Fatal(&c, "a system export without a handler was called (from %llx)", static_cast<unsigned long long>(c.lr));
+}
+
+}  // namespace
+
+void MapSystemExports() {
+  constexpr uint32_t kTrap = 0x7FE00008;  // tw 31, 0, 0
+  for (auto& [module, fns] : R().functions) {
+    uint32_t size = 4 * kSystemOrdinals, base = SystemAlloc(size);
+    R().areas[module] = {base, size};
+    for (uint32_t ordinal = 0; ordinal < kSystemOrdinals; ordinal++) {
+      uint32_t va = base + 4 * ordinal;
+      Wr32(va, kTrap);
+      auto f = fns.find(ordinal);
+      R().exports.push_back({va, f == fns.end() ? &Unhandled : f->second.call});
+    }
+  }
+  ppc::RegisterGuestFunctions(R().exports.data(), uint32_t(R().exports.size()));
+}
+
+bool SystemExportArea(const std::string& module, uint32_t& base, uint32_t& size) {
+  auto it = R().areas.find(module);
+  if (it == R().areas.end()) return false;
+  base = it->second.base;
+  size = it->second.size;
+  return true;
+}
+
+uint32_t SystemExport(const std::string& module, uint32_t ordinal) {
+  if (uint32_t va = VariableAddress(module.c_str(), ordinal)) return va;
+  auto it = R().areas.find(module);
+  if (it == R().areas.end() || ordinal >= kSystemOrdinals) return 0;
+  return it->second.base + 4 * ordinal;
 }
 
 void BindImports(const XexModule& m) {

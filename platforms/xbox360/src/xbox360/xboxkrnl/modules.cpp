@@ -46,14 +46,17 @@ HLE(kKrnl, 404, XexCheckExecutablePrivilege) {
 }
 
 // XexGetModuleHandle(name, *handle): the title's module for no name or the
-// name it was started as. An NTSTATUS, which xam's callers test for < 0;
-// the status of a module that is not loaded is chosen (docs/xboxkrnl.md).
+// name it was started as, a system module's entry for its name. An
+// NTSTATUS, which xam's callers test for < 0; the status of a module that
+// is not loaded is chosen (docs/xboxkrnl.md).
 HLE(kKrnl, 405, XexGetModuleHandle) {
   uint32_t name_ptr = Arg(c, 0), out = Arg(c, 1);
   if (name_ptr) {
     std::string name = ReadString(name_ptr);
-    if (SameName(name, "xboxkrnl.exe") || SameName(name, "xam.xex"))
-      ppc::Fatal(&c, "XexGetModuleHandle(%s): the system modules have no loader entries yet", name.c_str());
+    if (uint32_t system = SystemModule(name)) {
+      Wr32(out, system);
+      return kStatusSuccess;
+    }
     if (!SameName(name, ExecutableModuleName())) {
       Wr32(out, 0);
       return kStatusDllNotFound;
@@ -82,13 +85,22 @@ HLE(kKrnl, 406, XexGetModuleSection) {
 }
 
 // XexGetProcedureAddress(handle, ordinal, *address): an export of the
-// title's module (handle 0 or its own). XEX exports are by ordinal; a
-// value above 0xFFFF names one by a string, which nothing here reads yet.
+// title's module (handle 0 or its own) or of a system module, whose
+// functions run their handlers when called (MapSystemExports). XEX exports
+// are by ordinal; a value above 0xFFFF names one by a string, which
+// nothing here reads yet.
 HLE(kKrnl, 407, XexGetProcedureAddress) {
   uint32_t handle = Arg(c, 0), ordinal = Arg(c, 1), out = Arg(c, 2);
-  if (handle && handle != ExecutableModule()) return kStatusInvalidHandle;
+  const char* system = SystemModuleName(handle);
+  if (handle && handle != ExecutableModule() && !system) return kStatusInvalidHandle;
   if (ordinal > 0xFFFF)
     ppc::Fatal(&c, "XexGetProcedureAddress(%s): exports by name are not read", ReadString(ordinal).c_str());
+  if (system) {
+    uint32_t va = SystemExport(system, ordinal);
+    if (!va) ppc::Fatal(&c, "XexGetProcedureAddress(%s, %u): beyond the ordinals modelled", system, ordinal);
+    Wr32(out, va);
+    return kStatusSuccess;
+  }
   uint32_t va = ExecutableExport(ordinal);
   Wr32(out, va);
   return va ? kStatusSuccess : kStatusDriverEntrypointNotFound;

@@ -109,12 +109,20 @@ here; on the console a KPCR belongs to a hardware thread.
   is the title's module (xam and a title ask so). For a module that is not
   loaded Xenia and ReXGlue return ERROR_NOT_FOUND (0x490), which those
   callers would take for success; here STATUS_DLL_NOT_FOUND and a zero
-  handle. xam asks for `xam.xex` by name: the system modules' entries are
-  not modelled yet, so asking for one is fatal. Console check.
+  handle. xam and titles ask for `xam.xex` by name (a title, on a system
+  of build 2610 or later, to call xam's NetDll_XNetStartupEx through
+  XexGetProcedureAddress): `xboxkrnl.exe` and `xam.xex` have loader
+  entries of their own, named `\SystemRoot\<name>`, with no entry point
+  and, as the image, the area that holds their exports' addresses (word n
+  for ordinal n, a trap instruction; a call to it runs the handler).
+  The names, the image and the layout are chosen. Console check.
 - XexGetModuleSection(handle, name, data, size) finds the module's XEX
   resources (header 0x000002FF: name[8], address, size each), by exact
   name. XexGetProcedureAddress(handle, ordinal, address) by ordinal; a
-  value above 0xFFFF names an export by a string. Failures are Xenia's
+  value above 0xFFFF names an export by a string. A system module's
+  function without a handler has an address too, and a call through it is
+  fatal, as a call to its import is; its variables are the ones imports
+  get. Failures are Xenia's
   STATUS_NOT_FOUND and STATUS_DRIVER_ENTRYPOINT_NOT_FOUND. Console check.
 - XexCheckExecutablePrivilege(n) is bit n of the system flags header
   (0x00030000), as in Xenia and ReXGlue.

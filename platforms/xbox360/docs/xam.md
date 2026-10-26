@@ -27,7 +27,10 @@ only a console can settle.
   the caller first, a title (1) or the system (2), and refuse others with
   WSAEINVAL (xam's code). NetDll_WSAStartup fills WSADATA as xam does:
   the version asked for, the highest 2.2, empty description and status,
-  no limits. NetDll_XNetStartup succeeds. NetDll_XNetGetEthernetLinkStatus
+  no limits. NetDll_XNetStartup succeeds. Their Ex forms (WSAStartupEx,
+  XNetStartupEx, which titles call through XexGetProcedureAddress on newer
+  systems) take the title's version too, which xam hands on to its network
+  stack unchecked: the same here. NetDll_XNetGetEthernetLinkStatus
   returns 0, no link (xam returns 0 whenever the NIC's link bit is clear,
   and does not check the caller).
 

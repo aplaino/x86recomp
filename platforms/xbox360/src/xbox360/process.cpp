@@ -86,6 +86,7 @@ void RunProcess(const GameConfig& cfg) {
   MountFiles(cfg);
   MapImage(m);
   LoadExecutableModule(m, std::filesystem::path(cfg.xex).filename().string());
+  LoadSystemModules();
   BindImports(m);
   SetProcessInfo({m.tls.slots ? m.tls.slots : kDefaultTlsSlots, m.tls.data_size, m.tls.raw_data,
                   m.tls.raw_size, m.stack_size ? m.stack_size : kDefaultStackSize});

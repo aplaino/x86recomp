@@ -184,6 +184,14 @@ constexpr uint32_t kLdrXexHeader = 0x58;
 // started as (what XexGetModuleHandle matches). Before BindImports.
 void LoadExecutableModule(const XexModule& m, const std::string& name);
 uint32_t ExecutableModule();  // its loader entry, 0 before
+// The system modules (xboxkrnl.exe, xam.xex) as loader entries, their
+// exports at guest addresses (MapSystemExports). Once, before the first
+// guest thread.
+void LoadSystemModules();
+// The loader entry of the system module `name` (any case), 0 if it is not
+// one; the name of the system module whose entry is `handle`, or null.
+uint32_t SystemModule(const std::string& name);
+const char* SystemModuleName(uint32_t handle);
 uint32_t ExecutableTitleId();  // its XEX's execution info's
 const std::string& ExecutableModuleName();
 // Export `ordinal` of the title's module, 0 if it has none.

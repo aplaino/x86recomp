@@ -22,8 +22,10 @@ struct XexModule;
 
 using HleFn = uint64_t (*)(ppc::Ctx& c);
 
+// `call` runs the handler as guest code calls it through the export's
+// address (SystemExport): its result in r3.
 struct Registrar {
-  Registrar(const char* module, uint32_t ordinal, const char* name, HleFn fn);
+  Registrar(const char* module, uint32_t ordinal, const char* name, HleFn fn, ppc::GuestFn call);
 };
 // A variable export: `size` bytes of guest memory, zero or set by `init`,
 // allocated when a module first imports it.
@@ -42,6 +44,19 @@ void BindImports(const XexModule& m);
 uint32_t VariableAddress(const char* module, uint32_t ordinal);
 // "module!Name" or "module!ordinal" for diagnostics.
 std::string ExportName(const char* module, uint32_t ordinal);
+
+// The system modules' exports at guest addresses, which XexGetProcedureAddress
+// hands out: ordinal n is word n of its module's area (a trap instruction,
+// never run: a call to it runs the handler, or is fatal, naming the export,
+// if there is none, as a call to its import is). Ordinals below
+// kSystemOrdinals. Once, before the first guest thread. The area of
+// `module` (the HLE modules' names), false if it has no handlers.
+constexpr uint32_t kSystemOrdinals = 0x1000;
+void MapSystemExports();
+bool SystemExportArea(const std::string& module, uint32_t& base, uint32_t& size);
+// The address of export module!ordinal: a variable's, or its word in the
+// area; 0 for a module without one or an ordinal beyond it.
+uint32_t SystemExport(const std::string& module, uint32_t ordinal);
 
 // ---- guest memory, big-endian -------------------------------------------
 inline uint8_t Rd8(uint32_t va) { return Mem()[va]; }
@@ -75,8 +90,11 @@ inline uint32_t Arg(const ppc::Ctx& c, int i) { return uint32_t(Arg64(c, i)); }
 // HLE("xboxkrnl.exe", 300, RtlInitAnsiString) { ... return r3; }
 #define HLE(module, ordinal, name)                                                     \
   static uint64_t RECOMP_XHLE_CAT(hle_, name)(::recomp::ppc::Ctx & c);                 \
+  static void RECOMP_XHLE_CAT(call_, name)(::recomp::ppc::Ctx & c) {                   \
+    c.r[3] = RECOMP_XHLE_CAT(hle_, name)(c);                                           \
+  }                                                                                    \
   static const ::recomp::xbox360::Registrar RECOMP_XHLE_CAT(reg_, name){              \
-      module, ordinal, #name, &RECOMP_XHLE_CAT(hle_, name)};                           \
+      module, ordinal, #name, &RECOMP_XHLE_CAT(hle_, name), &RECOMP_XHLE_CAT(call_, name)}; \
   static uint64_t RECOMP_XHLE_CAT(hle_, name)([[maybe_unused]] ::recomp::ppc::Ctx & c)
 
 // HLE_VARIABLE("xboxkrnl.exe", 344, XboxKrnlVersion, 8, init): init(va) or nullptr.

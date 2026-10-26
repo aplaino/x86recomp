@@ -1,6 +1,7 @@
 #include <cstring>
 #include <vector>
 
+#include "xbox360/fs.h"
 #include "xbox360/hle.h"
 #include "xbox360/kernel.h"
 #include "xbox360/xex.h"
@@ -20,6 +21,15 @@ constexpr uint32_t kLdrSize = 0x64, kLdrInLoadOrder = 0x0, kLdrInMemoryOrder = 0
 // Optional header: the image's checksum and time stamp.
 constexpr uint32_t kXexChecksumTimestamp = 0x00018002;
 
+// The system modules a title may ask the loader for, by the names the HLE
+// modules register their handlers under.
+constexpr const char* kSystemModules[] = {"xboxkrnl.exe", "xam.xex"};
+struct SystemEntry {
+  const char* name;
+  uint32_t ldr;
+};
+std::vector<SystemEntry> g_system;
+
 uint32_t g_ldr, g_title_id;
 std::string g_name;
 std::vector<uint32_t> g_exports;
@@ -35,27 +45,35 @@ void UnicodeString(uint32_t at, const std::string& s) {
   Wr32(at + 4, buf);
 }
 
+// A loader entry, not in a list of loaded modules (each of its lists is
+// empty).
+uint32_t LoaderEntry(const std::string& full_name, const std::string& name, uint32_t base,
+                     uint32_t size, uint32_t entry) {
+  uint32_t ldr = SystemAlloc(kLdrSize);
+  std::memset(Mem() + ldr, 0, kLdrSize);
+  for (uint32_t list : {kLdrInLoadOrder, kLdrInMemoryOrder, kLdrInInitializationOrder}) {
+    Wr32(ldr + list, ldr + list);
+    Wr32(ldr + list + 4, ldr + list);
+  }
+  Wr32(ldr + kLdrDllBase, base);
+  Wr32(ldr + kLdrImageBase, base);
+  Wr32(ldr + kLdrImageSize, size);
+  UnicodeString(ldr + kLdrFullDllName, full_name);
+  UnicodeString(ldr + kLdrBaseDllName, name);
+  Wr32(ldr + kLdrFullImageSize, size);
+  Wr32(ldr + kLdrEntryPoint, entry);
+  Wr16(ldr + kLdrLoadCount, 1);
+  return ldr;
+}
+
 }  // namespace
 
 void LoadExecutableModule(const XexModule& m, const std::string& name) {
   uint32_t header = SystemAlloc(uint32_t(m.headers.size()));
   std::memcpy(Mem() + header, m.headers.data(), m.headers.size());
-  uint32_t ldr = SystemAlloc(kLdrSize);
-  // Not in a list of loaded modules: each of its lists is empty.
-  for (uint32_t list : {kLdrInLoadOrder, kLdrInMemoryOrder, kLdrInInitializationOrder}) {
-    Wr32(ldr + list, ldr + list);
-    Wr32(ldr + list + 4, ldr + list);
-  }
-  uint32_t size = uint32_t(m.image.size());
-  Wr32(ldr + kLdrDllBase, m.base);
-  Wr32(ldr + kLdrImageBase, m.base);
-  Wr32(ldr + kLdrImageSize, size);
   // The system starts a title from its disc's root.
-  UnicodeString(ldr + kLdrFullDllName, "\\Device\\CdRom0\\" + name);
-  UnicodeString(ldr + kLdrBaseDllName, name);
-  Wr32(ldr + kLdrFullImageSize, size);
-  Wr32(ldr + kLdrEntryPoint, m.entry);
-  Wr16(ldr + kLdrLoadCount, 1);
+  uint32_t ldr =
+      LoaderEntry("\\Device\\CdRom0\\" + name, name, m.base, uint32_t(m.image.size()), m.entry);
   if (uint32_t stamp = XexHeaderField(header, kXexChecksumTimestamp))
     Wr32(ldr + kLdrTimeDateStamp, Rd32(stamp + 4));
   Wr32(ldr + kLdrXexHeader, header);
@@ -64,6 +82,30 @@ void LoadExecutableModule(const XexModule& m, const std::string& name) {
   g_name = name;
   g_exports = m.exports;
   g_export_base = m.export_base;
+}
+
+// The system modules' entries: the area of their exports' addresses as
+// the image (chosen: the console's modules are images in system memory),
+// no entry point.
+void LoadSystemModules() {
+  MapSystemExports();
+  for (const char* name : kSystemModules) {
+    uint32_t base = 0, size = 0;
+    SystemExportArea(name, base, size);
+    g_system.push_back({name, LoaderEntry(std::string("\\SystemRoot\\") + name, name, base, size, 0)});
+  }
+}
+
+uint32_t SystemModule(const std::string& name) {
+  for (const SystemEntry& e : g_system)
+    if (SameName(name, e.name)) return e.ldr;
+  return 0;
+}
+
+const char* SystemModuleName(uint32_t handle) {
+  for (const SystemEntry& e : g_system)
+    if (handle && handle == e.ldr) return e.name;
+  return nullptr;
 }
 
 uint32_t ExecutableModule() { return g_ldr; }

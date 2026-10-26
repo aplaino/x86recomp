@@ -78,7 +78,12 @@ exports are HLE modules on top of it, one shared library per system
 module (`recomp_xbox360_xboxkrnl` in `src/xbox360/xboxkrnl`,
 `recomp_xbox360_xam` in `src/xbox360/xam`); where one module's export is
 another's (xam's XGetVideoMode is the kernel's VdQueryVideoMode), both
-handlers call the same runtime code. Behaviour comes from the system's own code where
+handlers call the same runtime code. Guest code that takes a system
+export's address (XexGetProcedureAddress) gets one the dispatcher runs
+the handler for: each `HLE()` handler also defines a guest function, and
+before the first guest thread the runtime gives each an address in its
+module's area and registers it with the dispatcher (`RegisterGuestFunctions`).
+Behaviour comes from the system's own code where
 it shows it (xam, which the console's update ships unencrypted, and what
 titles read), otherwise from Xenia and ReXGlue, and is written down in
 docs/xboxkrnl.md with what still waits for a console.

@@ -614,6 +614,22 @@ static void Modules(void) {
   CHECK((int32_t)XexGetModuleSection(h, "Other", &data, &size) < 0);
   u32 address = 1;
   CHECK((int32_t)XexGetProcedureAddress(0, 1, &address) < 0 && address == 0);
+  // The system modules: their exports by address, called through it.
+  u32 xam = 0, krnl = 0;
+  CHECK(XexGetModuleHandle("xam.xex", &xam) == 0 && xam && XexGetModuleHandle("XBOXKRNL.EXE", &krnl) == 0 &&
+        krnl && krnl != xam && krnl != h);
+  CHECK(XexGetProcedureAddress(xam, 75, &address) == 0 && address);
+  CHECK(((u32(*)(u32))(uintptr_t)address)(1) == 0);  // NetDll_XNetGetEthernetLinkStatus: no link
+  CHECK(XexGetProcedureAddress(krnl, 320, &address) == 0 && address);
+  uint64_t time = 0x1da6b158f2a0f87ull;
+  uint16_t f[8] = {0};
+  ((u32(*)(const uint64_t*, uint16_t*))(uintptr_t)address)(&time, f);  // RtlTimeToTimeFields
+  CHECK(f[0] == 2024 && f[1] == 2 && f[2] == 29 && f[7] == 4);
+  CHECK(XexGetProcedureAddress(krnl, 344, &address) == 0 && address == __imp_XboxKrnlVersion);
+  // Any export has an address, a handler or not (only a call without one is fatal).
+  u32 first = 0;
+  CHECK(XexGetProcedureAddress(xam, 1, &first) == 0 && XexGetProcedureAddress(xam, 2, &address) == 0 &&
+        address == first + 4);
 }
 
 // ---- the console --------------------------------------------------------------
@@ -846,6 +862,16 @@ static void Xam(void) {
   CHECK(NetDll_WSAStartup(1, 0x0202, wsa) == 0 && wsa[0] == 0x0202 && wsa[1] == 0x0202);
   CHECK(NetDll_WSAStartup(3, 0x0202, wsa) == 10022 && NetDll_XNetStartup(1, 0) == 0);
   CHECK(NetDll_XNetGetEthernetLinkStatus(1) == 0);
+  // The Ex forms, which titles find through XexGetProcedureAddress.
+  u32 xam = 0, wsa_ex = 0, xnet_ex = 0;
+  CHECK(XexGetModuleHandle("xam.xex", &xam) == 0 && XexGetProcedureAddress(xam, 36, &wsa_ex) == 0 &&
+        XexGetProcedureAddress(xam, 80, &xnet_ex) == 0);
+  wsa[0] = wsa[1] = 0;
+  CHECK(((u32(*)(u32, u32, void*, u32))(uintptr_t)wsa_ex)(1, 0x0101, wsa, 0x200DC900) == 0 && wsa[0] == 0x0101 &&
+        wsa[1] == 0x0202);
+  CHECK(((u32(*)(u32, u32, void*, u32))(uintptr_t)wsa_ex)(0, 0x0202, wsa, 0x200DC900) == 10022);
+  CHECK(((u32(*)(u32, void*, u32))(uintptr_t)xnet_ex)(1, 0, 0x200DC900) == 0 &&
+        ((u32(*)(u32, void*, u32))(uintptr_t)xnet_ex)(5, 0, 0x200DC900) == 10022);
   u32 p = 0;
   CHECK(XamAlloc(0, 0x440, &p) == 0 && p && *At(p) == 0 && *At(p + 0x43C) == 0);
   XamFree(p);
