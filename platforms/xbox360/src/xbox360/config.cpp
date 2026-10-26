@@ -73,6 +73,9 @@ bool XConfigSetting(uint16_t category, uint16_t setting, const uint8_t*& data, u
   return false;
 }
 
+// North America (NTSC-U), with the AV region.
+uint16_t GameRegion() { return 0x00FF; }
+
 uint32_t AvPack() { return kAvPackHdmi; }
 
 // 1280x720 progressive on the HDMI pack, at the AV region's rate (50 Hz

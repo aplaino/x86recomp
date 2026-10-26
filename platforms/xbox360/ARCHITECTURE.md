@@ -270,7 +270,11 @@ through the slot reaches the same handler, a variable's the address of
 guest memory the HLE module defines for it (`HLE_VARIABLE`), and a module
 importing a variable nobody defines is refused at load, naming each.
 Import() finds the handler by the thunk's address in a per-thread table,
-without a lock.
+without a lock. xam's own messages to its apps (XMsg*) have a registry
+of their own in the xam module, by app and message
+(`XMSG(app, message, Name)`), with the same rule: a message without a
+handler is fatal when it is sent. Requests complete before the call
+returns.
 
 ### Threads and objects
 - A guest thread runs on its own host thread (16 MiB of host stack, for
@@ -417,8 +421,8 @@ memory; any other interrupt fails the run.
   objects, critical sections, formatting, variables, time, files on its
   disc and on the hard disk, its module and XEX headers, the settings and
   the video mode, the GPU's registers, interrupts and a ring buffer's
-  packets, string conversions, an audio client) and exits with the number
-  of failed checks. It runs with SDL's dummy audio driver.
+  packets, string conversions, an audio client, xam's startup exports and
+  messages) and exits with the number of failed checks. It runs with SDL's dummy audio driver.
   The test writes the disc's files and empties the data directory before
   each run.
 - Not covered by QEMU: what the 970 does differently from the Xenon
@@ -436,8 +440,9 @@ memory; any other interrupt fails the run.
    the libraries and their layout, memory, threads, synchronisation,
    files, the title's module, the settings, the display driver with a
    command processor that executes the ring buffer without drawing, and
-   the audio render driver, and the first kernel and xam exports are
-   done; next xam (users, content, notifications, messages), XMA
-   decoding, timers and APCs.
+   the audio render driver, the kernel exports and xam's startup ones
+   (the loader, networking, memory, messages and the music player's) are
+   done; next xam's users, profiles, notifications and content, the XGI
+   and XLiveBase messages, timers, XMA decoding and APCs.
 5. Xenos: drawing, shaders and presentation through gfx::Device, behind
    the command processor (which runs the ring buffer already).

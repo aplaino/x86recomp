@@ -97,8 +97,20 @@ u32 XAudioUnregisterRenderDriverClient(u32 driver);
 u32 XAudioSubmitRenderDriverFrame(u32 driver, float* samples);
 u32 XAudioGetVoiceCategoryVolumeChangeMask(u32 driver, u32* mask);
 u32 XAudioGetVoiceCategoryVolume(u32 category, u32* volume);
+u32 MmQueryStatistics(u32* statistics);
 u32 XGetAVPack(void);     // xam
 u32 XGetVideoMode(u32* mode);  // xam
+u32 XGetGameRegion(void);
+u32 XamGetSystemVersion(void);
+u32 XamLoaderGetLaunchDataSize(u32* size);
+u32 XamLoaderGetLaunchData(void* buffer, u32 size);
+u32 NetDll_WSAStartup(u32 caller, u32 version, void* data);
+u32 NetDll_XNetStartup(u32 caller, void* parameters);
+u32 XamAlloc(u32 attributes, u32 size, u32* address);
+u32 XamFree(u32 address);
+u32 XMsgInProcessCall(u32 app, u32 message, void* p1, void* p2);
+u32 XMsgStartIORequest(u32 app, u32 message, u32* overlapped, void* buffer, u32 size);
+u32 XMsgStartIORequestEx(u32 app, u32 message, u32* overlapped, void* buffer, u32 size, void* xparams);
 extern u32 __imp_NtClose, __imp_ExThreadObjectType, __imp_KeTimeStampBundle, __imp_XboxKrnlVersion,
     __imp_XexExecutableModuleHandle, __imp_ExLoadedCommandLine, __imp_VdGlobalDevice, __imp_VdGpuClockInMHz,
     __imp_VdHSIOCalibrationLock;
@@ -730,8 +742,47 @@ static void Audio(void) {
   CHECK(audio_calls - calls <= 1);
 }
 
+// ---- xam ----------------------------------------------------------------------
+static void Xam(void) {
+  CHECK(XGetGameRegion() == 0x00FF && XamGetSystemVersion() == 0x20449700);
+  u32 size = 1;
+  char buf[16];
+  CHECK(XamLoaderGetLaunchDataSize(&size) == 0x490 && size == 0 && XamLoaderGetLaunchData(buf, 16) == 0x490);
+  uint16_t wsa[0xC8];
+  CHECK(NetDll_WSAStartup(1, 0x0202, wsa) == 0 && wsa[0] == 0x0202 && wsa[1] == 0x0202);
+  CHECK(NetDll_WSAStartup(3, 0x0202, wsa) == 10022 && NetDll_XNetStartup(1, 0) == 0);
+  u32 p = 0;
+  CHECK(XamAlloc(0, 0x440, &p) == 0 && p && *At(p) == 0 && *At(p + 0x43C) == 0);
+  XamFree(p);
+  // Memory statistics: the totals, what is left.
+  u32 stats[26];
+  stats[0] = 0x68;
+  CHECK(MmQueryStatistics(stats) == 0 && stats[1] == 0x20000 && stats[3] > 0 && stats[3] < 0x20000 && stats[5] > 0);
+  stats[0] = 0x60;
+  CHECK(MmQueryStatistics(stats) == 0xC0000023);
+  // The music player's playback controller, in-process and as a request.
+  u32 controller = 9, locked = 9;
+  u32 get[3] = {2, (u32)(uintptr_t)&controller, (u32)(uintptr_t)&locked};
+  CHECK(XMsgInProcessCall(0xFA, 0x7001B, get, 0) == 0 && controller == 0 && locked == 0);
+  u32 set[3] = {2, 0, 1};
+  CHECK(XMsgStartIORequestEx(0xFA, 0x7001A, 0, set, sizeof set, 0) == 0);
+  u32 e = 0, ov[7] = {0, 0, 0, 0, 0, 0, 0};
+  CHECK(NtCreateEvent(&e, 0, 0, 0) == 0);
+  ov[3] = e;
+  int64_t zero = 0;
+  CHECK(XMsgStartIORequest(0xFA, 0x7001A, ov, set, sizeof set) == 0 && ov[0] == 0 &&
+        NtWaitForSingleObjectEx(e, 1, 0, &zero) == 0);
+  // A refused request: its result and extended error, or the last error.
+  set[1] = 1;
+  CHECK(XMsgStartIORequest(0xFA, 0x7001A, ov, set, sizeof set) == 0 && ov[0] == 87 && ov[6] == 0x80070057);
+  CHECK(XMsgStartIORequest(0xFA, 0x7001A, 0, set, sizeof set) == 0 &&
+        *At(*At((u32)pcr() + 0x100) + 0x160) == 0x80070057);
+  NtClose(e);
+}
+
 int main(void) {
   Modules();
+  Xam();
   Console();
   Gpu();
   Conversions();

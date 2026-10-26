@@ -55,6 +55,7 @@ __xex_import_slot_\name:
   FUNCTION 189, MmFreePhysicalMemory
   FUNCTION 190, MmGetPhysicalAddress
   FUNCTION 196, MmQueryAddressProtect
+  FUNCTION 198, MmQueryStatistics
   FUNCTION 204, NtAllocateVirtualMemory
   FUNCTION 207, NtClose
   FUNCTION 210, NtCreateFile
@@ -112,7 +113,18 @@ __xex_import_slot_\name:
   FUNCTION 603, VdSwap
   FUNCTION 458, VdQueryVideoMode
   FUNCTION 971, XGetAVPack, 1
+  FUNCTION 972, XGetGameRegion, 1
   FUNCTION 977, XGetVideoMode, 1
+  FUNCTION 1, NetDll_WSAStartup, 1
+  FUNCTION 51, NetDll_XNetStartup, 1
+  FUNCTION 423, XamLoaderGetLaunchDataSize, 1
+  FUNCTION 424, XamLoaderGetLaunchData, 1
+  FUNCTION 490, XamAlloc, 1
+  FUNCTION 492, XamFree, 1
+  FUNCTION 500, XMsgInProcessCall, 1
+  FUNCTION 503, XMsgStartIORequest, 1
+  FUNCTION 508, XMsgStartIORequestEx, 1
+  FUNCTION 642, XamGetSystemVersion, 1
   VARIABLE 27, ExThreadObjectType
   VARIABLE 173, KeTimeStampBundle
   VARIABLE 344, XboxKrnlVersion

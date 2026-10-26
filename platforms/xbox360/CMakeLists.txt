@@ -51,7 +51,12 @@ add_library(recomp_xbox360_xboxkrnl SHARED
   src/xbox360/xboxkrnl/video.cpp
   src/xbox360/xboxkrnl/xconfig.cpp)
 add_library(recomp_xbox360_xam SHARED
-  src/xbox360/xam/info.cpp)
+  src/xbox360/xam/info.cpp
+  src/xbox360/xam/loader.cpp
+  src/xbox360/xam/memory.cpp
+  src/xbox360/xam/msg.cpp
+  src/xbox360/xam/net.cpp
+  src/xbox360/xam/xmp.cpp)
 foreach(_m xboxkrnl xam)
   target_link_libraries(recomp_xbox360_${_m} PUBLIC recomp_xbox360)
   if(NOT APPLE)

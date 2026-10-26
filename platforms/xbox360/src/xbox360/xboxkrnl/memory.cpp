@@ -1,5 +1,8 @@
 // xboxkrnl: virtual and physical memory, the kernel pool.
 
+#include <algorithm>
+#include <cstring>
+
 #include "ppc/fatal.h"
 #include "xbox360/hle.h"
 #include "xbox360/kernel.h"
@@ -131,6 +134,30 @@ HLE(kKrnl, 197, MmQueryAllocationSize) {
   RegionInfo r;
   if (!Query(Arg(c, 0), r) || r.state == kMemFree) return 0;
   return ReservationSize(r.alloc_base);
+}
+
+// MmQueryStatistics(*statistics): MM_STATISTICS (0x68 bytes, its size
+// first): total physical pages, the kernel's, then the title's and the
+// system's sections (available pages, total and reserved virtual bytes,
+// then pages by use), the highest physical page. A title reads the totals
+// and the title's available pages and virtual bytes (GlobalMemoryStatus).
+// The kernel's 0x100 pages and the title's 0x2FFE0000 virtual bytes are
+// Xenia's; the pages by use are left 0. Console check.
+HLE(kKrnl, 198, MmQueryStatistics) {
+  constexpr uint32_t kSize = 0x68, kTotalPages = kPhysicalSize / 0x1000, kKernelPages = 0x100;
+  uint32_t s = Arg(c, 0);
+  if (!s) return kStatusInvalidParameter;
+  if (Rd32(s) != kSize) return kStatusBufferTooSmall;
+  MemoryUse u = QueryMemoryUse();
+  std::memset(Mem() + s, 0, kSize);
+  Wr32(s, kSize);
+  Wr32(s + 0x4, kTotalPages);
+  Wr32(s + 0x8, kKernelPages);
+  Wr32(s + 0xC, kTotalPages - kKernelPages - std::min(u.pages_in_use, kTotalPages - kKernelPages));
+  Wr32(s + 0x10, 0x2FFE0000);
+  Wr32(s + 0x14, u.virtual_reserved);
+  Wr32(s + 0x64, kTotalPages - 1);
+  return kStatusSuccess;
 }
 
 // The kernel pool (ExAllocatePool, ExAllocatePoolWithTag): the kernel's

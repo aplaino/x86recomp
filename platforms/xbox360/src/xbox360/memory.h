@@ -82,6 +82,15 @@ uint32_t PageProtect(uint32_t va);
 // The size of the reservation based at va, 0 if none.
 uint32_t ReservationSize(uint32_t va);
 
+// What MmQueryStatistics reports: 4 KiB pages in use (every committed
+// page outside the physical views, as each takes a physical page on the
+// console, plus the physical views' claimed frames) and the bytes reserved
+// in the virtual heaps (0x00000000-0x7EFFFFFF).
+struct MemoryUse {
+  uint32_t pages_in_use, virtual_reserved;
+};
+MemoryUse QueryMemoryUse();
+
 // The physical address of va in a physical view. False in the others:
 // here no physical page backs virtual memory.
 bool PhysicalAddress(uint32_t va, uint32_t& pa);
