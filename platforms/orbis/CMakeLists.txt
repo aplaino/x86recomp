@@ -64,8 +64,9 @@ add_library(recomp_orbis_videoout SHARED src/orbis/hle/videoout.cpp)
 target_link_libraries(recomp_orbis_videoout PUBLIC recomp_orbis_kernel)
 # The GPU (orbis/gpu): the command processor, beside the CPU, and its
 # shaders' instructions.
-add_library(recomp_orbis_gpu SHARED src/orbis/gpu/cp.cpp src/orbis/gpu/gcn.cpp)
-target_link_libraries(recomp_orbis_gpu PUBLIC recomp_orbis_kernel)
+add_library(recomp_orbis_gpu SHARED src/orbis/gpu/cp.cpp src/orbis/gpu/gcn.cpp
+            src/orbis/gpu/shader.cpp)
+target_link_libraries(recomp_orbis_gpu PUBLIC recomp_orbis_kernel recomp_gfx)
 # libSceGnmDriver, which submits to the GPU.
 add_library(recomp_orbis_gnm SHARED src/orbis/hle/gnm_driver.cpp)
 target_link_libraries(recomp_orbis_gnm PUBLIC recomp_orbis_videoout recomp_orbis_gpu)
