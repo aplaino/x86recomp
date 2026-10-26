@@ -15,10 +15,11 @@ the same output as on a PowerPC 970 in 32-bit mode, every instruction
 form checked bit for bit against it (VMX128's as their VMX equivalents).
 The runtime maps the console's address space with its physical views,
 runs a title's threads with their kernel structures, and has the
-kernel's memory, thread, synchronisation, file, module, settings, string
-and formatting exports and the first of xam's, which a test title
-checks; the rest of what a title's startup calls (the display driver
-first), timers and the rest of xam are next.
+kernel's memory, thread, synchronisation, file, module, settings,
+display driver, string and formatting exports and the first of xam's,
+with a GPU command processor that executes a title's ring buffer without
+drawing, which a test title checks; the rest of what a title's startup
+calls (the audio driver next), timers and the rest of xam follow.
 
 ## Using it
 

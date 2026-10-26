@@ -75,24 +75,30 @@ bool XConfigSetting(uint16_t category, uint16_t setting, const uint8_t*& data, u
 
 uint32_t AvPack() { return kAvPackHdmi; }
 
+// 1280x720 progressive on the HDMI pack, at the AV region's rate (50 Hz
+// with its bit 23) and standard (its bits 8-15).
+VideoMode CurrentVideoMode() {
+  uint32_t region = Value(kXConfigSecured, 2);
+  return {1280, 720, false, (Value(kXConfigUser, 10) & 0x00010000) != 0, true,
+          region >> 23 & 1 ? 50u : 60u, region >> 8 & 0xFF};
+}
+
 // X_VIDEO_MODE: width, height, interlaced, widescreen, high definition,
 // refresh rate (a float), video standard, then two words Xenia fills with
 // 0x8A and 1 (widescreen; 3 otherwise). xam reads the size, the refresh
-// rate and the standard. 1280x720 progressive on the HDMI pack, at the
-// AV region's rate and standard.
+// rate and the standard.
 void WriteVideoMode(uint32_t va) {
-  uint32_t region = Value(kXConfigSecured, 2);
-  bool widescreen = Value(kXConfigUser, 10) & 0x00010000;
+  VideoMode m = CurrentVideoMode();
   std::memset(Mem() + va, 0, kVideoModeSize);
-  Wr32(va, 1280);
-  Wr32(va + 4, 720);
-  Wr32(va + 8, 0);
-  Wr32(va + 12, widescreen);
-  Wr32(va + 16, 1);
-  Wr32(va + 20, std::bit_cast<uint32_t>(region >> 23 & 1 ? 50.0f : 60.0f));
-  Wr32(va + 24, region >> 8 & 0xFF);
+  Wr32(va, m.width);
+  Wr32(va + 4, m.height);
+  Wr32(va + 8, m.interlaced);
+  Wr32(va + 12, m.widescreen);
+  Wr32(va + 16, m.high_definition);
+  Wr32(va + 20, std::bit_cast<uint32_t>(float(m.refresh_hz)));
+  Wr32(va + 24, m.standard);
   Wr32(va + 28, 0x8A);
-  Wr32(va + 32, widescreen ? 1 : 3);
+  Wr32(va + 32, m.widescreen ? 1 : 3);
 }
 
 }  // namespace recomp::xbox360

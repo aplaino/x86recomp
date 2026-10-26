@@ -2,7 +2,7 @@
 // The kernel's state the HLE modules share (ARCHITECTURE.md, "Runtime:
 // threads and objects"): dispatcher objects in guest memory and the waits
 // on them, handles, guest threads with the structures guest code reads
-// through r13, the title's module, and time.
+// through r13 and the kernel's own threads, the title's module, and time.
 
 #include <cstdint>
 #include <string>
@@ -135,6 +135,18 @@ uint32_t ResumeThread(Thread* t);
 // Ends the current thread (ExTerminateThread, or its start routine
 // returning) with `status`. The process ends with its last thread.
 [[noreturn]] void ExitThread(uint32_t status);
+// The IRQL, a byte of the KPCR.
+constexpr uint32_t kPcrIrql = 0x18;
+constexpr uint8_t kDispatchLevel = 2;
+// A thread of the kernel's own (the GPU's interrupts, its command
+// processor): `body(arg)` runs on it, host code, with guest structures so
+// that it can call guest code (CallDpc); it does not keep the process
+// alive.
+Thread* CreateSystemThread(void (*body)(void* arg), void* arg);
+// Calls guest function fn(a0, a1) on the current system thread as a DPC
+// does: at DISPATCH_LEVEL, the KPCR's DPC-active flag set, on processor
+// `cpu`. Returns r3.
+uint32_t CallDpc(uint32_t fn, uint32_t a0, uint32_t a1, uint32_t cpu);
 
 // The title process (KeGetCurrentProcessType): kTitleProcess.
 constexpr uint32_t kTitleProcess = 1;

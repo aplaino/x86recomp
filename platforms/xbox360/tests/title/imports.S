@@ -95,6 +95,10 @@ __xex_import_slot_\name:
   FUNCTION 405, XexGetModuleHandle
   FUNCTION 406, XexGetModuleSection
   FUNCTION 407, XexGetProcedureAddress
+  FUNCTION 438, VdEnableRingBufferRPtrWriteBack
+  FUNCTION 451, VdInitializeRingBuffer
+  FUNCTION 469, VdSetGraphicsInterruptCallback
+  FUNCTION 603, VdSwap
   FUNCTION 458, VdQueryVideoMode
   FUNCTION 971, XGetAVPack, 1
   FUNCTION 977, XGetVideoMode, 1

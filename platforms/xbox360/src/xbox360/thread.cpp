@@ -29,6 +29,8 @@ namespace recomp::xbox360 {
 struct Thread {
   ppc::Ctx c{};
   ThreadParams p{};
+  void (*system_body)(void* arg) = nullptr;  // a system thread's
+  void* system_arg = nullptr;
   uint32_t kthread = 0, pcr = 0, tls = 0;
   uint32_t stack_alloc = 0, stack_base = 0;
   uint32_t id = 0;
@@ -51,7 +53,10 @@ constexpr uint32_t kKtStackBase = 0x5C, kKtStackLimit = 0x60, kKtTls = 0x68,
                    kKtList154 = 0x154, kKtCreationFlags = 0x16C;
 // KPCR fields.
 constexpr uint32_t kPcrTls = 0x0, kPcrSelf = 0x30, kPcrStackBase = 0x70, kPcrStackEnd = 0x74,
-                   kPcrPrcb = 0x100, kPcrCurrentThread = 0x100, kPcrCpu = 0x10C, kPcrPrcbPtr = 0x2A8;
+                   kPcrPrcb = 0x100, kPcrCurrentThread = 0x100, kPcrCpu = 0x10C, kPcrDpcActive = 0x150,
+                   kPcrPrcbPtr = 0x2A8;
+// A system thread's guest stack, for the guest code it calls.
+constexpr uint32_t kSystemStack = 64 << 10;
 // The host stack lifted code runs on: its frames are the guest's calls.
 constexpr size_t kHostStack = 16 << 20;
 // Below the top of a new guest stack, room for the parameter area of the
@@ -105,6 +110,10 @@ void Finish(Thread* t, uint32_t status) {
 void* Run(void* arg) {
   Thread* t = static_cast<Thread*>(arg);
   t_current = t;
+  if (t->system_body) {
+    t->system_body(t->system_arg);
+    return nullptr;
+  }
   {
     std::unique_lock<std::mutex> l(t->lock);
     t->resumed.wait(l, [t] { return t->suspend == 0; });
@@ -133,9 +142,13 @@ void* Run(void* arg) {
 
 }  // namespace
 
-Thread* CreateThread(const ThreadParams& p) {
+namespace {
+
+Thread* NewThread(const ThreadParams& p, void (*system_body)(void*), void* system_arg) {
   auto* t = new Thread;
   t->p = p;
+  t->system_body = system_body;
+  t->system_arg = system_arg;
   uint32_t size = std::max(0x4000u, RoundUp(p.stack_size ? p.stack_size : g_process.stack_size, 0x1000));
   uint32_t reserved = RoundUp(size, HeapPageSize(Heap::kVirtual64k));
   t->stack_alloc = Reserve(Heap::kVirtual64k, 0, reserved, 0, true);
@@ -152,7 +165,7 @@ Thread* CreateThread(const ThreadParams& p) {
     std::lock_guard<std::mutex> g(g_threads);
     t->id = g_next_id++;
     g_by_kthread[t->kthread] = t;
-    g_live++;
+    if (!system_body) g_live++;
   }
 
   uint32_t k = t->kthread, pcr = t->pcr;
@@ -198,6 +211,30 @@ Thread* CreateThread(const ThreadParams& p) {
   pthread_attr_destroy(&attr);
   if (err) Fatal(nullptr, "cannot start a host thread: %s", std::strerror(err));
   return t;
+}
+
+}  // namespace
+
+Thread* CreateThread(const ThreadParams& p) { return NewThread(p, nullptr, nullptr); }
+
+Thread* CreateSystemThread(void (*body)(void* arg), void* arg) {
+  return NewThread({kSystemStack, 0, 0, 0, 0}, body, arg);
+}
+
+uint32_t CallDpc(uint32_t fn, uint32_t a0, uint32_t a1, uint32_t cpu) {
+  Thread* t = t_current;
+  ppc::Ctx& c = t->c;
+  SetProcessor(t, cpu);
+  uint8_t irql = Rd8(t->pcr + kPcrIrql);
+  Wr8(t->pcr + kPcrIrql, kDispatchLevel);
+  Wr32(t->pcr + kPcrDpcActive, 1);
+  c.r[1] = t->stack_base - kStackTopReserve;
+  c.r[3] = a0;
+  c.r[4] = a1;
+  ppc::Dispatch(c, fn, 0);
+  Wr32(t->pcr + kPcrDpcActive, 0);
+  Wr8(t->pcr + kPcrIrql, irql);
+  return uint32_t(c.r[3]);
 }
 
 Thread* CurrentThread() { return t_current; }

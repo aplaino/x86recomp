@@ -83,6 +83,9 @@ u32 ExRegisterTitleTerminateNotification(void* registration, u32 create);
 u32 FscSetCacheElementCount(u32 count);
 u32 HalGetCurrentAVPack(void);
 u32 VdQueryVideoMode(u32* mode);
+u32 VdEnableRingBufferRPtrWriteBack(u32 pa, u32 block_log2);
+u32 VdInitializeRingBuffer(u32 pa, u32 size_log2);
+u32 VdSetGraphicsInterruptCallback(void* callback, u32 user);
 u32 XGetAVPack(void);     // xam
 u32 XGetVideoMode(u32* mode);  // xam
 extern u32 __imp_NtClose, __imp_ExThreadObjectType, __imp_KeTimeStampBundle, __imp_XboxKrnlVersion,
@@ -97,6 +100,9 @@ u32 NtCreateFile9(u32* handle, u32 access, void* attributes, u32* io, void* size
                   u32 share, u32 disposition, u32 options);
 u32 NtQueryDirectoryFile9(u32 handle, u32 event, void* apc, void* context, u32* io, void* info, u32 length,
                           void* mask, u32 restart);
+u32 VdSwap10(volatile u32* words, u32* fetch, u32 writeback, void* system, u32 value, u32* front, u32* format,
+             u32* color_space, u32* width, u32* height);
+void interrupt_entry(void);
 uint64_t time_base(void);
 uint64_t pcr(void);
 
@@ -566,9 +572,101 @@ static void Console(void) {
   CHECK(FscSetCacheElementCount(64) == 0);
 }
 
+// ---- the GPU -----------------------------------------------------------------
+static volatile u32* Reg(u32 r) { return At(0x7FC80000 + 4 * r); }
+static u32 Type0(u32 reg, u32 count) { return (count - 1) << 16 | reg; }
+static u32 Type3(u32 opcode, u32 count) { return 0xC0000000 | (count - 1) << 16 | opcode << 8; }
+
+// The graphics interrupt callback (start.S's interrupt_entry), as a DPC.
+static volatile u32 interrupts[2], interrupt_user, interrupt_irql;
+void GraphicsInterrupt(u32 source, u32 user) {
+  if (source < 2) interrupts[source]++;
+  interrupt_user = user;
+  interrupt_irql = *(volatile uint8_t*)(uintptr_t)(pcr() + 0x18);
+}
+
+// Waits up to a second for *p == v.
+static int WaitFor(volatile u32* p, u32 v) {
+  int64_t ms = -10000;
+  for (int k = 0; k < 1000 && *p != v; k++) KeDelayExecutionThread(1, 0, &ms);
+  return *p == v;
+}
+
+static void Gpu(void) {
+  CHECK(*Reg(0x1961) == (1280u << 16 | 720) && *Reg(0x1951) == 1);
+  // Vertical blanks reach the callback as DPCs.
+  VdSetGraphicsInterruptCallback((void*)interrupt_entry, 0x5678);
+  int64_t hundred_ms = -1000000;
+  KeDelayExecutionThread(1, 0, &hundred_ms);
+  CHECK(interrupts[0] >= 3 && interrupt_user == 0x5678 && interrupt_irql == 2);
+
+  // A 4 KiB ring buffer, then the memory the GPU writes, by physical
+  // address (the GPU's addresses) through another view.
+  u32 ring = MmAllocatePhysicalMemoryEx(0, 0x3000, kPageReadWrite, 0, 0, 0x1000), pa = MmGetPhysicalAddress(ring);
+  u32 data = ring + 0x1000, pdata = pa + 0x1000;
+  CHECK(VdInitializeRingBuffer(pa, 9) == 0);
+  VdEnableRingBufferRPtrWriteBack(pdata, 6);
+  volatile u32* rb = At(ring);
+  u32 w = 0;
+  // Scratch register 0, written back to memory.
+  rb[w++] = Type0(0x1DC, 2);
+  rb[w++] = 1;
+  rb[w++] = pdata + 4;
+  rb[w++] = Type0(0x578, 1);
+  rb[w++] = 0x1234;
+  // Words to memory: the GPU is little-endian, 2 swaps bytes in words.
+  rb[w++] = Type3(0x3D, 2);
+  rb[w++] = (pdata + 0x40) | 2;
+  rb[w++] = 0xCAFEBABE;
+  rb[w++] = Type3(0x3D, 2);
+  rb[w++] = pdata + 0x44;
+  rb[w++] = 0xCAFEBABE;
+  // An indirect buffer with a fence.
+  volatile u32* ib = At(data + 0x100);
+  ib[0] = Type3(0x58, 3);
+  ib[1] = 0;
+  ib[2] = (pdata + 0x60) | 2;
+  ib[3] = 7;
+  rb[w++] = Type3(0x3F, 2);
+  rb[w++] = pdata + 0x100;
+  rb[w++] = 4;
+  // An interrupt for processor 0.
+  rb[w++] = Type3(0x54, 1);
+  rb[w++] = 1;
+  // A wait for the title's flag, then a fence.
+  rb[w++] = Type3(0x3C, 5);
+  rb[w++] = 0x13;
+  rb[w++] = (pdata + 0x80) | 2;
+  rb[w++] = 1;
+  rb[w++] = 0xFFFFFFFF;
+  rb[w++] = 0x100;
+  rb[w++] = Type3(0x58, 3);
+  rb[w++] = 0;
+  rb[w++] = (pdata + 0x64) | 2;
+  rb[w++] = 9;
+  // The swap: VdSwap fills 64 words.
+  u32 fb = ring + 0x2000, fetch[6] = {0, fb, 0, 0, 0, 0}, front = fb, format = 6, color_space = 0, width = 1280,
+      height = 720;
+  u32 swap = w;
+  VdSwap10(&rb[w], fetch, 0, 0, 0, &front, &format, &color_space, &width, &height);
+  w += 64;
+  CHECK(rb[swap] == 0x00054800 && rb[swap + 2] == pa + 0x2000 && rb[swap + 7] == 0xC0036400 &&
+        rb[swap + 8] == 0x53574150 && rb[swap + 9] == pa + 0x2000 && rb[swap + 63] == 0x80000000);
+  *Reg(0x1C5) = w;  // CP_RB_WPTR
+
+  CHECK(WaitFor(At(data + 0x60), 7));
+  CHECK(*At(data + 4) == 0x1234 && *At(data + 0x40) == 0xCAFEBABE && *At(data + 0x44) == 0xBEBAFECA);
+  CHECK(WaitFor(&interrupts[1], 1));
+  // Held at the wait until the flag is set.
+  CHECK(*At(data + 0x64) == 0);
+  *At(data + 0x80) = 1;
+  CHECK(WaitFor(At(data + 0x64), 9) && WaitFor(At(data), w) && *Reg(0x1C4) == w);
+}
+
 int main(void) {
   Modules();
   Console();
+  Gpu();
   Memory();
   Physical();
   Threads();

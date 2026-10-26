@@ -17,8 +17,9 @@ ARCHITECTURE.md, "Console platforms"), built only with
   registers an image reader for its own.
 - Platform, here: XEX2 and the lifter's reader for it, LZX, the tools
   around the format, the runtime (the guest address layout, process
-  bring-up, the kernel HLE; xam's and the Xenos front end to come;
-  libraries `recomp_xbox360_*`), with their tests and docs.
+  bring-up, the kernel and xam HLE, the Xenos's command processor;
+  drawing to come; libraries `recomp_xbox360_*`), with their tests and
+  docs.
 Paths below are relative to `platforms/xbox360` unless they start with
 `src/ppc` or `tools/lifter_ppc`. An Xbox 360 game project turns
 `RECOMP_X86` off and keeps the host layer every guest shares.
@@ -191,7 +192,7 @@ zero IV.
 The runtime (`src/xbox360`, library `recomp_xbox360`) holds what lifted
 code calls (`Import`, `Sc`, `Trap`, `TimeBase`) and the kernel's state:
 guest memory, the HLE registry, threads, dispatcher objects, handles,
-the title's module, the console's settings and time. The system modules'
+the title's module, the console's settings, the GPU and time. The system modules'
 exports are HLE modules on top of it, one shared library per system
 module (`recomp_xbox360_xboxkrnl` in `src/xbox360/xboxkrnl`,
 `recomp_xbox360_xam` in `src/xbox360/xam`); where one module's export is
@@ -291,6 +292,10 @@ without a lock.
   when its last thread ends, or at HalReturnToFirmware. A thread that is
   running cannot be suspended (fatal; a host thread cannot be stopped
   where it is), one created suspended can.
+- The kernel's own threads (the GPU's command processor and vertical
+  blank) are host loops with guest structures, which call guest code (the
+  graphics interrupt callback) as DPCs: at DISPATCH_LEVEL, the KPCR's DPC
+  flag set. They do not keep the process alive.
 - The time base runs at 49.875 MHz from the host's steady clock, system
   time is the host's, KeTimeStampBundle is kept current every
   millisecond.
@@ -315,6 +320,23 @@ exist; reading another is fatal and names it, so each one is added with
 its evidence (docs/xboxkrnl.md, "Settings and the display"). The values
 are a console set up in English for an HD display, the time zone the
 host's.
+
+### The GPU
+The GPU (`src/xbox360/gpu.{h,cpp}`) is what the kernel's display driver
+and titles see of the Xenos, without drawing yet (docs/xenos.md):
+- Its registers are guest memory at 0x7FC80000, where the console maps
+  them, so guest code reads and writes them with plain loads and stores;
+  nothing traps an access. The values titles read are set at power-on.
+- The command processor is a kernel thread that polls CP_RB_WPTR and
+  executes the ring buffer's PM4 packets up to it: register writes,
+  memory writes, waits, fences, indirect buffers, interrupts, the swap
+  packet VdSwap writes. Draws and shader loads are consumed; an opcode it
+  does not know is fatal. It writes the read pointer back as the driver
+  asked.
+- The vertical blank is another kernel thread, at the video mode's rate.
+  Both deliver the graphics interrupt callback as a DPC.
+Drawing (milestone 5) adds a renderer behind the same command processor,
+through gfx::Device.
 
 ### Files
 The file namespace (`src/xbox360/fs.{h,cpp}`) is the kernel's: devices,
@@ -382,7 +404,8 @@ memory; any other interrupt fails the run.
   it (memory and the physical views, threads, TLS, r13, waits and
   objects, critical sections, formatting, variables, time, files on its
   disc and on the hard disk, its module and XEX headers, the settings and
-  the video mode) and exits with the number of failed checks.
+  the video mode, the GPU's registers, interrupts and a ring buffer's
+  packets) and exits with the number of failed checks.
   The test writes the disc's files and empties the data directory before
   each run.
 - Not covered by QEMU: what the 970 does differently from the Xenon
@@ -398,8 +421,10 @@ memory; any other interrupt fails the run.
    thread bring-up (r13 and the thread's kernel structures), the kernel
    and xam HLE, written against the system's own behaviour. In progress:
    the libraries and their layout, memory, threads, synchronisation,
-   files, the title's module, the settings and the first kernel and xam
-   exports are done; next the rest of what a title's startup calls (the
-   display driver's Vd* exports with a command processor that consumes
-   the ring buffer without drawing), timers and APCs.
-5. Xenos: the command processor and shaders through gfx::Device.
+   files, the title's module, the settings, the display driver with a
+   command processor that executes the ring buffer without drawing, and
+   the first kernel and xam exports are done; next the rest of what a
+   title's startup calls (the audio driver, strings, xam's users and
+   content), timers and APCs.
+5. Xenos: drawing, shaders and presentation through gfx::Device, behind
+   the command processor (which runs the ring buffer already).
