@@ -45,4 +45,5 @@ add_test(NAME xbox360_runtime_data COMMAND "${CMAKE_COMMAND}" -E rm -rf "${_titl
 set_tests_properties(xbox360_runtime_data PROPERTIES FIXTURES_SETUP xbox360_runtime_data)
 add_test(NAME xbox360_runtime COMMAND xbox360_title "${_bin}/title.xex" "${_title_game}" "${_title_data}")
 set_tests_properties(xbox360_runtime PROPERTIES FAIL_REGULAR_EXPRESSION "FAIL|fatal" TIMEOUT 120
+                     ENVIRONMENT "SDL_AUDIO_DRIVER=dummy;SDL_ASSERT=abort"
                      FIXTURES_REQUIRED xbox360_runtime_data)

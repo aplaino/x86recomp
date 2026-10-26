@@ -40,6 +40,7 @@ __xex_import_slot_\name:
   FUNCTION 43, InterlockedFlushSList
   FUNCTION 44, InterlockedPopEntrySList
   FUNCTION 90, KeDelayExecutionThread
+  FUNCTION 93, KeEnableFpuExceptions
   FUNCTION 102, KeGetCurrentProcessType
   FUNCTION 116, KeInitializeSemaphore
   FUNCTION 131, KeQueryPerformanceFrequency
@@ -82,11 +83,16 @@ __xex_import_slot_\name:
   FUNCTION 299, RtlImageXexHeaderField
   FUNCTION 293, RtlEnterCriticalSection
   FUNCTION 294, RtlFillMemoryUlong
+  FUNCTION 295, RtlFreeAnsiString
   FUNCTION 300, RtlInitAnsiString
   FUNCTION 302, RtlInitializeCriticalSection
   FUNCTION 304, RtlLeaveCriticalSection
+  FUNCTION 307, RtlMultiByteToUnicodeN
+  FUNCTION 309, RtlNtStatusToDosError
   FUNCTION 315, sprintf
   FUNCTION 321, RtlTryEnterCriticalSection
+  FUNCTION 322, RtlUnicodeStringToAnsiString
+  FUNCTION 323, RtlUnicodeToMultiByteN
   FUNCTION 333, _vsnprintf
   FUNCTION 338, KeTlsAlloc
   FUNCTION 340, KeTlsGetValue
@@ -98,6 +104,11 @@ __xex_import_slot_\name:
   FUNCTION 438, VdEnableRingBufferRPtrWriteBack
   FUNCTION 451, VdInitializeRingBuffer
   FUNCTION 469, VdSetGraphicsInterruptCallback
+  FUNCTION 499, XAudioRegisterRenderDriverClient
+  FUNCTION 500, XAudioUnregisterRenderDriverClient
+  FUNCTION 501, XAudioSubmitRenderDriverFrame
+  FUNCTION 503, XAudioGetVoiceCategoryVolumeChangeMask
+  FUNCTION 504, XAudioGetVoiceCategoryVolume
   FUNCTION 603, VdSwap
   FUNCTION 458, VdQueryVideoMode
   FUNCTION 971, XGetAVPack, 1

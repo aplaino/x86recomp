@@ -133,6 +133,37 @@ here; on the console a KPCR belongs to a hardware thread.
   (titles store their device there); VdHSIOCalibrationLock is a critical
   section, which titles enter (spin count 10000, Xenia's).
 
+## Audio
+- XAudioRegisterRenderDriverClient(*{callback, argument}, *driver): the
+  driver handle is 0x4155 ("AU") and the client's index, up to 8 clients;
+  a missing callback is E_INVALIDARG. Xenia's. The callback gets the
+  address of a word holding the argument, not the argument, on the
+  driver's thread (not as a DPC), as Xenia calls it. Console check.
+- The driver calls each client once per frame of 256 samples at 48 kHz
+  (16/3 ms), and holds back while the host has 16 of its frames queued.
+- XAudioSubmitRenderDriverFrame(driver, samples): six channels (front
+  left, right, centre, LFE, back left, right) of 256 big-endian floats
+  each, one channel after another (Xenia converts them so).
+- XAudioGetVoiceCategoryVolumeChangeMask writes 0 and
+  XAudioGetVoiceCategoryVolume 1.0: the system's category volumes never
+  change here.
+
+## Strings and statuses
+- RtlMultiByteToUnicodeN and RtlUnicodeToMultiByteN convert as many
+  characters as both buffers hold and report the bytes written; the ANSI
+  side is Latin-1 (a byte is its code point, a character above 0xFF
+  becomes '?'), as Xenia converts. RtlUnicodeStringToAnsiString uses the
+  same conversion, into a kernel pool buffer (allocate) or the string's
+  own, truncated with STATUS_BUFFER_OVERFLOW (NT's behaviour). Whether
+  the console's ANSI code page is Latin-1 or 1252 is a console check.
+- RtlNtStatusToDosError maps the statuses this kernel returns as Windows
+  NT does (Xenia's table is NT's, not copied here); a customer status
+  (bit 29) stays itself, 0x8007xxxx gives xxxx, any other is fatal.
+- KeEnableFpuExceptions(enable) sets the KTHREAD's flag at 0x71 (Xenia's
+  layout); the C runtime's floating-point control calls it with whether
+  any exception is unmasked. Enabled exceptions do not trap here: the
+  CPU model stops on one either way (ARCHITECTURE.md, "Floating point").
+
 ## The title's end
 - ExRegisterTitleTerminateNotification(registration, create) adds or
   removes a registration (routine, priority, list entry). The routines are

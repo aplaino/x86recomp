@@ -16,10 +16,10 @@ form checked bit for bit against it (VMX128's as their VMX equivalents).
 The runtime maps the console's address space with its physical views,
 runs a title's threads with their kernel structures, and has the
 kernel's memory, thread, synchronisation, file, module, settings,
-display driver, string and formatting exports and the first of xam's,
-with a GPU command processor that executes a title's ring buffer without
-drawing, which a test title checks; the rest of what a title's startup
-calls (the audio driver next), timers and the rest of xam follow.
+display and audio driver, string and formatting exports and the first of
+xam's, with a GPU command processor that executes a title's ring buffer
+without drawing and audio output through SDL3, which a test title
+checks; xam, XMA decoding and timers follow.
 
 ## Using it
 

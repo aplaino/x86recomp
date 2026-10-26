@@ -2,6 +2,10 @@
 # only with RECOMP_PLATFORM_XBOX360, on the PowerPC lifter and CPU model
 # (recomp_lift_ppc, recomp_ppc).
 
+if(NOT RECOMP_HOST)
+  message(FATAL_ERROR "RECOMP_PLATFORM_XBOX360 needs RECOMP_HOST (audio output)")
+endif()
+
 # XEX2 parsing and LZX decompression, for the lifter and the runtime.
 add_library(recomp_xbox360_image SHARED src/xbox360/lzx.cpp src/xbox360/xex.cpp)
 target_include_directories(recomp_xbox360_image PUBLIC src ${RECOMP_ROOT}/src)
@@ -10,11 +14,12 @@ recomp_bundle(recomp_xbox360_image)
 
 # The runtime (ARCHITECTURE.md, "Runtime"): guest memory, the HLE registry
 # and Import(), threads, dispatcher objects, handles and time, the file
-# namespace, the title's module, the console's settings, the GPU, process
-# bring-up (xbox360/process.h). Lifted modules link it for what lifted
+# namespace, the title's module, the console's settings, the GPU, audio
+# output (SDL3, from the host layer), process bring-up (xbox360/process.h). Lifted modules link it for what lifted
 # code calls (recomp_add_lifted_ppc ... LINK recomp_xbox360).
 find_package(Threads REQUIRED)
 add_library(recomp_xbox360 SHARED
+  src/xbox360/audio.cpp
   src/xbox360/config.cpp
   src/xbox360/cpu.cpp
   src/xbox360/format.cpp
@@ -26,7 +31,8 @@ add_library(recomp_xbox360 SHARED
   src/xbox360/objects.cpp
   src/xbox360/process.cpp
   src/xbox360/thread.cpp)
-target_link_libraries(recomp_xbox360 PUBLIC recomp_ppc recomp_xbox360_image Threads::Threads)
+target_link_libraries(recomp_xbox360 PUBLIC recomp_ppc recomp_xbox360_image Threads::Threads
+                      PRIVATE SDL3::SDL3 recomp_log)
 recomp_bundle(recomp_xbox360)
 
 # The HLE modules, one shared library per system module, found by nothing
@@ -34,6 +40,7 @@ recomp_bundle(recomp_xbox360)
 # them --no-as-needed, so a linker that drops unreferenced libraries keeps
 # them.
 add_library(recomp_xbox360_xboxkrnl SHARED
+  src/xbox360/xboxkrnl/audio.cpp
   src/xbox360/xboxkrnl/io.cpp
   src/xbox360/xboxkrnl/memory.cpp
   src/xbox360/xboxkrnl/modules.cpp

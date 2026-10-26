@@ -219,6 +219,17 @@ and titles see of the Xenos, without drawing yet (docs/xenos.md):
 Drawing (milestone 5) adds a renderer behind the same command processor,
 through gfx::Device.
 
+### Audio
+The audio render driver (`src/xbox360/audio.{h,cpp}`, docs/xboxkrnl.md
+"Audio") is a kernel thread that calls each registered client's
+callback once per frame of 256 samples of 5.1 at 48 kHz, paced by the
+host clock and held back by the host's queue. Submitted frames go to
+SDL3 (the host layer), one stream per client on the default playback
+device, which mixes them and downmixes to the device; the floats are
+handed over unchanged. With no device the frames are dropped and the
+callbacks keep their pace. XMA decoding (the XMA* exports) is not there
+yet.
+
 ### Files
 The file namespace (`src/xbox360/fs.{h,cpp}`) is the kernel's: devices,
 each a host directory, and symbolic links to them.
@@ -255,9 +266,10 @@ builds and runs them too.
   (memory and the physical views, threads, TLS, r13, waits and objects,
   critical sections, formatting, variables, time, files on its disc and on
   the hard disk, its module and XEX headers, the settings and the video
-  mode, the GPU's registers, interrupts and a ring buffer's packets) and
-  exits with the number of failed checks. The test writes the disc's files
-  and empties the data directory before each run.
+  mode, the GPU's registers, interrupts and a ring buffer's packets,
+  string conversions, an audio client) and exits with the number of failed
+  checks. It runs with SDL's dummy audio driver. The test writes the
+  disc's files and empties the data directory before each run.
 
 ## Roadmap
 1. Integer core, XEX reader, oracle (done).
@@ -270,8 +282,8 @@ builds and runs them too.
    the libraries and their layout, memory, threads, synchronisation,
    files, the title's module, the settings, the display driver with a
    command processor that executes the ring buffer without drawing, and
-   the first kernel and xam exports are done; next the rest of what a
-   title's startup calls (the audio driver, strings, xam's users and
-   content), timers and APCs.
+   the audio render driver, and the first kernel and xam exports are
+   done; next xam (users, content, notifications, messages), XMA
+   decoding, timers and APCs.
 5. Xenos: drawing, shaders and presentation through gfx::Device, behind
    the command processor (which runs the ring buffer already).

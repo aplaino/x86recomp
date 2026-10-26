@@ -221,20 +221,25 @@ Thread* CreateSystemThread(void (*body)(void* arg), void* arg) {
   return NewThread({kSystemStack, 0, 0, 0, 0}, body, arg);
 }
 
+uint32_t CallGuest(uint32_t fn, uint32_t a0, uint32_t a1) {
+  ppc::Ctx& c = t_current->c;
+  c.r[1] = t_current->stack_base - kStackTopReserve;
+  c.r[3] = a0;
+  c.r[4] = a1;
+  ppc::Dispatch(c, fn, 0);
+  return uint32_t(c.r[3]);
+}
+
 uint32_t CallDpc(uint32_t fn, uint32_t a0, uint32_t a1, uint32_t cpu) {
   Thread* t = t_current;
-  ppc::Ctx& c = t->c;
   SetProcessor(t, cpu);
   uint8_t irql = Rd8(t->pcr + kPcrIrql);
   Wr8(t->pcr + kPcrIrql, kDispatchLevel);
   Wr32(t->pcr + kPcrDpcActive, 1);
-  c.r[1] = t->stack_base - kStackTopReserve;
-  c.r[3] = a0;
-  c.r[4] = a1;
-  ppc::Dispatch(c, fn, 0);
+  uint32_t r = CallGuest(fn, a0, a1);
   Wr32(t->pcr + kPcrDpcActive, 0);
   Wr8(t->pcr + kPcrIrql, irql);
-  return uint32_t(c.r[3]);
+  return r;
 }
 
 Thread* CurrentThread() { return t_current; }
