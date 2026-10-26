@@ -124,6 +124,9 @@ __xex_import_slot_\name:
   FUNCTION 1, NetDll_WSAStartup, 1
   FUNCTION 51, NetDll_XNetStartup, 1
   FUNCTION 75, NetDll_XNetGetEthernetLinkStatus, 1
+  FUNCTION 400, XamInputGetCapabilities, 1
+  FUNCTION 401, XamInputGetState, 1
+  FUNCTION 402, XamInputSetState, 1
   FUNCTION 423, XamLoaderGetLaunchDataSize, 1
   FUNCTION 424, XamLoaderGetLaunchData, 1
   FUNCTION 490, XamAlloc, 1

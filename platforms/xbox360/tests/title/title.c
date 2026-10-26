@@ -112,6 +112,9 @@ u32 XamLoaderGetLaunchData(void* buffer, u32 size);
 u32 NetDll_WSAStartup(u32 caller, u32 version, void* data);
 u32 NetDll_XNetStartup(u32 caller, void* parameters);
 u32 NetDll_XNetGetEthernetLinkStatus(u32 caller);
+u32 XamInputGetCapabilities(u32 user, u32 flags, void* caps);
+u32 XamInputGetState(u32 user, u32 flags, void* state);
+u32 XamInputSetState(u32 user, u32 flags, void* vibration);
 u32 XamAlloc(u32 attributes, u32 size, u32* address);
 u32 XamFree(u32 address);
 u32 XMsgInProcessCall(u32 app, u32 message, void* p1, void* p2);
@@ -862,6 +865,14 @@ static void Xam(void) {
   CHECK(NetDll_WSAStartup(1, 0x0202, wsa) == 0 && wsa[0] == 0x0202 && wsa[1] == 0x0202);
   CHECK(NetDll_WSAStartup(3, 0x0202, wsa) == 10022 && NetDll_XNetStartup(1, 0) == 0);
   CHECK(NetDll_XNetGetEthernetLinkStatus(1) == 0);
+  // No controller: zeroed results, ERROR_DEVICE_NOT_CONNECTED.
+  uint8_t pad[0x14];
+  memset(pad, 0xAA, sizeof pad);
+  CHECK(XamInputGetCapabilities(0, 0, pad) == 1167 && pad[0] == 0 && pad[0x13] == 0);
+  memset(pad, 0xAA, sizeof pad);
+  CHECK(XamInputGetState(0, 0, pad) == 1167 && pad[0] == 0 && pad[0xF] == 0 && pad[0x10] == 0xAA);
+  uint16_t vibration[2] = {0x8000, 0x8000};
+  CHECK(XamInputSetState(0, 0, vibration) == 1167);
   // The Ex forms, which titles find through XexGetProcedureAddress.
   u32 xam = 0, wsa_ex = 0, xnet_ex = 0;
   CHECK(XexGetModuleHandle("xam.xex", &xam) == 0 && XexGetProcedureAddress(xam, 36, &wsa_ex) == 0 &&

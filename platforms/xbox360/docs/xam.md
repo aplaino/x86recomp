@@ -22,6 +22,14 @@ only a console can settle.
   then too (ERROR_BUFFER_OVERFLOW for a short buffer). A title the system
   starts from its disc has none (xam's code).
 
+## Input
+- No controller is connected yet: the host's input devices are not read.
+  XamInputGetCapabilities zeroes XINPUT_CAPABILITIES (0x14 bytes) and
+  XamInputGetState XINPUT_STATE (16 bytes: packet number, gamepad), and
+  both, like XamInputSetState, return ERROR_DEVICE_NOT_CONNECTED, as xam
+  does for a user without a device (for a gamepad and, through
+  HidGetCapabilities, a keyboard).
+
 ## Networking
 - There is no network interface: a console with no cable. NetDll_* take
   the caller first, a title (1) or the system (2), and refuse others with
