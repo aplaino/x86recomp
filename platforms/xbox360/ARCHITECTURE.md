@@ -191,9 +191,12 @@ zero IV.
 The runtime (`src/xbox360`, library `recomp_xbox360`) holds what lifted
 code calls (`Import`, `Sc`, `Trap`, `TimeBase`) and the kernel's state:
 guest memory, the HLE registry, threads, dispatcher objects, handles,
-the title's module and time. The system modules' exports are HLE modules on top of it, one
-shared library per system module (`recomp_xbox360_xboxkrnl` so far, in
-`src/xbox360/xboxkrnl`). Behaviour comes from the system's own code where
+the title's module, the console's settings and time. The system modules'
+exports are HLE modules on top of it, one shared library per system
+module (`recomp_xbox360_xboxkrnl` in `src/xbox360/xboxkrnl`,
+`recomp_xbox360_xam` in `src/xbox360/xam`); where one module's export is
+another's (xam's XGetVideoMode is the kernel's VdQueryVideoMode), both
+handlers call the same runtime code. Behaviour comes from the system's own code where
 it shows it (xam, which the console's update ships unencrypted, and what
 titles read), otherwise from Xenia and ReXGlue, and is written down in
 docs/xboxkrnl.md with what still waits for a console.
@@ -303,6 +306,16 @@ module with an entry: asking for a system module's handle (xam asks for
 its own) is fatal until those are modelled, and XexLoadImage (a title's
 own DLLs) is not there yet.
 
+### Settings
+The console's settings (`src/xbox360/config.{h,cpp}`) are the XConfig
+entries titles and xam read with ExGetXConfigSetting, and the display
+they describe: the AV pack (HDMI) and the video mode (1280x720,
+progressive, at the AV region's rate). Only the settings listed there
+exist; reading another is fatal and names it, so each one is added with
+its evidence (docs/xboxkrnl.md, "Settings and the display"). The values
+are a console set up in English for an HD display, the time zone the
+host's.
+
 ### Files
 The file namespace (`src/xbox360/fs.{h,cpp}`) is the kernel's: devices,
 each a host directory, and symbolic links to them.
@@ -368,8 +381,8 @@ memory; any other interrupt fails the run.
   lifted module and run on the runtime. It checks what the kernel gives
   it (memory and the physical views, threads, TLS, r13, waits and
   objects, critical sections, formatting, variables, time, files on its
-  disc and on the hard disk, its module and XEX headers) and exits with
-  the number of failed checks.
+  disc and on the hard disk, its module and XEX headers, the settings and
+  the video mode) and exits with the number of failed checks.
   The test writes the disc's files and empties the data directory before
   each run.
 - Not covered by QEMU: what the 970 does differently from the Xenon
@@ -385,6 +398,8 @@ memory; any other interrupt fails the run.
    thread bring-up (r13 and the thread's kernel structures), the kernel
    and xam HLE, written against the system's own behaviour. In progress:
    the libraries and their layout, memory, threads, synchronisation,
-   files, the title's module and the first kernel exports are done; next
-   the kernel and xam exports a title's startup calls, timers and APCs.
+   files, the title's module, the settings and the first kernel and xam
+   exports are done; next the rest of what a title's startup calls (the
+   display driver's Vd* exports with a command processor that consumes
+   the ring buffer without drawing), timers and APCs.
 5. Xenos: the command processor and shaders through gfx::Device.

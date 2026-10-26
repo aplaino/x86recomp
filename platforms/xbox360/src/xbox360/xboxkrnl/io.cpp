@@ -500,4 +500,8 @@ HLE(kKrnl, 260, ObDeleteSymbolicLink) {
   return DeleteSymbolicLink(ReadAnsiString(Arg(c, 0))) ? kStatusSuccess : kStatusObjectNameNotFound;
 }
 
+// FscSetCacheElementCount(count): the size of the file system cache. File
+// data is cached by the host, not here, so there is nothing to size.
+HLE(kKrnl, 33, FscSetCacheElementCount) { return kStatusSuccess; }
+
 }  // namespace recomp::xbox360

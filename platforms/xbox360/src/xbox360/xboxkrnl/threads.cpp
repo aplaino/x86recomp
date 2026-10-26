@@ -1,4 +1,4 @@
-// xboxkrnl: threads, TLS, time, the title's end.
+// xboxkrnl: threads, TLS, time, the title's end and its notifications.
 
 #include <bit>
 #include <mutex>
@@ -23,6 +23,9 @@ Thread* ThreadArg(ppc::Ctx& c, uint32_t kthread) {
 // Dynamic TLS slots in use, process wide.
 std::mutex g_tls;
 std::vector<bool> g_tls_used;
+// ExRegisterTitleTerminateNotification's registrations.
+std::mutex g_terminate;
+std::vector<uint32_t> g_terminate_routines;
 
 }  // namespace
 
@@ -135,5 +138,18 @@ HLE(kKrnl, 132, KeQuerySystemTime) {
 
 // HalReturnToFirmware(routine): the title's end, whatever the routine.
 HLE(kKrnl, 40, HalReturnToFirmware) { ExitProcess(0); }
+
+// ExRegisterTitleTerminateNotification(registration, create): adds (or,
+// create 0, removes) a routine for the title's end; the registration is
+// the routine, its priority and a list entry (0x10 bytes). The routines
+// are kept, not run: the title's end here is the host process's, with no
+// system left to tidy for another title (as in Xenia).
+HLE(kKrnl, 21, ExRegisterTitleTerminateNotification) {
+  std::lock_guard<std::mutex> g(g_terminate);
+  uint32_t reg = Arg(c, 0);
+  std::erase(g_terminate_routines, reg);
+  if (Arg(c, 1)) g_terminate_routines.push_back(reg);
+  return 0;
+}
 
 }  // namespace recomp::xbox360

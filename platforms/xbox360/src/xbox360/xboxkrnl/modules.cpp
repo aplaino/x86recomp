@@ -1,5 +1,6 @@
-// xboxkrnl: the title's module (Xex*) and its XEX headers.
+// xboxkrnl: the title's module (Xex*), its XEX headers and command line.
 
+#include <algorithm>
 #include <cstring>
 
 #include "ppc/fatal.h"
@@ -19,10 +20,19 @@ uint32_t ExecutableHeaders() { return Rd32(ExecutableModule() + kLdrXexHeader); 
 
 void InitExecutableModuleHandle(uint32_t va) { Wr32(va, ExecutableModule()); }
 
+// The title's command line: its name, quoted, as Xenia has it (console
+// check); the C runtime splits it into argv.
+constexpr uint32_t kCommandLineSize = 1024;
+void InitCommandLine(uint32_t va) {
+  std::string line = "\"" + ExecutableModuleName() + "\"";
+  std::memcpy(Mem() + va, line.c_str(), std::min<size_t>(line.size(), kCommandLineSize - 1));
+}
+
 }  // namespace
 
 // The title's loader entry, which titles and xam read for its XEX headers.
 HLE_VARIABLE(kKrnl, 403, XexExecutableModuleHandle, 4, InitExecutableModuleHandle);
+HLE_VARIABLE(kKrnl, 430, ExLoadedCommandLine, kCommandLineSize, InitCommandLine);
 
 // RtlImageXexHeaderField(headers, key).
 HLE(kKrnl, 299, RtlImageXexHeaderField) { return XexHeaderField(Arg(c, 0), Arg(c, 1)); }

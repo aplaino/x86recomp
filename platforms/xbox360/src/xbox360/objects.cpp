@@ -1,5 +1,6 @@
 // Dispatcher objects, waits, handles and time (kernel.h).
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -71,6 +72,14 @@ void InitObject(uint32_t obj, ObjectType type, int32_t signal_state) {
   SetState(obj, signal_state);
   Wr32(obj + 8, obj + 8);
   Wr32(obj + 12, obj + 8);
+}
+
+void InitCriticalSection(uint32_t cs, uint32_t spin_count) {
+  InitObject(cs, kSynchronizationEvent, 0);
+  Wr8(cs + 1, uint8_t(std::min<uint32_t>((spin_count + 255) / 256, 255)));
+  Wr32(cs + 0x10, 0xFFFFFFFF);
+  Wr32(cs + 0x14, 0);
+  Wr32(cs + 0x18, 0);
 }
 
 int32_t SetSignal(uint32_t obj, int32_t state) {

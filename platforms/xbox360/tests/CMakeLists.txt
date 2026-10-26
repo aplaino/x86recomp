@@ -88,7 +88,7 @@ add_custom_command(OUTPUT "${_bin}/title.elf"
   DEPENDS ${_title_objs} "${_src}/fixture/fixture.ld"
   COMMENT "Linking the PowerPC runtime test title")
 add_custom_command(OUTPUT "${_bin}/title.xex"
-  COMMAND xbox360_elf2xex "${_bin}/title.elf" "${_bin}/title.xex" --import xboxkrnl.exe
+  COMMAND xbox360_elf2xex "${_bin}/title.elf" "${_bin}/title.xex" --import xboxkrnl.exe --import xam.xex
           --header 0x00030000=0x400 --header 0x00020401=0x123000
   DEPENDS xbox360_elf2xex "${_bin}/title.elf")
 set(_title_gen "${CMAKE_CURRENT_BINARY_DIR}/title_generated")
@@ -100,7 +100,8 @@ add_custom_command(OUTPUT "${_title_gen}/funcs_000.cpp" "${_title_gen}/table.cpp
 recomp_add_lifted_ppc_files(xbox360_title_code "${_title_gen}/funcs_000.cpp" "${_title_gen}/table.cpp"
                             LINK recomp_xbox360)
 add_executable(xbox360_title title_main.cpp)
-target_link_libraries(xbox360_title PRIVATE recomp_xbox360 recomp_xbox360_xboxkrnl xbox360_title_code)
+target_link_libraries(xbox360_title PRIVATE recomp_xbox360 recomp_xbox360_xboxkrnl recomp_xbox360_xam
+                      xbox360_title_code)
 recomp_bundle(xbox360_title)
 # Its disc (the files title.c reads) and a data directory, emptied before
 # each run.

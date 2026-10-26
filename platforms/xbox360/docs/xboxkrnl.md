@@ -109,7 +109,41 @@ here; on the console a KPCR belongs to a hardware thread.
 - XexCheckExecutablePrivilege(n) is bit n of the system flags header
   (0x00030000), as in Xenia and ReXGlue.
 
+## Settings and the display
+- ExGetXConfigSetting(category, setting, buffer, size, required size)
+  returns an NTSTATUS (xam's callers test it for < 0); the required size
+  is a 16-bit count (xam passes a halfword). A null buffer with a size is
+  STATUS_INVALID_PARAMETER_3, a short buffer STATUS_BUFFER_TOO_SMALL, as
+  Xenia has them. Console check.
+- The settings here, all 4 bytes: secured (category 2) AV region, user
+  (3) time zone bias, standard and daylight names, dates and biases (1-7),
+  language (9), video flags (10), retail flags (12): what a title's
+  startup reads. Values: AV region NTSC-M (0x00400100), English (1),
+  widescreen (0x00010000), dashboard set up (0x40), as Xenia defaults
+  them; the time zone the host's current offset, its abbreviation as both
+  names, no daylight saving dates.
+- X_VIDEO_MODE (0x30 bytes): width, height, interlaced, widescreen,
+  high definition, refresh rate (float), video standard, then two words
+  Xenia sets to 0x8A and 1 (3 when not widescreen). xam reads the width
+  and height (it treats 1280x1470 and 1920x2205, HDMI's frame-packed 3D
+  modes, apart), the rate at 0x14 and the standard at 0x18. The rate is
+  50 Hz with the AV region's bit 23, the standard its bits 8-15 (Xenia).
+- The AV pack is 8, HDMI in Xenia's numbering. Console check.
+- VdGpuClockInMHz is 500 (the Xenos's clock); VdGlobalDevice starts 0
+  (titles store their device there); VdHSIOCalibrationLock is a critical
+  section, which titles enter (spin count 10000, Xenia's).
+
+## The title's end
+- ExRegisterTitleTerminateNotification(registration, create) adds or
+  removes a registration (routine, priority, list entry). The routines are
+  not run: the title's end is the host process's (Xenia does not run them
+  either).
+- ExLoadedCommandLine is the title's name in quotes (Xenia's), 1024
+  bytes; a title's C runtime splits it into argv. Console check.
+
 ## Files
+- FscSetCacheElementCount sizes the file system cache; file data is
+  cached by the host here, so it succeeds and changes nothing.
 - Device names: xam opens `\Device\CdRom0\default.xex` and makes the
   `\??\GAME:` link; `\Device\Harddisk0\Partition1` is the hard
   disk's data partition. D: as Xenia has it.
