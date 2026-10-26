@@ -189,7 +189,7 @@ uint32_t FloatBits(float f) {
 
 // ---- D3D enums -> SDL_GPU
 
-SDL_GPUBlendFactor BlendFactor(uint32_t d3d, bool target_alpha) {
+SDL_GPUBlendFactor D3DBlendFactor(uint32_t d3d, bool target_alpha) {
   switch (d3d) {
     case 1: return SDL_GPU_BLENDFACTOR_ZERO;
     case 2: return SDL_GPU_BLENDFACTOR_ONE;
@@ -209,7 +209,7 @@ SDL_GPUBlendFactor BlendFactor(uint32_t d3d, bool target_alpha) {
   }
 }
 
-SDL_GPUBlendOp BlendOp(uint32_t d3d) {
+SDL_GPUBlendOp D3DBlendOp(uint32_t d3d) {
   switch (d3d) {
     case 2: return SDL_GPU_BLENDOP_SUBTRACT;
     case 3: return SDL_GPU_BLENDOP_REVERSE_SUBTRACT;
@@ -220,14 +220,14 @@ SDL_GPUBlendOp BlendOp(uint32_t d3d) {
 }
 
 // D3DCMPFUNC and D3DSTENCILOP use SDL_GPU's numbering (1..8).
-SDL_GPUCompareOp CompareOp(uint32_t d3d) {
+SDL_GPUCompareOp D3DCompareOp(uint32_t d3d) {
   return d3d >= 1 && d3d <= 8 ? SDL_GPUCompareOp(d3d) : SDL_GPU_COMPAREOP_ALWAYS;
 }
-SDL_GPUStencilOp StencilOp(uint32_t d3d) {
+SDL_GPUStencilOp D3DStencilOp(uint32_t d3d) {
   return d3d >= 1 && d3d <= 8 ? SDL_GPUStencilOp(d3d) : SDL_GPU_STENCILOP_KEEP;
 }
 
-SDL_GPUSamplerAddressMode AddressMode(uint32_t d3d) {
+SDL_GPUSamplerAddressMode D3DAddressMode(uint32_t d3d) {
   switch (d3d) {
     case 2: case 5: return SDL_GPU_SAMPLERADDRESSMODE_MIRRORED_REPEAT;
     case 3: case 4: return SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;  // no border
@@ -331,6 +331,29 @@ struct SamplerKey {
   bool operator<(const SamplerKey& o) const { return std::memcmp(this, &o, sizeof *this) < 0; }
 };
 
+// A pipeline for a program: the program, its fixed state and the pass's
+// target formats.
+struct ProgramKey {
+  uint32_t program;
+  uint8_t topology, cull, front_ccw, depth_test, depth_write, depth_clip, depth_compare, stencil;
+  uint8_t s_ops[2][4];  // fail, depth fail, pass, compare: front, back
+  uint8_t s_read, s_write, targets, depth_format;
+  uint8_t fmt[4];
+  uint8_t blend[4][8];  // enable, src, dst, op, src alpha, dst alpha, alpha op, mask
+  float bias, bias_slope, bias_clamp;
+
+  bool operator==(const ProgramKey& o) const { return std::memcmp(this, &o, sizeof *this) == 0; }
+};
+static_assert(sizeof(ProgramKey) == 72, "no padding: compared and hashed as bytes");
+
+struct ProgramSamplerKey {
+  uint8_t min, mag, mip, u, v, w, compare, compare_op;
+  float lod_bias, min_lod, max_lod, aniso;
+  bool operator<(const ProgramSamplerKey& o) const {
+    return std::memcmp(this, &o, sizeof *this) < 0;
+  }
+};
+
 class GpuDevice final : public Device {
  public:
   explicit GpuDevice(SDL_Window* w) : window_(w) {}
@@ -399,7 +422,8 @@ class GpuDevice final : public Device {
     uint32_t black = 0xFF000000u;
     for (auto [t, type, layers] : {std::tuple{&dummy_2d_, SDL_GPU_TEXTURETYPE_2D, 1},
                                    {&dummy_cube_, SDL_GPU_TEXTURETYPE_CUBE, 6},
-                                   {&dummy_3d_, SDL_GPU_TEXTURETYPE_3D, 1}}) {
+                                   {&dummy_3d_, SDL_GPU_TEXTURETYPE_3D, 1},
+                                   {&dummy_array_, SDL_GPU_TEXTURETYPE_2D_ARRAY, 1}}) {
       ti.type = type;
       ti.layer_count_or_depth = Uint32(layers);
       *t = SDL_CreateGPUTexture(dev_, &ti);
@@ -419,14 +443,19 @@ class GpuDevice final : public Device {
     for (auto& [t, rd] : reads_) FinishRead(rd, nullptr, 0, Format::Unknown);
     for (auto& [k, p] : pipelines_) SDL_ReleaseGPUGraphicsPipeline(dev_, p);
     for (auto& [k, p] : shader_pipelines_) SDL_ReleaseGPUGraphicsPipeline(dev_, p);
+    for (auto& [k, p] : program_pipelines_) SDL_ReleaseGPUGraphicsPipeline(dev_, p);
+    for (auto& [id, pr] : programs_) ReleaseProgram(pr);
+    if (present_pipeline_) SDL_ReleaseGPUGraphicsPipeline(dev_, present_pipeline_);
+    for (auto& [k, s] : program_samplers_) SDL_ReleaseGPUSampler(dev_, s);
     for (auto& [id, sh] : shaders_) SDL_ReleaseGPUShader(dev_, sh.sh);
     for (auto& [k, s] : samplers_) SDL_ReleaseGPUSampler(dev_, s);
     for (auto& [id, t] : textures_) SDL_ReleaseGPUTexture(dev_, t.tex);
     for (auto& [id, d] : depths_) SDL_ReleaseGPUTexture(dev_, d.tex);
-    for (SDL_GPUTexture* t : {backbuffer_, front_, dummy_, dummy_2d_, dummy_cube_, dummy_3d_})
+    for (SDL_GPUTexture* t : {backbuffer_, front_, dummy_, dummy_2d_, dummy_cube_, dummy_3d_,
+                              dummy_array_})
       if (t) SDL_ReleaseGPUTexture(dev_, t);
     for (auto& b : blit_pool_) SDL_ReleaseGPUTexture(dev_, b.tex);
-    for (SDL_GPUBuffer* b : {vbuf_, ibuf_})
+    for (SDL_GPUBuffer* b : {vbuf_, ibuf_, pbuf_, cro_, crw_})
       if (b) SDL_ReleaseGPUBuffer(dev_, b);
     for (SDL_GPUTransferBuffer* b : {upload_tb_, download_tb_})
       if (b) SDL_ReleaseGPUTransferBuffer(dev_, b);
@@ -625,6 +654,7 @@ class GpuDevice final : public Device {
       case Format::D16: d.gpu_format = SDL_GPU_TEXTUREFORMAT_D16_UNORM; d.bias_scale = 65535.0f; break;
       case Format::D24X8: d.gpu_format = depth24_; break;
       case Format::D32: d.gpu_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT; break;
+      case Format::D32FS8: d.gpu_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT; d.stencil = true; break;
       default: d.gpu_format = depth24s8_; d.stencil = true; break;  // D24S8, D15S1
     }
     if (d.gpu_format == SDL_GPU_TEXTUREFORMAT_D24_UNORM ||
@@ -633,7 +663,12 @@ class GpuDevice final : public Device {
     SDL_GPUTextureCreateInfo ti{};
     ti.type = SDL_GPU_TEXTURETYPE_2D;
     ti.format = d.gpu_format;
+    // Sampled too where the GPU can (programs read depth targets).
     ti.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
+    if (SDL_GPUTextureSupportsFormat(dev_, d.gpu_format, SDL_GPU_TEXTURETYPE_2D,
+                                     SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET |
+                                         SDL_GPU_TEXTUREUSAGE_SAMPLER))
+      ti.usage |= SDL_GPU_TEXTUREUSAGE_SAMPLER;
     ti.width = Uint32(w);
     ti.height = Uint32(h);
     ti.layer_count_or_depth = 1;
@@ -1221,9 +1256,9 @@ void r_color0(inout vec4 c) {
     sc.key.vs = d.vs;
     sc.key.ps = d.ps;
     if (k.blend && rs_[206]) {  // SEPARATEALPHABLENDENABLE
-      sc.key.src_a = uint8_t(BlendFactor(rs_[207], pass_alpha_));
-      sc.key.dst_a = uint8_t(BlendFactor(rs_[208], pass_alpha_));
-      sc.key.op_a = uint8_t(BlendOp(rs_[209]));
+      sc.key.src_a = uint8_t(D3DBlendFactor(rs_[207], pass_alpha_));
+      sc.key.dst_a = uint8_t(D3DBlendFactor(rs_[208], pass_alpha_));
+      sc.key.op_a = uint8_t(D3DBlendOp(rs_[209]));
     } else {
       sc.key.src_a = k.src;
       sc.key.dst_a = k.dst;
@@ -1339,6 +1374,431 @@ void r_color0(inout vec4 c) {
     cmds_.push_back(c);
   }
 
+  // ---- programs (console GPUs)
+
+  ProgramId CreateProgram(const ProgramDesc& d) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+#if defined(__APPLE__)
+    FatalF("gfx: programs on Metal are not implemented yet");
+#endif
+    Program pr;
+    pr.vs = d.vs;
+    pr.fs = d.fs;
+    pr.cs = d.cs;
+    if (!d.cs.glsl.empty()) {
+      pr.compute = true;
+      const std::vector<uint32_t> spirv =
+          CompileProgramStage(d.cs, ShaderStage::Compute, d.local_size);
+      SDL_GPUComputePipelineCreateInfo ci{};
+      ci.code = reinterpret_cast<const Uint8*>(spirv.data());
+      ci.code_size = spirv.size() * 4;
+      ci.entrypoint = "main";
+      ci.format = SDL_GPU_SHADERFORMAT_SPIRV;
+      ci.num_samplers = d.cs.textures;
+      ci.num_readonly_storage_buffers = d.cs.buffers ? 1 : 0;
+      ci.num_readwrite_storage_textures = d.cs.rw_images;
+      ci.num_readwrite_storage_buffers = d.cs.rw_buffers ? 1 : 0;
+      ci.num_uniform_buffers = ProgramUniformBlocks(d.cs);
+      ci.threadcount_x = d.local_size[0];
+      ci.threadcount_y = d.local_size[1];
+      ci.threadcount_z = d.local_size[2];
+      pr.cp = SDL_CreateGPUComputePipeline(dev_, &ci);
+      if (!pr.cp) FatalF("gfx: SDL_CreateGPUComputePipeline: %s", SDL_GetError());
+    } else {
+      for (bool vertex : {true, false}) {
+        const ProgramStage& st = vertex ? d.vs : d.fs;
+        const std::vector<uint32_t> spirv =
+            CompileProgramStage(st, vertex ? ShaderStage::Vertex : ShaderStage::Fragment, nullptr);
+        SDL_GPUShaderCreateInfo si{};
+        si.code = reinterpret_cast<const Uint8*>(spirv.data());
+        si.code_size = spirv.size() * 4;
+        si.entrypoint = "main";
+        si.format = SDL_GPU_SHADERFORMAT_SPIRV;
+        si.stage = vertex ? SDL_GPU_SHADERSTAGE_VERTEX : SDL_GPU_SHADERSTAGE_FRAGMENT;
+        si.num_samplers = st.textures;
+        si.num_storage_buffers = st.buffers ? 1 : 0;
+        si.num_uniform_buffers = ProgramUniformBlocks(st);
+        SDL_GPUShader* sh = SDL_CreateGPUShader(dev_, &si);
+        if (!sh) FatalF("gfx: SDL_CreateGPUShader (program): %s", SDL_GetError());
+        (vertex ? pr.vsh : pr.fsh) = sh;
+      }
+    }
+    pr.vs.glsl.clear();
+    pr.fs.glsl.clear();
+    pr.cs.glsl.clear();
+    const ProgramId id = next_id_++;
+    programs_[id] = pr;
+    return id;
+  }
+
+  void DestroyProgram(ProgramId id) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    auto it = programs_.find(id);
+    if (it == programs_.end()) return;
+    Flush();
+    for (auto p = program_pipelines_.begin(); p != program_pipelines_.end();) {
+      if (p->first.program == id) {
+        SDL_ReleaseGPUGraphicsPipeline(dev_, p->second);
+        p = program_pipelines_.erase(p);
+      } else {
+        ++p;
+      }
+    }
+    ReleaseProgram(it->second);
+    programs_.erase(it);
+  }
+
+  TextureId CreateImage(const ImageDesc& d) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    if (d.w <= 0 || d.h <= 0 || d.layers <= 0 || d.levels <= 0) return 0;
+    Tex t;
+    t.w = d.w;
+    t.h = d.h;
+    t.levels = d.levels;
+    t.layers = d.layers;
+    t.fmt = d.fmt;
+    t.rt = d.color_target;
+    t.kind = d.kind;
+    t.cube = d.kind == TextureKind::Cube;
+    t.storage = d.storage;
+    SDL_GPUTextureCreateInfo ti{};
+    ti.type = d.kind == TextureKind::Cube         ? SDL_GPU_TEXTURETYPE_CUBE
+              : d.kind == TextureKind::Tex2DArray ? SDL_GPU_TEXTURETYPE_2D_ARRAY
+              : d.kind == TextureKind::Tex3D      ? SDL_GPU_TEXTURETYPE_3D
+                                                  : SDL_GPU_TEXTURETYPE_2D;
+    ti.format = GpuFormat(d.fmt);
+    ti.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER |
+               (d.color_target ? SDL_GPU_TEXTUREUSAGE_COLOR_TARGET : 0) |
+               (d.storage ? SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE : 0);
+    ti.width = Uint32(d.w);
+    ti.height = Uint32(d.h);
+    ti.layer_count_or_depth = Uint32(d.layers);
+    ti.num_levels = Uint32(d.levels);
+    t.tex = SDL_CreateGPUTexture(dev_, &ti);
+    if (!t.tex) {
+      WarnF("gfx: CreateImage %dx%dx%d x%d fmt %u failed: %s\n", d.w, d.h, d.layers, d.levels,
+            unsigned(d.fmt), SDL_GetError());
+      return 0;
+    }
+    const TextureId id = next_id_++;
+    textures_[id] = t;
+    return id;
+  }
+
+  void UpdateImage(TextureId id, int level, int layer, const Rect& r, const void* src,
+                   uint32_t pitch) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    auto it = textures_.find(id);
+    if (it == textures_.end() || level < 0 || level >= it->second.levels) return;
+    const Tex& t = it->second;
+    if (layer < 0 || layer >= t.layers) return;
+    const Rect c = Clip(r, LevelSize(t.w, level), LevelSize(t.h, level));
+    const int w = c.right - c.left, h = c.bottom - c.top;
+    if (w <= 0 || h <= 0) return;
+    if (Pending(t.tex)) Flush();
+    QueueUpload(t.tex, level, c.left, c.top, w, h, src, pitch, RowCount(t.fmt, uint32_t(h)),
+                RowPitch(t.fmt, uint32_t(w)), false, IsCompressed(t.fmt), layer);
+  }
+
+  void ReadImage(TextureId id, int level, int layer, const Rect& r, void* dst,
+                 uint32_t pitch) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    auto it = textures_.find(id);
+    if (it == textures_.end() || level < 0 || level >= it->second.levels) return;
+    const Tex& t = it->second;
+    const Rect c = Clip(r, LevelSize(t.w, level), LevelSize(t.h, level));
+    const uint32_t w = uint32_t(c.right - c.left), h = uint32_t(c.bottom - c.top);
+    if (!w || !h || IsCompressed(t.fmt)) return;
+    Flush();
+    const uint32_t row = RowPitch(t.fmt, w), size = row * h;
+    SDL_GPUTransferBufferCreateInfo tbi{};
+    tbi.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+    tbi.size = size;
+    SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(dev_, &tbi);
+    if (!tb) FatalF("gfx: transfer buffer: %s", SDL_GetError());
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(dev_);
+    SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
+    SDL_GPUTextureRegion src{};
+    src.texture = t.tex;
+    src.mip_level = Uint32(level);
+    src.layer = Uint32(layer);
+    src.x = Uint32(c.left);
+    src.y = Uint32(c.top);
+    src.w = w;
+    src.h = h;
+    src.d = 1;
+    SDL_GPUTextureTransferInfo to{};
+    to.transfer_buffer = tb;
+    to.pixels_per_row = w;
+    to.rows_per_layer = h;
+    SDL_DownloadFromGPUTexture(cp, &src, &to);
+    SDL_EndGPUCopyPass(cp);
+    SDL_GPUFence* f = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+    SDL_WaitForGPUFences(dev_, true, &f, 1);
+    SDL_ReleaseGPUFence(dev_, f);
+    const auto* p = static_cast<const uint8_t*>(SDL_MapGPUTransferBuffer(dev_, tb, false));
+    for (uint32_t y = 0; y < h; y++)
+      std::memcpy(static_cast<uint8_t*>(dst) + size_t(y) * pitch, p + size_t(y) * row, row);
+    SDL_UnmapGPUTransferBuffer(dev_, tb);
+    SDL_ReleaseGPUTransferBuffer(dev_, tb);
+  }
+
+  void ClearImage(TextureId id, int level, const Color& c) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    auto it = textures_.find(id);
+    if (it == textures_.end() || !it->second.rt || level < 0 || level >= it->second.levels) return;
+    Flush();
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(dev_);
+    for (int layer = 0; layer < it->second.layers; layer++) {
+      SDL_GPUColorTargetInfo ct{};
+      ct.texture = it->second.tex;
+      ct.mip_level = Uint32(level);
+      ct.layer_or_depth_plane = Uint32(layer);
+      ct.load_op = SDL_GPU_LOADOP_CLEAR;
+      ct.clear_color = {c.r, c.g, c.b, c.a};
+      ct.store_op = SDL_GPU_STOREOP_STORE;
+      SDL_EndGPURenderPass(SDL_BeginGPURenderPass(cmd, &ct, 1, nullptr));
+    }
+    Submit(cmd);
+  }
+
+  void ClearDepth(DepthId id, float z, int stencil) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    auto it = depths_.find(id);
+    if (it == depths_.end()) return;
+    Flush();
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(dev_);
+    SDL_GPUDepthStencilTargetInfo dt{};
+    dt.texture = it->second.tex;
+    dt.load_op = SDL_GPU_LOADOP_CLEAR;
+    dt.clear_depth = z;
+    dt.store_op = SDL_GPU_STOREOP_STORE;
+    dt.stencil_load_op = stencil >= 0 ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+    dt.stencil_store_op = SDL_GPU_STOREOP_STORE;
+    dt.clear_stencil = Uint8(stencil >= 0 ? stencil : 0);
+    SDL_EndGPURenderPass(SDL_BeginGPURenderPass(cmd, nullptr, 0, &dt));
+    Submit(cmd);
+  }
+
+  void DrawProgram(const ProgramDraw& d) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    auto pit = programs_.find(d.program);
+    if (pit == programs_.end() || pit->second.compute) return;
+    if (!d.vertex_count || !d.instance_count) return;
+    const Program& pr = pit->second;
+
+    // The pass: the colour targets (from target 0 on) and the depth.
+    std::array<SDL_GPUTexture*, 4> colors{};
+    std::array<uint8_t, 4> fmts{};
+    std::array<int, 4> levels{};
+    int w = 0, h = 0, n = 0;
+    for (int i = 0; i < 4 && d.targets[i].tex; i++, n++) {
+      auto it = textures_.find(d.targets[i].tex);
+      if (it == textures_.end() || !it->second.rt || d.targets[i].level >= it->second.levels)
+        FatalF("gfx: DrawProgram: target %d is no colour target", i);
+      colors[size_t(i)] = it->second.tex;
+      levels[size_t(i)] = d.targets[i].level;
+      fmts[size_t(i)] = uint8_t(GpuFormat(it->second.fmt));
+      if (!i) {
+        w = LevelSize(it->second.w, d.targets[i].level);
+        h = LevelSize(it->second.h, d.targets[i].level);
+      }
+    }
+    const Depth* depth = nullptr;
+    if (d.depth) {
+      auto dit = depths_.find(d.depth);
+      if (dit == depths_.end()) FatalF("gfx: DrawProgram: no depth target %u", d.depth);
+      depth = &dit->second;
+      if (!n) w = depth->w, h = depth->h;
+    }
+    if (!n && !depth) return;
+    SetPass(colors, fmts, depth, w, h, true, levels);
+
+    Cmd c{};
+    const Rect sc = Intersect(Clip(d.scissor, w, h), Rect{0, 0, w, h});
+    if (sc.right <= sc.left || sc.bottom <= sc.top) return;
+    c.scissor = {sc.left, sc.top, sc.right - sc.left, sc.bottom - sc.top};
+    c.viewport = {float(d.viewport.x), float(d.viewport.y), float(d.viewport.width),
+                  float(d.viewport.height), d.viewport.min_z, d.viewport.max_z};
+    c.stencil_ref = d.state.stencil_ref;
+    if (d.indices) {
+      c.indexed = true;
+      c.first = uint32_t(indices_.size());
+      for (uint32_t i = 0; i < d.vertex_count; i++)
+        indices_.push_back(d.index_size == 4 ? static_cast<const uint32_t*>(d.indices)[i]
+                                             : static_cast<const uint16_t*>(d.indices)[i]);
+      c.base = d.base_vertex;
+    } else {
+      c.first = uint32_t(d.base_vertex);
+    }
+    c.count = d.vertex_count;
+
+    ProgramCmd pc;
+    pc.pipeline = ProgramPipeline(d.program, d.state, n, fmts, depth);
+    pc.instances = d.instance_count;
+    pc.blend_constant = {d.state.blend_constant.r, d.state.blend_constant.g,
+                         d.state.blend_constant.b, d.state.blend_constant.a};
+    RecordStage(pc.stage[0], pr.vs, d.vs, true);
+    RecordStage(pc.stage[1], pr.fs, d.fs, true);
+    c.program = int(program_cmds_.size());
+    program_cmds_.push_back(pc);
+    cmds_.push_back(c);
+  }
+
+  void DispatchProgram(const ProgramDispatch& d) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    auto pit = programs_.find(d.program);
+    if (pit == programs_.end() || !pit->second.compute) return;
+    const Program& pr = pit->second;
+    const ProgramStage& st = pr.cs;
+    if (!d.groups[0] || !d.groups[1] || !d.groups[2]) return;
+    // What was drawn before comes first.
+    Flush();
+
+    // The read-only and read-write buffers, each in its own arena, and
+    // their places in the uniform block.
+    std::vector<uint8_t> ro, rw;
+    std::vector<uint32_t> table(4 * size_t(st.buffers + st.rw_buffers), 0);
+    for (uint32_t b = 0; b < st.buffers; b++) {
+      table[4 * b] = uint32_t(ro.size() / 4);
+      table[4 * b + 1] = d.cs.buffers[b].size;
+      AppendWords(ro, d.cs.buffers[b].data, d.cs.buffers[b].size);
+    }
+    std::vector<uint32_t> rw_at(st.rw_buffers);
+    for (uint32_t b = 0; b < st.rw_buffers; b++) {
+      rw_at[b] = uint32_t(rw.size());
+      table[4 * (st.buffers + b)] = uint32_t(rw.size() / 4);
+      table[4 * (st.buffers + b) + 1] = d.rw_buffers[b].size;
+      AppendWords(rw, d.rw_buffers[b].data, d.rw_buffers[b].size);
+    }
+    if (st.buffers && ro.empty()) ro.resize(4);
+    if (st.rw_buffers && rw.empty()) rw.resize(4);
+
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(dev_);
+    if (!cmd) FatalF("gfx: SDL_AcquireGPUCommandBuffer: %s", SDL_GetError());
+    SDL_GPUTransferBuffer* tb = nullptr;
+    if (!ro.empty() || !rw.empty()) {
+      SDL_GPUTransferBufferCreateInfo tbi{};
+      tbi.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+      tbi.size = Uint32(ro.size() + rw.size());
+      tb = SDL_CreateGPUTransferBuffer(dev_, &tbi);
+      if (!tb) FatalF("gfx: transfer buffer: %s", SDL_GetError());
+      auto* p = static_cast<uint8_t*>(SDL_MapGPUTransferBuffer(dev_, tb, false));
+      if (!ro.empty()) std::memcpy(p, ro.data(), ro.size());
+      if (!rw.empty()) std::memcpy(p + ro.size(), rw.data(), rw.size());
+      SDL_UnmapGPUTransferBuffer(dev_, tb);
+      SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
+      if (!ro.empty()) {
+        EnsureBuffer(cro_, cro_cap_, ro.size(), SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ);
+        SDL_GPUTransferBufferLocation src{tb, 0};
+        SDL_GPUBufferRegion dst{cro_, 0, Uint32(ro.size())};
+        SDL_UploadToGPUBuffer(cp, &src, &dst, true);
+      }
+      if (!rw.empty()) {
+        EnsureBuffer(crw_, crw_cap_, rw.size(),
+                     SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ |
+                         SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE);
+        SDL_GPUTransferBufferLocation src{tb, Uint32(ro.size())};
+        SDL_GPUBufferRegion dst{crw_, 0, Uint32(rw.size())};
+        SDL_UploadToGPUBuffer(cp, &src, &dst, false);
+      }
+      SDL_EndGPUCopyPass(cp);
+    }
+
+    SDL_GPUStorageTextureReadWriteBinding images[8]{};
+    for (uint32_t i = 0; i < st.rw_images && i < 8; i++) {
+      auto it = textures_.find(d.rw_images[i].tex);
+      if (it == textures_.end() || !it->second.storage)
+        FatalF("gfx: DispatchProgram: image %u is no storage image", i);
+      images[i].texture = it->second.tex;
+      images[i].mip_level = Uint32(d.rw_images[i].level);
+    }
+    SDL_GPUStorageBufferReadWriteBinding rwb{};
+    rwb.buffer = crw_;
+    SDL_GPUComputePass* cp = SDL_BeginGPUComputePass(cmd, images, st.rw_images, &rwb,
+                                                     rw.empty() ? 0 : 1);
+    SDL_BindGPUComputePipeline(cp, pr.cp);
+    ProgramStageCmd sc;
+    RecordStage(sc, st, d.cs);
+    if (sc.ntex) {
+      SDL_GPUTextureSamplerBinding tbs[16];
+      for (uint32_t i = 0; i < sc.ntex; i++) tbs[i] = {sc.tex[i], sc.smp[i]};
+      SDL_BindGPUComputeSamplers(cp, 0, tbs, sc.ntex);
+    }
+    if (!ro.empty()) SDL_BindGPUComputeStorageBuffers(cp, 0, &cro_, 1);
+    Uint32 slot = 0;
+    if (!table.empty()) SDL_PushGPUComputeUniformData(cmd, slot++, table.data(), Uint32(table.size() * 4));
+    if (st.uniform_bytes)
+      SDL_PushGPUComputeUniformData(cmd, slot, d.cs.uniforms, st.uniform_bytes);
+    SDL_DispatchGPUCompute(cp, d.groups[0], d.groups[1], d.groups[2]);
+    SDL_EndGPUComputePass(cp);
+
+    if (rw.empty()) {
+      Submit(cmd);
+    } else {
+      SDL_GPUTransferBufferCreateInfo dbi{};
+      dbi.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+      dbi.size = Uint32(rw.size());
+      SDL_GPUTransferBuffer* db = SDL_CreateGPUTransferBuffer(dev_, &dbi);
+      if (!db) FatalF("gfx: transfer buffer: %s", SDL_GetError());
+      SDL_GPUCopyPass* down = SDL_BeginGPUCopyPass(cmd);
+      SDL_GPUBufferRegion src{crw_, 0, Uint32(rw.size())};
+      SDL_GPUTransferBufferLocation dst{db, 0};
+      SDL_DownloadFromGPUBuffer(down, &src, &dst);
+      SDL_EndGPUCopyPass(down);
+      SDL_GPUFence* f = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+      SDL_WaitForGPUFences(dev_, true, &f, 1);
+      SDL_ReleaseGPUFence(dev_, f);
+      const auto* p = static_cast<const uint8_t*>(SDL_MapGPUTransferBuffer(dev_, db, false));
+      for (uint32_t b = 0; b < st.rw_buffers; b++)
+        std::memcpy(d.rw_buffers[b].data, p + rw_at[b], d.rw_buffers[b].size);
+      SDL_UnmapGPUTransferBuffer(dev_, db);
+      SDL_ReleaseGPUTransferBuffer(dev_, db);
+    }
+    if (tb) SDL_ReleaseGPUTransferBuffer(dev_, tb);
+  }
+
+  void PresentImage(TextureId id, const Rect& r) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    auto it = textures_.find(id);
+    if (it == textures_.end()) return;
+    const Tex& t = it->second;
+    Flush();
+    if (!present_pipeline_) CreatePresentPipeline();
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(dev_);
+    SDL_GPUColorTargetInfo ct{};
+    ct.texture = backbuffer_;
+    ct.load_op = SDL_GPU_LOADOP_CLEAR;
+    ct.clear_color = {0, 0, 0, 1};
+    ct.store_op = SDL_GPU_STOREOP_STORE;
+    SDL_GPURenderPass* rp = SDL_BeginGPURenderPass(cmd, &ct, 1, nullptr);
+    SDL_BindGPUGraphicsPipeline(rp, present_pipeline_);
+    SDL_GPUTextureSamplerBinding tb{t.tex, Sampler(SamplerKey{})};
+    SDL_BindGPUFragmentSamplers(rp, 0, &tb, 1);
+    // The region's corner, its far corner, and whether to encode as sRGB.
+    const int32_t u[4] = {r.left, r.top, std::min(r.right, t.w) - 1,
+                          t.fmt == Format::R8G8B8A8Srgb || t.fmt == Format::B8G8R8A8Srgb ||
+                                  t.fmt == Format::Bc1Srgb || t.fmt == Format::Bc2Srgb ||
+                                  t.fmt == Format::Bc3Srgb || t.fmt == Format::Bc7Srgb
+                              ? 1
+                              : 0};
+    const int32_t bottom = std::min(r.bottom, t.h) - 1;
+    const int32_t ub[8] = {u[0], u[1], u[2], bottom, u[3], 0, 0, 0};
+    SDL_PushGPUFragmentUniformData(cmd, 0, ub, sizeof ub);
+    SDL_GPUViewport vp{0, 0, float(bb_w_), float(bb_h_), 0, 1};
+    SDL_SetGPUViewport(rp, &vp);
+    SDL_DrawGPUPrimitives(rp, 3, 1, 0, 0);
+    SDL_EndGPURenderPass(rp);
+    SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
+    SDL_GPUTextureLocation s{}, dl{};
+    s.texture = backbuffer_;
+    dl.texture = front_;
+    SDL_CopyGPUTextureToTexture(cp, &s, &dl, Uint32(bb_w_), Uint32(bb_h_), 1, false);
+    SDL_EndGPUCopyPass(cp);
+    Show(cmd);
+    Submit(cmd);
+  }
+
   void Present() override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     Flush();
@@ -1356,10 +1816,12 @@ void r_color0(inout vec4 c) {
  private:
   struct Tex {
     SDL_GPUTexture* tex = nullptr;
-    int w = 0, h = 0, levels = 1;
+    int w = 0, h = 0, levels = 1, layers = 1;
     Format fmt = Format::Unknown;
     bool rt = false;
     bool cube = false;
+    TextureKind kind = TextureKind::Tex2D;
+    bool storage = false;  // a compute stage's read-write image
   };
   struct Depth {
     SDL_GPUTexture* tex = nullptr;
@@ -1388,7 +1850,8 @@ void r_color0(inout vec4 c) {
     bool indexed = false;
     uint32_t first = 0, count = 0;
     int32_t base = 0;
-    int shader = -1;  // shader_cmds_ index for a DrawShader
+    int shader = -1;   // shader_cmds_ index for a DrawShader
+    int program = -1;  // program_cmds_ index for a DrawProgram
   };
   // What a DrawShader adds to its Cmd: samplers (vertex 0-3, pixel 0-15)
   // and the uniform blocks in ubytes_ (vertex then pixel: float
@@ -1515,6 +1978,43 @@ void r_color0(inout vec4 c) {
       case Format::R32F: return SDL_GPU_TEXTUREFORMAT_R32_FLOAT;
       case Format::G32R32F: return SDL_GPU_TEXTUREFORMAT_R32G32_FLOAT;
       case Format::A32B32G32R32F: return SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT;
+      case Format::R8: return SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+      case Format::R8G8: return SDL_GPU_TEXTUREFORMAT_R8G8_UNORM;
+      case Format::R8G8B8A8: return SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+      case Format::R8G8B8A8Srgb: return SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB;
+      case Format::B8G8R8A8Srgb: return SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB;
+      case Format::R16: return SDL_GPU_TEXTUREFORMAT_R16_UNORM;
+      case Format::R16G16: return SDL_GPU_TEXTUREFORMAT_R16G16_UNORM;
+      case Format::R16G16B16A16: return SDL_GPU_TEXTUREFORMAT_R16G16B16A16_UNORM;
+      case Format::R10G10B10A2: return SDL_GPU_TEXTUREFORMAT_R10G10B10A2_UNORM;
+      case Format::R11G11B10F: return SDL_GPU_TEXTUREFORMAT_R11G11B10_UFLOAT;
+      case Format::R8G8B8A8Snorm: return SDL_GPU_TEXTUREFORMAT_R8G8B8A8_SNORM;
+      case Format::R16G16Snorm: return SDL_GPU_TEXTUREFORMAT_R16G16_SNORM;
+      case Format::R16G16B16A16Snorm: return SDL_GPU_TEXTUREFORMAT_R16G16B16A16_SNORM;
+      case Format::R8Uint: return SDL_GPU_TEXTUREFORMAT_R8_UINT;
+      case Format::R8G8Uint: return SDL_GPU_TEXTUREFORMAT_R8G8_UINT;
+      case Format::R8G8B8A8Uint: return SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UINT;
+      case Format::R16Uint: return SDL_GPU_TEXTUREFORMAT_R16_UINT;
+      case Format::R16G16Uint: return SDL_GPU_TEXTUREFORMAT_R16G16_UINT;
+      case Format::R16G16B16A16Uint: return SDL_GPU_TEXTUREFORMAT_R16G16B16A16_UINT;
+      case Format::R32Uint: return SDL_GPU_TEXTUREFORMAT_R32_UINT;
+      case Format::R32G32Uint: return SDL_GPU_TEXTUREFORMAT_R32G32_UINT;
+      case Format::R32G32B32A32Uint: return SDL_GPU_TEXTUREFORMAT_R32G32B32A32_UINT;
+      case Format::R32Sint: return SDL_GPU_TEXTUREFORMAT_R32_INT;
+      case Format::R32G32Sint: return SDL_GPU_TEXTUREFORMAT_R32G32_INT;
+      case Format::R32G32B32A32Sint: return SDL_GPU_TEXTUREFORMAT_R32G32B32A32_INT;
+      case Format::Bc1: return SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM;
+      case Format::Bc1Srgb: return SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM_SRGB;
+      case Format::Bc2: return SDL_GPU_TEXTUREFORMAT_BC2_RGBA_UNORM;
+      case Format::Bc2Srgb: return SDL_GPU_TEXTUREFORMAT_BC2_RGBA_UNORM_SRGB;
+      case Format::Bc3: return SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM;
+      case Format::Bc3Srgb: return SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM_SRGB;
+      case Format::Bc4: return SDL_GPU_TEXTUREFORMAT_BC4_R_UNORM;
+      case Format::Bc5: return SDL_GPU_TEXTUREFORMAT_BC5_RG_UNORM;
+      case Format::Bc6hUfloat: return SDL_GPU_TEXTUREFORMAT_BC6H_RGB_UFLOAT;
+      case Format::Bc6hSfloat: return SDL_GPU_TEXTUREFORMAT_BC6H_RGB_FLOAT;
+      case Format::Bc7: return SDL_GPU_TEXTUREFORMAT_BC7_RGBA_UNORM;
+      case Format::Bc7Srgb: return SDL_GPU_TEXTUREFORMAT_BC7_RGBA_UNORM_SRGB;
       default: return SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;
     }
   }
@@ -1597,6 +2097,10 @@ void r_color0(inout vec4 c) {
     for (const ShaderCmd& c : shader_cmds_)
       for (SDL_GPUTexture* x : c.tex)
         if (x == t) return true;
+    for (const ProgramCmd& c : program_cmds_)
+      for (const ProgramStageCmd& sc : c.stage)
+        for (SDL_GPUTexture* x : sc.tex)
+          if (x == t) return true;
     return false;
   }
 
@@ -1668,9 +2172,9 @@ void r_color0(inout vec4 c) {
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(dev_);
     if (!cmd) FatalF("gfx: SDL_AcquireGPUCommandBuffer: %s", SDL_GetError());
 
-    size_t vbytes = verts_.size(), ibytes = indices_.size() * 4;
+    size_t vbytes = verts_.size(), ibytes = indices_.size() * 4, pbytes = pmem_.size();
     size_t ubytes = (upload_bytes_.size() + 15) & ~size_t(15);
-    size_t total = ubytes + vbytes + ibytes;
+    size_t total = ubytes + vbytes + ibytes + pbytes;
     if (total) {
       if (!upload_tb_ || upload_tb_cap_ < total) {
         if (upload_tb_) SDL_ReleaseGPUTransferBuffer(dev_, upload_tb_);
@@ -1686,6 +2190,7 @@ void r_color0(inout vec4 c) {
       if (!upload_bytes_.empty()) std::memcpy(p, upload_bytes_.data(), upload_bytes_.size());
       if (vbytes) std::memcpy(p + ubytes, verts_.data(), vbytes);
       if (ibytes) std::memcpy(p + ubytes + vbytes, indices_.data(), ibytes);
+      if (pbytes) std::memcpy(p + ubytes + vbytes + ibytes, pmem_.data(), pbytes);
       SDL_UnmapGPUTransferBuffer(dev_, upload_tb_);
 
       SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
@@ -1718,10 +2223,16 @@ void r_color0(inout vec4 c) {
         SDL_GPUBufferRegion dst{ibuf_, 0, Uint32(ibytes)};
         SDL_UploadToGPUBuffer(cp, &src, &dst, true);
       }
+      if (pbytes) {
+        EnsureBuffer(pbuf_, pbuf_cap_, pbytes, SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
+        SDL_GPUTransferBufferLocation src{upload_tb_, Uint32(ubytes + vbytes + ibytes)};
+        SDL_GPUBufferRegion dst{pbuf_, 0, Uint32(pbytes)};
+        SDL_UploadToGPUBuffer(cp, &src, &dst, true);
+      }
       SDL_EndGPUCopyPass(cp);
     }
 
-    if (draw && pass_color_) {
+    if (draw && (pass_color_ || pass_depth_)) {
       // A clear clears every target, as D3D9's does.
       SDL_GPUColorTargetInfo cts[4]{};
       for (int i = 0; i < pass_targets_; i++) {
@@ -1750,12 +2261,58 @@ void r_color0(inout vec4 c) {
         SDL_BindGPUIndexBuffer(rp, &ib, SDL_GPU_INDEXELEMENTSIZE_32BIT);
       }
       SDL_GPUGraphicsPipeline* bound = nullptr;
+      bool vertex_storage = vbuf_ != nullptr;  // vbuf_ at slot 0 for the other draws
       int vs = -1, fs = -1;
       uint32_t pushed[6];  // ubytes_ offsets pushed per shader uniform slot
       std::fill(std::begin(pushed), std::end(pushed), ~0u);
       bool have_constant = false;
       SDL_FColor constant{};
       for (const Cmd& c : cmds_) {
+        if (c.program < 0 && !vertex_storage && vbuf_) {
+          SDL_BindGPUVertexStorageBuffers(rp, 0, &vbuf_, 1);
+          vertex_storage = true;
+        }
+        if (c.program >= 0) {
+          const ProgramCmd& pc = program_cmds_[size_t(c.program)];
+          if (pc.pipeline != bound) {
+            SDL_BindGPUGraphicsPipeline(rp, pc.pipeline);
+            bound = pc.pipeline;
+          }
+          std::fill(std::begin(pushed), std::end(pushed), ~0u);
+          vs = fs = -1;
+          for (int st = 0; st < 2; st++) {
+            const ProgramStageCmd& sc = pc.stage[st];
+            for (uint32_t i = 0; i < sc.nuni; i++) {
+              const uint8_t* data = ubytes_.data() + sc.uoff[i];
+              if (st) SDL_PushGPUFragmentUniformData(cmd, i, data, sc.ulen[i]);
+              else SDL_PushGPUVertexUniformData(cmd, i, data, sc.ulen[i]);
+            }
+            SDL_GPUTextureSamplerBinding tb[16];
+            for (uint32_t i = 0; i < sc.ntex; i++) tb[i] = {sc.tex[i], sc.smp[i]};
+            if (sc.ntex) {
+              if (st) SDL_BindGPUFragmentSamplers(rp, 0, tb, sc.ntex);
+              else SDL_BindGPUVertexSamplers(rp, 0, tb, sc.ntex);
+            }
+            if (sc.storage) {
+              if (st) SDL_BindGPUFragmentStorageBuffers(rp, 0, &pbuf_, 1);
+              else SDL_BindGPUVertexStorageBuffers(rp, 0, &pbuf_, 1);
+              if (!st) vertex_storage = false;
+            }
+          }
+          if (!have_constant || std::memcmp(&constant, &pc.blend_constant, sizeof constant)) {
+            SDL_SetGPUBlendConstants(rp, pc.blend_constant);
+            constant = pc.blend_constant;
+            have_constant = true;
+          }
+          SDL_SetGPUViewport(rp, &c.viewport);
+          SDL_SetGPUScissor(rp, &c.scissor);
+          SDL_SetGPUStencilReference(rp, c.stencil_ref);
+          if (c.indexed)
+            SDL_DrawGPUIndexedPrimitives(rp, c.count, pc.instances, c.first, c.base, 0);
+          else
+            SDL_DrawGPUPrimitives(rp, c.count, pc.instances, c.first, 0);
+          continue;
+        }
         if (c.shader >= 0) {
           const ShaderCmd& sc = shader_cmds_[size_t(c.shader)];
           SDL_GPUGraphicsPipeline* p = ShaderPipeline(sc.key);
@@ -1813,6 +2370,8 @@ void r_color0(inout vec4 c) {
 
     cmds_.clear();
     shader_cmds_.clear();
+    program_cmds_.clear();
+    pmem_.clear();
     ubytes_.clear();
     uploads_.clear();
     upload_bytes_.clear();
@@ -2140,21 +2699,21 @@ void r_color0(inout vec4 c) {
       uint32_t s = rs_[19], d = rs_[20];
       if (s == 12) { s = 5; d = 6; }        // BOTHSRCALPHA
       else if (s == 13) { s = 6; d = 5; }   // BOTHINVSRCALPHA
-      k.src = uint8_t(BlendFactor(s, pass_alpha_));
-      k.dst = uint8_t(BlendFactor(d, pass_alpha_));
-      k.op = uint8_t(BlendOp(rs_[171]));
+      k.src = uint8_t(D3DBlendFactor(s, pass_alpha_));
+      k.dst = uint8_t(D3DBlendFactor(d, pass_alpha_));
+      k.op = uint8_t(D3DBlendOp(rs_[171]));
     }
     k.write_mask = uint8_t(rs_[168] & 0xF);
     if (pass_depth_) {
       k.depth_test = rs_[7] ? 1 : 0;
       k.depth_write = (rs_[7] && rs_[14]) ? 1 : 0;
-      k.depth_func = uint8_t(CompareOp(rs_[23]));
+      k.depth_func = uint8_t(D3DCompareOp(rs_[23]));
       if (pass_stencil_ && rs_[52]) {
         k.stencil = 1;
-        k.s_fail = uint8_t(StencilOp(rs_[53]));
-        k.s_zfail = uint8_t(StencilOp(rs_[54]));
-        k.s_pass = uint8_t(StencilOp(rs_[55]));
-        k.s_func = uint8_t(CompareOp(rs_[56]));
+        k.s_fail = uint8_t(D3DStencilOp(rs_[53]));
+        k.s_zfail = uint8_t(D3DStencilOp(rs_[54]));
+        k.s_pass = uint8_t(D3DStencilOp(rs_[55]));
+        k.s_func = uint8_t(D3DCompareOp(rs_[56]));
         k.s_read = uint8_t(rs_[58]);
         k.s_write = uint8_t(rs_[59]);
       }
@@ -2256,8 +2815,8 @@ void r_color0(inout vec4 c) {
     k.min = (t[17] == 1) ? SDL_GPU_FILTER_NEAREST : SDL_GPU_FILTER_LINEAR;
     k.mip = t[18] == 2 ? SDL_GPU_SAMPLERMIPMAPMODE_NEAREST
           : t[18] == 3 ? SDL_GPU_SAMPLERMIPMAPMODE_LINEAR : 0xFF;
-    k.u = uint8_t(AddressMode(t[13]));
-    k.v = uint8_t(AddressMode(t[14]));
+    k.u = uint8_t(D3DAddressMode(t[13]));
+    k.v = uint8_t(D3DAddressMode(t[14]));
     bool aniso = t[16] == 5 || t[17] == 3;
     k.aniso = uint8_t(aniso ? std::clamp<uint32_t>(t[21], 1, 16) : 1);
     k.lod_bias = AsFloat(t[19]);
@@ -2503,9 +3062,9 @@ void r_color0(inout vec4 c) {
     k.min = ss[6] <= 1 ? SDL_GPU_FILTER_NEAREST : SDL_GPU_FILTER_LINEAR;
     k.mip = ss[7] == 1 ? SDL_GPU_SAMPLERMIPMAPMODE_NEAREST
           : ss[7] >= 2 ? SDL_GPU_SAMPLERMIPMAPMODE_LINEAR : 0xFF;
-    k.u = uint8_t(AddressMode(ss[1]));
-    k.v = uint8_t(AddressMode(ss[2]));
-    k.w = uint8_t(AddressMode(ss[3]));
+    k.u = uint8_t(D3DAddressMode(ss[1]));
+    k.v = uint8_t(D3DAddressMode(ss[2]));
+    k.w = uint8_t(D3DAddressMode(ss[3]));
     bool aniso = ss[5] == 3 || ss[6] == 3;
     k.aniso = uint8_t(aniso ? std::clamp<uint32_t>(ss[10], 1, 16) : 1);
     k.lod_bias = AsFloat(ss[8]);
@@ -2527,6 +3086,340 @@ void r_color0(inout vec4 c) {
       warned_rs_ |= 1ull << (&ch - kChecks);
       WarnF("gfx: %s with shaders is not supported yet\n", ch.name);
     }
+  }
+
+  // ---- programs
+
+  struct Program {
+    bool compute = false;
+    ProgramStage vs, fs, cs;  // without their GLSL
+    SDL_GPUShader* vsh = nullptr;
+    SDL_GPUShader* fsh = nullptr;
+    SDL_GPUComputePipeline* cp = nullptr;
+  };
+  // A stage of a recorded program draw: its textures, its uniform blocks
+  // in ubytes_ (the buffer table, then the program's own) and whether it
+  // reads the arena (pmem_).
+  struct ProgramStageCmd {
+    SDL_GPUTexture* tex[16] = {};
+    SDL_GPUSampler* smp[16] = {};
+    uint32_t ntex = 0, nuni = 0;
+    uint32_t uoff[2] = {}, ulen[2] = {};
+    bool storage = false;
+  };
+  struct ProgramCmd {
+    SDL_GPUGraphicsPipeline* pipeline = nullptr;
+    uint32_t instances = 1;
+    SDL_FColor blend_constant{};
+    ProgramStageCmd stage[2];  // vertex, fragment
+  };
+
+  void ReleaseProgram(Program& p) {
+    if (p.vsh) SDL_ReleaseGPUShader(dev_, p.vsh);
+    if (p.fsh) SDL_ReleaseGPUShader(dev_, p.fsh);
+    if (p.cp) SDL_ReleaseGPUComputePipeline(dev_, p.cp);
+  }
+
+  static uint32_t ProgramUniformBlocks(const ProgramStage& st) {
+    return (st.buffers || st.rw_buffers ? 1 : 0) + (st.uniform_bytes ? 1 : 0);
+  }
+
+  // The stage's prelude (ProgramDesc) in SDL_GPU's SPIR-V sets, and its
+  // SPIR-V.
+  static std::vector<uint32_t> CompileProgramStage(const ProgramStage& st, ShaderStage stage,
+                                                   const uint32_t* local_size) {
+    if (st.textures > 16) FatalF("gfx: a program stage with %u textures", st.textures);
+    const int res = stage == ShaderStage::Fragment ? 2 : 0;
+    const int uni = stage == ShaderStage::Vertex ? 1 : stage == ShaderStage::Fragment ? 3 : 2;
+    char b[256];
+    std::string pre = "#version 450\n";
+    std::snprintf(b, sizeof b, "#define R_TEXTURE(n) set = %d, binding = (n)\n", res);
+    pre += b;
+    if (st.buffers) {
+      std::snprintf(b, sizeof b,
+                    "layout(std430, set = %d, binding = %u) readonly buffer RMem { uint r_mem[]; };\n",
+                    res, st.textures);
+      pre += b;
+    }
+    if (stage == ShaderStage::Compute) {
+      pre += "#define R_IMAGE(n) set = 1, binding = (n)\n";
+      if (st.rw_buffers) {
+        std::snprintf(b, sizeof b, "layout(std430, set = 1, binding = %u) buffer RRw { uint r_rw[]; };\n",
+                      st.rw_images);
+        pre += b;
+      }
+      std::snprintf(b, sizeof b, "layout(local_size_x = %u, local_size_y = %u, local_size_z = %u) in;\n",
+                    local_size[0], local_size[1], local_size[2]);
+      pre += b;
+    }
+    uint32_t binding = 0;
+    if (st.buffers || st.rw_buffers) {
+      std::snprintf(b, sizeof b, "layout(std140, set = %d, binding = 0) uniform RBufs {", uni);
+      pre += b;
+      if (st.buffers) {
+        std::snprintf(b, sizeof b, " uvec4 r_buf[%u];", st.buffers);
+        pre += b;
+      }
+      if (st.rw_buffers) {
+        std::snprintf(b, sizeof b, " uvec4 r_rwbuf[%u];", st.rw_buffers);
+        pre += b;
+      }
+      pre += " };\n";
+      binding = 1;
+    }
+    std::snprintf(b, sizeof b, "#define R_UNIFORMS set = %d, binding = %u\n", uni, binding);
+    pre += b;
+    const std::string glsl = pre + st.glsl;
+    std::vector<uint32_t> spirv;
+    std::string log;
+    if (!GlslToSpirv(glsl, stage, &spirv, &log)) {
+      std::fprintf(stderr, "%s\n", glsl.c_str());
+      FatalF("gfx: compiling a program (source above): %s", log.c_str());
+    }
+    return spirv;
+  }
+
+  static void AppendWords(std::vector<uint8_t>& v, const void* data, uint32_t size) {
+    const size_t at = v.size();
+    v.resize(at + ((size_t(size) + 3) & ~size_t(3)), 0);
+    if (data && size) std::memcpy(v.data() + at, data, size);
+  }
+
+  // A stage's textures (or depth targets), and for a draw its buffers
+  // (into pmem_, their table and its own uniforms into ubytes_).
+  void RecordStage(ProgramStageCmd& sc, const ProgramStage& st, const ProgramResources& r,
+                   bool draw = false) {
+    sc.ntex = st.textures;
+    for (uint32_t i = 0; i < st.textures; i++) {
+      const TextureId id = r.textures ? r.textures[i] : 0;
+      SDL_GPUTexture* t = nullptr;
+      if (auto it = textures_.find(id); it != textures_.end()) t = it->second.tex;
+      else if (auto dt = depths_.find(id); dt != depths_.end()) t = dt->second.tex;
+      if (!t) {
+        switch (st.texture_kinds[i]) {
+          case TextureKind::Cube: t = dummy_cube_; break;
+          case TextureKind::Tex3D: t = dummy_3d_; break;
+          case TextureKind::Tex2DArray: t = dummy_array_; break;
+          default: t = dummy_2d_; break;
+        }
+      }
+      sc.tex[i] = t;
+      sc.smp[i] = ProgramSampler(r.samplers ? r.samplers[i] : SamplerDesc{});
+    }
+    if (!draw) return;
+    if (st.buffers) {
+      std::vector<uint32_t> table(4 * size_t(st.buffers), 0);
+      for (uint32_t b = 0; b < st.buffers; b++) {
+        if (pmem_.size() + r.buffers[b].size > kMaxArena) FatalF("gfx: a draw's buffers pass the arena");
+        table[4 * b] = uint32_t(pmem_.size() / 4);
+        table[4 * b + 1] = r.buffers[b].size;
+        AppendWords(pmem_, r.buffers[b].data, r.buffers[b].size);
+      }
+      sc.storage = true;
+      AppendUniform(sc, table.data(), uint32_t(table.size() * 4));
+    }
+    if (st.uniform_bytes) AppendUniform(sc, r.uniforms, st.uniform_bytes);
+  }
+
+  void AppendUniform(ProgramStageCmd& sc, const void* data, uint32_t len) {
+    const size_t off = (ubytes_.size() + 15) & ~size_t(15);
+    ubytes_.resize(off + std::max(len, 16u), 0);
+    if (data) std::memcpy(ubytes_.data() + off, data, len);
+    sc.uoff[sc.nuni] = uint32_t(off);
+    sc.ulen[sc.nuni] = len;
+    sc.nuni++;
+  }
+
+  SDL_GPUSampler* ProgramSampler(const SamplerDesc& d) {
+    ProgramSamplerKey k{};
+    k.min = d.min_linear ? SDL_GPU_FILTER_LINEAR : SDL_GPU_FILTER_NEAREST;
+    k.mag = d.mag_linear ? SDL_GPU_FILTER_LINEAR : SDL_GPU_FILTER_NEAREST;
+    k.mip = d.mip_linear ? SDL_GPU_SAMPLERMIPMAPMODE_LINEAR : SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+    k.u = uint8_t(d.u);
+    k.v = uint8_t(d.v);
+    k.w = uint8_t(d.w);
+    k.compare = d.compare;
+    k.compare_op = uint8_t(uint8_t(d.compare_op) + 1);
+    k.lod_bias = d.lod_bias;
+    k.min_lod = d.min_lod;
+    k.max_lod = d.max_lod;
+    k.aniso = d.max_anisotropy;
+    auto it = program_samplers_.find(k);
+    if (it != program_samplers_.end()) return it->second;
+    SDL_GPUSamplerCreateInfo si{};
+    si.min_filter = SDL_GPUFilter(k.min);
+    si.mag_filter = SDL_GPUFilter(k.mag);
+    si.mipmap_mode = SDL_GPUSamplerMipmapMode(k.mip);
+    si.address_mode_u = SDL_GPUSamplerAddressMode(k.u);
+    si.address_mode_v = SDL_GPUSamplerAddressMode(k.v);
+    si.address_mode_w = SDL_GPUSamplerAddressMode(k.w);
+    si.mip_lod_bias = k.lod_bias;
+    si.min_lod = k.min_lod;
+    si.max_lod = k.max_lod;
+    si.enable_anisotropy = k.aniso > 1;
+    si.max_anisotropy = k.aniso;
+    si.enable_compare = k.compare;
+    si.compare_op = SDL_GPUCompareOp(k.compare_op);
+    SDL_GPUSampler* s = SDL_CreateGPUSampler(dev_, &si);
+    if (!s) FatalF("gfx: SDL_CreateGPUSampler: %s", SDL_GetError());
+    program_samplers_[k] = s;
+    return s;
+  }
+
+  SDL_GPUGraphicsPipeline* ProgramPipeline(ProgramId id, const PipelineState& st, int targets,
+                                           const std::array<uint8_t, 4>& fmts,
+                                           const Depth* depth) {
+    ProgramKey k{};
+    k.program = id;
+    k.topology = uint8_t(st.topology);
+    k.cull = uint8_t(st.cull);
+    k.front_ccw = st.front_ccw;
+    k.depth_test = st.depth_test && depth;
+    k.depth_write = st.depth_write && depth;
+    k.depth_clip = st.depth_clip;
+    k.depth_compare = uint8_t(st.depth_compare);
+    k.stencil = st.stencil && depth && depth->stencil;
+    for (int f = 0; f < 2; f++) {
+      const StencilFace& s = f ? st.stencil_back : st.stencil_front;
+      k.s_ops[f][0] = uint8_t(s.fail);
+      k.s_ops[f][1] = uint8_t(s.depth_fail);
+      k.s_ops[f][2] = uint8_t(s.pass);
+      k.s_ops[f][3] = uint8_t(s.compare);
+    }
+    k.s_read = st.stencil_read_mask;
+    k.s_write = st.stencil_write_mask;
+    k.targets = uint8_t(targets);
+    k.depth_format = depth ? uint8_t(depth->gpu_format) : 0;
+    for (int i = 0; i < targets; i++) {
+      const TargetBlend& b = st.blend[i];
+      k.fmt[i] = fmts[size_t(i)];
+      k.blend[i][0] = b.enable;
+      k.blend[i][1] = uint8_t(b.src_color);
+      k.blend[i][2] = uint8_t(b.dst_color);
+      k.blend[i][3] = uint8_t(b.color_op);
+      k.blend[i][4] = uint8_t(b.src_alpha);
+      k.blend[i][5] = uint8_t(b.dst_alpha);
+      k.blend[i][6] = uint8_t(b.alpha_op);
+      k.blend[i][7] = b.write_mask & 0xF;
+    }
+    k.bias = st.depth_bias;
+    k.bias_slope = st.depth_bias_slope;
+    k.bias_clamp = st.depth_bias_clamp;
+    auto it = program_pipelines_.find(k);
+    if (it != program_pipelines_.end()) return it->second;
+
+    const Program& pr = programs_.at(id);
+    SDL_GPUGraphicsPipelineCreateInfo pi{};
+    pi.vertex_shader = pr.vsh;
+    pi.fragment_shader = pr.fsh;
+    static const SDL_GPUPrimitiveType kTopology[] = {
+        SDL_GPU_PRIMITIVETYPE_POINTLIST, SDL_GPU_PRIMITIVETYPE_LINELIST,
+        SDL_GPU_PRIMITIVETYPE_LINESTRIP, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
+        SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP};
+    pi.primitive_type = kTopology[k.topology];
+    pi.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    pi.rasterizer_state.cull_mode = SDL_GPUCullMode(k.cull);
+    pi.rasterizer_state.front_face =
+        k.front_ccw ? SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE : SDL_GPU_FRONTFACE_CLOCKWISE;
+    pi.rasterizer_state.enable_depth_bias = k.bias != 0 || k.bias_slope != 0;
+    pi.rasterizer_state.depth_bias_constant_factor = k.bias;
+    pi.rasterizer_state.depth_bias_slope_factor = k.bias_slope;
+    pi.rasterizer_state.depth_bias_clamp = k.bias_clamp;
+    pi.rasterizer_state.enable_depth_clip = k.depth_clip;
+    pi.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    pi.depth_stencil_state.enable_depth_test = k.depth_test;
+    pi.depth_stencil_state.enable_depth_write = k.depth_write;
+    pi.depth_stencil_state.compare_op = SDL_GPUCompareOp(k.depth_compare + 1);
+    pi.depth_stencil_state.enable_stencil_test = k.stencil;
+    for (int f = 0; f < 2; f++) {
+      SDL_GPUStencilOpState& s =
+          f ? pi.depth_stencil_state.back_stencil_state : pi.depth_stencil_state.front_stencil_state;
+      s.fail_op = SDL_GPUStencilOp(k.s_ops[f][0] + 1);
+      s.depth_fail_op = SDL_GPUStencilOp(k.s_ops[f][1] + 1);
+      s.pass_op = SDL_GPUStencilOp(k.s_ops[f][2] + 1);
+      s.compare_op = SDL_GPUCompareOp(k.s_ops[f][3] + 1);
+    }
+    pi.depth_stencil_state.compare_mask = k.s_read;
+    pi.depth_stencil_state.write_mask = k.s_write;
+    SDL_GPUColorTargetDescription cds[4]{};
+    for (int i = 0; i < targets; i++) {
+      SDL_GPUColorTargetDescription& cd = cds[i];
+      cd.format = SDL_GPUTextureFormat(k.fmt[i]);
+      SDL_GPUColorTargetBlendState& b = cd.blend_state;
+      b.enable_blend = k.blend[i][0];
+      b.src_color_blendfactor = SDL_GPUBlendFactor(k.blend[i][1] + 1);
+      b.dst_color_blendfactor = SDL_GPUBlendFactor(k.blend[i][2] + 1);
+      b.color_blend_op = SDL_GPUBlendOp(k.blend[i][3] + 1);
+      b.src_alpha_blendfactor = SDL_GPUBlendFactor(k.blend[i][4] + 1);
+      b.dst_alpha_blendfactor = SDL_GPUBlendFactor(k.blend[i][5] + 1);
+      b.alpha_blend_op = SDL_GPUBlendOp(k.blend[i][6] + 1);
+      b.color_write_mask = SDL_GPUColorComponentFlags(k.blend[i][7]);
+      b.enable_color_write_mask = true;
+    }
+    pi.target_info.color_target_descriptions = cds;
+    pi.target_info.num_color_targets = Uint32(targets);
+    pi.target_info.has_depth_stencil_target = depth != nullptr;
+    pi.target_info.depth_stencil_format = depth ? depth->gpu_format : SDL_GPU_TEXTUREFORMAT_INVALID;
+    SDL_GPUGraphicsPipeline* p = SDL_CreateGPUGraphicsPipeline(dev_, &pi);
+    if (!p) FatalF("gfx: SDL_CreateGPUGraphicsPipeline (program): %s", SDL_GetError());
+    program_pipelines_[k] = p;
+    return p;
+  }
+
+  // PresentImage's: a triangle over the back buffer fetching the image's
+  // texels where the region maps (clamped to it), encoded back to sRGB for
+  // sRGB images, so the back buffer holds the stored values.
+  void CreatePresentPipeline() {
+    static const char* kVs =
+        "#version 450\n"
+        "void main() {\n"
+        "  vec2 p = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);\n"
+        "  gl_Position = vec4(p * vec2(2, -2) + vec2(-1, 1), 0, 1);\n"
+        "}\n";
+    static const char* kFs =
+        "#version 450\n"
+        "layout(set = 2, binding = 0) uniform sampler2D img;\n"
+        "layout(std140, set = 3, binding = 0) uniform U { ivec4 rect; ivec4 srgb; };\n"
+        "layout(location = 0) out vec4 o;\n"
+        "void main() {\n"
+        "  ivec2 at = clamp(ivec2(gl_FragCoord.xy) + rect.xy, rect.xy, rect.zw);\n"
+        "  vec4 c = texelFetch(img, at, 0);\n"
+        "  if (srgb.x != 0) {\n"
+        "    bvec3 lo = lessThanEqual(c.rgb, vec3(0.0031308));\n"
+        "    c.rgb = mix(1.055 * pow(c.rgb, vec3(1.0 / 2.4)) - 0.055, c.rgb * 12.92, lo);\n"
+        "  }\n"
+        "  o = c;\n"
+        "}\n";
+    SDL_GPUShader* sh[2];
+    for (int i = 0; i < 2; i++) {
+      std::vector<uint32_t> spirv;
+      std::string log;
+      if (!GlslToSpirv(i ? kFs : kVs, i ? ShaderStage::Fragment : ShaderStage::Vertex, &spirv, &log))
+        FatalF("gfx: the present shader: %s", log.c_str());
+      SDL_GPUShaderCreateInfo si{};
+      si.code = reinterpret_cast<const Uint8*>(spirv.data());
+      si.code_size = spirv.size() * 4;
+      si.entrypoint = "main";
+      si.format = SDL_GPU_SHADERFORMAT_SPIRV;
+      si.stage = i ? SDL_GPU_SHADERSTAGE_FRAGMENT : SDL_GPU_SHADERSTAGE_VERTEX;
+      si.num_samplers = i ? 1 : 0;
+      si.num_uniform_buffers = i ? 1 : 0;
+      sh[i] = SDL_CreateGPUShader(dev_, &si);
+      if (!sh[i]) FatalF("gfx: the present shader: %s", SDL_GetError());
+    }
+    SDL_GPUGraphicsPipelineCreateInfo pi{};
+    pi.vertex_shader = sh[0];
+    pi.fragment_shader = sh[1];
+    pi.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    pi.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    SDL_GPUColorTargetDescription cd{};
+    cd.format = SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;
+    pi.target_info.color_target_descriptions = &cd;
+    pi.target_info.num_color_targets = 1;
+    present_pipeline_ = SDL_CreateGPUGraphicsPipeline(dev_, &pi);
+    if (!present_pipeline_) FatalF("gfx: the present pipeline: %s", SDL_GetError());
+    SDL_ReleaseGPUShader(dev_, sh[0]);
+    SDL_ReleaseGPUShader(dev_, sh[1]);
   }
 
   // ---- members
@@ -2603,6 +3496,21 @@ void r_color0(inout vec4 c) {
   SDL_GPUTexture* dummy_3d_ = nullptr;
   uint64_t warned_rs_ = 0;
   std::map<SamplerKey, SDL_GPUSampler*> samplers_;
+
+  // Programs (console GPUs): their draws' buffers in one arena per flush
+  // (pmem_ into pbuf_), a dispatch's in cro_ and crw_.
+  static constexpr size_t kMaxArena = size_t(1) << 30;
+  std::map<ProgramId, Program> programs_;
+  std::unordered_map<ProgramKey, SDL_GPUGraphicsPipeline*, BytesHash<ProgramKey>> program_pipelines_;
+  std::map<ProgramSamplerKey, SDL_GPUSampler*> program_samplers_;
+  std::vector<ProgramCmd> program_cmds_;
+  std::vector<uint8_t> pmem_;
+  SDL_GPUBuffer* pbuf_ = nullptr;
+  SDL_GPUBuffer* cro_ = nullptr;
+  SDL_GPUBuffer* crw_ = nullptr;
+  uint32_t pbuf_cap_ = 0, cro_cap_ = 0, crw_cap_ = 0;
+  SDL_GPUGraphicsPipeline* present_pipeline_ = nullptr;
+  SDL_GPUTexture* dummy_array_ = nullptr;
 
   // D3D state.
   std::array<uint32_t, 256> rs_{};

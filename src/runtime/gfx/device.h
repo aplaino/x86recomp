@@ -22,6 +22,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 
 #include "runtime/hlsl/hlsl.h"
 
@@ -37,10 +38,21 @@ enum class Format : uint32_t {
   // Floating point, in D3D9's memory layout (red first): uploaded and
   // stored as is.
   R16F, G16R16F, A16B16G16R16F, R32F, G32R32F, A32B32G32R32F,
+  // Console GPUs' formats (programs, below), stored as they are in memory:
+  // components named from the lowest bits, so R8G8B8A8 is red first and
+  // R11G11B10F has red in bits 0-10. Uploaded and read back unconverted.
+  R8, R8G8, R8G8B8A8, R8G8B8A8Srgb, B8G8R8A8Srgb, R16, R16G16, R16G16B16A16,
+  R10G10B10A2, R11G11B10F, R8G8B8A8Snorm, R16G16Snorm, R16G16B16A16Snorm,
+  R8Uint, R8G8Uint, R8G8B8A8Uint, R16Uint, R16G16Uint, R16G16B16A16Uint, R32Uint,
+  R32G32Uint, R32G32B32A32Uint, R32Sint, R32G32Sint, R32G32B32A32Sint,
+  Bc1, Bc1Srgb, Bc2, Bc2Srgb, Bc3, Bc3Srgb, Bc4, Bc5, Bc6hUfloat, Bc6hSfloat, Bc7, Bc7Srgb,
+  D32FS8,
 };
 uint32_t BitsPerPixel(Format f);
 bool IsCompressed(Format f);
 bool IsFloat(Format f);
+// Formats uploaded and read back as they are (the float and console ones).
+bool IsRaw(Format f);
 // Bytes per row of `width` pixels (per row of 4x4 blocks if compressed).
 uint32_t RowPitch(Format f, uint32_t width);
 // Rows in the data for `height` (block rows if compressed).
@@ -132,6 +144,132 @@ struct ShaderDraw {
   // D3DSAMPLERSTATETYPE values (index 1-13).
   TextureId textures[20] = {};
   const uint32_t (*sampler_states)[14] = nullptr;
+};
+
+// ---- programs: console GPUs' shaders, which their front ends translate
+// to GLSL (the third way to draw, beside the fixed-function pipeline and
+// Direct3D 9's shaders). The device puts a prelude before each stage's
+// GLSL: `#version 450`, the binding macros for the stage's resources and
+// their declarations:
+//   - textures (combined image and sampler): `layout(R_TEXTURE(n))
+//     uniform sampler2D ...;` for n < textures, of the kind the GLSL says;
+//   - read-only buffers: their words in `r_mem[]`, buffer b from word
+//     r_buf[b].x, r_buf[b].y bytes long;
+//   - compute's read-write buffers likewise in `r_rw[]` and r_rwbuf[b];
+//     its storage images `layout(R_IMAGE(n), <format>) uniform image2D`;
+//   - the stage's own uniform block: `layout(R_UNIFORMS) uniform ...`.
+using ProgramId = uint32_t;  // 0: none
+
+enum class TextureKind : uint8_t { Tex2D, Tex2DArray, Cube, Tex3D };
+
+struct ProgramStage {
+  std::string glsl;  // empty: no such stage
+  uint32_t textures = 0, buffers = 0;
+  uint32_t rw_buffers = 0, rw_images = 0;  // compute only
+  uint32_t uniform_bytes = 0;              // 0: no uniform block
+  TextureKind texture_kinds[16] = {};      // what an unbound texture is
+};
+// Vertex and fragment stages, or a compute one (cs) with its workgroup
+// size.
+struct ProgramDesc {
+  ProgramStage vs, fs, cs;
+  uint32_t local_size[3] = {1, 1, 1};
+};
+
+// A texture or render target for programs: `layers` array layers (6 for
+// a cube) or a 3D texture's depth. A storage image can be a compute
+// stage's read-write image.
+struct ImageDesc {
+  int w = 1, h = 1, layers = 1, levels = 1;
+  Format fmt = Format::R8G8B8A8;
+  TextureKind kind = TextureKind::Tex2D;
+  bool color_target = false, storage = false;
+};
+
+enum class Topology : uint8_t { PointList, LineList, LineStrip, TriangleList, TriangleStrip };
+enum class BlendFactor : uint8_t {
+  Zero, One, SrcColor, OneMinusSrcColor, DstColor, OneMinusDstColor, SrcAlpha,
+  OneMinusSrcAlpha, DstAlpha, OneMinusDstAlpha, ConstantColor, OneMinusConstantColor,
+  SrcAlphaSaturate,
+};
+enum class BlendOp : uint8_t { Add, Subtract, ReverseSubtract, Min, Max };
+enum class CompareOp : uint8_t { Never, Less, Equal, LessEqual, Greater, NotEqual, GreaterEqual, Always };
+enum class StencilOp : uint8_t {
+  Keep, Zero, Replace, IncrementClamp, DecrementClamp, Invert, IncrementWrap, DecrementWrap,
+};
+enum class CullMode : uint8_t { None, Front, Back };
+enum class AddressMode : uint8_t { Repeat, MirroredRepeat, ClampToEdge };
+
+struct TargetBlend {
+  bool enable = false;
+  BlendFactor src_color = BlendFactor::One, dst_color = BlendFactor::Zero;
+  BlendOp color_op = BlendOp::Add;
+  BlendFactor src_alpha = BlendFactor::One, dst_alpha = BlendFactor::Zero;
+  BlendOp alpha_op = BlendOp::Add;
+  uint8_t write_mask = 0xF;  // bit 0 red .. bit 3 alpha
+};
+struct StencilFace {
+  StencilOp fail = StencilOp::Keep, depth_fail = StencilOp::Keep, pass = StencilOp::Keep;
+  CompareOp compare = CompareOp::Always;
+};
+struct PipelineState {
+  Topology topology = Topology::TriangleList;
+  CullMode cull = CullMode::None;
+  bool front_ccw = false;
+  bool depth_test = false, depth_write = false, depth_clip = true;
+  CompareOp depth_compare = CompareOp::Always;
+  float depth_bias = 0, depth_bias_slope = 0, depth_bias_clamp = 0;
+  bool stencil = false;
+  StencilFace stencil_front, stencil_back;
+  uint8_t stencil_read_mask = 0xFF, stencil_write_mask = 0xFF, stencil_ref = 0;
+  TargetBlend blend[4];
+  Color blend_constant{0, 0, 0, 0};
+};
+struct SamplerDesc {
+  bool min_linear = false, mag_linear = false, mip_linear = false;
+  AddressMode u = AddressMode::Repeat, v = AddressMode::Repeat, w = AddressMode::Repeat;
+  float lod_bias = 0, min_lod = 0, max_lod = 1000, max_anisotropy = 1;
+  bool compare = false;
+  CompareOp compare_op = CompareOp::Always;
+};
+
+struct BufferData {  // copied when the draw or dispatch is recorded
+  const void* data = nullptr;
+  uint32_t size = 0;
+};
+struct RwBufferData {  // read, and written back once the dispatch has run
+  void* data = nullptr;
+  uint32_t size = 0;
+};
+// A stage's resources for one draw or dispatch, as many as the stage
+// declares.
+struct ProgramResources {
+  const TextureId* textures = nullptr;
+  const SamplerDesc* samplers = nullptr;  // one per texture
+  const BufferData* buffers = nullptr;
+  const void* uniforms = nullptr;  // uniform_bytes
+};
+// Targets are ImageDesc color targets (tex 0 is no target here, not the
+// back buffer); the scissor is always on.
+struct ProgramDraw {
+  ProgramId program = 0;
+  PipelineState state;
+  ColorTarget targets[4];
+  DepthId depth = 0;
+  Viewport viewport{};
+  Rect scissor{};
+  uint32_t vertex_count = 0, instance_count = 1;
+  int32_t base_vertex = 0;
+  const void* indices = nullptr;  // vertex_count of them; null: not indexed
+  uint32_t index_size = 2;
+  ProgramResources vs, fs;
+};
+struct ProgramDispatch {
+  ProgramId program = 0;
+  uint32_t groups[3] = {1, 1, 1};
+  ProgramResources cs;
+  const RwBufferData* rw_buffers = nullptr;
+  const ColorTarget* rw_images = nullptr;  // storage images, at a level
 };
 
 class Device {
@@ -251,6 +389,32 @@ class Device {
   virtual ShaderId CreateShader(const hlsl::Program& p) = 0;
   virtual void DestroyShader(ShaderId s) = 0;
   virtual void DrawShader(const ShaderDraw& d) = 0;
+
+  // ---- programs (see ProgramDesc). Backends without them (d3d9) fail
+  // fatally. A program that does not compile is fatal too, with its
+  // source in the log.
+  virtual ProgramId CreateProgram(const ProgramDesc& p);
+  virtual void DestroyProgram(ProgramId p);
+  virtual TextureId CreateImage(const ImageDesc& d);
+  // Uploads `r` of a level and layer of an image, as it is in memory.
+  virtual void UpdateImage(TextureId t, int level, int layer, const Rect& r, const void* src,
+                           uint32_t pitch);
+  // Reads `r` of a level and layer of an image back as it is (waits for
+  // the GPU).
+  virtual void ReadImage(TextureId t, int level, int layer, const Rect& r, void* dst,
+                         uint32_t pitch);
+  // Clear a colour image's level (all layers) or a depth target (depth
+  // and, if `stencil` >= 0, stencil).
+  virtual void ClearImage(TextureId t, int level, const Color& c);
+  virtual void ClearDepth(DepthId d, float z, int stencil);
+  virtual void DrawProgram(const ProgramDraw& d);
+  // Runs at once (with what was drawn before it) when it has read-write
+  // buffers, which it writes back before returning.
+  virtual void DispatchProgram(const ProgramDispatch& d);
+  // Shows `r` of a level 0 colour image in the window as Present shows
+  // the back buffer (after ResetSwapChain to its size): its texels as
+  // they are stored, so an sRGB image's encoded values.
+  virtual void PresentImage(TextureId t, const Rect& r);
 };
 
 // Where a src_w x src_h frame is shown in a dst_w x dst_h output: scaled
