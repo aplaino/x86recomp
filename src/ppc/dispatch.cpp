@@ -12,7 +12,8 @@ struct Table {
   std::unordered_map<uint32_t, GuestFn> fns;
   std::vector<uint64_t> text_hashes;
 };
-// Filled before main() by each lifted module's lifted_table.cpp.
+// Filled before main() by each lifted module's lifted_table.cpp, and by the
+// platform's guest functions before the first guest thread.
 Table& Lifted() {
   static Table t;
   return t;
@@ -20,13 +21,17 @@ Table& Lifted() {
 
 }  // namespace
 
-void RegisterLiftedFunctions(const LiftedFn* fns, uint32_t count, uint64_t text_hash) {
+void RegisterGuestFunctions(const LiftedFn* fns, uint32_t count) {
   Table& t = Lifted();
   t.fns.reserve(t.fns.size() + count);
   for (uint32_t i = 0; i < count; i++)
     if (!t.fns.emplace(fns[i].va, fns[i].fn).second)
       Fatal(nullptr, "two lifted modules have a function at %x", fns[i].va);
-  t.text_hashes.push_back(text_hash);
+}
+
+void RegisterLiftedFunctions(const LiftedFn* fns, uint32_t count, uint64_t text_hash) {
+  RegisterGuestFunctions(fns, count);
+  Lifted().text_hashes.push_back(text_hash);
 }
 
 GuestFn LookupLifted(uint32_t va) {

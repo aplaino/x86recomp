@@ -177,6 +177,12 @@ whether a module made from its image's code (`TextHash`) is there.
 Nothing refers to a lifted module's symbols, so programs link it
 --no-as-needed; `recomp_bundle()` puts it next to the program.
 
+
+`RegisterGuestFunctions` adds guest addresses that run a host function
+when guest code calls or jumps to them (a platform's entry points for
+its system's exports, which guest code reaches through pointers), before
+the first guest thread.
+
 ## Tests and the oracle
 The oracle is QEMU's PowerPC 970 bare metal (`qemu-system-ppc64 -M none
 -cpu 970fx`), switched to 32-bit mode by the test programs' start-up

@@ -50,6 +50,11 @@ extern const uint64_t kLiftedTextHash;
 // library cannot refer to it; called from ppc/lifted_table.cpp, which
 // recomp_add_lifted_ppc compiles into each lifted module.
 void RegisterLiftedFunctions(const LiftedFn* fns, uint32_t count, uint64_t text_hash);
+// Guest addresses that are not lifted code but run a host function (a
+// platform's entry points for the system's exports, which guest code
+// reaches through pointers): a call or jump to one runs `fn`. Before any
+// guest thread runs, as the table is not locked.
+void RegisterGuestFunctions(const LiftedFn* fns, uint32_t count);
 
 // Runtime services called from lifted code. `va` is always the guest
 // address of the instruction making the call, for diagnostics.
