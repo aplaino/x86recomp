@@ -96,6 +96,8 @@ u32 XAudioUnregisterRenderDriverClient(u32 driver);
 u32 XAudioSubmitRenderDriverFrame(u32 driver, float* samples);
 u32 XAudioGetVoiceCategoryVolumeChangeMask(u32 driver, u32* mask);
 u32 XAudioGetVoiceCategoryVolume(u32 category, u32* volume);
+u32 XMACreateContext(u32* context);
+u32 XMAReleaseContext(u32 context);
 u32 MmQueryStatistics(u32* statistics);
 u32 NtCreateTimer(u32* handle, void* attributes, u32 type);
 u32 NtSetTimerEx(u32 handle, int64_t* due, void* apc, u32 mode, void* context, u32 resume, u32 period, u32* previous);
@@ -764,6 +766,37 @@ static void Audio(void) {
   CHECK(audio_calls - calls <= 1);
 }
 
+// ---- the XMA decoder -------------------------------------------------------------
+// Its registers are little-endian: the array's physical address at 0x600,
+// a bit per context in the clear registers from 0x6A0.
+static volatile u32* XmaReg(u32 r) { return At(0x7FEA0000 + 4 * r); }
+
+static void Xma(void) {
+  u32 array = __builtin_bswap32(*XmaReg(0x600)), a = 0, b = 0;
+  CHECK(XMACreateContext(&a) == 0 && XMACreateContext(&b) == 0 && a && b && a != b && !(a & 63) && !(b & 63));
+  u32 index = (MmGetPhysicalAddress(a) - array) >> 6;
+  CHECK(index < 320 && ((MmGetPhysicalAddress(b) - array) >> 6) < 320 && At(a)[0] == 0 && At(a)[15] == 0);
+  // A clear: no buffer valid, the read offset past the packet header; the
+  // packet count stays.
+  At(a)[0] = 0x00300FFF;
+  At(a)[1] = 0x80000000;
+  At(a)[2] = 0x12345;
+  *XmaReg(0x6A0 + (index >> 5)) = __builtin_bswap32(1u << (index & 31));
+  CHECK(WaitFor(&At(a)[2], 32) && At(a)[0] == 0x00000FFF && At(a)[1] == 0);
+  // Released contexts are zeroed and handed out again.
+  CHECK(XMAReleaseContext(a) == 0);
+  u32 again = 0;
+  CHECK(XMACreateContext(&again) == 0 && again == a && At(a)[2] == 0);
+  // All 320 in use: STATUS_NO_MEMORY.
+  static u32 contexts[320];
+  u32 n = 0;
+  while (n < 320 && XMACreateContext(&contexts[n]) == 0) n++;
+  u32 none = 1;
+  CHECK(n == 318 && XMACreateContext(&none) == 0xC0000017 && none == 0);
+  for (u32 k = 0; k < n; k++) XMAReleaseContext(contexts[k]);
+  CHECK(XMAReleaseContext(a) == 0 && XMAReleaseContext(b) == 0);
+}
+
 // ---- xam ----------------------------------------------------------------------
 static void Xam(void) {
   CHECK(XGetGameRegion() == 0x00FF && XamGetSystemVersion() == 0x20449700);
@@ -1046,6 +1079,7 @@ int main(void) {
   Gpu();
   Conversions();
   Audio();
+  Xma();
   Memory();
   Physical();
   Threads();

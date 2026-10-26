@@ -1,7 +1,7 @@
-// xboxkrnl: the audio render driver (XAudio*).
+// xboxkrnl: the audio render driver (XAudio*), XMA contexts (XMA*).
 //
 // The calls' meaning is Xenia's (the kernel's code is not available);
-// docs/xboxkrnl.md, "Audio".
+// docs/xboxkrnl.md, "Audio" and "XMA".
 
 #include <bit>
 
@@ -9,6 +9,7 @@
 #include "xbox360/audio.h"
 #include "xbox360/hle.h"
 #include "xbox360/kernel.h"
+#include "xbox360/xma.h"
 
 namespace recomp::xbox360 {
 namespace {
@@ -57,6 +58,20 @@ HLE(kKrnl, 503, XAudioGetVoiceCategoryVolumeChangeMask) {
 }
 HLE(kKrnl, 504, XAudioGetVoiceCategoryVolume) {
   Wr32(Arg(c, 1), std::bit_cast<uint32_t>(1.0f));
+  return 0;
+}
+
+// XMACreateContext(*context): a free hardware context's address, or 0 and
+// STATUS_NO_MEMORY when all are in use (Xenia's).
+HLE(kKrnl, 548, XMACreateContext) {
+  uint32_t context = AllocateXmaContext();
+  Wr32(Arg(c, 0), context);
+  return context ? 0 : kStatusNoMemory;
+}
+
+// XMAReleaseContext(context): zeroed and free again.
+HLE(kKrnl, 550, XMAReleaseContext) {
+  if (!ReleaseXmaContext(Arg(c, 0))) ppc::Fatal(&c, "XMAReleaseContext(%x): not a context in use", Arg(c, 0));
   return 0;
 }
 

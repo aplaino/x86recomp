@@ -113,6 +113,8 @@ __xex_import_slot_\name:
   FUNCTION 501, XAudioSubmitRenderDriverFrame
   FUNCTION 503, XAudioGetVoiceCategoryVolumeChangeMask
   FUNCTION 504, XAudioGetVoiceCategoryVolume
+  FUNCTION 548, XMACreateContext
+  FUNCTION 550, XMAReleaseContext
   FUNCTION 603, VdSwap
   FUNCTION 458, VdQueryVideoMode
   FUNCTION 971, XGetAVPack, 1

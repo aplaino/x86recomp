@@ -148,6 +148,30 @@ here; on the console a KPCR belongs to a hardware thread.
   XAudioGetVoiceCategoryVolume 1.0: the system's category volumes never
   change here.
 
+## XMA
+- The decoder's registers are at 0x7FEA0000, register r at + 4r, and
+  little-endian: xam reads the context array's physical address from
+  0x600 a byte at a time (low byte first) and keeps it; xam and titles'
+  audio libraries write the command registers with byte-reversed stores,
+  each followed by eieio.
+- After each XMACreateContext, xam and titles' libraries take the
+  context's index from its physical address, (pa - array) >> 6, and set
+  its bit in the clear registers (0x6A0 + index / 32, bit index % 32).
+  The other groups: kick 0x650 (decode), lock 0x690 (stop). Their
+  meaning and the clear's effect (no input or output buffer valid, the
+  input read offset 32 bits in, past the packet header, the output
+  offsets 0) are Xenia's. Console check.
+- 320 contexts of 64 bytes; XMACreateContext(*context) writes a free
+  one's address, or 0 with STATUS_NO_MEMORY when none is free;
+  XMAReleaseContext zeroes it. Xenia's (which allocates the array in its
+  system heap and gives the lowest free context, as here). Console
+  check. A context released that is not in use is fatal here.
+- The console's decoder takes a write to a command register at once;
+  here a thread polls them (yielding, then every 50 us when idle), so a
+  title's later writes to a context can race a clear the thread has not
+  taken yet. Before the decoder lands, commands have to reach it in the
+  order the title wrote them (open: at eieio, or by another route).
+
 ## Strings and statuses
 - RtlMultiByteToUnicodeN and RtlUnicodeToMultiByteN convert as many
   characters as both buffers hold and report the bytes written; the ANSI

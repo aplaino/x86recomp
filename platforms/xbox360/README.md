@@ -20,8 +20,9 @@ display and audio driver, string and formatting exports and the first of
 xam's startup ones (users with a local profile signed in, profile
 settings, notifications, content packages as host directories) and its
 message dispatch, timers, with a GPU command processor that executes a
-title's ring buffer without drawing and audio output through SDL3, which
-a test title checks; the Live apps' messages and XMA decoding follow.
+title's ring buffer without drawing, audio output through SDL3 and the
+XMA decoder's contexts and registers, which a test title checks; the
+Live apps' messages and XMA decoding follow.
 
 ## Using it
 

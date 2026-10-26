@@ -15,7 +15,7 @@ recomp_bundle(recomp_xbox360_image)
 # The runtime (ARCHITECTURE.md, "Runtime"): guest memory, the HLE registry
 # and Import(), threads, dispatcher objects, handles and time, the file
 # namespace, the title's module, the console's settings, the GPU, audio
-# output (SDL3, from the host layer), process bring-up (xbox360/process.h). Lifted modules link it for what lifted
+# output (SDL3, from the host layer), the XMA decoder, process bring-up (xbox360/process.h). Lifted modules link it for what lifted
 # code calls (recomp_add_lifted_ppc ... LINK recomp_xbox360).
 find_package(Threads REQUIRED)
 add_library(recomp_xbox360 SHARED
@@ -30,7 +30,8 @@ add_library(recomp_xbox360 SHARED
   src/xbox360/module.cpp
   src/xbox360/objects.cpp
   src/xbox360/process.cpp
-  src/xbox360/thread.cpp)
+  src/xbox360/thread.cpp
+  src/xbox360/xma.cpp)
 target_link_libraries(recomp_xbox360 PUBLIC recomp_ppc recomp_xbox360_image Threads::Threads
                       PRIVATE SDL3::SDL3 recomp_log)
 recomp_bundle(recomp_xbox360)

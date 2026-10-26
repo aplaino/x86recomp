@@ -111,7 +111,7 @@ does (the ranges are Xenia's, which match the addresses titles use):
 |---|---|---|
 | 0x00000000-0x3FFFFFFF | 4 KiB | NtAllocateVirtualMemory; the first 64 KiB never mapped |
 | 0x40000000-0x7EFFFFFF | 64 KiB | the same with MEM_LARGE_PAGES; thread stacks from the top |
-| 0x7F000000-0x7FFFFFFF | | the GPU's registers (milestone 5) |
+| 0x7F000000-0x7FFFFFFF | | the GPU's registers (milestone 5), the XMA decoder's |
 | 0x80000000-0x8FFFFFFF | 64 KiB | XEX images |
 | 0x90000000-0x9FFFFFFF | 4 KiB | XEX images; the kernel's own objects from the top |
 | 0xA0000000-0xBFFFFFFF | 64 KiB | physical memory |
@@ -231,8 +231,22 @@ host clock and held back by the host's queue. Submitted frames go to
 SDL3 (the host layer), one stream per client on the default playback
 device, which mixes them and downmixes to the device; the floats are
 handed over unchanged. With no device the frames are dropped and the
-callbacks keep their pace. XMA decoding (the XMA* exports) is not there
-yet.
+callbacks keep their pace.
+
+### The XMA decoder
+The XMA decoder (`src/xbox360/xma.{h,cpp}`, docs/xboxkrnl.md "XMA") is
+what the kernel's XMA* exports and titles' audio libraries see of the
+hardware, without decoding yet:
+- 320 contexts of 64 bytes in uncached physical memory, which
+  XMACreateContext hands out and XMAReleaseContext zeroes and frees.
+- Its registers are guest memory at 0x7FEA0000, little-endian, as for
+  the GPU: the context array's physical address is set at power-on.
+- A kernel thread polls the command registers, a bit per context, and
+  takes each word written (leaving 0). A clear resets the context's
+  buffers and offsets; a kick or a lock needs the decoder and is fatal.
+  Polling leaves a gap between a title's write and the command, which a
+  clear only narrows by running fast; the decoder settles how commands
+  reach it (docs/xboxkrnl.md, "XMA").
 
 ### Files
 The file namespace (`src/xbox360/fs.{h,cpp}`) is the kernel's: devices,
@@ -295,6 +309,7 @@ builds and runs them too.
    the audio render driver, timers, the kernel exports and xam's startup
    ones (the loader, networking, memory, messages, the music player's,
    users, profile settings, notifications, content) are done; next the
-   XGI and XLiveBase messages, XMA decoding and APCs.
+   XGI and XLiveBase messages, XMA decoding (the contexts and their
+   registers are there) and APCs.
 5. Xenos: drawing, shaders and presentation through gfx::Device, behind
    the command processor (which runs the ring buffer already).
