@@ -243,6 +243,9 @@ each a host directory, and symbolic links to them.
 - `\Device\Harddisk0\Partition1` is the hard disk's data partition,
   writable: `Partition1` in the per-user data directory
   (`GameConfig::data_dir`, by default $XDG_DATA_HOME/<id>).
+- A content package xam opens is a device of its own, mounted while the
+  title runs: a host directory under Partition1's `Content` (docs/xam.md,
+  "Content"). Devices are never unmounted, as open files refer to them.
 - ObCreateSymbolicLink adds links (`\??\name:`), which may name another.
   A path is resolved link by link, then on its device component by
   component, case-insensitively as the console's file systems compare
@@ -272,9 +275,11 @@ builds and runs them too.
   the hard disk, its module and XEX headers, the settings and the video
   mode, the GPU's registers, interrupts and a ring buffer's packets,
   string conversions, an audio client, xam's startup exports and messages,
-  users, profile settings, notifications, timers) and exits with the
-  number of failed checks. It runs with SDL's dummy audio driver. The test
-  writes the disc's files and empties the data directory before each run.
+  users, profile settings, notifications, content packages, timers) and
+  exits with the number of failed checks. It runs with SDL's dummy audio
+  driver. The test writes the disc's files and empties the data directory
+  before each run; it then checks the saves left on the data directory
+  (title settings, content packages).
 
 ## Roadmap
 1. Integer core, XEX reader, oracle (done).
@@ -289,7 +294,7 @@ builds and runs them too.
    command processor that executes the ring buffer without drawing, and
    the audio render driver, timers, the kernel exports and xam's startup
    ones (the loader, networking, memory, messages, the music player's,
-   users, profile settings, notifications) are done; next xam's content,
-   the XGI and XLiveBase messages, XMA decoding and APCs.
+   users, profile settings, notifications, content) are done; next the
+   XGI and XLiveBase messages, XMA decoding and APCs.
 5. Xenos: drawing, shaders and presentation through gfx::Device, behind
    the command processor (which runs the ring buffer already).

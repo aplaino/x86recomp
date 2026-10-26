@@ -121,6 +121,14 @@ u32 XNotifyGetNext(u32 listener, u32 match, u32* id, u32* value);
 u32 XNotifyPositionUI(u32 position);
 u32 XMsgStartIORequest(u32 app, u32 message, u32* overlapped, void* buffer, u32 size);
 u32 XMsgStartIORequestEx(u32 app, u32 message, u32* overlapped, void* buffer, u32 size, void* xparams);
+u32 XamEnumerate(u32 handle, u32 flags, void* buffer, u32 size, u32* returned, u32* overlapped);
+u32 XamContentCreateEx(void);  // through XamContentCreateEx9
+u32 XamContentClose(const char* root, u32* overlapped);
+u32 XamContentDelete(u32 user, void* data, u32* overlapped);
+u32 XamContentCreateEnumerator(u32 user, u32 device, u32 type, u32 flags, u32 items, u32* size, u32* handle);
+u32 XamContentGetDeviceData(u32 device, void* data);
+u32 XamContentGetCreator(u32 user, void* data, u32* is_creator, uint64_t* creator, u32* overlapped);
+u32 XamContentGetDeviceState(u32 device, u32* overlapped);
 extern u32 __imp_NtClose, __imp_ExThreadObjectType, __imp_KeTimeStampBundle, __imp_XboxKrnlVersion,
     __imp_XexExecutableModuleHandle, __imp_ExLoadedCommandLine, __imp_VdGlobalDevice, __imp_VdGpuClockInMHz,
     __imp_VdHSIOCalibrationLock;
@@ -135,6 +143,8 @@ u32 NtQueryDirectoryFile9(u32 handle, u32 event, void* apc, void* context, u32* 
                           void* mask, u32 restart);
 u32 XamUserReadProfileSettings9(u32 title, u32 slot, u32 xuid_count, void* xuids, u32 count, u32* ids, u32* size,
                                 void* results, u32* overlapped);
+u32 XamContentCreateEx9(u32 user, const char* root, void* data, u32 flags, u32* disposition, u32* license,
+                        u32 cache_size, uint64_t content_size, u32* overlapped);
 u32 VdSwap10(volatile u32* words, u32* fetch, u32 writeback, void* system, u32 value, u32* front, u32* format,
              u32* color_space, u32* width, u32* height);
 void interrupt_entry(void);
@@ -885,6 +895,124 @@ static void Users(void) {
   CHECK(XNotifyPositionUI(1) == 0);
 }
 
+// ---- content ------------------------------------------------------------------
+struct ContentData {  // XCONTENT_DATA
+  u32 device, type;
+  uint16_t display[128];
+  char file[42];
+  uint8_t pad[2];
+};
+
+static void Data(struct ContentData* d, u32 device, const char* file, const char* display) {
+  memset(d, 0, sizeof *d);
+  d->device = device;
+  d->type = 1;  // a saved game
+  for (int k = 0; display[k]; k++) d->display[k] = (uint16_t)display[k];
+  for (int k = 0; file[k]; k++) d->file[k] = file[k];
+}
+
+static void Content(void) {
+  // The hard disk, device 1.
+  CHECK(XamContentGetDeviceState(1, 0) == 0 && XamContentGetDeviceState(2, 0) == 0x48F);
+  struct {
+    u32 id, type;
+    uint64_t total, free;
+    uint16_t name[28];
+  } device;
+  CHECK(XamContentGetDeviceData(1, &device) == 0 && device.id == 1 && device.type == 1 && device.total > 0 &&
+        device.free <= device.total && device.name[0] == 'H' && device.name[9] == 'e' && device.name[10] == 0);
+  CHECK(XamContentGetDeviceData(2, &device) == 0x48F);
+
+  // No saves yet.
+  static struct ContentData items[4];
+  u32 size = 0, e = 0, n = 9;
+  CHECK(XamContentCreateEnumerator(0, 1, 1, 0, 2, &size, &e) == 0 && size == 2 * sizeof(struct ContentData));
+  CHECK(XamEnumerate(e, 0, items, size, &n, 0) == 0x12 && n == 0);
+  NtClose(e);
+  CHECK(XamEnumerate(e, 0, items, size, &n, 0) == 6);
+
+  // A save made, written and closed.
+  struct ContentData d, d2, d3;
+  Data(&d, 1, "slot1", "Save One");
+  u32 disposition = 9, license = 9, io[2], h = 0;
+  char buf[16];
+  CHECK(XamContentCreateEx9(0, "save", &d, 3, &disposition, &license, 0, 0, 0) == 3 && disposition == 0);
+  CHECK(XamContentCreateEx9(0, "save", &d, 1, &disposition, &license, 0, 0, 0) == 0 && disposition == 1 &&
+        license == 0);
+  CHECK(OpenPath(&h, "save:\\game.dat", kGenericWrite, kCreate, kSync | kNonDirectoryFile, io) == 0);
+  CHECK(NtWriteFile(h, 0, 0, 0, io, "progress", 8, 0) == 0);
+  NtClose(h);
+  CHECK(XamContentClose("save", 0) == 0 && XamContentClose("save", 0) == 2);
+  CHECK(OpenPath(&h, "save:\\game.dat", kGenericRead, kOpen, kSync, io) == kStatusObjectPathNotFound);
+  // Opened again through an XOVERLAPPED: complete at once, the disposition
+  // its length.
+  u32 ov[7] = {9, 9, 0, 0, 0, 0, 9};
+  CHECK(XamContentCreateEx9(0, "save", &d, 4, &disposition, 0, 0, 0, ov) == 0x3E5 && ov[0] == 0 && ov[1] == 2 &&
+        ov[6] == 0 && disposition == 2);
+  CHECK(OpenPath(&h, "save:\\game.dat", kGenericRead, kOpen, kSync, io) == 0);
+  CHECK(NtReadFile(h, 0, 0, 0, io, buf, 16, 0) == 0 && io[1] == 8 && Memeq(buf, "progress", 8));
+  NtClose(h);
+  // Refused: the root in use, the save as new, deleting it while open,
+  // names xam does not take, a root that is no package.
+  Data(&d2, 0, "slot2", "Save Two");
+  CHECK(XamContentCreateEx9(0, "save", &d2, 1, &disposition, 0, 0, 0, 0) == 0x34);
+  CHECK(XamContentCreateEx9(0, "other", &d, 1, &disposition, 0, 0, 0, 0) == 0xB7);
+  CHECK(XamContentDelete(0, &d, 0) == 0x20);
+  CHECK(XamContentCreateEx9(0, "sa.ve", &d2, 1, &disposition, 0, 0, 0, 0) == 0x7B);
+  d2.file[0] = 0;
+  CHECK(XamContentCreateEx9(0, "save2", &d2, 1, &disposition, 0, 0, 0, 0) == 0x57);
+  d2.file[0] = 's';
+  CHECK(XamContentClose("game", 0) == 0x57);
+  // Player 1 made it.
+  u32 is_creator = 9;
+  uint64_t creator = 0;
+  CHECK(XamContentGetCreator(0, &d, &is_creator, &creator, 0) == 0 && is_creator == 1 &&
+        creator == 0xE000000000000001ull);
+  CHECK(XamContentClose("save", 0) == 0);
+  // TRUNCATE_EXISTING empties it.
+  CHECK(XamContentCreateEx9(0, "save", &d, 5, &disposition, 0, 0, 0, 0) == 0 && disposition == 2);
+  CHECK(OpenPath(&h, "save:\\game.dat", kGenericRead, kOpen, kSync, io) == kStatusObjectNameNotFound);
+  CHECK(OpenPath(&h, "save:\\game.dat", kGenericWrite, kCreate, kSync | kNonDirectoryFile, io) == 0);
+  CHECK(NtWriteFile(h, 0, 0, 0, io, "again", 5, 0) == 0);
+  NtClose(h);
+  CHECK(XamContentClose("save", 0) == 0);
+
+  // Another save (on any device: the hard disk), and one no user owns.
+  CHECK(XamContentCreateEx9(0, "save", &d2, 1, &disposition, 0, 0, 0, 0) == 0 && disposition == 1);
+  CHECK(XamContentClose("save", 0) == 0);
+  Data(&d3, 1, "common", "Shared");
+  CHECK(XamContentCreateEx9(0xFF, "save", &d3, 1, &disposition, 0, 0, 0, 0) == 0 && disposition == 1);
+  CHECK(XamContentClose("save", 0) == 0);
+  // Listed: the player's by name, then the one no user owns, its name
+  // marked.
+  CHECK(XamContentCreateEnumerator(0, 0, 1, 0, 4, &size, &e) == 0);
+  CHECK(XamEnumerate(e, 0, items, size, &n, 0) == 0 && n == 2 && items[0].device == 1 && items[0].type == 1 &&
+        Memeq(items[0].file, "slot1", 6) && items[0].display[0] == 'S' && items[0].display[5] == 'O' &&
+        Memeq(items[1].file, "slot2", 6));
+  CHECK(XamEnumerate(e, 0, items, size, &n, 0) == 0 && n == 1 && (uint8_t)items[0].file[0] == ('c' | 0x80) &&
+        Memeq(items[0].file + 1, "ommon", 6));
+  CHECK(XamEnumerate(e, 0, items, size, &n, 0) == 0x12 && n == 0);
+  NtClose(e);
+  // The marked name opens that one.
+  CHECK(XamContentCreateEx9(0, "save", &items[0], 3, &disposition, 0, 0, 0, 0) == 0 && disposition == 2);
+  CHECK(XamContentClose("save", 0) == 0);
+  // One a call through an XOVERLAPPED, without those no user owns
+  // (XCONTENTFLAG_ENUM_EXCLUDECOMMON); the end is ERROR_FUNCTION_FAILED with
+  // ERROR_NO_MORE_FILES as the extended error.
+  CHECK(XamContentCreateEnumerator(0, 1, 1, 0x1000, 1, &size, &e) == 0 && size == sizeof(struct ContentData));
+  CHECK(XamEnumerate(e, 0, items, size, 0, ov) == 0x3E5 && ov[0] == 0 && ov[1] == 1 &&
+        Memeq(items[0].file, "slot1", 6));
+  CHECK(XamEnumerate(e, 0, items, size, 0, ov) == 0x3E5 && ov[1] == 1 && Memeq(items[0].file, "slot2", 6));
+  CHECK(XamEnumerate(e, 0, items, size, 0, ov) == 0x3E5 && ov[0] == 0x65B && ov[1] == 0 && ov[6] == 0x80070012);
+  NtClose(e);
+  // Deleted (by its device: 0 names none).
+  CHECK(XamContentDelete(0, &d2, 0) == 0x48F);
+  d2.device = 1;
+  CHECK(XamContentDelete(0, &d2, 0) == 0 && XamContentDelete(0, &d2, 0) == 2);
+  // Player 2 is not signed in.
+  CHECK(XamContentCreateEnumerator(1, 0, 1, 0, 1, &size, &e) == 0x525);
+}
+
 // ---- timers --------------------------------------------------------------------
 static void Timers(void) {
   u32 t = 0, previous = 9;
@@ -912,6 +1040,7 @@ int main(void) {
   Modules();
   Xam();
   Users();
+  Content();
   Timers();
   Console();
   Gpu();
