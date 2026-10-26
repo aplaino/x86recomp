@@ -91,6 +91,7 @@ u32 RtlUnicodeToMultiByteN(char* dest, u32 dest_bytes, u32* written, const uint1
 u32 RtlUnicodeStringToAnsiString(void* ansi, void* unicode, u32 allocate);
 u32 RtlFreeAnsiString(void* ansi);
 u32 RtlNtStatusToDosError(u32 status);
+u32 RtlTimeToTimeFields(const uint64_t* time, uint16_t* fields);
 u32 XAudioRegisterRenderDriverClient(u32* registration, u32* driver);
 u32 XAudioUnregisterRenderDriverClient(u32 driver);
 u32 XAudioSubmitRenderDriverFrame(u32 driver, float* samples);
@@ -110,6 +111,7 @@ u32 XamLoaderGetLaunchDataSize(u32* size);
 u32 XamLoaderGetLaunchData(void* buffer, u32 size);
 u32 NetDll_WSAStartup(u32 caller, u32 version, void* data);
 u32 NetDll_XNetStartup(u32 caller, void* parameters);
+u32 NetDll_XNetGetEthernetLinkStatus(u32 caller);
 u32 XamAlloc(u32 attributes, u32 size, u32* address);
 u32 XamFree(u32 address);
 u32 XMsgInProcessCall(u32 app, u32 message, void* p1, void* p2);
@@ -730,6 +732,17 @@ static void Conversions(void) {
   CHECK(RtlUnicodeStringToAnsiString(&s, &u, 0) == 0x80000005 && s.length == 1 && Memeq(small, "h", 2));
   CHECK(RtlNtStatusToDosError(0) == 0 && RtlNtStatusToDosError(0xC0000034) == 2 &&
         RtlNtStatusToDosError(0x80070005) == 5 && RtlNtStatusToDosError(0xC0000135) == 126);
+  uint64_t time = 0;
+  uint16_t f[8];
+  RtlTimeToTimeFields(&time, f);
+  CHECK(f[0] == 1601 && f[1] == 1 && f[2] == 1 && f[3] == 0 && f[6] == 0 && f[7] == 1);  // a Monday
+  time = 0x1da6b158f2a0f87ull;  // 2024-02-29 13:45:30.1234567, a Thursday
+  RtlTimeToTimeFields(&time, f);
+  CHECK(f[0] == 2024 && f[1] == 2 && f[2] == 29 && f[3] == 13 && f[4] == 45 && f[5] == 30 && f[6] == 123 &&
+        f[7] == 4);
+  time = 6 * 864000000000ull;  // 1601-01-07, a Sunday
+  RtlTimeToTimeFields(&time, f);
+  CHECK(f[2] == 7 && f[7] == 0);
   volatile uint8_t* fpu = (volatile uint8_t*)(uintptr_t)(*At((u32)pcr() + 0x100) + 0x71);
   KeEnableFpuExceptions(1);
   CHECK(*fpu == 1);
@@ -806,6 +819,7 @@ static void Xam(void) {
   uint16_t wsa[0xC8];
   CHECK(NetDll_WSAStartup(1, 0x0202, wsa) == 0 && wsa[0] == 0x0202 && wsa[1] == 0x0202);
   CHECK(NetDll_WSAStartup(3, 0x0202, wsa) == 10022 && NetDll_XNetStartup(1, 0) == 0);
+  CHECK(NetDll_XNetGetEthernetLinkStatus(1) == 0);
   u32 p = 0;
   CHECK(XamAlloc(0, 0x440, &p) == 0 && p && *At(p) == 0 && *At(p + 0x43C) == 0);
   XamFree(p);

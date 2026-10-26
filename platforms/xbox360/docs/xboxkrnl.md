@@ -16,6 +16,9 @@ titles' code reads, and Xenia's and ReXGlue's implementations (BSD-3).
 - KeTimeStampBundle: interrupt time (be64, 100 ns), system time (be64,
   100 ns since 1601), tick count (be32, ms). Titles read the tick count
   inline.
+- RtlTimeToTimeFields fills TIME_FIELDS, eight shorts: year, month, day,
+  hour, minute, second, milliseconds, weekday (0 is Sunday); xam's
+  FileTimeToSystemTime copies them into a SYSTEMTIME in that order.
 
 ## r13, KPCR and KTHREAD
 r13 holds the current processor's KPCR. Field use in xam and a title

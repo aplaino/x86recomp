@@ -94,6 +94,7 @@ __xex_import_slot_\name:
   FUNCTION 307, RtlMultiByteToUnicodeN
   FUNCTION 309, RtlNtStatusToDosError
   FUNCTION 315, sprintf
+  FUNCTION 320, RtlTimeToTimeFields
   FUNCTION 321, RtlTryEnterCriticalSection
   FUNCTION 322, RtlUnicodeStringToAnsiString
   FUNCTION 323, RtlUnicodeToMultiByteN
@@ -122,6 +123,7 @@ __xex_import_slot_\name:
   FUNCTION 977, XGetVideoMode, 1
   FUNCTION 1, NetDll_WSAStartup, 1
   FUNCTION 51, NetDll_XNetStartup, 1
+  FUNCTION 75, NetDll_XNetGetEthernetLinkStatus, 1
   FUNCTION 423, XamLoaderGetLaunchDataSize, 1
   FUNCTION 424, XamLoaderGetLaunchData, 1
   FUNCTION 490, XamAlloc, 1

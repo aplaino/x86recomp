@@ -1,7 +1,8 @@
-// xboxkrnl: the runtime library's strings and memory routines, debug
+// xboxkrnl: the runtime library's strings, memory and time routines, debug
 // output, formatting.
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 
@@ -149,6 +150,30 @@ HLE(kKrnl, 309, RtlNtStatusToDosError) {
   for (const DosError& e : kDosErrors)
     if (e.status == status) return e.error;
   ppc::Fatal(&c, "RtlNtStatusToDosError(%x): no mapping for this status here", status);
+}
+
+// RtlTimeToTimeFields(*time, *fields): the date of a time in 100 ns
+// units since 1601 as TIME_FIELDS, eight shorts: year, month, day, hour,
+// minute, second, milliseconds, weekday (0 is Sunday), the order xam's
+// FileTimeToSystemTime reads them in.
+HLE(kKrnl, 320, RtlTimeToTimeFields) {
+  using namespace std::chrono;
+  uint64_t time = Rd64(Arg(c, 0));
+  uint32_t fields = Arg(c, 1);
+  uint64_t ms = time / 10000, days = ms / 86400000, in_day = ms % 86400000;
+  // 1601-01-01 is 134,774 days before 1970-01-01.
+  sys_days day{std::chrono::days(int64_t(days) - 134774)};
+  year_month_day date{day};
+  uint16_t values[] = {uint16_t(int(date.year())),
+                       uint16_t(unsigned(date.month())),
+                       uint16_t(unsigned(date.day())),
+                       uint16_t(in_day / 3600000),
+                       uint16_t(in_day / 60000 % 60),
+                       uint16_t(in_day / 1000 % 60),
+                       uint16_t(in_day % 1000),
+                       uint16_t(weekday{day}.c_encoding())};
+  for (uint32_t k = 0; k < 8; k++) Wr16(fields + 2 * k, values[k]);
+  return 0;
 }
 
 // RtlFreeAnsiString(string): its buffer, from the kernel pool.

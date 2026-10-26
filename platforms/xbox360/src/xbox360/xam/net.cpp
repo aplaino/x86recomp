@@ -34,4 +34,8 @@ HLE(kXam, 1, NetDll_WSAStartup) {
 // NetDll_XNetStartup(caller, *parameters).
 HLE(kXam, 51, NetDll_XNetStartup) { return Caller(Arg(c, 0)) ? 0 : kWsaEinval; }
 
+// NetDll_XNetGetEthernetLinkStatus(caller): no link, 0. xam does not check
+// the caller here.
+HLE(kXam, 75, NetDll_XNetGetEthernetLinkStatus) { return 0; }
+
 }  // namespace recomp::xbox360
