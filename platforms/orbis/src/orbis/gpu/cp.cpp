@@ -282,6 +282,7 @@ struct Queues {
   std::condition_variable cv;
   std::deque<Submission> gfx;
   bool gfx_up = false;
+  std::atomic<uint64_t> submitted{0}, completed{0};
   std::map<uint32_t, std::shared_ptr<struct Ring>> rings;
 };
 Queues& Q() {
@@ -308,6 +309,7 @@ void GraphicsThread() {
     if (sub.done) sub.done();
     std::lock_guard<std::mutex> l(Q().mu);
     Q().gfx.pop_front();
+    Q().completed++;
   }
 }
 
@@ -354,8 +356,12 @@ void SubmitGraphics(std::vector<CmdBuffer> dcbs, std::vector<CmdBuffer> ccbs,
     std::thread(GraphicsThread).detach();
   }
   Q().gfx.push_back({std::move(dcbs), std::move(ccbs), std::move(done)});
+  Q().submitted++;
   Q().cv.notify_all();
 }
+
+uint64_t GraphicsSubmitted() { return Q().submitted; }
+uint64_t GraphicsCompleted() { return Q().completed; }
 
 void MapComputeRing(uint32_t vqid, gaddr base, uint32_t size_dw, gaddr rptr_addr) {
   auto r = std::make_shared<Ring>();

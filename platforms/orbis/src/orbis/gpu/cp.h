@@ -25,6 +25,9 @@ struct CmdBuffer {
 // thread once the last has finished.
 void SubmitGraphics(std::vector<CmdBuffer> dcbs, std::vector<CmdBuffer> ccbs,
                     std::function<void()> done);
+// Graphics submissions so far, and how many of them the GPU has finished.
+uint64_t GraphicsSubmitted();
+uint64_t GraphicsCompleted();
 
 // A compute queue's ring (sceGnmMapComputeQueue): the GPU runs what lies
 // between its read pointer and the write pointer Kick moves it to, and

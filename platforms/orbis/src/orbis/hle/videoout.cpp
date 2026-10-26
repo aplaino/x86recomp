@@ -19,6 +19,7 @@
 #include <thread>
 #include <vector>
 
+#include "orbis/gpu/cp.h"
 #include "orbis/hle.h"
 #include "orbis/hle/kernel.h"
 #include "orbis/host.h"
@@ -57,6 +58,7 @@ struct Attr {  // SceVideoOutBufferAttribute
 struct Flip {
   int index;  // -1: blank
   int64_t arg;
+  uint64_t after = 0;  // graphics submissions done first (gpu/cp.h)
   gaddr addr = 0;  // the buffer and its attribute, when it runs
   Attr attr = {};
 };
@@ -154,6 +156,9 @@ void VblankThread() {
     std::this_thread::sleep_until(next);
     std::lock_guard<std::mutex> l(g_mu);
     if (g_port.queue.empty() || vblank % (g_port.rate + 1)) continue;
+    // The GPU first finishes what was submitted before the flip, as it
+    // would by the vblank on the console.
+    if (g_port.queue.front().after > gpu::GraphicsCompleted()) continue;
     Flip f = g_port.queue.front();
     g_port.queue.pop_front();
     if (f.index >= 0) {
@@ -180,7 +185,7 @@ gaddr LabelAddress(int handle) {
   return handle == kHandle && g_port.open ? g_port.labels : 0;
 }
 
-int32_t SubmitFlip(int handle, int index, uint32_t mode, int64_t arg) {
+int32_t SubmitFlip(int handle, int index, uint32_t mode, int64_t arg, uint64_t after) {
   GuestSyncPoint sync;
   std::lock_guard<std::mutex> l(g_mu);
   if (handle != kHandle || !g_port.open) return kErrInvalidHandle;
@@ -188,7 +193,7 @@ int32_t SubmitFlip(int handle, int index, uint32_t mode, int64_t arg) {
     FatalF("sceVideoOutSubmitFlip: buffer %d is not registered", index);
   if (mode != 1) FatalF("sceVideoOutSubmitFlip: flip mode %u not implemented yet", mode);
   if (index >= 0) Wr64(g_port.labels + 8 * uint64_t(index), 1);
-  g_port.queue.push_back({index, arg});
+  g_port.queue.push_back({index, arg, after});
   return 0;
 }
 
@@ -277,8 +282,9 @@ ORBIS_HLE("libSceVideoOut", sceVideoOutRegisterBuffers, 5) {
 }
 
 // int sceVideoOutSubmitFlip(int handle, int index, int mode, int64_t arg):
-// index -1 blanks the display.
+// index -1 blanks the display. After what the game has submitted to the
+// GPU so far.
 ORBIS_HLE("libSceVideoOut", sceVideoOutSubmitFlip, 4) {
   return uint32_t(SubmitFlip(int(Arg(c, 0)), int(Arg(c, 1)), uint32_t(Arg(c, 2)),
-                             int64_t(Arg(c, 3))));
+                             int64_t(Arg(c, 3)), recomp::orbis::gpu::GraphicsSubmitted()));
 }
