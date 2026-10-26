@@ -119,10 +119,18 @@ library.
   answer fails with SCE_NP_ERROR_SIGNED_OUT.
 - recomp_orbis_font: libSceFont and libSceFontFt on the host's FreeType:
   libSceFont's structures, checks, codes and the objects it allocates
-  through the game's memory interface are 11.00's; glyphs are
-  FreeType's (unhinted, anti-aliased), not libSceFontFt's own
-  rasteriser, so pixels differ, and FreeType's allocations through the
-  game's memory are not made.
+  through the game's memory interface are 11.00's. Glyphs follow
+  libSceFontFt's use of FreeType: outlines loaded in font units,
+  unhinted, scaled in its 16.16 fixed point (each edge rounded on its
+  own), placed at the pen truncated to 1/64 pixel and rasterised by
+  FreeType's anti-aliasing rasteriser into the scissor, each pixel
+  keeping the larger coverage; for SDK versions 0.93 to 2.50 a row lower,
+  as there. Kerning comes from the 'kern' table, else from GPOS pair
+  adjustments (the 'latn' script's default language, feature 'kern').
+  Pixels can differ from the console's where the host FreeType's
+  rasteriser or glyph loaders differ from the firmware's; the effects
+  (weight, slant), vertical layout and system fonts are not implemented,
+  and FreeType's allocations through the game's memory are not made.
 - recomp_orbis_pad: libScePad, the user's controller from the first SDL
   gamepad or the keyboard, always connected; at rest in background
   runs; one state per read; the motion sensors report it lying still.
