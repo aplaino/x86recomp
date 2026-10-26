@@ -55,6 +55,31 @@ int sceNpTrophyCreateHandle(int* handle);
 int sceNpTrophyRegisterContext(int ctx, int handle, unsigned long options);
 int sceNpTrophyUnlockTrophy(int ctx, int handle, int id, int* platinum);
 
+typedef struct {
+  void* buffer;
+  unsigned long size;
+  unsigned long reserved[5];
+  void* user;
+} Ngs2BufferInfo;
+typedef struct {
+  int (*alloc)(Ngs2BufferInfo*);
+  int (*free)(Ngs2BufferInfo*);
+  void* user;
+} Ngs2Allocator;
+int sceNgs2SystemCreateWithAllocator(const void* option, const Ngs2Allocator* a,
+                                     unsigned long* out);
+int sceNgs2SystemDestroy(unsigned long sys, Ngs2BufferInfo* out);
+int sceNgs2RackQueryBufferSize(unsigned id, const void* option, Ngs2BufferInfo* out);
+int sceNgs2RackCreate(unsigned long sys, unsigned id, const void* option,
+                      const Ngs2BufferInfo* buf, unsigned long* out);
+int sceNgs2RackCreateWithAllocator(unsigned long sys, unsigned id, const void* option,
+                                   const Ngs2Allocator* a, unsigned long* out);
+int sceNgs2RackDestroy(unsigned long rack, Ngs2BufferInfo* out);
+int sceNgs2RackGetVoiceHandle(unsigned long rack, unsigned index, unsigned long* out);
+int sceNgs2VoiceControl(unsigned long voice, const void* params);
+int sceNgs2VoiceGetState(unsigned long voice, void* state, unsigned long size);
+int sceNgs2SystemRender(unsigned long sys, const void* buffers, unsigned count);
+
 #define SCE_ETIMEDOUT 0x8002003C
 
 // ---- fibers: a ping-pong between two, each on its own stack.
@@ -329,7 +354,147 @@ static int trophy_checks(void) {
   return failed;
 }
 
+// ---- NGS2: a stereo 16-bit one-shot through a sampler voice into a
+// mastering voice, rendered into a float buffer.
+
+static _Alignas(16) char ngs2_pool[0x20000];
+static unsigned long ngs2_used, ngs2_frees;
+
+static int ngs2_alloc(Ngs2BufferInfo* i) {
+  i->buffer = ngs2_pool + ngs2_used;
+  ngs2_used += (i->size + 15) & ~15ul;
+  return 0;
+}
+static int ngs2_free(Ngs2BufferInfo* i) {
+  ngs2_frees++;
+  return 0;
+}
+
+typedef struct {
+  unsigned short size;
+  short next;
+  unsigned id;
+} Ngs2Head;
+typedef struct {
+  Ngs2Head h;
+  unsigned type, channels, rate, config, offset, margin, flags, reserved;
+} Ngs2Setup;
+typedef struct {
+  Ngs2Head h;
+  const void* data;
+  unsigned flags, count;
+  const void* blocks;
+} Ngs2Blocks;
+typedef struct {
+  unsigned offset, size, repeats, skip, samples, reserved;
+  unsigned long user;
+} Ngs2Block;
+typedef struct {
+  Ngs2Head h;
+  unsigned port, input;
+  unsigned long dest;
+} Ngs2Patch;
+typedef struct {
+  Ngs2Head h;
+  unsigned a, b;
+} Ngs2Pair;
+typedef struct {
+  Ngs2Head h;
+  unsigned event;
+} Ngs2Event;
+typedef struct {
+  void* buffer;
+  unsigned long size;
+  unsigned type, channels;
+} Ngs2Render;
+
+static short ngs2_pcm[512 * 2];
+static float ngs2_out[256 * 2];
+
+static unsigned bits(float f) { return *(unsigned*)&f; }
+
+static int ngs2_checks(void) {
+  int failed = 0;
+  Ngs2Allocator a = {ngs2_alloc, ngs2_free, 0};
+  unsigned long sys = 0, sampler = 0, master = 0, sv = 0, mv = 0;
+  failed += test_check(160, (unsigned)sceNgs2SystemCreateWithAllocator(0, 0, &sys), 0x804A020A);
+  failed += test_check(161, sceNgs2SystemCreateWithAllocator(0, &a, &sys), 0);
+  failed += test_check(162, sys, (long)(ngs2_pool + 0x68));  // the handle: buffer + 0x68
+  failed += test_check(163, ngs2_used, 0x10410);              // 0x410 + 512 x 0x80
+  failed += test_check(164, (unsigned)sceNgs2RackCreateWithAllocator(sys, 0x1234, 0, &a, &sampler),
+                       0x804A0260);
+  failed += test_check(165, sceNgs2RackCreateWithAllocator(sys, 0x1000, 0, &a, &sampler), 0);
+  failed += test_check(166, sceNgs2RackCreateWithAllocator(sys, 0x3000, 0, &a, &master), 0);
+  failed += test_check(167, (unsigned)sceNgs2RackGetVoiceHandle(sampler, 256, &sv), 0x804A0302);
+  sceNgs2RackGetVoiceHandle(sampler, 0, &sv);
+  sceNgs2RackGetVoiceHandle(master, 0, &mv);
+
+  // Mastering voice 0: stereo, to render buffer 0, playing.
+  struct {
+    Ngs2Pair setup;
+    Ngs2Event play;
+  } m = {{{16, 16, 0x30000000}, 2, 0}, {{12, 0, 6}, 0}};
+  failed += test_check(168, sceNgs2VoiceControl(mv, &m), 0);
+
+  // The sampler voice: 512 stereo frames of (0.5, -0.25), once, patched to
+  // the mastering rack (its voice 0).
+  for (int i = 0; i < 512; i++) ngs2_pcm[2 * i] = 0x4000, ngs2_pcm[2 * i + 1] = -0x2000;
+  Ngs2Block block = {0, sizeof ngs2_pcm, 0, 0, 512, 0, 7};
+  struct {
+    Ngs2Setup setup;
+    Ngs2Blocks blocks;
+    Ngs2Patch patch;
+    Ngs2Event play;
+  } v = {{{40, 40, 0x10000000}, 0x12, 2, 48000, 0, 0, 0, 0, 0},
+         {{32, 32, 0x10000001}, ngs2_pcm, 0, 1, &block},
+         {{24, 24, 5}, 0, 0, master},
+         {{12, 0, 6}, 0}};
+  failed += test_check(169, sceNgs2VoiceControl(sv, &v), 0);
+  Ngs2Pair bad = {{12, 0, 2}, 0, 0};  // port volume is 16 bytes
+  failed += test_check(170, (unsigned)sceNgs2VoiceControl(sv, &bad), 0x804A030A);
+  Ngs2Patch to_sampler = {{24, 0, 5}, 0, 0, sampler};  // samplers have no inputs
+  failed += test_check(171, (unsigned)sceNgs2VoiceControl(sv, &to_sampler), 0x804A0305);
+  Ngs2Pair loop[2] = {{{16, 16, 2}, 0, 0x3F800000}, {{16, -16, 2}, 0, 0x3F800000}};
+  failed += test_check(172, (unsigned)sceNgs2VoiceControl(sv, loop), 0x804A030B);
+
+  unsigned st[12];
+  failed += test_check(173, sceNgs2VoiceGetState(sv, st, 4), 0);
+  failed += test_check(174, st[0], 1);  // played, not rendered yet
+
+  Ngs2Render out = {ngs2_out, sizeof ngs2_out, 0x18, 2};
+  Ngs2Render three = {ngs2_out, sizeof ngs2_out, 0x18, 3};
+  failed += test_check(175, (unsigned)sceNgs2SystemRender(sys, &three, 1), 0x804A0052);
+  failed += test_check(176, sceNgs2SystemRender(sys, &out, 1), 0);
+  // The resampler starts 3 samples late (its history), then copies.
+  failed += test_check(177, bits(ngs2_out[2 * 2]) == 0 && bits(ngs2_out[3 * 2]) == 0x3F000000 &&
+                                bits(ngs2_out[3 * 2 + 1]) == 0xBE800000 &&
+                                bits(ngs2_out[255 * 2]) == 0x3F000000,
+                       1);
+  for (int i = 0; i < 12; i++) st[i] = 0xAA;
+  failed += test_check(178, sceNgs2VoiceGetState(sv, st, 8), 0);
+  failed += test_check(179, st[0], 0xAA);  // 4 < size < 0x30: nothing written
+  sceNgs2VoiceGetState(sv, st, 0x30);
+  failed += test_check(180, st[0], 3);  // in use, playing
+  failed += test_check(181, st[1], 0x3F800000);  // no envelope: 1.0
+  failed += test_check(182, st[4] | (unsigned long)st[5] << 32, 256);  // decoded samples
+  failed += test_check(183, st[6], 1024);                              // and bytes
+  failed += test_check(184, st[8], 7);                                 // the block's userData
+  sceNgs2SystemRender(sys, &out, 1);
+  sceNgs2VoiceGetState(sv, st, 0x30);
+  failed += test_check(185, st[0], 3);
+  sceNgs2SystemRender(sys, &out, 1);  // the last 3 samples, then the voice ends
+  failed += test_check(186, bits(ngs2_out[2 * 2]) == 0x3F000000 && bits(ngs2_out[3 * 2]) == 0, 1);
+  sceNgs2VoiceGetState(sv, st, 0x30);
+  failed += test_check(187, st[0], 0);
+
+  failed += test_check(188, sceNgs2RackDestroy(sampler, 0), 0);
+  failed += test_check(189, sceNgs2RackDestroy(master, 0), 0);
+  failed += test_check(190, sceNgs2SystemDestroy(sys, 0), 0);
+  failed += test_check(191, ngs2_frees, 3);
+  return failed;
+}
+
 int system_checks(void) {
   return fiber_checks() + dir_checks() + gpu_checks() + save_checks() + audio_checks() +
-         pad_checks() + trophy_checks();
+         pad_checks() + trophy_checks() + ngs2_checks();
 }

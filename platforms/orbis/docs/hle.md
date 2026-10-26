@@ -69,6 +69,35 @@ library.
   host's clock, so a run without an audio device keeps time). Samples
   go to the software mixer (runtime/audio), a queue-fed voice per port,
   scaled by the port's volumes; 8 channels are folded to stereo.
+- recomp_orbis_ngs2: libSceNgs2, rendering on the caller's thread into
+  the game's buffers (the game gives them to libSceAudioOut). What
+  follows 11.00: the allocator protocol (the context-buffer info, the
+  free callback on failure and destroy), handles at 11.00's offsets in
+  the game's buffers (system +0x68, rack +0x80, voices after the rack
+  object; a rack handle as a patch destination is its voice 0), every
+  option and parameter layout with its clamps, checks and codes, the
+  voice events, fades (64 samples) and state flags, states as of the
+  last render (exactly 4 bytes: the flags; fewer than the rack's state:
+  nothing), controls taking effect at the next render (setup without
+  play kills a voice in use, games built with SDK 1.75 or later), and the
+  render order (sources, then the other voices depth-first from each
+  mastering voice; buffers no voice wrote are zeroed). The sampler reads
+  PCM in place from the game's memory through its block ring (repeats,
+  exit loop, stream continuations, termination), with a 4-tap
+  Hann-windowed sinc resampler (512 phases, 3 samples of start-up
+  history); envelopes, RBJ biquads, the compressor/limiter, distortion
+  and peak meters follow 11.00's formulas; the mastering rack's matrix,
+  LFE low-pass (4th-order Chebyshev, 0.1 dB), limiter and gain feed the
+  buffer its output id names. Ours rather than 11.00's: the voices' work
+  memory is on the host, so a rack's buffer is only 0x1058 + 0xc0 per
+  voice bytes; the default channel matrices (standard fold-downs: C and
+  surrounds at -3/-6 dB, no LFE); the I3DL2 reverb's delay lengths,
+  reflection patterns and comb routing (the structure, the property
+  mapping and clamps are 11.00's); the curve and coefficient tables
+  (computed). Not implemented yet, each fatal: ATRAC9, VAG and
+  oscillator waveforms, voice callbacks, user effects, custom racks and
+  reverb parameters, the alternative default matrices, and reading
+  parameters back (the 0x8000 ids).
 - recomp_orbis_avplayer: libSceAvPlayer on ffmpeg, reading through the
   game's file callbacks on a guest service thread; video as NV12 in the
   game's texture memory (pitch: the width rounded up to 64), released

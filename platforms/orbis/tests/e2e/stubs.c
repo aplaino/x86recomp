@@ -64,3 +64,12 @@ STUB(sceNpTrophyUnlockTrophy)
 STUB(sceGnmSetVsShader) STUB(sceGnmInsertPushMarker) STUB(sceGnmDrawInitDefaultHardwareState200)
 STUB(sceGnmSubmitCommandBuffers) STUB(sceGnmAddEqEvent)
 #endif
+
+#ifdef LIB_NGS2
+#define STUB(name) \
+  void name(void) {}
+STUB(sceNgs2SystemCreateWithAllocator) STUB(sceNgs2SystemDestroy) STUB(sceNgs2RackQueryBufferSize)
+STUB(sceNgs2RackCreate) STUB(sceNgs2RackCreateWithAllocator) STUB(sceNgs2RackDestroy)
+STUB(sceNgs2RackGetVoiceHandle) STUB(sceNgs2VoiceControl) STUB(sceNgs2VoiceGetState)
+STUB(sceNgs2SystemRender)
+#endif
