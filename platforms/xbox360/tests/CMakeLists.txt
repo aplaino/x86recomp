@@ -89,6 +89,7 @@ add_custom_command(OUTPUT "${_bin}/title.elf"
   COMMENT "Linking the PowerPC runtime test title")
 add_custom_command(OUTPUT "${_bin}/title.xex"
   COMMAND xbox360_elf2xex "${_bin}/title.elf" "${_bin}/title.xex" --import xboxkrnl.exe
+          --header 0x00030000=0x400 --header 0x00020401=0x123000
   DEPENDS xbox360_elf2xex "${_bin}/title.elf")
 set(_title_gen "${CMAKE_CURRENT_BINARY_DIR}/title_generated")
 add_custom_command(OUTPUT "${_title_gen}/funcs_000.cpp" "${_title_gen}/table.cpp"

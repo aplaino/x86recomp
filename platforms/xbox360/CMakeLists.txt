@@ -10,7 +10,7 @@ recomp_bundle(recomp_xbox360_image)
 
 # The runtime (ARCHITECTURE.md, "Runtime"): guest memory, the HLE registry
 # and Import(), threads, dispatcher objects, handles and time, the file
-# namespace, process bring-up (xbox360/process.h). Lifted modules link it for what lifted
+# namespace, the title's module, process bring-up (xbox360/process.h). Lifted modules link it for what lifted
 # code calls (recomp_add_lifted_ppc ... LINK recomp_xbox360).
 find_package(Threads REQUIRED)
 add_library(recomp_xbox360 SHARED
@@ -19,6 +19,7 @@ add_library(recomp_xbox360 SHARED
   src/xbox360/fs.cpp
   src/xbox360/hle.cpp
   src/xbox360/memory.cpp
+  src/xbox360/module.cpp
   src/xbox360/objects.cpp
   src/xbox360/process.cpp
   src/xbox360/thread.cpp)
@@ -32,6 +33,7 @@ recomp_bundle(recomp_xbox360)
 add_library(recomp_xbox360_xboxkrnl SHARED
   src/xbox360/xboxkrnl/io.cpp
   src/xbox360/xboxkrnl/memory.cpp
+  src/xbox360/xboxkrnl/modules.cpp
   src/xbox360/xboxkrnl/rtl.cpp
   src/xbox360/xboxkrnl/sync.cpp
   src/xbox360/xboxkrnl/threads.cpp

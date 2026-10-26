@@ -190,8 +190,8 @@ zero IV.
 ## Runtime
 The runtime (`src/xbox360`, library `recomp_xbox360`) holds what lifted
 code calls (`Import`, `Sc`, `Trap`, `TimeBase`) and the kernel's state:
-guest memory, the HLE registry, threads, dispatcher objects, handles and
-time. The system modules' exports are HLE modules on top of it, one
+guest memory, the HLE registry, threads, dispatcher objects, handles,
+the title's module and time. The system modules' exports are HLE modules on top of it, one
 shared library per system module (`recomp_xbox360_xboxkrnl` so far, in
 `src/xbox360/xboxkrnl`). Behaviour comes from the system's own code where
 it shows it (xam, which the console's update ships unencrypted, and what
@@ -292,6 +292,17 @@ without a lock.
   time is the host's, KeTimeStampBundle is kept current every
   millisecond.
 
+### The title's module
+The loader keeps the title's XEX headers in kernel memory and describes
+the module with a loader entry (LDR_DATA_TABLE_ENTRY), which
+XexExecutableModuleHandle points at and which is the module's handle:
+titles find their headers through it and read them with
+RtlImageXexHeaderField, their resources with XexGetModuleSection, their
+privileges with XexCheckExecutablePrivilege. The title is the only
+module with an entry: asking for a system module's handle (xam asks for
+its own) is fatal until those are modelled, and XexLoadImage (a title's
+own DLLs) is not there yet.
+
 ### Files
 The file namespace (`src/xbox360/fs.{h,cpp}`) is the kernel's: devices,
 each a host directory, and symbolic links to them.
@@ -352,11 +363,13 @@ memory; any other interrupt fails the run.
   Xenia's test vectors; it has its own planted bugs.
 - The runtime test title (tests/title, `xbox360_runtime`): C and assembly
   built like the fixture, which calls the kernel through imports
-  (`xbox360_elf2xex --import` writes its import library), is lifted into
-  a lifted module and run on the runtime. It checks what the kernel gives
+  (`xbox360_elf2xex --import` writes its import library, `--header` and
+  `__xex_resource_` symbols its optional headers), is lifted into a
+  lifted module and run on the runtime. It checks what the kernel gives
   it (memory and the physical views, threads, TLS, r13, waits and
   objects, critical sections, formatting, variables, time, files on its
-  disc and on the hard disk) and exits with the number of failed checks.
+  disc and on the hard disk, its module and XEX headers) and exits with
+  the number of failed checks.
   The test writes the disc's files and empties the data directory before
   each run.
 - Not covered by QEMU: what the 970 does differently from the Xenon
@@ -372,6 +385,6 @@ memory; any other interrupt fails the run.
    thread bring-up (r13 and the thread's kernel structures), the kernel
    and xam HLE, written against the system's own behaviour. In progress:
    the libraries and their layout, memory, threads, synchronisation,
-   files and the first kernel exports are done; next the title's module
-   (Xex*), timers and APCs, then xam.
+   files, the title's module and the first kernel exports are done; next
+   the kernel and xam exports a title's startup calls, timers and APCs.
 5. Xenos: the command processor and shaders through gfx::Device.

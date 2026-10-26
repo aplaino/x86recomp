@@ -2,13 +2,16 @@
 // The kernel's state the HLE modules share (ARCHITECTURE.md, "Runtime:
 // threads and objects"): dispatcher objects in guest memory and the waits
 // on them, handles, guest threads with the structures guest code reads
-// through r13, and time.
+// through r13, the title's module, and time.
 
 #include <cstdint>
+#include <string>
 
 #include "ppc/ctx.h"
 
 namespace recomp::xbox360 {
+
+struct XexModule;
 
 // NTSTATUS values.
 constexpr uint32_t kStatusSuccess = 0, kStatusAbandoned = 0x80, kStatusAlerted = 0x101,
@@ -19,7 +22,9 @@ constexpr uint32_t kStatusSuccess = 0, kStatusAbandoned = 0x80, kStatusAlerted =
                    kStatusObjectTypeMismatch = 0xC0000024,
                    kStatusInvalidPageProtection = 0xC0000045, kStatusMutantNotOwned = 0xC0000046,
                    kStatusSemaphoreLimitExceeded = 0xC0000047,
-                   kStatusMemoryNotAllocated = 0xC00000A0, kStatusFreeVmNotAtBase = 0xC000009F;
+                   kStatusMemoryNotAllocated = 0xC00000A0, kStatusFreeVmNotAtBase = 0xC000009F,
+                   kStatusDllNotFound = 0xC0000135, kStatusNotFound = 0xC0000225,
+                   kStatusDriverEntrypointNotFound = 0xC0000263;
 // ... and the file system's.
 constexpr uint32_t kStatusBufferOverflow = 0x80000005, kStatusNoMoreFiles = 0x80000006,
                    kStatusInvalidInfoClass = 0xC0000003, kStatusInfoLengthMismatch = 0xC0000004,
@@ -136,6 +141,26 @@ void SetProcessInfo(const ProcessInfo& info);
 const ProcessInfo& Process();
 // Ends the host process with `status` (the title's exit).
 [[noreturn]] void ExitProcess(int status);
+
+// ---- modules ------------------------------------------------------------
+// The title's module as the loader describes it to guest code: its loader
+// entry (LDR_DATA_TABLE_ENTRY), which XexExecutableModuleHandle points at
+// and module handles are, and the XEX headers it was loaded from, in guest
+// memory from the entry's 0x58.
+constexpr uint32_t kLdrXexHeader = 0x58;
+// Sets up the title's module: `m` as loaded, `name` the file it was
+// started as (what XexGetModuleHandle matches). Before BindImports.
+void LoadExecutableModule(const XexModule& m, const std::string& name);
+uint32_t ExecutableModule();  // its loader entry, 0 before
+const std::string& ExecutableModuleName();
+// Export `ordinal` of the title's module, 0 if it has none.
+uint32_t ExecutableExport(uint32_t ordinal);
+// RtlImageXexHeaderField: optional header `key` of the XEX headers at
+// `header` in guest memory, as the key's low byte says where its data is:
+// 0 the value in the header table itself, 1 a dword in the table (its
+// address), otherwise data at an offset from the headers (its address).
+// 0 if the headers have no such key.
+uint32_t XexHeaderField(uint32_t header, uint32_t key);
 
 // ---- time ---------------------------------------------------------------
 // The time base runs at the Xenon's 3.192 GHz / 64; xam converts its ticks

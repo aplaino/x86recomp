@@ -73,9 +73,16 @@ u32 NtWriteFile(u32 handle, u32 event, void* apc, void* context, u32* io, const 
 u32 ObCreateSymbolicLink(void* link, void* target);
 u32 ObDeleteSymbolicLink(void* link);
 u32 _vsnprintf(char* buf, u32 count, const char* fmt, uint64_t* args);
-extern u32 __imp_NtClose, __imp_ExThreadObjectType, __imp_KeTimeStampBundle, __imp_XboxKrnlVersion;
+u32 RtlImageXexHeaderField(u32 headers, u32 key);
+u32 XexCheckExecutablePrivilege(u32 privilege);
+u32 XexGetModuleHandle(const char* name, u32* handle);
+u32 XexGetModuleSection(u32 handle, const char* name, u32* data, u32* size);
+u32 XexGetProcedureAddress(u32 handle, u32 ordinal, u32* address);
+extern u32 __imp_NtClose, __imp_ExThreadObjectType, __imp_KeTimeStampBundle, __imp_XboxKrnlVersion,
+    __imp_XexExecutableModuleHandle;
 
 // start.S
+void _start(void);
 void thread_startup(void);
 u32 sprintf9(char* buf, const char* fmt, int a, int b, int c, int d, int e, int f, int g);
 u32 NtCreateFile9(u32* handle, u32 access, void* attributes, u32* io, void* size, u32 file_attributes,
@@ -484,7 +491,43 @@ static void Files(void) {
   NtClose(d);
 }
 
+// ---- the title's module -----------------------------------------------------
+// tests/CMakeLists.txt gives the title's XEX the system flags 0x400 and a
+// title workspace size (header 0x00020401) of 0x123000, and runs it as
+// title.xex; xbox360_elf2xex makes this its resource "Strings".
+const char __xex_resource_Strings[] __attribute__((used)) = "resource data";
+
+static void Modules(void) {
+  u32 h = *At(__imp_XexExecutableModuleHandle);
+  CHECK(h != 0);
+  if (!h) return;
+  u32 headers = At(h)[0x58 / 4], start = (u32)(uintptr_t)_start;
+  CHECK(Memeq((const void*)(uintptr_t)headers, "XEX2", 4));
+  CHECK(At(h)[0x1C / 4] == 0x82000000 && At(h)[0x3C / 4] == start);
+  // Its base name, in UTF-16.
+  CHECK((At(h)[0x2C / 4] >> 16) == 18 && *(volatile uint16_t*)(uintptr_t)At(h)[0x30 / 4] == 't');
+  // Header fields: a value in the table, a dword's address, a missing key.
+  CHECK(RtlImageXexHeaderField(headers, 0x00010100) == start);
+  u32 workspace = RtlImageXexHeaderField(headers, 0x00020401);
+  CHECK(workspace && *At(workspace) == 0x123000);
+  CHECK(RtlImageXexHeaderField(headers, 0x00040006) == 0);
+  CHECK(XexCheckExecutablePrivilege(10) == 1 && XexCheckExecutablePrivilege(9) == 0);
+  u32 other = 1;
+  CHECK(XexGetModuleHandle(0, &other) == 0 && other == h);
+  other = 1;
+  CHECK(XexGetModuleHandle("TITLE.xex", &other) == 0 && other == h);
+  other = 1;
+  CHECK((int32_t)XexGetModuleHandle("xbdm.xex", &other) < 0 && other == 0);
+  u32 data = 0, size = 0;
+  CHECK(XexGetModuleSection(h, "Strings", &data, &size) == 0 &&
+        data == (u32)(uintptr_t)__xex_resource_Strings && size == sizeof __xex_resource_Strings);
+  CHECK((int32_t)XexGetModuleSection(h, "Other", &data, &size) < 0);
+  u32 address = 1;
+  CHECK((int32_t)XexGetProcedureAddress(0, 1, &address) < 0 && address == 0);
+}
+
 int main(void) {
+  Modules();
   Memory();
   Physical();
   Threads();

@@ -240,6 +240,7 @@ bool ParseXex(const std::vector<uint8_t>& file, XexModule& m, std::string& err) 
     return false;
   }
   uint32_t image_size = r.U32(security + 4);
+  m.headers.assign(file.begin(), file.begin() + header_size);
   if (!m.base) m.base = r.U32(security + kSecurityLoadAddress);
   if (!Image(r, file, header_size, ffi, image_size, m.image, err) || !ReadPe(m, err)) return false;
 
