@@ -78,8 +78,16 @@ u32 XexCheckExecutablePrivilege(u32 privilege);
 u32 XexGetModuleHandle(const char* name, u32* handle);
 u32 XexGetModuleSection(u32 handle, const char* name, u32* data, u32* size);
 u32 XexGetProcedureAddress(u32 handle, u32 ordinal, u32* address);
+u32 ExGetXConfigSetting(u32 category, u32 setting, void* buffer, u32 size, uint16_t* required);
+u32 ExRegisterTitleTerminateNotification(void* registration, u32 create);
+u32 FscSetCacheElementCount(u32 count);
+u32 HalGetCurrentAVPack(void);
+u32 VdQueryVideoMode(u32* mode);
+u32 XGetAVPack(void);     // xam
+u32 XGetVideoMode(u32* mode);  // xam
 extern u32 __imp_NtClose, __imp_ExThreadObjectType, __imp_KeTimeStampBundle, __imp_XboxKrnlVersion,
-    __imp_XexExecutableModuleHandle;
+    __imp_XexExecutableModuleHandle, __imp_ExLoadedCommandLine, __imp_VdGlobalDevice, __imp_VdGpuClockInMHz,
+    __imp_VdHSIOCalibrationLock;
 
 // start.S
 void _start(void);
@@ -526,8 +534,41 @@ static void Modules(void) {
   CHECK((int32_t)XexGetProcedureAddress(0, 1, &address) < 0 && address == 0);
 }
 
+// ---- the console --------------------------------------------------------------
+static void Console(void) {
+  u32 v = 0;
+  uint16_t required = 0;
+  CHECK(ExGetXConfigSetting(3, 9, &v, 4, &required) == 0 && v == 1 && required == 4);  // English
+  CHECK(ExGetXConfigSetting(2, 2, &v, 4, &required) == 0 && v == 0x00400100);  // NTSC-M
+  required = 0;
+  CHECK(ExGetXConfigSetting(3, 9, 0, 0, &required) == 0 && required == 4);
+  CHECK(ExGetXConfigSetting(3, 9, &v, 2, &required) == 0xC0000023);
+  // XGetAVPack and XGetVideoMode are the kernel's queries.
+  CHECK(XGetAVPack() == HalGetCurrentAVPack());
+  u32 mode[12], kernel_mode[12];
+  XGetVideoMode(mode);
+  VdQueryVideoMode(kernel_mode);
+  CHECK(Memeq(mode, kernel_mode, sizeof mode));
+  CHECK(mode[0] == 1280 && mode[1] == 720 && mode[3] == 1 && mode[5] == 0x42700000 && mode[6] == 1);
+  CHECK(*At(__imp_VdGpuClockInMHz) == 500 && *At(__imp_VdGlobalDevice) == 0);
+  // The calibration lock is a free critical section.
+  void* lock = (void*)(uintptr_t)__imp_VdHSIOCalibrationLock;
+  CHECK(At(__imp_VdHSIOCalibrationLock)[4] == 0xFFFFFFFF);
+  RtlEnterCriticalSection(lock);
+  CHECK(At(__imp_VdHSIOCalibrationLock)[4] == 0 && RtlTryEnterCriticalSection(lock) == 1);
+  RtlLeaveCriticalSection(lock);
+  RtlLeaveCriticalSection(lock);
+  CHECK(At(__imp_VdHSIOCalibrationLock)[4] == 0xFFFFFFFF);
+  CHECK(Memeq((const void*)(uintptr_t)__imp_ExLoadedCommandLine, "\"title.xex\"", 12));
+  u32 registration[4] = {0x82001000, 0, 0, 0};
+  CHECK(ExRegisterTitleTerminateNotification(registration, 1) == 0);
+  CHECK(ExRegisterTitleTerminateNotification(registration, 0) == 0);
+  CHECK(FscSetCacheElementCount(64) == 0);
+}
+
 int main(void) {
   Modules();
+  Console();
   Memory();
   Physical();
   Threads();

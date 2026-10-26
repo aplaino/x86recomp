@@ -1,20 +1,20 @@
 // The test title's imports, as a title's are: a slot per import (the
 // loader writes the export's address into it) and, for a function, the
 // thunk the code calls. xbox360_elf2xex finds the records by their
-// __xex_import symbols; library 0 is xboxkrnl.exe.
-  .macro FUNCTION ordinal, name
+// __xex_import symbols; library 0 is xboxkrnl.exe, 1 xam.xex.
+  .macro FUNCTION ordinal, name, library=0
   .section .data.imports, "aw"
   .p2align 2
   .globl __imp_\name
 __imp_\name:
 __xex_import_slot_\name:
-  .long \ordinal
+  .long (\library << 16) | \ordinal
   .text
   .p2align 4
   .globl \name
 \name:
 __xex_import_thunk_\name:
-  .long 0x01000000 | \ordinal
+  .long 0x01000000 | (\library << 16) | \ordinal
   .long 0, 0, 0
   .endm
 
@@ -32,7 +32,11 @@ __xex_import_slot_\name:
   FUNCTION 9, ExAllocatePool
   FUNCTION 13, ExCreateThread
   FUNCTION 15, ExFreePool
+  FUNCTION 16, ExGetXConfigSetting
+  FUNCTION 21, ExRegisterTitleTerminateNotification
   FUNCTION 25, ExTerminateThread
+  FUNCTION 33, FscSetCacheElementCount
+  FUNCTION 34, HalGetCurrentAVPack
   FUNCTION 43, InterlockedFlushSList
   FUNCTION 44, InterlockedPopEntrySList
   FUNCTION 90, KeDelayExecutionThread
@@ -91,7 +95,14 @@ __xex_import_slot_\name:
   FUNCTION 405, XexGetModuleHandle
   FUNCTION 406, XexGetModuleSection
   FUNCTION 407, XexGetProcedureAddress
+  FUNCTION 458, VdQueryVideoMode
+  FUNCTION 971, XGetAVPack, 1
+  FUNCTION 977, XGetVideoMode, 1
   VARIABLE 27, ExThreadObjectType
   VARIABLE 173, KeTimeStampBundle
   VARIABLE 344, XboxKrnlVersion
   VARIABLE 403, XexExecutableModuleHandle
+  VARIABLE 430, ExLoadedCommandLine
+  VARIABLE 446, VdGlobalDevice
+  VARIABLE 448, VdGpuClockInMHz
+  VARIABLE 449, VdHSIOCalibrationLock

@@ -1,7 +1,6 @@
 // xboxkrnl: events, semaphores, mutants, waits, handles, critical sections,
 // spin locks and IRQL, interlocked singly linked lists.
 
-#include <algorithm>
 #include <thread>
 
 #include "ppc/fatal.h"
@@ -203,28 +202,17 @@ HLE(kKrnl, 261, ObDereferenceObject) {
 }
 
 // ---- critical sections ------------------------------------------------------
-// RTL_CRITICAL_SECTION: a synchronization event's header (its byte 1 the
-// spin count / 256), the lock count at 0x10 (-1 free), the recursion count
-// at 0x14 and the owning KTHREAD at 0x18; the kernel's own algorithm: take
-// it with an atomic increment of the lock count, wait on the event when it
+// RTL_CRITICAL_SECTION (kernel.h), with the kernel's own algorithm: take it
+// with an atomic increment of the lock count, wait on the event when it
 // was held.
 HLE(kKrnl, 302, RtlInitializeCriticalSection) {
-  uint32_t cs = Arg(c, 0);
-  InitObject(cs, kSynchronizationEvent, 0);
-  Wr32(cs + 0x10, 0xFFFFFFFF);
-  Wr32(cs + 0x14, 0);
-  Wr32(cs + 0x18, 0);
+  InitCriticalSection(Arg(c, 0), 0);
   return 0;
 }
 
 // RtlInitializeCriticalSectionAndSpinCount(cs, spin count).
 HLE(kKrnl, 303, RtlInitializeCriticalSectionAndSpinCount) {
-  uint32_t cs = Arg(c, 0);
-  InitObject(cs, kSynchronizationEvent, 0);
-  Wr8(cs + 1, uint8_t(std::min<uint32_t>((Arg(c, 1) + 255) / 256, 255)));
-  Wr32(cs + 0x10, 0xFFFFFFFF);
-  Wr32(cs + 0x14, 0);
-  Wr32(cs + 0x18, 0);
+  InitCriticalSection(Arg(c, 0), Arg(c, 1));
   return kStatusSuccess;
 }
 

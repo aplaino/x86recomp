@@ -10,10 +10,11 @@ recomp_bundle(recomp_xbox360_image)
 
 # The runtime (ARCHITECTURE.md, "Runtime"): guest memory, the HLE registry
 # and Import(), threads, dispatcher objects, handles and time, the file
-# namespace, the title's module, process bring-up (xbox360/process.h). Lifted modules link it for what lifted
+# namespace, the title's module, the console's settings, process bring-up (xbox360/process.h). Lifted modules link it for what lifted
 # code calls (recomp_add_lifted_ppc ... LINK recomp_xbox360).
 find_package(Threads REQUIRED)
 add_library(recomp_xbox360 SHARED
+  src/xbox360/config.cpp
   src/xbox360/cpu.cpp
   src/xbox360/format.cpp
   src/xbox360/fs.cpp
@@ -37,12 +38,18 @@ add_library(recomp_xbox360_xboxkrnl SHARED
   src/xbox360/xboxkrnl/rtl.cpp
   src/xbox360/xboxkrnl/sync.cpp
   src/xbox360/xboxkrnl/threads.cpp
-  src/xbox360/xboxkrnl/variables.cpp)
-target_link_libraries(recomp_xbox360_xboxkrnl PUBLIC recomp_xbox360)
-if(NOT APPLE)
-  target_link_options(recomp_xbox360_xboxkrnl INTERFACE "LINKER:--no-as-needed")
-endif()
-recomp_bundle(recomp_xbox360_xboxkrnl)
+  src/xbox360/xboxkrnl/variables.cpp
+  src/xbox360/xboxkrnl/video.cpp
+  src/xbox360/xboxkrnl/xconfig.cpp)
+add_library(recomp_xbox360_xam SHARED
+  src/xbox360/xam/info.cpp)
+foreach(_m xboxkrnl xam)
+  target_link_libraries(recomp_xbox360_${_m} PUBLIC recomp_xbox360)
+  if(NOT APPLE)
+    target_link_options(recomp_xbox360_${_m} INTERFACE "LINKER:--no-as-needed")
+  endif()
+  recomp_bundle(recomp_xbox360_${_m})
+endforeach()
 
 # recomp_lift_ppc reads XEX2.
 target_sources(recomp_lift_ppc PRIVATE lifter/xex_reader.cpp)

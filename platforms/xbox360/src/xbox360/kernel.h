@@ -18,6 +18,7 @@ constexpr uint32_t kStatusSuccess = 0, kStatusAbandoned = 0x80, kStatusAlerted =
                    kStatusTimeout = 0x102, kStatusPending = 0x103,
                    kStatusUnsuccessful = 0xC0000001, kStatusNotImplemented = 0xC0000002,
                    kStatusInvalidHandle = 0xC0000008, kStatusInvalidParameter = 0xC000000D,
+                   kStatusBufferTooSmall = 0xC0000023, kStatusInvalidParameter3 = 0xC00000F1,
                    kStatusNoMemory = 0xC0000017, kStatusConflictingAddresses = 0xC0000018,
                    kStatusObjectTypeMismatch = 0xC0000024,
                    kStatusInvalidPageProtection = 0xC0000045, kStatusMutantNotOwned = 0xC0000046,
@@ -69,6 +70,12 @@ bool ReleaseSemaphore(uint32_t sem, int32_t count, int32_t& previous);
 // KeReleaseMutant on behalf of the current thread: kStatusMutantNotOwned
 // if it does not own it.
 uint32_t ReleaseMutant(uint32_t mutant, int32_t& previous);
+
+// RTL_CRITICAL_SECTION (0x1C bytes): a synchronization event's header (its
+// byte 1 the spin count / 256), the lock count at 0x10 (-1 free), the
+// recursion count at 0x14 and the owning KTHREAD at 0x18; free.
+constexpr uint32_t kCriticalSectionSize = 0x1C;
+void InitCriticalSection(uint32_t cs, uint32_t spin_count);
 
 // KeWaitForMultipleObjects for the current thread. `timeout` is a 100 ns
 // count, NT's LARGE_INTEGER: negative relative, otherwise an absolute

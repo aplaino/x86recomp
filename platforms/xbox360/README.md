@@ -15,9 +15,10 @@ the same output as on a PowerPC 970 in 32-bit mode, every instruction
 form checked bit for bit against it (VMX128's as their VMX equivalents).
 The runtime maps the console's address space with its physical views,
 runs a title's threads with their kernel structures, and has the
-kernel's memory, thread, synchronisation, file, module, string and
-formatting exports that a test title checks; the rest of what a title's
-startup calls, timers and xam are next.
+kernel's memory, thread, synchronisation, file, module, settings, string
+and formatting exports and the first of xam's, which a test title
+checks; the rest of what a title's startup calls (the display driver
+first), timers and the rest of xam are next.
 
 ## Using it
 
@@ -36,7 +37,7 @@ add_subdirectory("${X86RECOMP_DIR}" x86recomp)
 # The lifted title is a library of its own, next to the program.
 recomp_add_lifted_ppc(mygame_lifted "${CMAKE_CURRENT_SOURCE_DIR}/generated" LINK recomp_xbox360)
 add_executable(mygame src/main.cpp)
-target_link_libraries(mygame PRIVATE recomp_xbox360 recomp_xbox360_xboxkrnl mygame_lifted)
+target_link_libraries(mygame PRIVATE recomp_xbox360 recomp_xbox360_xboxkrnl recomp_xbox360_xam mygame_lifted)
 recomp_bundle(mygame)
 ```
 
