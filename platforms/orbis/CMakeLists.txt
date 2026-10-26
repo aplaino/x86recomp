@@ -30,6 +30,9 @@ target_link_libraries(recomp_orbis_fiber PUBLIC recomp_orbis)
 # libSceAudioOut (and the audio libraries on it).
 add_library(recomp_orbis_audio SHARED src/orbis/hle/audioout.cpp)
 target_link_libraries(recomp_orbis_audio PUBLIC recomp_orbis recomp_audio)
+# libSceNgs2: renders into the game's buffers, which it gives libSceAudioOut.
+add_library(recomp_orbis_ngs2 SHARED src/orbis/hle/ngs2.cpp src/orbis/hle/ngs2_dsp.cpp)
+target_link_libraries(recomp_orbis_ngs2 PUBLIC recomp_orbis)
 add_library(recomp_orbis_savedata SHARED src/orbis/hle/savedata.cpp)
 target_link_libraries(recomp_orbis_savedata PUBLIC recomp_orbis_kernel)
 # libScePad on SDL gamepads and the keyboard.
@@ -91,7 +94,7 @@ if(RECOMP_LD_LLD AND Python3_FOUND AND CMAKE_C_COMPILER_ID MATCHES "Clang")
                  "${RECOMP_ROOT}/src/runtime/lifted_table.cpp")
   target_link_libraries(orbis_process_test PRIVATE recomp_orbis recomp_orbis_kernel
                         recomp_orbis_fiber recomp_orbis_gnm recomp_orbis_savedata
-                        recomp_orbis_audio recomp_orbis_pad recomp_orbis_np)
+                        recomp_orbis_audio recomp_orbis_pad recomp_orbis_np recomp_orbis_ngs2)
   add_test(NAME orbis_process COMMAND orbis_process_test "${_e2e}/eboot.elf" "${_e2e}/prx.elf")
   set_tests_properties(orbis_process PROPERTIES TIMEOUT 60)  # a hang is a failure
 endif()
