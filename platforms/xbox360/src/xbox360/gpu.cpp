@@ -51,6 +51,7 @@ enum : uint32_t {
   kPm4SetShaderConstants = 0x56,
   kPm4EventWriteShd = 0x58,
   kPm4EventWriteExt = 0x5A,
+  kPm4EventWriteZpd = 0x5B,
   kPm4WaitIbPfdComplete = 0x5D,
   kPm4ContextUpdate = 0x5E,
   kPm4SetBinMaskLo = 0x60,
@@ -64,6 +65,10 @@ enum : uint32_t {
 constexpr uint32_t kSwapSignature = 0x53574150;  // "SWAP"
 // VGT_EVENT_INITIATOR values of VIZ_QUERY.
 constexpr uint32_t kVizQueryStart = 7, kVizQueryEnd = 8;
+// An occlusion query's samples: the word D3D leaves in the z pass or z
+// fail counts of a query's end, and the samples every query passes while
+// nothing is drawn (Xenia's).
+constexpr uint32_t kQueryEndMark = 0xFFFFFEED, kQuerySamples = 1000;
 
 void SetReg(uint32_t r, uint32_t v) { Wr32(kGpuRegisters + 4 * r, v); }
 
@@ -262,6 +267,25 @@ void Type3(Reader& in, uint32_t packet) {
       uint32_t va = PhysicalToVirtual(in.Next() & ~3u);
       const uint16_t extents[6] = {0, 8192 >> 3, 0, 8192 >> 3, 0, 1};
       for (uint32_t k = 0; k < 6; k++) Wr16(va + 2 * k, extents[k]);
+      return;
+    }
+    case kPm4EventWriteZpd: {
+      // An occlusion query's begin or end: the sample counts at
+      // RB_SAMPLE_COUNT_ADDR, eight little-endian words (total, z fail, z
+      // pass, stencil fail, two each, which D3D adds). With no drawing a
+      // query's end reports samples passing, so a title takes what it
+      // queried for visible, as EVENT_WRITE_EXT reports the largest extent.
+      SetReg(kRegVgtEventInitiator, in.Next() & 0x3F);
+      if (uint32_t pa = GpuRegister(kRegRbSampleCountAddr)) {
+        uint32_t va = PhysicalToVirtual(pa & 0x1FFFFFFC);
+        bool end = false;
+        for (uint32_t k = 2; k < 6; k++) end |= Rd32(va + 4 * k) == kQueryEndMark;
+        for (uint32_t k = 0; k < 8; k++) Wr32(va + 4 * k, 0);
+        if (end) {
+          Wr32(va, Bswap(kQuerySamples));
+          Wr32(va + 16, Bswap(kQuerySamples));
+        }
+      }
       return;
     }
     case kPm4DrawIndx:

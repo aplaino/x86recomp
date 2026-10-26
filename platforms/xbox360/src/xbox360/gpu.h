@@ -21,7 +21,8 @@ constexpr uint32_t kRegCpRbRptr = 0x01C4, kRegCpRbWptr = 0x01C5, kRegScratchUmsk
                    kRegRbEdramTiming = 0x0F00, kRegRbBcControl = 0x0F01,
                    kRegRbHsioAligner = 0x0F2D, kRegD1ModeVCounter = 0x194C,
                    kRegInterruptStatus = 0x1951, kRegD1ModeViewportSize = 0x1961,
-                   kRegVgtEventInitiator = 0x21F9, kRegShaderConstantFetch = 0x4800;
+                   kRegVgtEventInitiator = 0x21F9, kRegRbSampleCountAddr = 0x2325,
+                   kRegShaderConstantFetch = 0x4800;
 
 uint32_t GpuRegister(uint32_t r);
 

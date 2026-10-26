@@ -51,14 +51,17 @@ console can settle.
   (a fence; bit 31 of the initiator writes the counter of vertical blanks
   and swaps instead, console check; addresses above physical memory go to
   the writeback window at 0x7F000000), EVENT_WRITE_EXT (the largest
-  extents, since nothing is drawn), INTERRUPT (the callback with source 1
+  extents, since nothing is drawn), EVENT_WRITE_ZPD (an occlusion query's
+  sample counts at RB_SAMPLE_COUNT_ADDR, eight little-endian words: total,
+  z fail, z pass, stencil fail, two each; zero, and at a query's end,
+  which D3D marks with 0xFFFFFEED in a z pass or z fail word, 1000
+  samples passed, Xenia's count, since nothing is drawn), INTERRUPT (the callback with source 1
   for each processor in the mask), SET_CONSTANT, SET_CONSTANT2,
   SET_SHADER_CONSTANTS, LOAD_ALU_CONSTANT, VIZ_QUERY, the bin masks,
   CONTEXT_UPDATE, WAIT_IB_PFD_COMPLETE, WAIT_FOR_IDLE, INVALIDATE_STATE.
 - Draws (DRAW_INDX, DRAW_INDX_2) and shader loads (IM_LOAD,
   IM_LOAD_IMMEDIATE) are consumed and nothing is drawn yet.
-- Any other opcode is fatal and names it; EVENT_WRITE_ZPD (occlusion
-  queries) waits for drawing.
+- Any other opcode is fatal and names it.
 
 ## Interrupts and the vertical blank
 - VdSetGraphicsInterruptCallback(callback, argument): the callback runs as

@@ -754,6 +754,19 @@ static void Gpu(void) {
   rb[w++] = 0;
   rb[w++] = (pdata + 0x64) | 2;
   rb[w++] = 9;
+  // Occlusion queries: a begin's counts zeroed, an end's (D3D's mark in
+  // a z fail word) samples passed, little-endian.
+  volatile u32* query = At(data + 0xC0);
+  for (u32 k = 0; k < 16; k++) query[k] = 0x11111111;
+  query[3] = 0xFFFFFEED;
+  rb[w++] = Type0(0x2325, 1);
+  rb[w++] = pdata + 0xC0;
+  rb[w++] = Type3(0x5B, 1);
+  rb[w++] = 0x15;
+  rb[w++] = Type0(0x2325, 1);
+  rb[w++] = pdata + 0xE0;
+  rb[w++] = Type3(0x5B, 1);
+  rb[w++] = 0x15;
   // The swap: VdSwap fills 64 words.
   u32 fb = ring + 0x2000, fetch[6] = {0, fb, 0, 0, 0, 0}, front = fb, format = 6, color_space = 0, width = 1280,
       height = 720;
@@ -771,6 +784,8 @@ static void Gpu(void) {
   CHECK(*At(data + 0x64) == 0);
   *At(data + 0x80) = 1;
   CHECK(WaitFor(At(data + 0x64), 9) && WaitFor(At(data), w) && *Reg(0x1C4) == w);
+  CHECK(query[0] == 0xE8030000 && query[4] == 0xE8030000 && query[1] == 0 && query[3] == 0 && query[7] == 0);
+  CHECK(query[8] == 0 && query[12] == 0 && query[15] == 0);
 }
 
 // ---- strings, statuses, the FPU flag ------------------------------------------
