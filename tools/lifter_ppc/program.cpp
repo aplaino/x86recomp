@@ -211,25 +211,55 @@ bool Program::JumpTable(const Function& f, uint64_t bcctr_va, std::vector<uint64
     from = sc.va;
   }
 
+  // Unoptimised code keeps the index in a stack slot and loads it again
+  // for the compare and for the table: `lwz X, d(r1)` makes the slot the
+  // index, and a compare on a register loaded from it bounds it, unless
+  // the slot (a store to it, a call, r1 itself) can change in between.
+  auto slot_load = [](const Insn& i, int r) {
+    return i.op == Op::kLoad && i.size == 4 && !i.indexed && !i.update && !i.sign && i.ra == 1 &&
+           i.rd == r;
+  };
+  auto slot_hazard = [](const Insn& i, int64_t d) {
+    bool call = (i.op == Op::kB || i.op == Op::kBc || i.op == Op::kBclr || i.op == Op::kBcctr) && i.lk;
+    return (i.op == Op::kStore && i.ra == 1 && (i.indexed || i.imm == d)) || WritesReg(i, 1) || call;
+  };
+  auto from_slot = [&](uint64_t cmp, int r, int64_t d) {
+    for (uint64_t p = cmp; p > f.va && cmp - p < 8 * 4;) {
+      p -= 4;
+      Insn i = ppc::Decode(p, Word(p));
+      if (slot_load(i, r)) return i.imm == d;
+      if (WritesReg(i, r) || slot_hazard(i, d)) return false;
+    }
+    return false;
+  };
   int crf = -1;
   bool gt = false;
+  bool in_slot = false;
+  int64_t slot = 0;
   uint64_t count = 0;
   for (uint64_t p = from; p > f.va && from - p < 24 * 4;) {
     p -= 4;
     Insn i = ppc::Decode(p, Word(p));
-    // bgt crN (BO 12, BI 4N+1) or bge crN (BO 4, BI 4N+0) to the default.
-    if (i.op == Op::kBc && !i.lk && crf < 0) {
+    // bgt crN (BO 12, BI 4N+1) or bge crN (BO 4, BI 4N+0) to the default,
+    // or the same conditions on a return (bgtlr, bgelr: no default case).
+    if ((i.op == Op::kBc || i.op == Op::kBclr) && !i.lk && crf < 0) {
       if (i.bo == 12 && i.bi % 4 == 1) gt = true;
       else if (i.bo == 4 && i.bi % 4 == 0) gt = false;
       else return false;
       crf = i.bi / 4;
       continue;
     }
-    if (i.op == Op::kCmpli && !i.l && i.crfd == crf && i.ra == x) {
+    if (i.op == Op::kCmpli && !i.l && i.crfd == crf &&
+        (in_slot ? from_slot(p, i.ra, slot) : i.ra == x)) {
       count = uint64_t(i.imm) + (gt ? 1 : 0);
       break;
     }
-    if (WritesReg(i, x)) return false;
+    if (!in_slot && slot_load(i, x)) {
+      in_slot = true;
+      slot = i.imm;
+      continue;
+    }
+    if (in_slot ? slot_hazard(i, slot) : WritesReg(i, x)) return false;
   }
   if (!count || count > 4096) return false;
 
@@ -298,6 +328,39 @@ Function Program::Build(uint64_t start, uint64_t end, std::set<uint64_t>& found)
   return f;
 }
 
+// Addresses the module holds as constants, words in its data and LIS /
+// ADDI (ORI) pairs in the code reached, that land in code past the last
+// instruction its function reaches (in the gap after its return): a
+// function called only through a pointer that has no .pdata entry, such as
+// a one-branch thunk between two functions' padding. A constant in a
+// function's reached code, or on padding (0) or an undecodable word, is
+// not one.
+std::set<uint64_t> Program::PointerStarts(const std::set<uint64_t>& starts) const {
+  std::set<uint64_t> consts;
+  for (uint64_t off = 0; off + 4 <= img_.bytes.size(); off += 4)
+    if (!InText(img_.base + off)) consts.insert(Word(img_.base + off));
+  for (const auto& [va, f] : funcs_)
+    for (const auto& [iva, i] : f.insns) {
+      uint64_t v;
+      if ((i.op == Op::kAddi && i.ra && ConstOf(iva, f.va, i.ra, v)) ||
+          (i.op == Op::kOri && ConstOf(iva, f.va, i.rd, v)))
+        consts.insert(uint32_t(i.op == Op::kAddi ? v + uint64_t(i.imm) : v | uint64_t(i.imm)));
+    }
+  std::set<uint64_t> out;
+  for (uint64_t t : consts) {
+    if (t % 4 || !InText(t) || starts.count(t) || !Word(t) ||
+        ppc::Decode(t, Word(t)).op == Op::kInvalid)
+      continue;
+    auto it = funcs_.upper_bound(t);
+    if (it != funcs_.begin()) {
+      const Function& f = std::prev(it)->second;
+      if (t < f.end && f.insns.lower_bound(t) != f.insns.end()) continue;
+    }
+    out.insert(t);
+  }
+  return out;
+}
+
 void Program::Discover() {
   std::set<uint64_t> starts;
   for (const auto& [va, size] : img_.starts) {
@@ -329,7 +392,11 @@ void Program::Discover() {
       starts.insert(t);
       grew = true;
     }
-    if (!grew) break;
+    if (!grew) {
+      std::set<uint64_t> more = PointerStarts(starts);
+      if (more.empty()) break;
+      starts.insert(more.begin(), more.end());
+    }
   }
   for (const auto& [va, f] : funcs_)
     for (const auto& [iva, i] : f.insns)

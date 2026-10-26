@@ -73,6 +73,10 @@ __attribute__((noinline)) static u32 classify(u32 v) {
 // fixture/tables.S: the Xbox 360 compiler's jump table shapes.
 int table_words(unsigned v);
 int table_bytes(unsigned v);
+int table_slot(unsigned v);
+int table_ret(unsigned v);
+int call_thunk(unsigned v);
+extern int (*const ptr_table[1])(unsigned v);
 
 typedef u64 (*Op)(u64, u64);
 __attribute__((noinline)) static u64 op_add(u64 a, u64 b) { return a + b; }
@@ -157,8 +161,14 @@ int main(void) {
   hex("float", floats());
 
   u64 jt = 0;
-  for (u32 k = 0; k < 64; k++) jt = jt * 5 + (u64)(i64)table_words(k % 7) + (u64)(i64)table_bytes(k % 8);
+  for (u32 k = 0; k < 64; k++)
+    jt = jt * 5 + (u64)(i64)table_words(k % 7) + (u64)(i64)table_bytes(k % 8) + (u64)(i64)table_slot(k % 5) +
+         (u64)(i64)table_ret(k % 6) * 3;
   hex("tables", jt);
+
+  u64 pt = 0;
+  for (u32 k = 0; k < 16; k++) pt = pt * 9 + (u64)(i64)ptr_table[0](k) + (u64)(i64)call_thunk(k % 6);
+  hex("pointers", pt);
 
   u64 acc = 1;
   for (u32 k = 0; k < 200; k++) acc ^= ops_table[k % 5](next(), next() >> (k % 61));

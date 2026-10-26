@@ -142,6 +142,13 @@ add_test(NAME ppc_oracle_fixture COMMAND ${_run} --program "${_bin}/fixture.elf"
 set_tests_properties(ppc_oracle_fixture PROPERTIES FIXTURES_SETUP ppc_fixture_out)
 add_test(NAME ppc_lift_fixture COMMAND ppc_fixture "${_bin}/fixture.elf" "${_fixture_out}")
 set_tests_properties(ppc_lift_fixture PROPERTIES FIXTURES_REQUIRED ppc_fixture_out)
+# Each of tables.S's jump tables recognised: an unrecognised one still runs
+# (dispatched, its cases lifted through the table's pointers), so only the
+# lifter's count shows it.
+set(_relift "${CMAKE_CURRENT_BINARY_DIR}/fixture_relift")
+file(MAKE_DIRECTORY "${_relift}")
+add_test(NAME ppc_lift_fixture_tables COMMAND recomp_lift_ppc --image "${_bin}/fixture.elf" --out "${_relift}" --files 1)
+set_tests_properties(ppc_lift_fixture_tables PROPERTIES PASS_REGULAR_EXPRESSION " 4 jump tables,")
 
 add_test(NAME ppc_oracle_forms COMMAND ${_run} --program "${_bin}/forms_oracle.elf" --out "${_records}")
 set_tests_properties(ppc_oracle_forms PROPERTIES FIXTURES_SETUP ppc_forms_records)

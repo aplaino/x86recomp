@@ -56,9 +56,90 @@ table_bytes:
   blr
   .size table_bytes, .-table_bytes
 
+// table_slot: unoptimised code, which keeps the index in a stack slot and
+// loads it again for the bound and for the table. table_ret: the bound is
+// a conditional return (bgtlr), v itself above it.
+  .globl table_slot
+  .type table_slot, @function
+table_slot:
+  stwu 1, -32(1)
+  stw 3, 16(1)
+  lwz 11, 16(1)
+  cmplwi 6, 11, 2
+  bgt 6, .Ls9
+  lwz 11, 16(1)
+  lis 12, .Lslot@high
+  ori 12, 12, .Lslot@l
+  rlwinm 0, 11, 2, 0, 29
+  lwzx 0, 12, 0
+  mtctr 0
+  ori 0, 0, 0
+  bctr
+.Ls0: li 3, 11
+  b .Ls8
+.Ls1: li 3, 22
+  b .Ls8
+.Ls2: li 3, 33
+  b .Ls8
+.Ls9: li 3, -3
+.Ls8: addi 1, 1, 32
+  blr
+  .size table_slot, .-table_slot
+
+  .globl table_ret
+  .type table_ret, @function
+table_ret:
+  cmplwi 6, 3, 2
+  bgtlr 6
+  lis 11, .Lret@high
+  ori 11, 11, .Lret@l
+  rlwinm 0, 3, 2, 0, 29
+  lwzx 0, 11, 0
+  mtctr 0
+  bctr
+.Lr0: li 3, 44
+  blr
+.Lr1: li 3, 55
+  blr
+.Lr2: li 3, 66
+  blr
+  .size table_ret, .-table_ret
+
+// Functions without a .pdata entry (no sized symbol), reached only
+// through a pointer, after another function's return as compilers leave
+// them: ptr_data(v) = v + 11 through a word in data (ptr_table), and
+// ptr_thunk, one branch to table_words, through the address call_thunk
+// builds with lis/ori.
+  .long 0
+ptr_data:
+  addi 3, 3, 11
+  blr
+  .long 0
+ptr_thunk:
+  b table_words
+  .long 0
+
+  .globl call_thunk
+  .type call_thunk, @function
+call_thunk:
+  lis 12, ptr_thunk@high
+  ori 12, 12, ptr_thunk@l
+  mtctr 12
+  bctr
+  .size call_thunk, .-call_thunk
+
   .section .rodata
+  .p2align 2
+  .globl ptr_table
+ptr_table:
+  .quad ptr_data  // a C pointer here is 64-bit
   .p2align 2
 .Lwords:
   .long 0b, 1b, 2b, 3b, 4b
 .Lbytes:
   .byte 0, 2, 4, 2, 0, 4
+  .p2align 2
+.Lslot:
+  .long .Ls0, .Ls1, .Ls2
+.Lret:
+  .long .Lr0, .Lr1, .Lr2

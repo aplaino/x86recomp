@@ -69,7 +69,8 @@ tininess detected before rounding, and the PowerPC's own rules on top:
 - LFS and STFS convert by the ISA's bit-level algorithms (no rounding,
   SNaNs kept).
 - An exception whose enable bit is set, and FPSCR[NI], are fatal errors
-  until their semantics are modelled.
+  until their semantics are modelled, whether or not the thread enabled
+  traps (KeEnableFpuExceptions, MSR[FE0/FE1] on the console).
 FRES and FRSQRTE are estimates whose exact values are the CPU's own: the
 model returns the correctly rounded reciprocal (square root), as QEMU's
 970 does; the Xenon's tables wait for a console. FCTIW(Z)'s high word is
@@ -138,9 +139,19 @@ mask bit 4, an unused immediate).
   start within its range (the length the reader gives, or up to the next
   start), so a call into the middle of a run of code (the register save
   and restore helpers) gets its own overlapping function, and falling
-  through into the next start is a tail call.
+  through into the next start is a tail call. Then, until nothing changes,
+  the addresses the module holds as constants (words in its data, `lis`
+  with `addi`/`ori` in the code reached) that land on a decodable,
+  non-zero word past the last instruction its function reaches: functions
+  only called through pointers (vtables, callbacks, one-branch thunks) and
+  without a `.pdata` entry, as leaf functions are. Code a function reaches
+  is never split this way.
 - Jump tables, ending in `mtctr` and `bcctr` with the index bounded by a
-  `cmplwi` and a `bgt` or `bge`: absolute (`lwzx` from a table of
+  `cmplwi` and a `bgt` or `bge` (or `bgtlr`, `bgelr`: a conditional
+  return in place of the default case), also when unoptimised code
+  loads the index from its stack slot again between the bound and the
+  table (no store to the slot, call or change of `r1` in between):
+  absolute (`lwzx` from a table of
   addresses) and relative (`lbzx`, `lhzx` or `lwzx` of an offset, scaled,
   added to a base); constants from `lis`/`li` with `addi`/`ori`, and the
   `ori r, r, 0` padding skipped. Other `bcctr` are indirect jumps

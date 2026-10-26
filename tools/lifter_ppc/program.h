@@ -1,9 +1,10 @@
 #pragma once
 // The module being lifted and its functions. Function starts come from the
 // image reader (for the Xbox 360's XEX: the entry point, .pdata and the
-// import thunks) and from branch targets; each function's instructions are
-// those reachable from its start within its range, so data after a return
-// is never decoded.
+// import thunks), from branch targets and from addresses held as constants
+// that land in code no function reaches (PointerStarts); each function's
+// instructions are those reachable from its start within its range, so
+// data after a return is never decoded.
 
 #include <cstdint>
 #include <map>
@@ -82,6 +83,8 @@ class Program {
   Function Build(uint64_t start, uint64_t end, std::set<uint64_t>& found);
   bool JumpTable(const Function& f, uint64_t bcctr_va, std::vector<uint64_t>& targets);
   bool ConstOf(uint64_t va, uint64_t lo, int reg, uint64_t& out, int depth = 0) const;
+  // Starts that only a pointer reaches: see Discover.
+  std::set<uint64_t> PointerStarts(const std::set<uint64_t>& starts) const;
   // The end of the code range holding `va`.
   uint64_t CodeEnd(uint64_t va) const;
   void Warn(const std::string& w);
