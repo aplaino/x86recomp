@@ -148,12 +148,13 @@ mask bit 4, an unused immediate).
   is never split this way.
 - Jump tables, ending in `mtctr` and `bcctr` with the index bounded by a
   `cmplwi` and a `bgt` or `bge` (or `bgtlr`, `bgelr`: a conditional
-  return in place of the default case), also when unoptimised code
-  loads the index from its stack slot again between the bound and the
-  table (no store to the slot, call or change of `r1` in between), or
-  with no bound at all (the index a bit field) when the table of words
-  follows the `bcctr` and ends at its lowest target, where the first
-  case's code begins:
+  return in place of the default case), also when the code loads the
+  index again between the bound and the table, from its stack slot
+  (unoptimised code) or the field it compared (no store that may alias
+  it, call or change of its base in between), or moves or zero-extends
+  it; or with no bound at all (the index a bit field) when the table of
+  words follows the `bcctr`, its targets are in the function and it ends
+  at its lowest target past it, where the code after it begins:
   absolute (`lwzx` from a table of
   addresses) and relative (`lbzx`, `lhzx` or `lwzx` of an offset, scaled,
   added to a base); constants from `lis`/`li` with `addi`/`ori`, and the

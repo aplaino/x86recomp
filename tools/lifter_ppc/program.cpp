@@ -212,31 +212,39 @@ bool Program::JumpTable(const Function& f, uint64_t bcctr_va, std::vector<uint64
     from = sc.va;
   }
 
-  // Unoptimised code keeps the index in a stack slot and loads it again
-  // for the compare and for the table: `lwz X, d(r1)` makes the slot the
-  // index, and a compare on a register loaded from it bounds it, unless
-  // the slot (a store to it, a call, r1 itself) can change in between.
+  // Code that keeps the index in memory loads it again for the compare and
+  // for the table: unoptimised code from its stack slot, other code from
+  // the field of an object it compared. `lwz X, d(B)` makes that word the
+  // index, and a compare on a register loaded from it bounds it, unless the
+  // word can change in between: a store (for a stack slot, one to that
+  // slot), a call, a change of B.
+  struct Slot {
+    int base;
+    int64_t disp;
+  };
   auto slot_load = [](const Insn& i, int r) {
-    return i.op == Op::kLoad && i.size == 4 && !i.indexed && !i.update && !i.sign && i.ra == 1 &&
-           i.rd == r;
+    return i.op == Op::kLoad && i.size == 4 && !i.indexed && !i.update && !i.sign && i.ra != 0 &&
+           i.ra != r && i.rd == r;
   };
-  auto slot_hazard = [](const Insn& i, int64_t d) {
+  auto slot_hazard = [](const Insn& i, const Slot& w) {
     bool call = (i.op == Op::kB || i.op == Op::kBc || i.op == Op::kBclr || i.op == Op::kBcctr) && i.lk;
-    return (i.op == Op::kStore && i.ra == 1 && (i.indexed || i.imm == d)) || WritesReg(i, 1) || call;
+    bool store = i.op == Op::kStore || i.op == Op::kFpStore || i.op == Op::kStmw;
+    bool aliases = w.base == 1 ? i.ra == 1 && (i.indexed || i.imm == w.disp) : true;
+    return (store && aliases) || WritesReg(i, w.base) || call;
   };
-  auto from_slot = [&](uint64_t cmp, int r, int64_t d) {
+  auto from_slot = [&](uint64_t cmp, int r, const Slot& w) {
     for (uint64_t p = cmp; p > f.va && cmp - p < 8 * 4;) {
       p -= 4;
       Insn i = ppc::Decode(p, Word(p));
-      if (slot_load(i, r)) return i.imm == d;
-      if (WritesReg(i, r) || slot_hazard(i, d)) return false;
+      if (slot_load(i, r)) return i.ra == w.base && i.imm == w.disp;
+      if (WritesReg(i, r) || slot_hazard(i, w)) return false;
     }
     return false;
   };
   int crf = -1;
   bool gt = false;
   bool in_slot = false;
-  int64_t slot = 0;
+  Slot slot{};
   uint64_t count = 0;
   // The bound, or none (count 0) when the code above has none.
   for (uint64_t p = from; p > f.va && from - p < 24 * 4;) {
@@ -258,20 +266,28 @@ bool Program::JumpTable(const Function& f, uint64_t bcctr_va, std::vector<uint64
     }
     if (!in_slot && slot_load(i, x)) {
       in_slot = true;
-      slot = i.imm;
+      slot = {i.ra, i.imm};
+      continue;
+    }
+    // A move of the index (`mr`, or the zero extension `clrldi X, Y, 32`
+    // as `rlwinm X, Y, 0, 0, 31`) keeps the 32 bits the compare saw.
+    if (!in_slot && !i.rc && i.ra == x &&
+        ((i.op == Op::kRlwinm && i.sh == 0 && i.mb == 0 && i.me == 31) ||
+         (i.op == Op::kOr && i.rd == i.rb))) {
+      x = i.rd;
       continue;
     }
     if (in_slot ? slot_hazard(i, slot) : WritesReg(i, x)) break;
   }
   // No bound (the compiler knew the index's range, a bit field's): a table
-  // of words right after the BCCTR, which ends where the first case's code
-  // begins, so it runs to its lowest target.
+  // of words right after the BCCTR, whose targets are in the function and
+  // which ends where the code after it begins, its lowest target past it.
   if (!count && !relative && ld.size == 4 && uint32_t(table) == bcctr_va + 4) {
     uint64_t start = uint32_t(table), lowest = f.end;
     while (start + 4 * count < lowest) {
       uint64_t e = Read(start + 4 * count, 4, false);
-      if (e % 4 || e < start + 4 * (count + 1) || e >= f.end) return false;
-      lowest = std::min(lowest, e);
+      if (e % 4 || e < f.va || e >= f.end || (e >= start && e < start + 4 * (count + 1))) return false;
+      if (e > start) lowest = std::min(lowest, e);
       count++;
     }
     if (start + 4 * count != lowest) return false;

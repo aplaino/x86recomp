@@ -129,6 +129,54 @@ table_bits:
   blr
   .size table_bits, .-table_bits
 
+// table_field(p): the index a field of *p, compared, loaded again and
+// zero-extended (clrldi) before the table. table_back(v): a switch on
+// v & 3 with no bound whose first case is code before the bctr.
+  .globl table_field
+  .type table_field, @function
+table_field:
+  lwz 11, 8(3)
+  cmplwi 6, 11, 2
+  bgt 6, .Lf9
+  lwz 11, 8(3)
+  rlwinm 11, 11, 0, 0, 31
+  lis 12, .Lfield@high
+  ori 12, 12, .Lfield@l
+  rlwinm 0, 11, 2, 0, 29
+  lwzx 0, 12, 0
+  mtctr 0
+  bctr
+.Lf0: li 3, 80
+  blr
+.Lf1: li 3, 81
+  blr
+.Lf2: li 3, 82
+  blr
+.Lf9: li 3, -8
+  blr
+  .size table_field, .-table_field
+
+  .globl table_back
+  .type table_back, @function
+table_back:
+  b .Lk
+.Lk0: li 3, 90
+  blr
+.Lk: rlwinm 5, 3, 0, 30, 31
+  lis 12, .Lback@high
+  ori 12, 12, .Lback@l
+  rlwinm 0, 5, 2, 0, 29
+  lwzx 0, 12, 0
+  mtctr 0
+  bctr
+.Lback:
+  .long .Lk0, .Lk1, .Lk0, .Lk3
+.Lk1: li 3, 91
+  blr
+.Lk3: li 3, 93
+  blr
+  .size table_back, .-table_back
+
 // Functions without a .pdata entry (no sized symbol), reached only
 // through a pointer, after another function's return as compilers leave
 // them: ptr_data(v) = v + 11 through a word in data (ptr_table), and
@@ -167,3 +215,5 @@ ptr_table:
   .long .Ls0, .Ls1, .Ls2
 .Lret:
   .long .Lr0, .Lr1, .Lr2
+.Lfield:
+  .long .Lf0, .Lf1, .Lf2

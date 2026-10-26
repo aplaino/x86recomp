@@ -148,7 +148,7 @@ set_tests_properties(ppc_lift_fixture PROPERTIES FIXTURES_REQUIRED ppc_fixture_o
 set(_relift "${CMAKE_CURRENT_BINARY_DIR}/fixture_relift")
 file(MAKE_DIRECTORY "${_relift}")
 add_test(NAME ppc_lift_fixture_tables COMMAND recomp_lift_ppc --image "${_bin}/fixture.elf" --out "${_relift}" --files 1)
-set_tests_properties(ppc_lift_fixture_tables PROPERTIES PASS_REGULAR_EXPRESSION " 5 jump tables,")
+set_tests_properties(ppc_lift_fixture_tables PROPERTIES PASS_REGULAR_EXPRESSION " 7 jump tables,")
 
 add_test(NAME ppc_oracle_forms COMMAND ${_run} --program "${_bin}/forms_oracle.elf" --out "${_records}")
 set_tests_properties(ppc_oracle_forms PROPERTIES FIXTURES_SETUP ppc_forms_records)
