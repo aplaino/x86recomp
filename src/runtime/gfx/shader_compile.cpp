@@ -16,7 +16,9 @@ bool GlslToSpirv(const std::string& glsl, ShaderStage stage, std::vector<uint32_
                  std::string* log) {
   static std::once_flag once;
   std::call_once(once, [] { glslang::InitializeProcess(); });
-  EShLanguage lang = stage == ShaderStage::Vertex ? EShLangVertex : EShLangFragment;
+  const EShLanguage lang = stage == ShaderStage::Vertex   ? EShLangVertex
+                           : stage == ShaderStage::Compute ? EShLangCompute
+                                                           : EShLangFragment;
   glslang::TShader sh(lang);
   const char* src = glsl.c_str();
   sh.setStrings(&src, 1);

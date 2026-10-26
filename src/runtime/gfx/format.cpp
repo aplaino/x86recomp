@@ -1,8 +1,25 @@
-// Format/FVF/primitive helpers shared by all backends.
+// Format/FVF/primitive helpers shared by all backends, and the Device
+// methods backends need not implement.
 
 #include "runtime/gfx/device.h"
+#include "runtime/log.h"
 
 namespace recomp::gfx {
+
+ProgramId Device::CreateProgram(const ProgramDesc&) {
+  FatalF("gfx: this backend has no programs (console GPUs need SDL_GPU)");
+}
+void Device::DestroyProgram(ProgramId) {}
+TextureId Device::CreateImage(const ImageDesc&) {
+  FatalF("gfx: this backend has no programs (console GPUs need SDL_GPU)");
+}
+void Device::UpdateImage(TextureId, int, int, const Rect&, const void*, uint32_t) {}
+void Device::ReadImage(TextureId, int, int, const Rect&, void*, uint32_t) {}
+void Device::ClearImage(TextureId, int, const Color&) {}
+void Device::ClearDepth(DepthId, float, int) {}
+void Device::DrawProgram(const ProgramDraw&) {}
+void Device::DispatchProgram(const ProgramDispatch&) {}
+void Device::PresentImage(TextureId, const Rect&) {}
 
 uint32_t BitsPerPixel(Format f) {
   switch (f) {
@@ -29,6 +46,26 @@ uint32_t BitsPerPixel(Format f) {
       return 64;
     case Format::A32B32G32R32F:
       return 128;
+    case Format::R8: case Format::R8Uint:
+      return 8;
+    case Format::R8G8: case Format::R16: case Format::R8G8Uint: case Format::R16Uint:
+      return 16;
+    case Format::R8G8B8A8: case Format::R8G8B8A8Srgb: case Format::B8G8R8A8Srgb:
+    case Format::R16G16: case Format::R10G10B10A2: case Format::R11G11B10F:
+    case Format::R8G8B8A8Snorm: case Format::R16G16Snorm: case Format::R8G8B8A8Uint:
+    case Format::R16G16Uint: case Format::R32Uint: case Format::R32Sint:
+      return 32;
+    case Format::R16G16B16A16: case Format::R16G16B16A16Snorm: case Format::R16G16B16A16Uint:
+    case Format::R32G32Uint: case Format::R32G32Sint: case Format::D32FS8:
+      return 64;
+    case Format::R32G32B32A32Uint: case Format::R32G32B32A32Sint:
+      return 128;
+    case Format::Bc1: case Format::Bc1Srgb: case Format::Bc4:
+      return 4;
+    case Format::Bc2: case Format::Bc2Srgb: case Format::Bc3: case Format::Bc3Srgb:
+    case Format::Bc5: case Format::Bc6hUfloat: case Format::Bc6hSfloat: case Format::Bc7:
+    case Format::Bc7Srgb:
+      return 8;
     default:
       return 0;
   }
@@ -36,7 +73,7 @@ uint32_t BitsPerPixel(Format f) {
 
 bool IsCompressed(Format f) {
   return f == Format::DXT1 || f == Format::DXT2 || f == Format::DXT3 ||
-         f == Format::DXT4 || f == Format::DXT5;
+         f == Format::DXT4 || f == Format::DXT5 || (f >= Format::Bc1 && f <= Format::Bc7Srgb);
 }
 
 bool IsFloat(Format f) {
@@ -44,10 +81,12 @@ bool IsFloat(Format f) {
          f == Format::R32F || f == Format::G32R32F || f == Format::A32B32G32R32F;
 }
 
+bool IsRaw(Format f) { return f >= Format::R16F; }
+
 uint32_t RowPitch(Format f, uint32_t width) {
   if (IsCompressed(f)) {
     uint32_t blocks = (width + 3) / 4;
-    return blocks * (f == Format::DXT1 ? 8 : 16);
+    return blocks * BitsPerPixel(f) * 2;  // 16 pixels a block
   }
   return width * BitsPerPixel(f) / 8;
 }

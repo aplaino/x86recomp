@@ -10,7 +10,7 @@
 
 namespace recomp::gfx {
 
-enum class ShaderStage { Vertex, Fragment };
+enum class ShaderStage { Vertex, Fragment, Compute };
 
 // False with the compiler's messages in *log.
 bool GlslToSpirv(const std::string& glsl, ShaderStage stage, std::vector<uint32_t>* spirv,
