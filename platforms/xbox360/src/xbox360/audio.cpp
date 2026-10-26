@@ -36,6 +36,9 @@ bool g_started = false;
 
 // The default playback device, once; 0 if there is none.
 void OpenDevice() {
+  // Audio brings SDL's events, whose SIGINT and SIGTERM handlers would
+  // only queue a quit event nothing reads: the signals end the process.
+  SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
   if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
     WarnF("xbox360 audio: SDL audio init failed: %s; frames are dropped\n", SDL_GetError());
     return;
