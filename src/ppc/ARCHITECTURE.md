@@ -150,7 +150,10 @@ mask bit 4, an unused immediate).
   `cmplwi` and a `bgt` or `bge` (or `bgtlr`, `bgelr`: a conditional
   return in place of the default case), also when unoptimised code
   loads the index from its stack slot again between the bound and the
-  table (no store to the slot, call or change of `r1` in between):
+  table (no store to the slot, call or change of `r1` in between), or
+  with no bound at all (the index a bit field) when the table of words
+  follows the `bcctr` and ends at its lowest target, where the first
+  case's code begins:
   absolute (`lwzx` from a table of
   addresses) and relative (`lbzx`, `lhzx` or `lwzx` of an offset, scaled,
   added to a base); constants from `lis`/`li` with `addi`/`ori`, and the

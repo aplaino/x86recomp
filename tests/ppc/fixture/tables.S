@@ -105,6 +105,30 @@ table_ret:
   blr
   .size table_ret, .-table_ret
 
+// table_bits: a switch on v & 3 with no bound (the index cannot exceed
+// it), its table right after the bctr, up to the first case.
+  .globl table_bits
+  .type table_bits, @function
+table_bits:
+  rlwinm 5, 3, 0, 30, 31
+  lis 12, .Lbits@high
+  ori 12, 12, .Lbits@l
+  rlwinm 0, 5, 2, 0, 29
+  lwzx 0, 12, 0
+  mtctr 0
+  bctr
+.Lbits:
+  .long .Lb0, .Lb1, .Lb2, .Lb3
+.Lb0: li 3, 70
+  blr
+.Lb1: li 3, 71
+  blr
+.Lb2: li 3, 72
+  blr
+.Lb3: li 3, 73
+  blr
+  .size table_bits, .-table_bits
+
 // Functions without a .pdata entry (no sized symbol), reached only
 // through a pointer, after another function's return as compilers leave
 // them: ptr_data(v) = v + 11 through a word in data (ptr_table), and

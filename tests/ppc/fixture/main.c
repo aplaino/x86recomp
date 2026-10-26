@@ -75,6 +75,7 @@ int table_words(unsigned v);
 int table_bytes(unsigned v);
 int table_slot(unsigned v);
 int table_ret(unsigned v);
+int table_bits(unsigned v);
 int call_thunk(unsigned v);
 extern int (*const ptr_table[1])(unsigned v);
 
@@ -163,7 +164,7 @@ int main(void) {
   u64 jt = 0;
   for (u32 k = 0; k < 64; k++)
     jt = jt * 5 + (u64)(i64)table_words(k % 7) + (u64)(i64)table_bytes(k % 8) + (u64)(i64)table_slot(k % 5) +
-         (u64)(i64)table_ret(k % 6) * 3;
+         (u64)(i64)table_ret(k % 6) * 3 + (u64)(i64)table_bits(k) * 7;
   hex("tables", jt);
 
   u64 pt = 0;

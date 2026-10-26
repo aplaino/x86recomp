@@ -138,9 +138,10 @@ bool Program::ConstOf(uint64_t va, uint64_t lo, int reg, uint64_t& out, int dept
 //   relative: T = `add BASE, OFF`, OFF = E or `slwi E, n`, and E =
 //   `lbzx`/`lhzx`/`lwzx TABLE, IDX` with IDX = X scaled by the entry size;
 // TABLE and BASE constants, X bounded by a `cmplwi crN, X, n` with a
-// `bgt crN` (or `bge` on n) above it. Each entry's target is computed as
-// the code computes it. The walk is over straight-line code above the
-// BCCTR, which is how compilers lay these out.
+// `bgt crN` (or `bge` on n) above it, or, with no bound, an absolute table
+// right after the BCCTR. Each entry's target is computed as the code
+// computes it. The walk is over straight-line code above the BCCTR, which
+// is how compilers lay these out.
 bool Program::JumpTable(const Function& f, uint64_t bcctr_va, std::vector<uint64_t>& targets) {
   auto writer = [&](uint64_t from, auto pred, Insn& out) {
     for (uint64_t p = from; p > f.va && from - p < 24 * 4;) {
@@ -237,6 +238,7 @@ bool Program::JumpTable(const Function& f, uint64_t bcctr_va, std::vector<uint64
   bool in_slot = false;
   int64_t slot = 0;
   uint64_t count = 0;
+  // The bound, or none (count 0) when the code above has none.
   for (uint64_t p = from; p > f.va && from - p < 24 * 4;) {
     p -= 4;
     Insn i = ppc::Decode(p, Word(p));
@@ -245,7 +247,7 @@ bool Program::JumpTable(const Function& f, uint64_t bcctr_va, std::vector<uint64
     if ((i.op == Op::kBc || i.op == Op::kBclr) && !i.lk && crf < 0) {
       if (i.bo == 12 && i.bi % 4 == 1) gt = true;
       else if (i.bo == 4 && i.bi % 4 == 0) gt = false;
-      else return false;
+      else break;
       crf = i.bi / 4;
       continue;
     }
@@ -259,7 +261,20 @@ bool Program::JumpTable(const Function& f, uint64_t bcctr_va, std::vector<uint64
       slot = i.imm;
       continue;
     }
-    if (in_slot ? slot_hazard(i, slot) : WritesReg(i, x)) return false;
+    if (in_slot ? slot_hazard(i, slot) : WritesReg(i, x)) break;
+  }
+  // No bound (the compiler knew the index's range, a bit field's): a table
+  // of words right after the BCCTR, which ends where the first case's code
+  // begins, so it runs to its lowest target.
+  if (!count && !relative && ld.size == 4 && uint32_t(table) == bcctr_va + 4) {
+    uint64_t start = uint32_t(table), lowest = f.end;
+    while (start + 4 * count < lowest) {
+      uint64_t e = Read(start + 4 * count, 4, false);
+      if (e % 4 || e < start + 4 * (count + 1) || e >= f.end) return false;
+      lowest = std::min(lowest, e);
+      count++;
+    }
+    if (start + 4 * count != lowest) return false;
   }
   if (!count || count > 4096) return false;
 
