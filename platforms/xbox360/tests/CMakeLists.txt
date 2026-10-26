@@ -116,6 +116,12 @@ add_test(NAME xbox360_runtime COMMAND xbox360_title "${_bin}/title.xex" "${_titl
 set_tests_properties(xbox360_runtime PROPERTIES FAIL_REGULAR_EXPRESSION "FAIL|fatal" TIMEOUT 120
                      ENVIRONMENT "SDL_AUDIO_DRIVER=dummy;SDL_ASSERT=abort"
                      FIXTURES_REQUIRED xbox360_runtime_data)
+# The title settings it wrote, saved in the profile's directory: the
+# 1000-byte one, the one written again (10 bytes), the empty one.
+add_test(NAME xbox360_runtime_profile COMMAND "${CMAKE_COMMAND}"
+         -D "DIR=${_title_data}/profiles/E000000000000001/54540001" -P "${_src}/check_profile.cmake")
+set_tests_properties(xbox360_runtime_profile PROPERTIES DEPENDS xbox360_runtime
+                     FIXTURES_REQUIRED xbox360_runtime_data)
 
 # --- the form oracle: every form's native stub, bare metal -------------------
 ppc_objects(_forms_objs "${_src}/oracle/crt0.S" "${_src}/oracle/forms_main.c" "${_gen}/forms_native.S"

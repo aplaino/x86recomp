@@ -115,6 +115,7 @@ u32 XamUserGetSigninState(u32 slot);
 u32 XamUserGetXUID(u32 slot, u32 types, uint64_t* xuid);
 u32 XamUserGetName(u32 slot, char* buffer, u32 size);
 u32 XamUserReadProfileSettings(void);  // through XamUserReadProfileSettings9
+u32 XamUserWriteProfileSettings(u32 title, u32 slot, u32 count, void* settings, u32* overlapped);
 u32 XamNotifyCreateListener(uint64_t areas, u32 version);
 u32 XNotifyGetNext(u32 listener, u32 match, u32* id, u32* value);
 u32 XNotifyPositionUI(u32 position);
@@ -817,6 +818,55 @@ static void Users(void) {
   u32 ov[7] = {0, 0, 0, 0, 0, 0, 0};
   CHECK(XamUserReadProfileSettings9(0xFFFE07D1, 0, 0, 0, 4, ids, &size, results, ov) == 0x3E5 && ov[0] == 0);
   CHECK(XamUserReadProfileSettings9(0xFFFE07D1, 0, 0, 0, 0, ids, &size, results, 0) == 0x57);
+
+  // Title settings written as a title saves them: the three title-specific
+  // settings at once, the last one empty with an address (a zero-length
+  // copy into an empty buffer has corrupted heaps elsewhere), then read
+  // back, written again and read again. tests/CMakeLists.txt checks the
+  // saved files.
+  static uint8_t big[1000], mid[214], small2[10];
+  for (u32 k = 0; k < sizeof big; k++) big[k] = (uint8_t)k;
+  for (u32 k = 0; k < sizeof mid; k++) mid[k] = (uint8_t)(0xA5 ^ k);
+  for (u32 k = 0; k < sizeof small2; k++) small2[k] = (uint8_t)(0x30 + k);
+  struct {
+    u32 source, pad, user, user_low, id, pad2, type, pad3, size, ptr;
+  } w[3];
+  memset(w, 0, sizeof w);
+  const u32 tids[3] = {0x63E83FFF, 0x63E83FFE, 0x63E83FFD};
+  u32 lens[3] = {sizeof big, sizeof mid, 0}, ptrs[3] = {(u32)(uintptr_t)big, (u32)(uintptr_t)mid, (u32)(uintptr_t)mid};
+  for (int k = 0; k < 3; k++) {
+    w[k].id = tids[k];
+    w[k].type = 6u << 24;
+    w[k].size = lens[k];
+    w[k].ptr = ptrs[k];
+  }
+  CHECK(XamUserWriteProfileSettings(0x54540001, 0, 3, w, 0) == 0);
+  static u32 tr[(3 * 0x28 + 3000 + 8) / 4];
+  u32 trsize = sizeof tr;
+  CHECK(XamUserReadProfileSettings9(0x54540001, 0, 0, 0, 3, (u32*)tids, &trsize, tr, 0) == 0);
+  u32 ts = (u32)(uintptr_t)tr + 8;
+  CHECK(*At(ts) == 2 && *At(ts + 0x20) == 1000 && Memeq((void*)(uintptr_t)*At(ts + 0x24), big, 1000));
+  CHECK(*At(ts + 0x28) == 2 && *At(ts + 0x28 + 0x20) == 214 &&
+        Memeq((void*)(uintptr_t)*At(ts + 0x28 + 0x24), mid, 214));
+  CHECK(*At(ts + 0x50) == 2 && *At(ts + 0x50 + 0x20) == 0);
+  w[1].size = sizeof small2;
+  w[1].ptr = (u32)(uintptr_t)small2;
+  CHECK(XamUserWriteProfileSettings(0x54540001, 0, 2, &w[1], 0) == 0);
+  CHECK(XamUserReadProfileSettings9(0x54540001, 0, 0, 0, 3, (u32*)tids, &trsize, tr, 0) == 0);
+  CHECK(*At(ts + 0x28 + 0x20) == 10 && Memeq((void*)(uintptr_t)*At(ts + 0x28 + 0x24), small2, 10) &&
+        *At(ts + 0x50 + 0x20) == 0 && *At(ts + 0x20) == 1000);
+  // The profile's own settings a title writes are the profile's; a title
+  // may not write another kind.
+  w[0].id = 0x10040002;
+  w[0].type = 1u << 24;
+  w[0].size = 1;
+  CHECK(XamUserWriteProfileSettings(0x54540001, 0, 1, w, 0) == 0);
+  u32 inv = 0x10040002;
+  trsize = sizeof tr;
+  CHECK(XamUserReadProfileSettings9(0xFFFE07D1, 0, 0, 0, 1, &inv, &trsize, tr, 0) == 0 && *At(ts) == 2 &&
+        *At(ts + 0x20) == 1);
+  w[0].id = 0x10040100;
+  CHECK(XamUserWriteProfileSettings(0x54540001, 0, 1, w, 0) == 0x57);
 
   // A new listener holds what the system has pending: the UI is not
   // showing, player 1 signed in; a Live listener: disconnected, no link.

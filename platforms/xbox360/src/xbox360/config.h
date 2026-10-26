@@ -5,6 +5,7 @@
 // exist; reading any other is fatal and names it.
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 
 namespace recomp::xbox360 {
@@ -21,9 +22,12 @@ bool XConfigSetting(uint16_t category, uint16_t setting, const uint8_t*& data, u
 struct Profile {
   std::string gamertag;
   uint64_t xuid;
+  std::filesystem::path directory;  // its stored settings
 };
 constexpr uint32_t kUserSlots = 4;
-void SetSignedInProfile(const std::string& gamertag);
+// `data_dir`: the per-user data directory, whose profiles/<XUID> holds the
+// profile's settings.
+void SetSignedInProfile(const std::string& gamertag, const std::filesystem::path& data_dir);
 // The profile signed in at `slot`, nullptr if none.
 const Profile* SignedInProfile(uint32_t slot);
 

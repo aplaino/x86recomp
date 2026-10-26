@@ -132,6 +132,7 @@ __xex_import_slot_\name:
   FUNCTION 526, XamUserGetName, 1
   FUNCTION 528, XamUserGetSigninState, 1
   FUNCTION 537, XamUserReadProfileSettings, 1
+  FUNCTION 538, XamUserWriteProfileSettings, 1
   FUNCTION 650, XamNotifyCreateListener, 1
   FUNCTION 651, XNotifyGetNext, 1
   FUNCTION 652, XNotifyPositionUI, 1

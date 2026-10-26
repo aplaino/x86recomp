@@ -54,10 +54,15 @@ std::filesystem::path DataDirectory(const std::string& id) {
 // 2 KiB, GDFX's sectors, and 16 KiB, FATX's clusters), and the links the
 // system makes for a title it launches from a disc (xam creates GAME:; D:
 // as Xenia has it).
+// The per-user data directory: GameConfig::data_dir, or by the id.
+std::filesystem::path DataDir(const GameConfig& cfg) {
+  return cfg.data_dir.empty() ? DataDirectory(cfg.id) : std::filesystem::path(cfg.data_dir);
+}
+
 void MountFiles(const GameConfig& cfg) {
   namespace fs = std::filesystem;
   fs::path game = cfg.game_dir.empty() ? fs::absolute(cfg.xex).parent_path() : fs::path(cfg.game_dir);
-  fs::path data = (cfg.data_dir.empty() ? DataDirectory(cfg.id) : fs::path(cfg.data_dir)) / "Partition1";
+  fs::path data = DataDir(cfg) / "Partition1";
   std::error_code ec;
   fs::create_directories(data, ec);
   if (ec) Fatal(nullptr, "cannot create %s: %s", data.c_str(), ec.message().c_str());
@@ -75,7 +80,7 @@ void RunProcess(const GameConfig& cfg) {
   if (!LoadXex(cfg.xex, m, err)) Fatal(nullptr, "%s", err.c_str());
   if (!ppc::HasLiftedModule(TextHash(m)))
     Fatal(nullptr, "%s is not the module this program was lifted from", cfg.xex.c_str());
-  SetSignedInProfile(cfg.profile);
+  SetSignedInProfile(cfg.profile, DataDir(cfg));
   MapGuestMemory();
   MountFiles(cfg);
   MapImage(m);
