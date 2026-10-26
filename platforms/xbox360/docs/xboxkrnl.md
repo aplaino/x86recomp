@@ -159,6 +159,14 @@ here; on the console a KPCR belongs to a hardware thread.
 - RtlNtStatusToDosError maps the statuses this kernel returns as Windows
   NT does (Xenia's table is NT's, not copied here); a customer status
   (bit 29) stays itself, 0x8007xxxx gives xxxx, any other is fatal.
+- MmQueryStatistics fills MM_STATISTICS (0x68 bytes, its size first, else
+  STATUS_BUFFER_TOO_SMALL): 0x20000 physical pages, the kernel's 0x100
+  (Xenia's), the title's available pages (what no committed page or
+  physical frame uses: on the console every committed page takes a
+  physical one), its 0x2FFE0000 virtual bytes (Xenia's) and those
+  reserved in the virtual heaps, the highest physical page; pages by use
+  are 0. A title reads the totals and the title's available pages and
+  virtual bytes. Console check.
 - KeEnableFpuExceptions(enable) sets the KTHREAD's flag at 0x71 (Xenia's
   layout); the C runtime's floating-point control calls it with whether
   any exception is unmasked. Enabled exceptions do not trap here: the

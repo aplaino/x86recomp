@@ -311,6 +311,17 @@ uint32_t SystemPages(uint32_t size) {
 }
 }  // namespace
 
+MemoryUse QueryMemoryUse() {
+  std::lock_guard<std::mutex> g(g_lock);
+  MemoryUse u{0, 0};
+  for (uint32_t p = 0; p < kPhysical64kBase / kPage; p++) {
+    if (g_pages[p].state == kCommitted) u.pages_in_use++;
+    if (p < Def(Heap::kImage64k).base / kPage && g_pages[p].state != kFree) u.virtual_reserved += kPage;
+  }
+  for (uint8_t f : g_frames) u.pages_in_use += f;
+  return u;
+}
+
 uint32_t SystemAlloc(uint32_t size) {
   std::lock_guard<std::mutex> g(g_sys_lock);
   uint32_t cls = 0;

@@ -46,6 +46,7 @@ using ppc::Fatal;
 
 constexpr uint32_t kKThreadSize = 0xAB0, kPcrSize = 0x2D8;
 // KTHREAD fields.
+constexpr uint32_t kKtLastError = 0x160;
 constexpr uint32_t kKtStackBase = 0x5C, kKtStackLimit = 0x60, kKtTls = 0x68,
                    kKtProcessTypeDup = 0x72, kKtProcessType = 0x73, kKtCpu = 0xBF,
                    kKtPrcb = 0xC0, kKtPrcb2 = 0xC4, kKtStackAlloc = 0xD0, kKtCreateTime = 0x130,
@@ -246,6 +247,7 @@ Thread* CurrentThread() { return t_current; }
 uint32_t KThread(const Thread* t) { return t ? t->kthread : 0; }
 uint32_t ThreadId(const Thread* t) { return t->id; }
 uint32_t TlsSlots(const Thread* t) { return t->tls + g_process.tls_data_size; }
+void SetLastError(uint32_t error) { Wr32(t_current->kthread + kKtLastError, error); }
 
 Thread* ThreadOf(uint32_t kthread) {
   std::lock_guard<std::mutex> g(g_threads);

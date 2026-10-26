@@ -15,6 +15,10 @@ constexpr uint16_t kXConfigSecured = 2, kXConfigUser = 3;
 // stores them) and size; false if there is no such setting here.
 bool XConfigSetting(uint16_t category, uint16_t setting, const uint8_t*& data, uint16_t& size);
 
+// XGetGameRegion: the console's game region, the games it plays (the
+// XEX's region mask's bits for it).
+uint16_t GameRegion();
+
 // HalGetCurrentAVPack: the cable the console's display is on.
 uint32_t AvPack();
 // The display's mode; VdQueryVideoMode writes it as an X_VIDEO_MODE (0x30

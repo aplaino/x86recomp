@@ -126,6 +126,8 @@ Thread* CurrentThread();
 uint32_t KThread(const Thread* t);
 Thread* ThreadOf(uint32_t kthread);
 uint32_t ThreadId(const Thread* t);
+// The thread's last error (RtlSetLastError, GetLastError read it inline).
+void SetLastError(uint32_t error);
 // The guest address of a thread's dynamic TLS slots (KeTlsGetValue).
 uint32_t TlsSlots(const Thread* t);
 // Its processor (KPCR and KTHREAD), 0-5.
