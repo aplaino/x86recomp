@@ -43,6 +43,7 @@ u32 NtFreeVirtualMemory(u32* base, u32* size, u32 type, u32 debug);
 u32 NtQueryVirtualMemory(u32 base, void* info, u32 debug);
 u32 NtReleaseMutant(u32 handle, u32* previous);
 u32 NtResumeThread(u32 handle, u32* previous);
+u32 NtSuspendThread(u32 handle, u32* previous);
 u32 NtSetEvent(u32 handle, u32* previous);
 u32 NtWaitForSingleObjectEx(u32 handle, u32 mode, u32 alertable, int64_t* timeout);
 u32 NtWaitForMultipleObjectsEx(u32 count, u32* handles, u32 type, u32 mode, u32 alertable, int64_t* timeout);
@@ -136,6 +137,7 @@ u32 XamContentCreateEnumerator(u32 user, u32 device, u32 type, u32 flags, u32 it
 u32 XamContentGetDeviceData(u32 device, void* data);
 u32 XamContentGetCreator(u32 user, void* data, u32* is_creator, uint64_t* creator, u32* overlapped);
 u32 XamContentGetDeviceState(u32 device, u32* overlapped);
+u32 XamShowDeviceSelectorUI(u32 user, u32 type, u32 flags, uint64_t bytes, u32* device, u32* overlapped);
 extern u32 __imp_NtClose, __imp_ExThreadObjectType, __imp_KeTimeStampBundle, __imp_XboxKrnlVersion,
     __imp_XexExecutableModuleHandle, __imp_ExLoadedCommandLine, __imp_VdGlobalDevice, __imp_VdGpuClockInMHz,
     __imp_VdHSIOCalibrationLock;
@@ -304,8 +306,18 @@ struct Shared {
   u32 tls_seen;   // what a worker read from its own slot before setting it
   u32 kthread;    // a worker's KPCR+0x100
   u32 thread_id;  // a worker's KTHREAD+0x14C
+  u32 cpu[2];     // a worker's KPCR+0x10C and KTHREAD+0xBF
+  u32 handle;     // a worker's own handle
+  u32 stage;
+  u32 ticks, stop;
 };
 static struct Shared shared;
+
+static int WaitFor(volatile u32* p, u32 v) {
+  int64_t ms = -10000;
+  for (int k = 0; k < 1000 && *p != v; k++) KeDelayExecutionThread(1, 0, &ms);
+  return *p == v;
+}
 
 static u32 Counter(void* arg) {
   (void)arg;
@@ -327,6 +339,33 @@ static u32 Probe(void* arg) {
   shared.thread_id = *At(shared.kthread + 0x14C);
   KeWaitForSingleObject(shared.event, 3, 1, 0, 0);
   return (u32)(uintptr_t)arg;
+}
+
+static u32 Affine(void* arg) {
+  (void)arg;
+  u32 pc = (u32)pcr();
+  shared.cpu[0] = *(volatile unsigned char*)(uintptr_t)(pc + 0x10C);
+  shared.cpu[1] = *(volatile unsigned char*)(uintptr_t)(*At(pc + 0x100) + 0xBF);
+  return 0;
+}
+
+static u32 SelfSuspend(void* arg) {
+  (void)arg;
+  u32 previous = 9;
+  shared.stage = 1;
+  u32 status = NtSuspendThread(shared.handle, &previous);
+  shared.stage = 2;
+  return status == 0 && previous == 0 ? 5 : 6;
+}
+
+static u32 Ticker(void* arg) {
+  (void)arg;
+  int64_t ms = -10000;
+  while (!*(volatile u32*)&shared.stop) {
+    shared.ticks++;
+    KeDelayExecutionThread(1, 0, &ms);
+  }
+  return 0;
 }
 
 static void Threads(void) {
@@ -375,6 +414,36 @@ static void Threads(void) {
   CHECK(KeWaitForSingleObject((void*)(uintptr_t)kt, 3, 1, 0, 0) == 0 && shared.kthread == kt);
   CHECK(*At(kt + 0x140) == 43);
   ObDereferenceObject(kt);
+
+  // Bits 24-31 of the flags: an affinity mask, the thread on its lowest
+  // processor from its first instruction.
+  CHECK(ExCreateThread(&h, 0, 0, (void*)thread_startup, (void*)Affine, 0, 0x0C000000) == 0);
+  CHECK(NtWaitForSingleObjectEx(h, 1, 0, 0) == 0 && shared.cpu[0] == 2 && shared.cpu[1] == 2);
+  NtClose(h);
+  // A thread suspending itself stops in the call until resumed, which
+  // returns the count it had.
+  CHECK(ExCreateThread(&h, 0, 0, (void*)thread_startup, (void*)SelfSuspend, 0, 1) == 0);
+  shared.handle = h;
+  CHECK(NtResumeThread(h, &previous) == 0 && previous == 1);
+  CHECK(WaitFor(&shared.stage, 1));
+  CHECK(NtWaitForSingleObjectEx(h, 1, 0, &ten_ms) == kStatusTimeout && shared.stage == 1);
+  CHECK(NtResumeThread(h, &previous) == 0 && previous == 1);
+  CHECK(NtWaitForSingleObjectEx(h, 1, 0, 0) == 0 && shared.stage == 2);
+  CHECK(ObReferenceObjectByHandle(h, __imp_ExThreadObjectType, &obj) == 0 && *At(obj + 0x140) == 5);
+  ObDereferenceObject(obj);
+  NtClose(h);
+  // Another running thread, suspended, stops by its next delay.
+  CHECK(ExCreateThread(&h, 0, 0, (void*)thread_startup, (void*)Ticker, 0, 0) == 0);
+  KeDelayExecutionThread(1, 0, &ten_ms);
+  CHECK(NtSuspendThread(h, &previous) == 0 && previous == 0);
+  KeDelayExecutionThread(1, 0, &ten_ms);
+  u32 held = shared.ticks;
+  for (int k = 0; k < 3; k++) KeDelayExecutionThread(1, 0, &ten_ms);
+  CHECK(held != 0 && shared.ticks == held);
+  shared.stop = 1;
+  CHECK(NtResumeThread(h, &previous) == 0 && previous == 1);
+  CHECK(NtWaitForSingleObjectEx(h, 1, 0, 0) == 0);
+  NtClose(h);
 
   // Four threads contending for a critical section.
   RtlInitializeCriticalSection(shared.cs);
@@ -696,12 +765,6 @@ void GraphicsInterrupt(u32 source, u32 user) {
 }
 
 // Waits up to a second for *p == v.
-static int WaitFor(volatile u32* p, u32 v) {
-  int64_t ms = -10000;
-  for (int k = 0; k < 1000 && *p != v; k++) KeDelayExecutionThread(1, 0, &ms);
-  return *p == v;
-}
-
 static void Gpu(void) {
   CHECK(*Reg(0x1961) == (1280u << 16 | 720) && *Reg(0x1951) == 1);
   // Vertical blanks reach the callback as DPCs.
@@ -871,6 +934,10 @@ static void Xma(void) {
   At(a)[2] = 0x12345;
   *XmaReg(0x6A0 + (index >> 5)) = __builtin_bswap32(1u << (index & 31));
   CHECK(WaitFor(&At(a)[2], 32) && At(a)[0] == 0x00000FFF && At(a)[1] == 0);
+  // A lock, with nothing decoding, is taken and leaves the context alone.
+  At(a)[0] = 0x00300FFF;
+  *XmaReg(0x690 + (index >> 5)) = __builtin_bswap32(1u << (index & 31));
+  CHECK(WaitFor(XmaReg(0x690 + (index >> 5)), 0) && At(a)[0] == 0x00300FFF && At(a)[2] == 32);
   // Released contexts are zeroed and handed out again.
   CHECK(XMAReleaseContext(a) == 0);
   u32 again = 0;
@@ -978,6 +1045,11 @@ static void Users(void) {
   size = 2 * 0x28 + 8;
   CHECK(XamUserReadProfileSettings9(0, 0, 0, 0, 2, gamer, &size, results, 0) == 0 && results[0] == 2 &&
         *At(settings) == 0 && *At(settings + 0x28) == 0 && *At(settings + 0x28 + 0x10) == 0x10040018);
+  u32 card[3] = {0x10040022, 0x402C0011, 0x5004000B};  // auto aim, motto, reputation: not written
+  size = 3 * 0x28 + 0x2C + 8;
+  CHECK(XamUserReadProfileSettings9(0, 0, 0, 0, 3, card, &size, results, 0) == 0 && results[0] == 3 &&
+        *At(settings) == 0 && *At(settings + 0x28) == 0 && *At(settings + 0x28 + 0x20) == 0 &&
+        *At(settings + 0x50) == 0 && *At(settings + 0x50 + 0x10) == 0x5004000B);
 
   // Title settings written as a title saves them: the three title-specific
   // settings at once, the last one empty with an address (a zero-length
@@ -1072,6 +1144,12 @@ static void Content(void) {
   CHECK(XamContentGetDeviceData(1, &device) == 0 && device.id == 1 && device.type == 1 && device.total > 0 &&
         device.free <= device.total && device.name[0] == 'H' && device.name[9] == 'e' && device.name[10] == 0);
   CHECK(XamContentGetDeviceData(2, &device) == 0x48F);
+  // The device selector picks it, through an XOVERLAPPED only.
+  u32 chosen = 0, sel[7] = {9, 9, 0, 0, 0, 0, 9};
+  CHECK(XamShowDeviceSelectorUI(0, 1, 0, 0x10000, &chosen, 0) == 0x57 && chosen == 0);
+  CHECK(XamShowDeviceSelectorUI(4, 1, 0, 0x10000, &chosen, sel) == 0x57 && sel[6] == 0x57 && chosen == 0);
+  CHECK(XamShowDeviceSelectorUI(0xFF, 1, 0x200, 0x10000, &chosen, sel) == 0x3E5 && sel[0] == 0 &&
+        sel[6] == 0 && chosen == 1);
 
   // No saves yet.
   static struct ContentData items[4];

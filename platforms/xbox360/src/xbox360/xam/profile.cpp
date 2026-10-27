@@ -46,10 +46,28 @@ struct Known {
 constexpr Known kProfileSettings[] = {
     {0x10040002, kSourceNoValue, 0},   // y axis inverted
     {0x10040003, kSourceDefault, 3},   // controller vibration on (Xenia's default)
+    {0x10040006, kSourceNoValue, 0},   // gamercard: gamer score
+    {0x5004000B, kSourceNoValue, 0},   // gamercard: reputation
     {0x1004000C, kSourceNoValue, 0},   // voice muted
     {0x1004000D, kSourceNoValue, 0},   // voice through the speakers
     {0x1004000E, kSourceNoValue, 0},   // voice volume
+    {0x4064000F, kSourceNoValue, 0},   // gamercard: picture key
+    {0x402C0011, kSourceNoValue, 0},   // gamercard: motto
+    {0x10040012, kSourceNoValue, 0},   // gamercard: titles played
+    {0x10040013, kSourceNoValue, 0},   // gamercard: achievements earned
+    {0x10040015, kSourceNoValue, 0},   // difficulty
     {0x10040018, kSourceNoValue, 0},   // control sensitivity
+    {0x1004001D, kSourceNoValue, 0},   // preferred colour 1
+    {0x1004001E, kSourceNoValue, 0},   // preferred colour 2
+    {0x10040022, kSourceNoValue, 0},   // auto aim
+    {0x10040023, kSourceNoValue, 0},   // auto centre
+    {0x10040024, kSourceNoValue, 0},   // movement control
+    {0x10040026, kSourceNoValue, 0},   // racing: transmission
+    {0x10040027, kSourceNoValue, 0},   // racing: camera location
+    {0x10040028, kSourceNoValue, 0},   // racing: brake control
+    {0x10040029, kSourceNoValue, 0},   // racing: accelerator control
+    {0x10040038, kSourceNoValue, 0},   // gamercard: this title's gamer score
+    {0x10040039, kSourceNoValue, 0},   // gamercard: this title's achievements
 };
 // A title's own settings (title specific 1-3, 1000 bytes each).
 bool TitleSpecific(uint32_t id) { return id == 0x63E83FFF || id == 0x63E83FFE || id == 0x63E83FFD; }

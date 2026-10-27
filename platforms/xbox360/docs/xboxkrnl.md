@@ -46,10 +46,20 @@ here; on the console a KPCR belongs to a hardware thread.
 - ExCreateThread(handle, stack size, thread id, XAPI startup, start,
   context, flags): with a startup routine the thread runs
   `startup(start, context)`, otherwise `start(context)`; the result is the
-  exit status. Flag 1 creates it suspended. With flag 0x80 *handle is
+  exit status. Flag 1 creates it suspended. Bits 24-31 are an affinity
+  mask (XAPI's CreateThread builds `1 << processor << 24` in titles): the
+  thread reports the mask's lowest processor (KPCR+0x10C, KTHREAD+0xBF)
+  from its first instruction, as after KeSetAffinityThread; titles index
+  per-processor tables by it. With flag 0x80 *handle is
   the KTHREAD, not a handle (Xenia's; a title hands it straight to
   KeSetBasePriorityThread), referenced for the caller as a handle would
   be (chosen). Console check.
+- NtSuspendThread: a host thread cannot be stopped where it runs. A
+  thread suspending itself (titles' workers do, to sleep until another
+  thread resumes them) stops in the call until its count is 0 again;
+  another running thread stops at its next wait or delay, before or after
+  it blocks (chosen; on the console at once); one not yet started stops
+  before its start routine. Console check.
 - A stack size of 0 takes the title's (the XEX's default stack size
   header); without one 1 MiB, as Xenia chose. At least 16 KiB, in whole
   4 KiB pages. Console check.
@@ -182,6 +192,11 @@ here; on the console a KPCR belongs to a hardware thread.
   meaning and the clear's effect (no input or output buffer valid, the
   input read offset 32 bits in, past the packet header, the output
   offsets 0) are Xenia's. Console check.
+- Titles' audio libraries lock a context whenever a voice stops or
+  changes, then poll register 0x606 and read the context's buffer-valid
+  bits back. A lock stops the context's decoding (Xenia's); with no
+  decoder there is none to stop, so it is taken and leaves the context as
+  it was.
 - 320 contexts of 64 bytes; XMACreateContext(*context) writes a free
   one's address, or 0 with STATUS_NO_MEMORY when none is free;
   XMAReleaseContext zeroes it. Xenia's (which allocates the array in its

@@ -54,9 +54,16 @@ void ClearContext(uint32_t index) {
   Wr32(va + 36, Rd32(va + 36) & ~0x1Fu);                   // output read offset
 }
 
+void CheckContexts(uint32_t bits, uint32_t k, const char* command) {
+  for (uint32_t n = 0; n < 32; n++)
+    if (bits >> n & 1 && 32 * k + n >= kXmaContexts)
+      Fatal(nullptr, "XMA: context %u %s: no such context", 32 * k + n, command);
+}
+
 // Takes the commands written to the registers, which nothing signals, so
-// the decoder polls them. A kick (decode) or a lock (stop decoding) needs
-// the decoder, which is not implemented yet.
+// the decoder polls them. A kick (decode) needs the decoder, which is not
+// implemented yet. A lock stops a context's decoding (Xenia's), and with
+// nothing decoded there is none to stop: it is taken and changes nothing.
 void Decoder(void*) {
   for (unsigned idle = 0;; idle++) {
     bool worked = false;
@@ -64,16 +71,15 @@ void Decoder(void*) {
       if (uint32_t bits = TakeCommand(kXmaRegKick + k))
         Fatal(nullptr, "XMA: contexts %x of %u..%u kicked: XMA decoding is not implemented yet", bits, 32 * k,
               32 * k + 31);
-      if (uint32_t bits = TakeCommand(kXmaRegLock + k))
-        Fatal(nullptr, "XMA: contexts %x of %u..%u locked: XMA decoding is not implemented yet", bits, 32 * k,
-              32 * k + 31);
+      if (uint32_t bits = TakeCommand(kXmaRegLock + k)) {
+        CheckContexts(bits, k, "locked");
+        worked = true;
+      }
       if (uint32_t bits = TakeCommand(kXmaRegClear + k)) {
+        CheckContexts(bits, k, "cleared");
         std::lock_guard<std::mutex> g(g_lock);
         for (uint32_t n = 0; n < 32; n++)
-          if (bits >> n & 1) {
-            if (32 * k + n >= kXmaContexts) Fatal(nullptr, "XMA: context %u cleared: no such context", 32 * k + n);
-            ClearContext(32 * k + n);
-          }
+          if (bits >> n & 1) ClearContext(32 * k + n);
         worked = true;
       }
     }

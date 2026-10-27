@@ -121,7 +121,7 @@ struct ThreadParams {
   uint32_t stack_size;  // 0: the title's default
   uint32_t startup;     // XAPI's startup routine, called as startup(start, context); or 0
   uint32_t start, context;
-  uint32_t flags;       // kCreateSuspended; the processor in bits 24-31
+  uint32_t flags;       // kCreateSuspended; the affinity mask in bits 24-31
   // The title's main thread: its start routine returning ends the process
   // (the C runtime's exit), with what it returned.
   bool main = false;
@@ -144,6 +144,9 @@ void SetProcessor(Thread* t, uint32_t cpu);
 // Suspend counts (KeSuspendThread, KeResumeThread): the previous count.
 uint32_t SuspendThread(Thread* t);
 uint32_t ResumeThread(Thread* t);
+// Where a running thread that another suspended stops: Wait and Delay call
+// it, before and after they block.
+void HoldIfSuspended();
 // Ends the current thread (ExTerminateThread, or its start routine
 // returning) with `status`. The process ends with its last thread.
 [[noreturn]] void ExitThread(uint32_t status);

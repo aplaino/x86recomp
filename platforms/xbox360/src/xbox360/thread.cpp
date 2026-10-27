@@ -12,6 +12,7 @@
 #include <pthread.h>
 
 #include <algorithm>
+#include <bit>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -37,7 +38,6 @@ struct Thread {
   std::mutex lock;
   std::condition_variable resumed;
   uint32_t suspend = 0;
-  bool started = false;
 };
 
 namespace {
@@ -118,7 +118,6 @@ void* Run(void* arg) {
   {
     std::unique_lock<std::mutex> l(t->lock);
     t->resumed.wait(l, [t] { return t->suspend == 0; });
-    t->started = true;
   }
   uint32_t status;
   try {
@@ -193,6 +192,8 @@ Thread* NewThread(const ThreadParams& p, void (*system_body)(void*), void* syste
   Wr32(pcr + kPcrStackEnd, t->stack_base - size);
   Wr32(pcr + kPcrCurrentThread, k);
   Wr32(pcr + kPcrPrcbPtr, pcr + kPcrPrcb);
+  // The affinity mask's lowest processor, before the thread can read it.
+  if (uint32_t mask = p.flags >> 24) SetProcessor(t, uint32_t(std::countr_zero(mask)));
 
   t->c.mem = Mem();
   t->c.r[1] = t->stack_base - kStackTopReserve;
@@ -261,12 +262,21 @@ void SetProcessor(Thread* t, uint32_t cpu) {
   Wr8(t->pcr + kPcrCpu, uint8_t(cpu));
 }
 
+// A running host thread cannot be stopped where it is: a thread suspending
+// itself stops here, another running thread at its next wait or delay
+// (HoldIfSuspended), one that has not started before its start routine.
 uint32_t SuspendThread(Thread* t) {
-  std::lock_guard<std::mutex> l(t->lock);
-  // A running host thread cannot be stopped where it is; only a thread
-  // that has not started yet can be held.
-  if (t->started) Fatal(&t->c, "suspending a running thread is not supported yet");
-  return t->suspend++;
+  std::unique_lock<std::mutex> l(t->lock);
+  uint32_t old = t->suspend++;
+  if (t == t_current) t->resumed.wait(l, [t] { return t->suspend == 0; });
+  return old;
+}
+
+void HoldIfSuspended() {
+  Thread* t = t_current;
+  if (!t || t->system_body) return;
+  std::unique_lock<std::mutex> l(t->lock);
+  t->resumed.wait(l, [t] { return t->suspend == 0; });
 }
 
 uint32_t ResumeThread(Thread* t) {

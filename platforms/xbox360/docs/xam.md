@@ -156,9 +156,14 @@ only a console can settle.
   under -O3 and UBSan the planted memcpy is reported.
 - A setting not written reads as NO_VALUE, except controller vibration,
   DEFAULT 3 (Xenia's); a title's own settings with no bytes. The
-  profile's settings listed: y axis inverted, vibration, voice muted,
-  voice through the speakers, voice volume, control sensitivity. An id not
-  listed is fatal. Title 0 is the running title (chosen). Console check.
+  profile's settings listed are the 24 Xenia and the XDK name: y axis
+  inverted, vibration, the gamercard's (gamer score, reputation, picture
+  key, motto, titles played, achievements, this title's score and
+  achievements), voice muted, through the speakers and volume,
+  difficulty, control sensitivity, preferred colours 1 and 2, auto aim,
+  auto centre, movement control, racing transmission, camera, brake and
+  accelerator. Titles map their own option ids onto all of them and read
+  the ones their own settings do not hold. An id not listed is fatal. Title 0 is the running title (chosen). Console check.
 
 ## Notifications
 - An id is an area (bits 25-30), a version (16-24) and a number.
@@ -205,6 +210,17 @@ only a console can settle.
   bytes: id, type, size and free bytes, as the partition's volume
   reports them, a name of 27 UTF-16 characters, the last 0). xam reports
   a device of type 0x10 as 2 to titles (xam's code).
+- XamShowDeviceSelectorUI(user, content type, flags, bytes wanted,
+  *device id, overlapped) is xam's: ERROR_INVALID_PARAMETER (also the
+  XOVERLAPPED's extended error) for a user past slot 3 but 0xFF, flags in
+  0x83F00008, no device id pointer or no XOVERLAPPED; flag 0x10000 adds
+  0x200 (XCONTENTFLAG_FORCE_SHOW_UI). It loads its UI app, sends it
+  {0, user, type, flags, bytes (8), *device id, overlapped, 0} as app
+  0xFE's message 0x2100B and returns ERROR_IO_PENDING, leaving
+  XMsgStartIORequest's result as the extended error. With no UI here
+  the selector picks the one device, id 1, at once, as Xenia does,
+  whatever the flags (chosen). Console check: what the console's
+  selector does with one device and no FORCE_SHOW_UI.
 - XamContentCreateEx(user, root, data, flags, *disposition, *license
   mask, cache size, content size, overlapped): ERROR_INVALID_PARAMETER
   for an empty file name or one with a character past 0x7F (but for

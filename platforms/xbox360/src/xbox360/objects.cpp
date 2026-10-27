@@ -129,8 +129,8 @@ uint32_t ReleaseMutant(uint32_t mutant, int32_t& previous) {
   return kStatusSuccess;
 }
 
-uint32_t Wait(const uint32_t* objs, uint32_t count, bool wait_all, const int64_t* timeout,
-              bool /*alertable*/) {
+namespace {
+uint32_t WaitObjects(const uint32_t* objs, uint32_t count, bool wait_all, const int64_t* timeout) {
   uint32_t me = KThread(CurrentThread());
   Clock::time_point deadline = timeout ? Deadline(*timeout) : Clock::time_point::max();
   std::unique_lock<std::mutex> l(g_dispatch);
@@ -153,9 +153,21 @@ uint32_t Wait(const uint32_t* objs, uint32_t count, bool wait_all, const int64_t
   }
 }
 
+}  // namespace
+
+uint32_t Wait(const uint32_t* objs, uint32_t count, bool wait_all, const int64_t* timeout,
+              bool /*alertable*/) {
+  HoldIfSuspended();
+  uint32_t status = WaitObjects(objs, count, wait_all, timeout);
+  HoldIfSuspended();
+  return status;
+}
+
 uint32_t Delay(int64_t timeout, bool /*alertable*/) {
+  HoldIfSuspended();
   if (timeout == 0) std::this_thread::yield();
   else std::this_thread::sleep_until(Deadline(timeout));
+  HoldIfSuspended();
   return kStatusSuccess;
 }
 

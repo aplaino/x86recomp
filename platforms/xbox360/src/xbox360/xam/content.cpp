@@ -36,7 +36,8 @@ namespace recomp::xbox360 {
 namespace {
 
 constexpr const char* kXam = "xam.xex";
-constexpr uint32_t kErrorInvalidParameter = 0x57, kErrorInvalidName = 0x7B, kEInvalidArg = 0x80070057;
+constexpr uint32_t kErrorInvalidParameter = 0x57, kErrorInvalidName = 0x7B, kErrorIoPending = 0x3E5,
+                   kEInvalidArg = 0x80070057;
 constexpr uint32_t kFileNotFound = 0x80070002, kPathNotFound = 0x80070003, kAccessDenied = 0x80070005,
                    kNoMoreFiles = 0x80070012, kSharingViolation = 0x80070020, kDupName = 0x80070034,
                    kBadName = 0x8007007B, kAlreadyExists = 0x800700B7, kDeviceNotConnected = 0x8007048F,
@@ -435,6 +436,16 @@ XMSG(kXamApp, 0x20029, ContentGetDeviceData) {
   return 0;
 }
 
+// 0x2100B, XamShowDeviceSelectorUI's {0, user, content type, flags, bytes
+// wanted (8 bytes), *device id, *overlapped, 0}: the device selector,
+// which xam's UI app shows. There is no UI here, and one device: it is
+// chosen, as Xenia chooses it, whatever the flags ask (XCONTENTFLAG_
+// FORCE_SHOW_UI among them). Console check.
+XMSG(kXamApp, 0x2100B, ShowDeviceSelector) {
+  Wr32(Rd32(p1 + 0x18), kDeviceId);
+  return 0;
+}
+
 // ---- the exports ------------------------------------------------------------
 // Each returns a Win32 code: with an XOVERLAPPED, ERROR_IO_PENDING once the
 // request is sent (here: complete).
@@ -541,6 +552,34 @@ HLE(kXam, 610, XamContentGetCreator) {
   uint32_t hr = ProcessXMsgRequest(c, kXamApp, 0x20014, ov, req, 0x144);
   SystemFree(req);
   return Win32FromHResult(hr);
+}
+
+// XamShowDeviceSelectorUI(user, content type, flags, bytes wanted (8
+// bytes), *device id, *overlapped), as xam's: it refuses a user past slot 3
+// but XUSER_INDEX_ANY, flags it does not know, and no device id pointer or
+// no XOVERLAPPED (ERROR_INVALID_PARAMETER, also the extended error), then
+// sends its UI app the request and returns ERROR_IO_PENDING, leaving
+// XMsgStartIORequest's result (S_OK) as the extended error. Loading the UI
+// app cannot fail here.
+HLE(kXam, 715, XamShowDeviceSelectorUI) {
+  uint32_t user = Arg(c, 0), flags = Arg(c, 2), device = Arg(c, 4), ov = Arg(c, 5);
+  if ((user >= 4 && user != 0xFF) || flags & 0x83F00008 || !device || !ov) {
+    if (ov) Wr32(ov + 0x18, kErrorInvalidParameter);
+    return kErrorInvalidParameter;
+  }
+  if (flags & 0x10000) flags |= 0x200;
+  uint32_t req = SystemAlloc(0x28);
+  std::memset(Mem() + req, 0, 0x28);
+  Wr32(req + 4, user);
+  Wr32(req + 8, Arg(c, 1));
+  Wr32(req + 0xC, flags);
+  Wr64(req + 0x10, Arg64(c, 3));
+  Wr32(req + 0x18, device);
+  Wr32(req + 0x1C, ov);
+  uint32_t hr = StartXMsgRequest(c, kXamApp, 0x2100B, ov, req, 0x28);
+  SystemFree(req);
+  Wr32(ov + 0x18, hr);
+  return kErrorIoPending;
 }
 
 // XamContentGetDeviceState(device id, *overlapped).

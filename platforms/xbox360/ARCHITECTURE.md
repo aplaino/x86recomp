@@ -248,7 +248,8 @@ hardware, without decoding yet:
   the GPU: the context array's physical address is set at power-on.
 - A kernel thread polls the command registers, a bit per context, and
   takes each word written (leaving 0). A clear resets the context's
-  buffers and offsets; a kick or a lock needs the decoder and is fatal.
+  buffers and offsets; a lock, with nothing decoding, changes nothing; a
+  kick needs the decoder and is fatal.
   Polling leaves a gap between a title's write and the command, which a
   clear only narrows by running fast; the decoder settles how commands
   reach it (docs/xboxkrnl.md, "XMA").

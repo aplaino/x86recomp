@@ -80,6 +80,7 @@ __xex_import_slot_\name:
   FUNCTION 245, NtResumeThread
   FUNCTION 246, NtSetEvent
   FUNCTION 250, NtSetTimerEx
+  FUNCTION 252, NtSuspendThread
   FUNCTION 253, NtWaitForSingleObjectEx
   FUNCTION 254, NtWaitForMultipleObjectsEx
   FUNCTION 272, ObReferenceObjectByHandle
@@ -151,6 +152,7 @@ __xex_import_slot_\name:
   FUNCTION 606, XamContentGetDeviceData, 1
   FUNCTION 610, XamContentGetCreator, 1
   FUNCTION 613, XamContentGetDeviceState, 1
+  FUNCTION 715, XamShowDeviceSelectorUI, 1
   VARIABLE 27, ExThreadObjectType
   VARIABLE 173, KeTimeStampBundle
   VARIABLE 344, XboxKrnlVersion
