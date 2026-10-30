@@ -8,6 +8,16 @@ project(x86recomp LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# iOS / tvOS: the runtime and the game only (the lifter and the tests run on
+# the Mac that builds them); dependencies come from an iOS prefix
+# (RECOMP_IOS_PREFIX: SDL3 as a dylib, FFmpeg, glslang, SPIRV-Cross), the
+# shader tools from the host.
+if(CMAKE_SYSTEM_NAME MATCHES "^(iOS|tvOS)$")
+  set(RECOMP_IOS ON CACHE INTERNAL "")
+else()
+  set(RECOMP_IOS OFF CACHE INTERNAL "")
+endif()
+
 include(FetchContent)
 
 find_package(SDL3 REQUIRED CONFIG)
@@ -81,7 +91,9 @@ target_compile_options(softfloat PRIVATE -O2)
 # ----------------------------------------------------------------------
 
 # Lifter (build-time tool): x86-32 machine code -> C++.
-add_subdirectory(tools/lifter)
+if(NOT RECOMP_IOS)
+  add_subdirectory(tools/lifter)
+endif()
 
 # Runtime core and the Win32 HLE. HLE handlers register themselves from
 # static initialisers, which run when their library is loaded.
@@ -166,7 +178,9 @@ add_library(recomp_hlsl SHARED
   src/runtime/hlsl/bytecode.cpp)
 target_include_directories(recomp_hlsl PUBLIC src)
 target_compile_features(recomp_hlsl PUBLIC cxx_std_20)
-add_subdirectory(tools/hlslc)
+if(NOT RECOMP_IOS)
+  add_subdirectory(tools/hlslc)
+endif()
 
 # gfx::Device and its backends; no HLE in it, shared by the graphics API
 # modules below. Backends:
@@ -196,9 +210,10 @@ endif()
 # compiles it to SPIR-V for Vulkan; for Metal, SPIRV-Cross turns a build
 # with Metal's binding order (METAL defined) into MSL source. Either way
 # the result is embedded in a header (ff_<stage>.h, array kFf<Stage>).
-find_program(RECOMP_GLSLANG glslangValidator REQUIRED)
+# Host tools (also when cross-compiling for iOS).
+find_program(RECOMP_GLSLANG glslangValidator REQUIRED HINTS /opt/homebrew/bin NO_CMAKE_FIND_ROOT_PATH)
 if(APPLE)
-  find_program(RECOMP_SPIRV_CROSS spirv-cross REQUIRED)
+  find_program(RECOMP_SPIRV_CROSS spirv-cross REQUIRED HINTS /opt/homebrew/bin NO_CMAKE_FIND_ROOT_PATH)
 endif()
 set(_shader_dir "${CMAKE_CURRENT_BINARY_DIR}/gfx_shaders")
 set(_shader_name_vert kFfVert)
@@ -310,9 +325,24 @@ add_library(recomp_sdl2 SHARED src/runtime/hle/sdl2.cpp src/runtime/hle/sdl2_vid
 target_link_libraries(recomp_sdl2 PUBLIC recomp_runtime SDL3::SDL3)
 
 add_library(recomp_dbghelp SHARED src/runtime/hle/dbghelp.cpp)
-find_library(RECOMP_LLVM_DEMANGLE libLLVMDemangle.a
-  PATHS "${RECOMP_LLVM_ROOT}/lib64" "${RECOMP_LLVM_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)
-target_link_libraries(recomp_dbghelp PUBLIC recomp_runtime "${RECOMP_LLVM_DEMANGLE}")
+if(RECOMP_IOS)
+  # The host's libLLVMDemangle.a is built for macOS: its sources (the same
+  # LLVM release, llvm/lib/Demangle) are built here instead.
+  set(RECOMP_LLVM_DEMANGLE_SRC "" CACHE PATH "llvm/lib/Demangle sources (iOS builds)")
+  file(GLOB _demangle "${RECOMP_LLVM_DEMANGLE_SRC}/*.cpp")
+  if(NOT _demangle)
+    message(FATAL_ERROR "set RECOMP_LLVM_DEMANGLE_SRC to LLVM's lib/Demangle sources")
+  endif()
+  add_library(recomp_llvm_demangle STATIC ${_demangle})
+  target_include_directories(recomp_llvm_demangle PRIVATE "${RECOMP_LLVM_ROOT}/include")
+  target_compile_features(recomp_llvm_demangle PRIVATE cxx_std_17)
+  set_target_properties(recomp_llvm_demangle PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_link_libraries(recomp_dbghelp PUBLIC recomp_runtime recomp_llvm_demangle)
+else()
+  find_library(RECOMP_LLVM_DEMANGLE libLLVMDemangle.a
+    PATHS "${RECOMP_LLVM_ROOT}/lib64" "${RECOMP_LLVM_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)
+  target_link_libraries(recomp_dbghelp PUBLIC recomp_runtime "${RECOMP_LLVM_DEMANGLE}")
+endif()
 target_include_directories(recomp_dbghelp PRIVATE "${RECOMP_LLVM_ROOT}/include")
 
 # recomp_add_lifted(<target> <dir>): an OBJECT library of the lifter's
@@ -484,8 +514,10 @@ endfunction()
 if(PROJECT_IS_TOP_LEVEL)
   enable_testing()
 endif()
-add_subdirectory(tests)
+if(NOT RECOMP_IOS)
+  add_subdirectory(tests)
+endif()
 # Dev tool: renders the EAX capture cases with recomp_audio (eax_render).
-if(PROJECT_IS_TOP_LEVEL AND FFMPEG_FOUND)
+if(PROJECT_IS_TOP_LEVEL AND FFMPEG_FOUND AND NOT RECOMP_IOS)
   add_subdirectory(tools/eax_capture)
 endif()

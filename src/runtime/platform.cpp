@@ -16,6 +16,7 @@
 #include <ucontext.h>
 
 #if defined(__APPLE__)
+#include <TargetConditionals.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <mach/thread_policy.h>
@@ -30,6 +31,28 @@ namespace {
 ucontext_t g_caller_ctx, g_stack_ctx;
 }
 
+#if defined(__APPLE__) && defined(__aarch64__) && TARGET_OS_IPHONE
+// iOS / tvOS: the ucontext routines are there but swapcontext returns at
+// once, so the switch to the private stack is done here: sp moves to its
+// top, fn runs, sp comes back. fn is an ordinary call (frame records and
+// unwind info as usual); everything the AAPCS64 lets it clobber is listed.
+void RunOnStack(void* stack, size_t size, void (*fn)()) {
+  const uintptr_t top = (reinterpret_cast<uintptr_t>(stack) + size) & ~uintptr_t(15);
+  asm volatile(
+      "mov x9, sp\n"
+      "mov sp, %0\n"
+      "stp x9, x30, [sp, #-16]!\n"
+      "blr %1\n"
+      "ldp x9, x30, [sp], #16\n"
+      "mov sp, x9\n"
+      :
+      : "r"(top), "r"(fn)
+      : "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12",
+        "x13", "x14", "x15", "x16", "x17", "x30", "v0", "v1", "v2", "v3", "v4", "v5", "v6",
+        "v7", "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23", "v24", "v25", "v26",
+        "v27", "v28", "v29", "v30", "v31", "cc", "memory");
+}
+#else
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 void RunOnStack(void* stack, size_t size, void (*fn)()) {
@@ -41,6 +64,7 @@ void RunOnStack(void* stack, size_t size, void (*fn)()) {
   swapcontext(&g_caller_ctx, &g_stack_ctx);
 }
 #pragma clang diagnostic pop
+#endif
 
 FaultContext ReadFaultContext(const void* uc) {
   FaultContext f;

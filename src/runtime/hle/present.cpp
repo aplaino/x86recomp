@@ -5,6 +5,7 @@
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <unistd.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -27,8 +28,15 @@ std::string g_shot_path;  // RequestShot's, until the next frame saves it
 void SaveFrame(gfx::Device& dev, int w, int h, const std::string& path) {
   std::vector<uint8_t> px(size_t(w) * h * 4);
   dev.ReadBackFront({0, 0, w, h}, px.data(), uint32_t(w * 4), gfx::Format::X8R8G8B8);
+  // Relative to the working directory (SDL would take a relative path from
+  // the app bundle on iOS).
+  std::string file = path;
+  if (!file.empty() && file[0] != '/') {
+    char cwd[1024];
+    if (getcwd(cwd, sizeof cwd)) file = std::string(cwd) + "/" + file;
+  }
   if (SDL_Surface* surf = SDL_CreateSurfaceFrom(w, h, SDL_PIXELFORMAT_XRGB8888, px.data(), w * 4)) {
-    SDL_SaveBMP(surf, path.c_str());
+    SDL_SaveBMP(surf, file.c_str());
     SDL_DestroySurface(surf);
   }
 }
