@@ -573,6 +573,15 @@ class GpuDevice final : public Device {
                           ? size_t(RowPitch(t.fmt, uint32_t(w))) * RowCount(t.fmt, uint32_t(h))
                           : size_t(w) * h * (IsFloat(t.fmt) ? BitsPerPixel(t.fmt) / 8 : 4));
     const uint8_t* s = static_cast<const uint8_t*>(src);
+    const bool whole = level == 0 && c.left == 0 && c.top == 0 && w == lw && h == lh;
+    if (!dump_dir_.empty() && whole && !IsFloat(t.fmt)) {
+      std::vector<uint32_t> px(size_t(w) * h);
+      if (IsCompressed(t.fmt))
+        DecodeDxt(s, pitch, t.fmt, w, h, px.data());
+      else
+        ConvertToArgb(s, pitch, t.fmt, w, h, px.data());
+      DumpTexture(px.data(), w, h);
+    }
     if (IsCompressed(t.fmt) && !bc_) {  // stored as B8G8R8A8
       std::vector<uint32_t> px(size_t(w) * h);
       DecodeDxt(s, pitch, t.fmt, w, h, px.data());
@@ -1386,6 +1395,26 @@ void r_color0(inout vec4 c) {
     for (auto& [k, s] : samplers_) SDL_ReleaseGPUSampler(dev_, s);
     samplers_.clear();
     if (min_aniso_ > 1) std::fprintf(stderr, "gfx: anisotropic filtering %dx\n", min_aniso_);
+  }
+
+  void DumpTexturesTo(const std::string& dir) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    dump_dir_ = dir;
+    std::fprintf(stderr, "gfx: textures saved to %s\n", dir.c_str());
+  }
+
+  void DumpTexture(const uint32_t* argb, int w, int h) {
+    if (w < 64 || h < 64) return;
+    uint64_t hash = 1469598103934665603ull;  // FNV-1a
+    for (size_t i = 0; i < size_t(w) * h; i++) hash = (hash ^ argb[i]) * 1099511628211ull;
+    if (!dumped_.insert(hash).second) return;
+    char path[1024];
+    std::snprintf(path, sizeof path, "%s/tex_%dx%d_%016llx.bmp", dump_dir_.c_str(), w, h,
+                  (unsigned long long)hash);
+    SDL_Surface* s = SDL_CreateSurfaceFrom(w, h, SDL_PIXELFORMAT_ARGB8888,
+                                           const_cast<uint32_t*>(argb), w * 4);
+    if (!s || !SDL_SaveBMP(s, path)) WarnF("gfx: saving %s: %s\n", path, SDL_GetError());
+    if (s) SDL_DestroySurface(s);
   }
 
   void DecodeDxtOnUpload() override {
@@ -2837,6 +2866,8 @@ void main() {
   std::vector<uint32_t> indices_;
   std::vector<Upload> uploads_;
   bool bc_ = true;  // the GPU samples BC1-3 (else DXT is decoded on upload)
+  std::string dump_dir_;           // DumpTexturesTo
+  std::set<uint64_t> dumped_;      // content hashes already saved
   std::vector<uint8_t> upload_bytes_;
   std::vector<BlitTex> blit_pool_;
   struct {

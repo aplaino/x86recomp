@@ -202,6 +202,8 @@ std::unique_ptr<gfx::Device> CreateGfxDevice(SDL_Window* w) {
   d->SetMinAnisotropy(aniso ? std::atoi(aniso) : Game().anisotropy);
   // <ID>_NO_BC=1: DXT decoded on upload, as on a GPU without BC sampling.
   if (const char* e = Env("NO_BC"); e && *e == '1') d->DecodeDxtOnUpload();
+  // <ID>_DUMP_TEXTURES=dir: the game's textures saved as they are uploaded.
+  if (const char* e = Env("DUMP_TEXTURES"); e && *e) d->DumpTexturesTo(e);
   return d;
 }
 

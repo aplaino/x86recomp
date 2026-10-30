@@ -255,6 +255,10 @@ class Device {
   // Decode DXT textures on upload even where the GPU samples BC formats
   // (to check the path GPUs without them take). Before any texture exists.
   virtual void DecodeDxtOnUpload() {}
+  // Saves each texture's top level, when it is uploaded whole, as
+  // dir/tex_<w>x<h>_<hash>.bmp (A8R8G8B8, alpha kept), once per content:
+  // the game's own art, e.g. for app icons.
+  virtual void DumpTexturesTo(const std::string& dir) { (void)dir; }
 
   // ---- programmable pipeline. A shader from the HLSL translation (null
   // on failure); render states (blend, depth, stencil, cull, colour
