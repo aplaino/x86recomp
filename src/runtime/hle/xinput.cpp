@@ -8,6 +8,9 @@
 // DirectInput and WMI list the same pads (xinput.h).
 
 #include <SDL3/SDL.h>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 #include <algorithm>
 #include <cstring>
@@ -53,6 +56,15 @@ void Refresh() {
       return;
     }
     g_up = true;
+#if defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_TV)
+    // GameController finds paired controllers only after launch: a moment
+    // for it (pumping its run loop), so that the game's first enumeration
+    // already sees a pad that is on.
+    for (int i = 0; i < 50 && !SDL_HasGamepad(); i++) {
+      SDL_PumpEvents();
+      SDL_Delay(20);
+    }
+#endif
     if (TestPadWanted()) {
       SDL_VirtualJoystickDesc d;
       SDL_INIT_INTERFACE(&d);
@@ -68,12 +80,22 @@ void Refresh() {
   }
   for (Pad& p : g_pads) {
     if (p.gp && !SDL_GamepadConnected(p.gp)) {
+      std::fprintf(stderr, "xinput: pad %d disconnected\n", int(&p - g_pads));
       SDL_CloseGamepad(p.gp);
       p = Pad{};
     }
   }
   int n = 0;
   SDL_JoystickID* ids = SDL_GetGamepads(&n);
+  {  // Joysticks SDL has no gamepad mapping for are not pads here: say so.
+    static int last_j = -1, last_g = -1;
+    int nj = 0;
+    SDL_free(SDL_GetJoysticks(&nj));
+    if (nj != last_j || n != last_g)
+      std::fprintf(stderr, "xinput: %d joystick(s), %d of them gamepads\n", nj, n);
+    last_j = nj;
+    last_g = n;
+  }
   for (int i = 0; ids && i < n; i++) {
     // Automated runs take no host input: only the test pad.
     if (Background() && !(g_test_pad && SDL_GetJoystickID(g_test_pad) == ids[i])) continue;
@@ -84,6 +106,12 @@ void Refresh() {
     for (Pad& p : g_pads) {
       if (p.gp) continue;
       p.gp = SDL_OpenGamepad(ids[i]);
+      if (p.gp) {
+        const char* name = SDL_GetGamepadName(p.gp);
+        std::fprintf(stderr, "xinput: pad %d: %s\n", int(&p - g_pads), name ? name : "?");
+      } else {
+        WarnF("xinput: opening gamepad %u: %s\n", unsigned(ids[i]), SDL_GetError());
+      }
       break;
     }
   }
