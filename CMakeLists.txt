@@ -26,6 +26,27 @@ find_package(PkgConfig REQUIRED)
 # ffmpeg (LGPL, linked dynamically): MP3 for Miles streams, Bink movies.
 pkg_check_modules(FFMPEG IMPORTED_TARGET
   libavformat libavcodec libavutil libswscale)
+# A static ffmpeg's .pc lists "-framework X" as two options; CMake drops
+# repeated options, which leaves "-framework A B C" on the link line (a
+# reconfigure then fails to link). Keep each pair together.
+if(TARGET PkgConfig::FFMPEG)
+  get_target_property(_ff_opts PkgConfig::FFMPEG INTERFACE_LINK_OPTIONS)
+  if(_ff_opts)
+    set(_ff_fixed "")
+    set(_ff_framework OFF)
+    foreach(_o IN LISTS _ff_opts)
+      if(_ff_framework)
+        list(APPEND _ff_fixed "SHELL:-framework ${_o}")
+        set(_ff_framework OFF)
+      elseif(_o STREQUAL "-framework")
+        set(_ff_framework ON)
+      else()
+        list(APPEND _ff_fixed "${_o}")
+      endif()
+    endforeach()
+    set_target_properties(PkgConfig::FFMPEG PROPERTIES INTERFACE_LINK_OPTIONS "${_ff_fixed}")
+  endif()
+endif()
 if(APPLE)
   set(_llvm_default "/opt/homebrew/opt/llvm@22")  # Homebrew
 else()
