@@ -14,6 +14,13 @@
 // feedback effects rumble the pad.
 
 #include <SDL3/SDL.h>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+#if defined(__APPLE__) && TARGET_OS_IOS
+#include <objc/message.h>
+#include <objc/runtime.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -211,12 +218,43 @@ void OnRawInput(const RawInput& in) {
   }
 }
 
+#if defined(__APPLE__) && TARGET_OS_IOS
+// iPadOS locks the pointer to the app (hidden, motion only, no screen
+// edges) only for a full-screen scene: with "windowed apps" on (iPadOS 26's
+// default) it does not, even for a window as large as the screen. Logged
+// when it changes, so a "the mouse hits the edges" report can be told apart.
+void LogPointerLock(SDL_Window* w) {
+  static int last = -1;
+  void* win = SDL_GetPointerProperty(SDL_GetWindowProperties(w),
+                                     SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, nullptr);
+  if (!win) return;
+  auto msg = [](void* o, const char* sel) {
+    return reinterpret_cast<void* (*)(void*, SEL)>(objc_msgSend)(o, sel_registerName(sel));
+  };
+  auto flag = [](void* o, const char* sel) {
+    return o && reinterpret_cast<bool (*)(void*, SEL)>(objc_msgSend)(o, sel_registerName(sel));
+  };
+  void* scene = msg(win, "windowScene");
+  const bool wanted = flag(msg(win, "rootViewController"), "prefersPointerLocked");
+  const bool locked = scene && flag(msg(scene, "pointerLockState"), "isLocked");
+  const int state = int(wanted) | int(locked) << 1;
+  if (state != last && (wanted || last >= 0))
+    std::fprintf(stderr, "dinput8: pointer lock %s%s\n",
+                 !wanted ? "not wanted" : locked ? "granted" : "refused",
+                 wanted && !locked ? " (iPadOS gives it to full-screen apps only: Settings, "
+                                     "Multitasking & Gestures)" : "");
+  last = state;
+}
+#endif
+
 // The exclusive mouse hides the pointer and reports motion without
 // bounds, as on Windows: SDL's relative mode on the device's window.
 void Grab(InputDevice& d, bool on) {
   if (d.grabbed == on || d.keyboard || !(d.coop & DISCL_EXCLUSIVE) || Background())
     return;
-  if (SDL_Window* w = SdlWindowFor(d.hwnd)) SDL_SetWindowRelativeMouseMode(w, on);
+  if (SDL_Window* w = SdlWindowFor(d.hwnd)) {
+    SetRelativeMouse(w, on);
+  }
   d.grabbed = on;
 }
 
@@ -751,6 +789,13 @@ HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::GetDeviceState", DID8_GetDeviceS
     ReadPadState(*d, GPtr(out), size);
     return DI_OK;
   }
+#if defined(__APPLE__) && TARGET_OS_IOS
+  if (!d->keyboard) {
+    static int n = 0;
+    if (n++ % 120 == 0)
+      if (SDL_Window* w = SdlWindowFor(d->hwnd)) LogPointerLock(w);
+  }
+#endif
   std::lock_guard<std::mutex> l(g_mu);
   if (d->keyboard) {
     std::memcpy(GPtr(out), d->keys, 256);

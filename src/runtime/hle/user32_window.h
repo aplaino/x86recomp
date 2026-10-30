@@ -17,6 +17,10 @@ bool Background();
 
 // The SDL window behind a top-level HWND, or nullptr.
 SDL_Window* SdlWindowFor(uint32_t hwnd);
+// SDL's relative mouse mode on `w` (the exclusive or clipped mouse). On
+// iOS the pointer is also hidden while it is on: SDL hides it there only for
+// SDL_HideCursor, and iPadOS does not always lock it to the app.
+void SetRelativeMouse(SDL_Window* w, bool on);
 
 // HDCs: GetDC(hwnd) returns DcForWindow(hwnd); WindowForDc maps it back
 // (0 for the screen DC or anything else).

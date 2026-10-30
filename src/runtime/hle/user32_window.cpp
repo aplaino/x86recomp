@@ -7,6 +7,13 @@
 // activation, size) are delivered by calling the WndProc directly.
 
 #include <SDL3/SDL.h>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+#if defined(__APPLE__) && TARGET_OS_IOS
+#include <objc/message.h>
+#include <objc/runtime.h>
+#endif
 
 #include <atomic>
 #include <bit>
@@ -426,7 +433,7 @@ void AttachClip() {
     g_clip.hwnd = ClipWindow();
     if (Window* w = Win(g_clip.hwnd)) grab = w->sdl;
   }
-  if (grab && !Background()) SDL_SetWindowRelativeMouseMode(grab, true);
+  if (grab && !Background()) SetRelativeMouse(grab, true);
 }
 
 void ActivateApp(uint32_t hwnd, bool active) {
@@ -1278,6 +1285,50 @@ void ClientAreaSize(uint32_t hwnd, int* w, int* h) {
   if (Window* win = Win(hwnd)) GameClientSize(*win, w, h);
 }
 
+#if defined(__APPLE__) && TARGET_OS_IOS
+namespace {
+std::atomic<int> g_relative_windows{0};
+
+// UIKit asks SDL's view for the pointer's style only now and then: make it
+// ask again (each UIPointerInteraction of the window's root view).
+void RefreshPointerStyle(SDL_Window* w) {
+  void* win = SDL_GetPointerProperty(SDL_GetWindowProperties(w),
+                                     SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, nullptr);
+  if (!win) return;
+  auto msg = [](void* o, const char* sel) {
+    return reinterpret_cast<void* (*)(void*, SEL)>(objc_msgSend)(o, sel_registerName(sel));
+  };
+  void* vc = msg(win, "rootViewController");
+  void* view = vc ? msg(vc, "view") : nullptr;
+  void* list = view ? msg(view, "interactions") : nullptr;
+  if (!list) return;
+  const auto count = reinterpret_cast<unsigned long (*)(void*, SEL)>(objc_msgSend)(
+      list, sel_registerName("count"));
+  Class pointer = objc_getClass("UIPointerInteraction");
+  for (unsigned long i = 0; i < count; i++) {
+    void* it = reinterpret_cast<void* (*)(void*, SEL, unsigned long)>(objc_msgSend)(
+        list, sel_registerName("objectAtIndex:"), i);
+    if (pointer && reinterpret_cast<bool (*)(void*, SEL, Class)>(objc_msgSend)(
+                       it, sel_registerName("isKindOfClass:"), pointer))
+      msg(it, "invalidate");
+  }
+}
+}  // namespace
+#endif
+
+void SetRelativeMouse(SDL_Window* w, bool on) {
+  if (!w || SDL_GetWindowRelativeMouseMode(w) == on) return;
+  SDL_SetWindowRelativeMouseMode(w, on);
+#if defined(__APPLE__) && TARGET_OS_IOS
+  const int n = g_relative_windows += on ? 1 : -1;
+  if (on)
+    SDL_HideCursor();
+  else if (n <= 0 && g_cursor_count >= 0)
+    SDL_ShowCursor();
+  RefreshPointerStyle(w);
+#endif
+}
+
 namespace hle {
 namespace {
 
@@ -1465,7 +1516,7 @@ HLE("user32.dll", DestroyWindow, 1) {
     if (g_clip.hwnd == hwnd) {
       // The clip stays; AttachClip gives it to the next window over it.
       g_clip.hwnd = 0;
-      if (w->sdl) SDL_SetWindowRelativeMouseMode(w->sdl, false);
+      if (w->sdl) SetRelativeMouse(w->sdl, false);
     }
     if (w->sdl) SDL_DestroyWindow(w->sdl);
     w->sdl = nullptr;
@@ -2354,7 +2405,12 @@ HLE64("user32.dll", CallNextHookEx, 4) { return 0; }
 
 HLE("user32.dll", ShowCursor, 1) {
   g_cursor_count += Arg(c, 0) ? 1 : -1;
-  if (g_sdl_up && !Background()) {
+#if defined(__APPLE__) && TARGET_OS_IOS
+  const bool relative = g_relative_windows > 0;  // the pointer stays hidden
+#else
+  const bool relative = false;
+#endif
+  if (g_sdl_up && !Background() && !relative) {
     if (g_cursor_count >= 0)
       SDL_ShowCursor();
     else
@@ -2429,8 +2485,8 @@ HLE("user32.dll", ClipCursor, 1) {
       g_mouse_y = std::clamp(g_mouse_y, g_clip.t, std::max(g_clip.t, g_clip.b - 1));
     }
   }
-  if (release && release != grab) SDL_SetWindowRelativeMouseMode(release, false);
-  if (grab && !Background()) SDL_SetWindowRelativeMouseMode(grab, true);
+  if (release && release != grab) SetRelativeMouse(release, false);
+  if (grab && !Background()) SetRelativeMouse(grab, true);
   return 1;
 }
 
