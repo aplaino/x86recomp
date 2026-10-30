@@ -17,6 +17,10 @@ namespace recomp::hle {
 // PeekMessage calls so far (the FPS report gives them per frame: a game
 // loop that never waits peeks many times a frame).
 extern std::atomic<uint64_t> g_peek_messages;
+// Time a game's frame limiter spent asleep (ns), added by the game project
+// where it replaces a busy wait; the FPS report gives it per frame: the
+// main thread's headroom.
+extern std::atomic<uint64_t> g_limiter_sleep_ns;
 
 void PresentFrame(gfx::Device& dev, int w, int h);
 

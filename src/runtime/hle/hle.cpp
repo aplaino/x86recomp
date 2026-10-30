@@ -4,6 +4,7 @@
 #include <cstdlib>
 
 #include <algorithm>
+#include <chrono>
 #include <atomic>
 #include <map>
 #include <mutex>
@@ -213,6 +214,14 @@ void CallThunk(Ctx& c, gaddr thunk) {
       t_wd_hle_ret = saved_ret;
     }
   };
+  // <ID>_SLOW_HLE=ms: report imports that took longer than that (wall
+  // time; long frames that are waits rather than work show up here).
+  static const double slow_ms = [] {
+    const char* e = Env("SLOW_HLE");
+    return e ? std::atof(e) : 0.0;
+  }();
+  const auto t0 = slow_ms > 0 ? std::chrono::steady_clock::now()
+                              : std::chrono::steady_clock::time_point{};
   uint64_t r;
   {
     Inside inside(s->name.c_str(), ret);
@@ -220,6 +229,13 @@ void CallThunk(Ctx& c, gaddr thunk) {
     std::unique_lock<std::recursive_mutex> gl;
     if (s->graphics) gl = std::unique_lock<std::recursive_mutex>(graphics_mu);
     r = d.fn(c);
+  }
+  if (slow_ms > 0) {
+    const double ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (ms > slow_ms)
+      WarnF("slow import: %s!%s took %.1f ms (thread %04X, return address %08llX)\n",
+            s->dll.c_str(), s->name.c_str(), ms, CurrentThread()->tid, ret);
   }
   if (trace) TraceF("[%04X]   -> %llX\n", CurrentThread()->tid, (unsigned long long)r);
   if (x64) {

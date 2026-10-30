@@ -44,6 +44,7 @@ void SaveFrame(gfx::Device& dev, int w, int h, const std::string& path) {
 }  // namespace
 
 std::atomic<uint64_t> g_peek_messages{0};
+std::atomic<uint64_t> g_limiter_sleep_ns{0};
 
 void RequestShot(const std::string& path) {
   std::lock_guard<std::mutex> l(g_shot_mu);
@@ -115,13 +116,16 @@ void PresentFrame(gfx::Device& dev, int w, int h) {
     if ((now - first) / 1e9 >= report_s && !dts.empty()) {
       std::sort(dts.begin(), dts.end());
       auto q = [&](double p) { return dts[size_t(p * double(dts.size() - 1) + 0.5)]; };
-      static uint64_t peeks_before = 0;
+      static uint64_t peeks_before = 0, sleep_before = 0;
       const uint64_t peeks = g_peek_messages.load(std::memory_order_relaxed);
+      const uint64_t slept = g_limiter_sleep_ns.load(std::memory_order_relaxed);
       WarnF("fps: %.2f at t=%.1f s (interval ms: min %.3f p1 %.3f median %.3f p99 %.3f max %.3f; "
-            "%.1f PeekMessage a frame)\n",
+            "%.1f PeekMessage, %.2f ms limiter sleep a frame)\n",
             dts.size() / ((now - first) / 1e9), (now - t0) / 1e9, dts.front(), q(0.01),
-            q(0.5), q(0.99), dts.back(), double(peeks - peeks_before) / double(dts.size()));
+            q(0.5), q(0.99), dts.back(), double(peeks - peeks_before) / double(dts.size()),
+            double(slept - sleep_before) / 1e6 / double(dts.size()));
       peeks_before = peeks;
+      sleep_before = slept;
       dts.clear();
       first = now;
     }
