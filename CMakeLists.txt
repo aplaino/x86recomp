@@ -309,6 +309,10 @@ target_link_libraries(recomp_xinput PUBLIC recomp_runtime)
 # lists the XInput pads as game controllers.
 add_library(recomp_dinput8 SHARED src/runtime/hle/dinput8.cpp)
 target_link_libraries(recomp_dinput8 PUBLIC recomp_runtime recomp_xinput)
+if(RECOMP_IOS)
+  target_link_libraries(recomp_dinput8 PRIVATE objc)  # the pointer lock's state, for the log
+  target_link_libraries(recomp_runtime PRIVATE objc)  # the pointer's style (user32_window.cpp)
+endif()
 
 # Direct3D 9 and D3DX 9 over gfx::Device.
 add_library(recomp_d3d9 SHARED src/runtime/hle/d3d9.cpp src/runtime/hle/d3d9_draw.cpp
