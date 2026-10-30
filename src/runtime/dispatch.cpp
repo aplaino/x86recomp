@@ -9,6 +9,9 @@
 #include <pthread.h>
 #include <sys/mman.h>
 #include <signal.h>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 #include <unistd.h>
 
 #include <chrono>
@@ -253,6 +256,14 @@ void FaultHandler(int sig, siginfo_t* si, void* uc) {
   _exit(4);
 }
 }  // namespace
+
+#if defined(__APPLE__) && TARGET_OS_TV
+// tvOS's headers mark sigaltstack unavailable, but the kernel has it (one
+// kernel across Apple's systems). Called by its symbol; were it refused,
+// SA_ONSTACK falls back to the thread's own stack.
+extern "C" int SystemSigaltstack(const stack_t*, stack_t*) __asm__("_sigaltstack");
+#define sigaltstack SystemSigaltstack
+#endif
 
 // Each host thread running guest code needs its own signal stack: SEH
 // handlers for guest faults run lifted code on it, so it is large.
