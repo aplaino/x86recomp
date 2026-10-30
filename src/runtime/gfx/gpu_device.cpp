@@ -17,7 +17,8 @@
 // Colour textures and render targets are all B8G8R8A8 (D3D's A8R8G8B8
 // memory layout): other D3D formats are converted on upload and on
 // readback, as the d3d9 backend does for its X8R8G8B8 back buffer. DXT
-// stays compressed (BC1-3).
+// stays compressed (BC1-3), except on a GPU that cannot sample those (the
+// A15 of an Apple TV): there it is decoded to B8G8R8A8 on upload.
 
 #include <SDL3/SDL.h>
 
@@ -376,12 +377,13 @@ class GpuDevice final : public Device {
     fs_ = SDL_CreateGPUShader(dev_, &fs);
     if (!vs_ || !fs_) FatalF("gfx: compiling the fixed-function shaders: %s", SDL_GetError());
 
-    for (auto [d3d, sdl] : {std::pair{Format::DXT1, SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM},
-                            {Format::DXT3, SDL_GPU_TEXTUREFORMAT_BC2_RGBA_UNORM},
-                            {Format::DXT5, SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM}})
-      if (!SDL_GPUTextureSupportsFormat(dev_, sdl, SDL_GPU_TEXTURETYPE_2D,
+    for (SDL_GPUTextureFormat f : {SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM,
+                                   SDL_GPU_TEXTUREFORMAT_BC2_RGBA_UNORM,
+                                   SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM})
+      if (!SDL_GPUTextureSupportsFormat(dev_, f, SDL_GPU_TEXTURETYPE_2D,
                                         SDL_GPU_TEXTUREUSAGE_SAMPLER))
-        WarnF("gfx: this GPU cannot sample format %u (DXT)\n", unsigned(d3d));
+        bc_ = false;
+    if (!bc_) std::fprintf(stderr, "gfx: no BC sampling on this GPU: DXT decoded on upload\n");
     depth24_ = SupportsDepth(SDL_GPU_TEXTUREFORMAT_D24_UNORM)
                    ? SDL_GPU_TEXTUREFORMAT_D24_UNORM : SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
     depth24s8_ = SupportsDepth(SDL_GPU_TEXTUREFORMAT_D24_UNORM_S8_UINT)
@@ -552,6 +554,7 @@ class GpuDevice final : public Device {
     int w = c.right - c.left, h = c.bottom - c.top;
     if (w <= 0 || h <= 0) return;
     if (Pending(it->second.tex)) Flush();
+    MakeRoomForUpload(size_t(w) * h * 4);
     std::vector<uint32_t> px(size_t(w) * h, argb);
     QueueUpload(it->second.tex, 0, c.left, c.top, w, h, px.data(), uint32_t(w) * 4,
                 uint32_t(h), uint32_t(w) * 4);
@@ -570,7 +573,17 @@ class GpuDevice final : public Device {
     if (w <= 0 || h <= 0) return;
     // Draws recorded before the update must see the old contents.
     if (Pending(t.tex)) Flush();
+    MakeRoomForUpload(IsCompressed(t.fmt) && bc_
+                          ? size_t(RowPitch(t.fmt, uint32_t(w))) * RowCount(t.fmt, uint32_t(h))
+                          : size_t(w) * h * (IsFloat(t.fmt) ? BitsPerPixel(t.fmt) / 8 : 4));
     const uint8_t* s = static_cast<const uint8_t*>(src);
+    if (IsCompressed(t.fmt) && !bc_) {  // stored as B8G8R8A8
+      std::vector<uint32_t> px(size_t(w) * h);
+      DecodeDxt(s, pitch, t.fmt, w, h, px.data());
+      QueueUpload(t.tex, level, c.left, c.top, w, h, px.data(), uint32_t(w) * 4, uint32_t(h),
+                  uint32_t(w) * 4, false, false, layer);
+      return;
+    }
     if (IsCompressed(t.fmt)) {
       uint32_t row = RowPitch(t.fmt, uint32_t(w)), rows = RowCount(t.fmt, uint32_t(h));
       QueueUpload(t.tex, level, c.left, c.top, w, h, s, pitch, rows, row, false, true, layer);
@@ -1416,6 +1429,13 @@ void r_color0(inout vec4 c) {
     if (min_aniso_ > 1) std::fprintf(stderr, "gfx: anisotropic filtering %dx\n", min_aniso_);
   }
 
+  void DecodeDxtOnUpload() override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    if (!textures_.empty()) return;  // those already made keep their format
+    bc_ = false;
+    std::fprintf(stderr, "gfx: DXT decoded on upload\n");
+  }
+
   void SetPostAntialiasing(bool on) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     smaa_on_ = on;
@@ -1575,6 +1595,7 @@ void r_color0(inout vec4 c) {
   }
 
   SDL_GPUTextureFormat GpuFormat(Format f) const {
+    if (IsCompressed(f) && !bc_) return SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;
     switch (f) {
       case Format::DXT1: return SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM;
       case Format::DXT2: case Format::DXT3: return SDL_GPU_TEXTUREFORMAT_BC2_RGBA_UNORM;
@@ -1710,6 +1731,15 @@ void r_color0(inout vec4 c) {
     b = SDL_CreateGPUBuffer(dev_, &bi);
     if (!b) FatalF("gfx: cannot create a %u-byte buffer: %s", cap, SDL_GetError());
     return b;
+  }
+
+  // Texture data waits in upload_bytes_ for the next flush, then goes
+  // through the upload transfer buffer, which SDL keeps one copy of per
+  // submission in flight for good. Left to grow over a level's load it held
+  // several hundred MB (on unified memory, the app's own): uploads go in
+  // batches of at most kUploadBatch instead, flushed early.
+  void MakeRoomForUpload(size_t bytes) {
+    if (!uploads_.empty() && upload_bytes_.size() + bytes > kUploadBatch) Flush();
   }
 
   // ---- flush: one copy pass, then one render pass for the target
@@ -1886,6 +1916,7 @@ void r_color0(inout vec4 c) {
     ubytes_.clear();
     uploads_.clear();
     upload_bytes_.clear();
+    if (upload_bytes_.capacity() > 2 * kUploadBatch) std::vector<uint8_t>().swap(upload_bytes_);
     verts_.clear();
     indices_.clear();
     vs_list_.clear();
@@ -2847,6 +2878,7 @@ void main() {
   std::vector<uint8_t> verts_;
   std::vector<uint32_t> indices_;
   std::vector<Upload> uploads_;
+  bool bc_ = true;  // the GPU samples BC1-3 (else DXT is decoded on upload)
   std::vector<uint8_t> upload_bytes_;
   std::vector<BlitTex> blit_pool_;
   struct {
@@ -2861,6 +2893,7 @@ void main() {
   uint32_t vbuf_cap_ = 0, ibuf_cap_ = 0;
   SDL_GPUTransferBuffer* upload_tb_ = nullptr;
   static constexpr size_t kMaxInFlight = 4;
+  static constexpr size_t kUploadBatch = 8u << 20;
   std::deque<SDL_GPUFence*> in_flight_;  // submitted, not known finished
   SDL_GPUTransferBuffer* download_tb_ = nullptr;
   std::map<uint32_t, Read> reads_;  // StartReadBack tickets

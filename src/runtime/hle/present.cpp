@@ -1,5 +1,12 @@
 // Frame presentation shared by the graphics APIs (ddraw, opengl32).
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#include <mach/mach.h>
+#if TARGET_OS_IOS || TARGET_OS_TV
+#include <os/proc.h>
+#endif
+#endif
 #include "runtime/hle/present.h"
 
 #include <SDL3/SDL.h>
@@ -57,6 +64,29 @@ void SaveFrame(gfx::Device& dev, int w, int h, const std::string& path) {
 }
 
 }  // namespace
+
+// The process's memory for the FPS report: its footprint (what the system
+// counts against it) and, on iOS and tvOS, how much more it may take before
+// it is killed.
+static std::string MemoryNote() {
+#if defined(__APPLE__)
+  task_vm_info_data_t vm{};
+  mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
+  if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&vm), &n) !=
+      KERN_SUCCESS)
+    return "";
+  char buf[96];
+#if TARGET_OS_IOS || TARGET_OS_TV
+  std::snprintf(buf, sizeof buf, "; footprint %llu MB, %zu MB left",
+                (unsigned long long)(vm.phys_footprint >> 20), os_proc_available_memory() >> 20);
+#else
+  std::snprintf(buf, sizeof buf, "; footprint %llu MB", (unsigned long long)(vm.phys_footprint >> 20));
+#endif
+  return buf;
+#else
+  return "";
+#endif
+}
 
 std::atomic<uint64_t> g_peek_messages{0};
 
@@ -173,10 +203,10 @@ void PresentFrame(gfx::Device& dev, int w, int h) {
       if (dev.TakePresentLatency(&lm, &l99))
         std::snprintf(lat_text, sizeof lat_text, "; present to display ms: median %.1f p99 %.1f", lm, l99);
       WarnF("fps: %.2f at t=%.1f s (interval ms: min %.3f p1 %.3f median %.3f p99 %.3f max %.3f; "
-            "%.1f PeekMessage a frame%s%s%s)\n",
+            "%.1f PeekMessage a frame%s%s%s%s)\n",
             dts.size() / ((now - first) / 1e9), (now - t0) / 1e9, dts.front(), q(0.01),
             q(0.5), q(0.99), dts.back(), double(peeks - peeks_before) / double(dts.size()),
-            gpu_text, shown_text, lat_text);
+            gpu_text, shown_text, lat_text, MemoryNote().c_str());
       peeks_before = peeks;
       dts.clear();
       first = now;
@@ -228,6 +258,8 @@ std::unique_ptr<gfx::Device> CreateGfxDevice(SDL_Window* w) {
   if (perf::On()) d->EnablePerfStats();
   const char* aniso = Env("ANISO");
   d->SetMinAnisotropy(aniso ? std::atoi(aniso) : Game().anisotropy);
+  // <ID>_NO_BC=1: DXT decoded on upload, as on a GPU without BC sampling.
+  if (const char* e = Env("NO_BC"); e && *e == '1') d->DecodeDxtOnUpload();
   return d;
 }
 

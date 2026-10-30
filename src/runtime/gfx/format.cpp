@@ -57,6 +57,75 @@ uint32_t RowCount(Format f, uint32_t height) {
 }
 
 namespace {
+// One 4x4 colour block into A8R8G8B8 texels; DXT1 has the 3-colour mode
+// with transparent black.
+void ColorBlock(const uint8_t* b, uint32_t out[16], bool dxt1) {
+  const uint32_t c0 = b[0] | b[1] << 8, c1 = b[2] | b[3] << 8;
+  uint32_t pal[4][4];  // r, g, b, a
+  for (int i = 0; i < 2; i++) {
+    const uint32_t c = i ? c1 : c0;
+    pal[i][0] = ((c >> 11) & 31) * 255 / 31;
+    pal[i][1] = ((c >> 5) & 63) * 255 / 63;
+    pal[i][2] = (c & 31) * 255 / 31;
+    pal[i][3] = 255;
+  }
+  if (!dxt1 || c0 > c1) {
+    for (int k = 0; k < 3; k++) {
+      pal[2][k] = (2 * pal[0][k] + pal[1][k]) / 3;
+      pal[3][k] = (pal[0][k] + 2 * pal[1][k]) / 3;
+    }
+    pal[2][3] = pal[3][3] = 255;
+  } else {
+    for (int k = 0; k < 3; k++) pal[2][k] = (pal[0][k] + pal[1][k]) / 2, pal[3][k] = 0;
+    pal[2][3] = 255;
+    pal[3][3] = 0;
+  }
+  const uint32_t idx = b[4] | b[5] << 8 | b[6] << 16 | uint32_t(b[7]) << 24;
+  for (int i = 0; i < 16; i++) {
+    const uint32_t* p = pal[(idx >> (2 * i)) & 3];
+    out[i] = p[3] << 24 | p[0] << 16 | p[1] << 8 | p[2];
+  }
+}
+}  // namespace
+
+void DecodeDxt(const uint8_t* src, uint32_t pitch, Format f, int w, int h, uint32_t* out) {
+  const bool dxt1 = f == Format::DXT1;
+  const bool explicit_alpha = f == Format::DXT2 || f == Format::DXT3;
+  const int bw = (w + 3) / 4, bh = (h + 3) / 4, bsize = dxt1 ? 8 : 16;
+  for (int by = 0; by < bh; by++) {
+    for (int bx = 0; bx < bw; bx++) {
+      const uint8_t* b = src + size_t(by) * pitch + size_t(bx) * bsize;
+      uint32_t px[16];
+      if (dxt1) {
+        ColorBlock(b, px, true);
+      } else {
+        ColorBlock(b + 8, px, false);
+        uint32_t a[16];
+        if (explicit_alpha) {  // 4 bits a texel
+          for (int i = 0; i < 16; i++) a[i] = ((b[i / 2] >> (4 * (i & 1))) & 15) * 17;
+        } else {  // two endpoints and 3-bit indices
+          uint32_t pal[8] = {b[0], b[1]};
+          if (pal[0] > pal[1]) {
+            for (int k = 1; k < 7; k++) pal[k + 1] = ((7 - k) * pal[0] + k * pal[1]) / 7;
+          } else {
+            for (int k = 1; k < 5; k++) pal[k + 1] = ((5 - k) * pal[0] + k * pal[1]) / 5;
+            pal[6] = 0;
+            pal[7] = 255;
+          }
+          uint64_t bits = 0;
+          for (int k = 0; k < 6; k++) bits |= uint64_t(b[2 + k]) << (8 * k);
+          for (int i = 0; i < 16; i++) a[i] = pal[(bits >> (3 * i)) & 7];
+        }
+        for (int i = 0; i < 16; i++) px[i] = (px[i] & 0x00FFFFFFu) | a[i] << 24;
+      }
+      for (int y = 0; y < 4 && by * 4 + y < h; y++)
+        for (int x = 0; x < 4 && bx * 4 + x < w; x++)
+          out[size_t(by * 4 + y) * w + bx * 4 + x] = px[y * 4 + x];
+    }
+  }
+}
+
+namespace {
 uint32_t Expand(uint32_t v, int bits) {
   // Replicate high bits so 0x1F -> 0xFF exactly.
   v <<= (8 - bits);

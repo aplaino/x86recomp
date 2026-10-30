@@ -48,6 +48,9 @@ bool IsFloat(Format f);
 uint32_t RowPitch(Format f, uint32_t width);
 // Rows in the data for `height` (block rows if compressed).
 uint32_t RowCount(Format f, uint32_t height);
+// A DXT1-5 image (`pitch` bytes per row of 4x4 blocks) decoded into w x h
+// A8R8G8B8, for GPUs that cannot sample BC formats (the A15 of an Apple TV).
+void DecodeDxt(const uint8_t* src, uint32_t pitch, Format f, int w, int h, uint32_t* out);
 
 // Single-pixel conversion between uncompressed colour formats and 32-bit
 // A8R8G8B8 (missing alpha reads as 0xFF). For blits and readbacks.
@@ -319,6 +322,9 @@ class Device {
   // Anisotropic filtering of at least `level` (2..16; 0: as the game sets
   // it) for mipmapped textures sampled with linear filtering.
   virtual void SetMinAnisotropy(int level) { (void)level; }
+  // Decode DXT textures on upload even where the GPU samples BC formats
+  // (to check the path GPUs without them take). Before any texture exists.
+  virtual void DecodeDxtOnUpload() {}
 
   // ---- programmable pipeline. A shader from the HLSL translation (null
   // on failure); render states (blend, depth, stencil, cull, colour
