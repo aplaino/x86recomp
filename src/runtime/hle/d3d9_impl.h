@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "runtime/gfx/device.h"
@@ -187,6 +188,15 @@ struct Device : com::Object {
   bool synced = false;
   // The D3D cursor (SetCursorProperties / ShowCursor).
   bool cursor_shown = false, cursor_set = false;
+  // Vertex shaders standing in for the fixed-function vertex stage in
+  // draws with a pixel shader (d3d9_draw.cpp), by their HLSL source.
+  struct FfVertexShader {
+    std::shared_ptr<const hlsl::Program> program;
+    gfx::ShaderId id = 0;
+  };
+  std::map<std::string, FfVertexShader> ff_vs;
+  // The same for the fixed-function pixel stage after a vertex shader.
+  std::map<std::string, FfVertexShader> ff_ps;
 };
 
 // IUnknown::QueryInterface for an object with one interface `iid` (and
@@ -208,6 +218,10 @@ void Bind(uint32_t* slot, uint32_t obj);
 uint32_t NewSurface(Device& d, uint32_t device, Surface::Kind kind, uint32_t w,
                     uint32_t h, uint32_t fmt, uint32_t usage, uint32_t pool,
                     std::shared_ptr<Surface>* keep);
+
+// What a reference to a surface handed to the app counts on: a texture
+// level's count is its texture's (AddRef/Release of the surface go there).
+uint32_t SurfaceRefTarget(uint32_t surface);
 
 // The gfx render targets and depth buffer for the current bindings.
 void BindTargets(Device& d);

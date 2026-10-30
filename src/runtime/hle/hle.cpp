@@ -1,5 +1,6 @@
 #include "runtime/hle/hle.h"
 
+#include <cstdio>
 #include <cstdlib>
 
 #include <algorithm>
@@ -8,8 +9,11 @@
 #include <mutex>
 #include <set>
 #include <deque>
+#include <string>
+#include <typeinfo>
 #include <vector>
 
+#include "runtime/hle/com.h"
 #include "runtime/hle/win32.h"
 #include "runtime/log.h"
 #include "runtime/watchdog.h"
@@ -155,9 +159,24 @@ void CallThunk(Ctx& c, gaddr thunk) {
   if (!s)
     FatalF("call to unknown thunk %08llX (return address %08llX)",
            (unsigned long long)thunk, ret);
-  if (!s->def)
-    FatalF("unimplemented import %s!%s called (return address %08llX)",
-           s->dll.c_str(), s->name.c_str(), ret);
+  if (!s->def) {
+    // A COM method ("Iface::Method"): which object the call was made on.
+    std::string self;
+    if (!x64 && s->name.find("::") != std::string::npos) {
+      uint32_t p = Rd32(c.esp + 4);
+      std::shared_ptr<com::Object> o = com::Lookup(p);
+      char buf[160];
+      if (o)
+        std::snprintf(buf, sizeof buf, "; this %08X: a live %s, refs %u, vtable %08X", p,
+                      typeid(*o).name(), o->refs, Rd32(p));
+      else
+        std::snprintf(buf, sizeof buf, "; this %08X: no live HLE object (vtable %08X)", p,
+                      g_proc->mem.IsCommitted(p) ? Rd32(p) : 0u);
+      self = buf;
+    }
+    FatalF("unimplemented import %s!%s called (return address %08llX)%s",
+           s->dll.c_str(), s->name.c_str(), ret, self.c_str());
+  }
   if (x64 && !s->def->x64)
     FatalF("import %s!%s called from x64 code: its handler is not audited for "
            "x64 guests (HLE64) (return address %08llX)",

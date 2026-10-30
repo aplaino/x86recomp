@@ -229,6 +229,17 @@ foreach(_stage vert frag)
   endif()
   target_sources(recomp_gfx PRIVATE "${_out}")
 endforeach()
+# SMAA.hlsl, compiled at run time per pass (gpu_device.cpp): embedded as
+# text (kSmaaHlsl).
+add_custom_command(
+  OUTPUT "${_shader_dir}/smaa_hlsl.h"
+  COMMAND "${CMAKE_COMMAND}" -E make_directory "${_shader_dir}"
+  COMMAND "${CMAKE_COMMAND}" -DIN=${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/gfx/smaa/SMAA.hlsl
+          -DOUT=${_shader_dir}/smaa_hlsl.h -DNAME=kSmaaHlsl
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_text.cmake"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/gfx/smaa/SMAA.hlsl"
+          "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_text.cmake" VERBATIM)
+target_sources(recomp_gfx PRIVATE "${_shader_dir}/smaa_hlsl.h")
 target_include_directories(recomp_gfx PRIVATE "${_shader_dir}")
 # Per-pixel host paths: optimised in every build type.
 set_source_files_properties(src/runtime/gfx/format.cpp
@@ -270,6 +281,10 @@ target_link_libraries(recomp_d3d9 PUBLIC recomp_runtime recomp_gfx recomp_hlsl)
 # D3DX's maths rounds like the original only without contraction into FMA.
 set_source_files_properties(src/runtime/hle/d3dx9.cpp TARGET_DIRECTORY recomp_d3d9
   PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+
+# Direct3D 8 on the Direct3D 9 HLE.
+add_library(recomp_d3d8 SHARED src/runtime/hle/d3d8.cpp)
+target_link_libraries(recomp_d3d8 PUBLIC recomp_d3d9)
 
 # OpenGL 1.x (opengl32, wgl, gdi32 pixel formats) over gfx::Device.
 add_library(recomp_opengl SHARED

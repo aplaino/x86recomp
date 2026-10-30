@@ -3,7 +3,7 @@
 // they disconnect. SDL's gamepad layout is the Xbox controller's (south =
 // A, east = B, west = X, north = Y); stick Y is up in XInput and down in
 // SDL. Automated runs (<ID>_BACKGROUND) see no pads, as they take no host
-// input. The gamepad subsystem starts on the main thread, where SDL's
+// input, unless they ask for the virtual test pad (<ID>_TEST_PAD). The gamepad subsystem starts on the main thread, where SDL's
 // events are pumped (callers on other threads see no pads until then).
 // DirectInput and WMI list the same pads (xinput.h).
 
@@ -14,6 +14,7 @@
 #include <mutex>
 
 #include "runtime/hle/hle.h"
+#include "runtime/hle/input_state.h"
 #include "runtime/hle/user32_window.h"
 #include "runtime/hle/xinput.h"
 #include "runtime/log.h"
@@ -33,16 +34,37 @@ struct Pad {
 std::mutex g_mu;
 bool g_up = false;
 Pad g_pads[4];
+SDL_Joystick* g_test_pad = nullptr;  // <ID>_TEST_PAD's virtual gamepad
+
+bool TestPadWanted() {
+  static const bool on = [] {
+    const char* e = Env("TEST_PAD");
+    return e && *e && *e != '0';
+  }();
+  return on;
+}
 
 // Opens newly connected gamepads into free slots, frees disconnected ones.
 void Refresh() {
   if (!g_up) {
-    if (!OnMainThread() || Background()) return;
+    if (!OnMainThread() || (Background() && !TestPadWanted())) return;
     if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) {
       WarnF("xinput: SDL gamepad init failed: %s\n", SDL_GetError());
       return;
     }
     g_up = true;
+    if (TestPadWanted()) {
+      SDL_VirtualJoystickDesc d;
+      SDL_INIT_INTERFACE(&d);
+      d.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+      d.naxes = SDL_GAMEPAD_AXIS_COUNT;
+      d.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+      d.name = "Test Pad";
+      const SDL_JoystickID id = SDL_AttachVirtualJoystick(&d);
+      g_test_pad = id ? SDL_OpenJoystick(id) : nullptr;
+      if (!g_test_pad) WarnF("xinput: test pad: %s\n", SDL_GetError());
+      else std::fprintf(stderr, "xinput: test pad attached\n");
+    }
   }
   for (Pad& p : g_pads) {
     if (p.gp && !SDL_GamepadConnected(p.gp)) {
@@ -53,6 +75,8 @@ void Refresh() {
   int n = 0;
   SDL_JoystickID* ids = SDL_GetGamepads(&n);
   for (int i = 0; ids && i < n; i++) {
+    // Automated runs take no host input: only the test pad.
+    if (Background() && !(g_test_pad && SDL_GetJoystickID(g_test_pad) == ids[i])) continue;
     bool open = false;
     for (const Pad& p : g_pads)
       if (p.gp && SDL_GetGamepadID(p.gp) == ids[i]) open = true;
@@ -161,6 +185,38 @@ HLE_NAMED("xinput1_3.dll", "#4", XInputGetCapabilities, 3) {
 
 }  // namespace
 
+bool ReadPad(uint32_t index, PadState* out) {
+  std::lock_guard<std::mutex> l(g_mu);
+  Pad* p = PadAt(index);
+  if (!p) return false;
+  for (int a = 0; a < 6; a++)
+    out->axis[a] = SDL_GetGamepadAxis(p->gp, SDL_GamepadAxis(a));
+  for (int b = 0; b < 32; b++)
+    out->button[b] = b < SDL_GAMEPAD_BUTTON_COUNT && SDL_GetGamepadButton(p->gp, SDL_GamepadButton(b));
+  return true;
+}
+
+void RumblePad(uint32_t index, uint16_t low, uint16_t high, uint32_t ms) {
+  std::lock_guard<std::mutex> l(g_mu);
+  if (Pad* p = PadAt(index)) SDL_RumbleGamepad(p->gp, low, high, ms);
+}
+
+void TestPadButton(int button, bool down) {
+  std::lock_guard<std::mutex> l(g_mu);
+  if (g_test_pad) SDL_SetJoystickVirtualButton(g_test_pad, button, down);
+}
+
+void TestPadAxis(int axis, int16_t value) {
+  std::lock_guard<std::mutex> l(g_mu);
+  if (g_test_pad) SDL_SetJoystickVirtualAxis(g_test_pad, axis, value);
+}
+
+// The runtime's live input drives the test pad through these.
+const bool g_test_pad_hooks = [] {
+  SetTestPadHooks({&TestPadButton, &TestPadAxis});
+  return true;
+}();
+
 std::vector<XInputPad> XInputPads() {
   std::lock_guard<std::mutex> l(g_mu);
   Refresh();
@@ -169,8 +225,11 @@ std::vector<XInputPad> XInputPads() {
     SDL_Gamepad* gp = g_pads[i].gp;
     if (!gp) continue;
     const char* name = SDL_GetGamepadName(gp);
+    const SDL_GamepadType type = SDL_GetGamepadType(gp);
     pads.push_back({i, SDL_GetGamepadVendor(gp), SDL_GetGamepadProduct(gp),
-                    name ? name : "Controller"});
+                    name ? name : "Controller",
+                    type == SDL_GAMEPAD_TYPE_PS3 || type == SDL_GAMEPAD_TYPE_PS4 ||
+                        type == SDL_GAMEPAD_TYPE_PS5});
   }
   return pads;
 }

@@ -206,6 +206,23 @@ bool IsSse(const ZydisDecodedInstruction& d) {
   }
 }
 
+// MMX instructions (runtime/mmx.h): an MMX register operand, EMMS, or the
+// SSE conversions between MMX and XMM (whose m64 forms touch no MMX state).
+bool UsesMmx(const Insn& in) {
+  switch (in.d.mnemonic) {
+    case ZYDIS_MNEMONIC_EMMS: case ZYDIS_MNEMONIC_CVTPI2PS:
+    case ZYDIS_MNEMONIC_CVTPS2PI: case ZYDIS_MNEMONIC_CVTTPS2PI:
+      return true;
+    default:
+      break;
+  }
+  for (int i = 0; i < in.d.operand_count_visible; i++)
+    if (in.ops[i].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+        ZydisRegisterGetClass(in.ops[i].reg.value) == ZYDIS_REGCLASS_MMX)
+      return true;
+  return false;
+}
+
 bool IsFcmov(ZydisMnemonic m) {
   switch (m) {
     case ZYDIS_MNEMONIC_FCMOVB: case ZYDIS_MNEMONIC_FCMOVBE:
@@ -614,6 +631,7 @@ class InsnEmitter {
   void EmitString64(int n, StringKind kind);
   void EmitX87();
   void EmitSse();
+  void EmitMmx();
   void EmitAvx();
   // ---- AVX: VEX operands by 128-bit half (h = 0: c.xmm, 1: c.ymm_hi) ----
   static int VecIndex(ZydisRegister r) {
@@ -1478,6 +1496,161 @@ bool InsnEmitter::EmitX87Double(X87Sim& sim, const std::string& fail, bool* can_
   }
 }
 
+// MMX on the x87 register file (runtime/mmx.h).
+void InsnEmitter::EmitMmx() {
+  const auto m = d_.mnemonic;
+  if (m == ZYDIS_MNEMONIC_EMMS) {
+    L("::recomp::mmx::Emms(c);");
+    return;
+  }
+  if (!PrepareMem()) return Unimpl();
+  const std::string va = Hex(in_.va);
+  auto is_mm = [&](int i) {
+    return IsReg(i) && ZydisRegisterGetClass(Op(i).reg.value) == ZYDIS_REGCLASS_MMX;
+  };
+  auto mm = [&](int i) { return int(Op(i).reg.value - ZYDIS_REGISTER_MM0); };
+  // Operand i as 64 bits: an MMX register, or memory (an m32 operand, as
+  // the low-half unpacks have, is zero-extended).
+  auto src = [&](int i) -> std::string {
+    if (is_mm(i)) return Fmt("::recomp::mmx::Get(c, %d)", mm(i));
+    if (IsMem(i))
+      return Bytes(i) == 4 ? Fmt("uint64_t(::recomp::lift::Rd<uint32_t>(B, m%d))", i)
+                           : Fmt("::recomp::lift::Rd<uint64_t>(B, m%d)", i);
+    return std::string();
+  };
+  auto set = [&](const std::string& v) {
+    L(Fmt("::recomp::mmx::Set(c, %d, %s);", mm(0), v.c_str()));
+  };
+  bool any_mm = false;
+  for (int i = 0; i < Nvis(); i++) any_mm |= is_mm(i);
+  if (any_mm) L("::recomp::mmx::Enter(c);");
+
+  switch (m) {
+    case ZYDIS_MNEMONIC_MOVD:
+      if (is_mm(0)) {
+        L(Fmt("const uint64_t v = uint64_t(uint32_t(%s));", Read(1).c_str()));
+        set("v");
+      } else {
+        L(Write(0, Fmt("uint32_t(::recomp::mmx::Get(c, %d))", mm(1))));
+      }
+      return;
+    case ZYDIS_MNEMONIC_MOVQ: case ZYDIS_MNEMONIC_MOVNTQ:
+      if (is_mm(0)) {
+        L(Fmt("const uint64_t v = %s;", src(1).c_str()));
+        set("v");
+      } else if (IsMem(0) && is_mm(1)) {
+        L(Fmt("::recomp::lift::Wr<uint64_t>(B, m0, ::recomp::mmx::Get(c, %d));", mm(1)));
+      } else {
+        return Unimpl();
+      }
+      return;
+    case ZYDIS_MNEMONIC_CVTPS2PI: case ZYDIS_MNEMONIC_CVTTPS2PI: {
+      // The two low floats through CVT(T)PS2DQ with the upper lanes zero
+      // (exact, no flags): rounding, the integer indefinite and MXCSR flags
+      // as the SSE form has them.
+      if (!is_mm(0)) return Unimpl();
+      const bool trunc = m == ZYDIS_MNEMONIC_CVTTPS2PI;
+      std::string s = XmmSrc(1, false);
+      L("::recomp::Xmm t{}, r{};");
+      L(Fmt("::recomp::sse::SetLane<uint64_t>(t, 0, ::recomp::sse::Lane<uint64_t>(%s, 0));",
+            s.c_str()));
+      L(Fmt("::recomp::sse::CvtToDq(c, false, %s, r, t, %s);", trunc ? "true" : "false",
+            va.c_str()));
+      set("::recomp::sse::Lane<uint64_t>(r, 0)");
+      return;
+    }
+    case ZYDIS_MNEMONIC_CVTPI2PS: {
+      // Two dwords through CVTDQ2PS with the upper lanes zero; the
+      // destination's upper floats are kept.
+      if (!IsXmm(0)) return Unimpl();
+      L("::recomp::Xmm t{}, r{};");
+      L(Fmt("::recomp::sse::SetLane<uint64_t>(t, 0, %s);", src(1).c_str()));
+      L(Fmt("::recomp::sse::Cvtdq2ps(c, r, t, %s);", va.c_str()));
+      L(Fmt("::recomp::sse::SetLane<uint64_t>(%s, 0, ::recomp::sse::Lane<uint64_t>(r, 0));",
+            XmmRef(0).c_str()));
+      return;
+    }
+    default:
+      break;
+  }
+
+  if (!is_mm(0)) return Unimpl();
+  const std::string a = Fmt("::recomp::mmx::Get(c, %d)", mm(0));
+  // Shift counts: an imm8, or the low 64 bits of the source.
+  if (IsImm(1)) {
+    const std::string n = Fmt("uint64_t(%llu)", (unsigned long long)(Op(1).imm.value.u & 0xFF));
+    const char* fn = nullptr;
+    switch (m) {
+      case ZYDIS_MNEMONIC_PSLLW: fn = "Shl<uint16_t>"; break;
+      case ZYDIS_MNEMONIC_PSLLD: fn = "Shl<uint32_t>"; break;
+      case ZYDIS_MNEMONIC_PSLLQ: fn = "Shl<uint64_t>"; break;
+      case ZYDIS_MNEMONIC_PSRLW: fn = "Shr<uint16_t>"; break;
+      case ZYDIS_MNEMONIC_PSRLD: fn = "Shr<uint32_t>"; break;
+      case ZYDIS_MNEMONIC_PSRLQ: fn = "Shr<uint64_t>"; break;
+      case ZYDIS_MNEMONIC_PSRAW: fn = "Sar<int16_t>"; break;
+      case ZYDIS_MNEMONIC_PSRAD: fn = "Sar<int32_t>"; break;
+      default: return Unimpl();
+    }
+    set(Fmt("::recomp::mmx::%s(%s, %s)", fn, a.c_str(), n.c_str()));
+    return;
+  }
+  const std::string b = src(1);
+  if (b.empty()) return Unimpl();
+  const char* expr = nullptr;  // in terms of A (destination) and S (source)
+  switch (m) {
+    case ZYDIS_MNEMONIC_PADDB: expr = "Add<uint8_t>(A, S, false)"; break;
+    case ZYDIS_MNEMONIC_PADDW: expr = "Add<uint16_t>(A, S, false)"; break;
+    case ZYDIS_MNEMONIC_PADDD: expr = "Add<uint32_t>(A, S, false)"; break;
+    case ZYDIS_MNEMONIC_PADDQ: expr = "Add<uint64_t>(A, S, false)"; break;
+    case ZYDIS_MNEMONIC_PADDSB: expr = "Add<int8_t>(A, S, true)"; break;
+    case ZYDIS_MNEMONIC_PADDSW: expr = "Add<int16_t>(A, S, true)"; break;
+    case ZYDIS_MNEMONIC_PADDUSB: expr = "Add<uint8_t>(A, S, true)"; break;
+    case ZYDIS_MNEMONIC_PADDUSW: expr = "Add<uint16_t>(A, S, true)"; break;
+    case ZYDIS_MNEMONIC_PSUBB: expr = "Sub<uint8_t>(A, S, false)"; break;
+    case ZYDIS_MNEMONIC_PSUBW: expr = "Sub<uint16_t>(A, S, false)"; break;
+    case ZYDIS_MNEMONIC_PSUBD: expr = "Sub<uint32_t>(A, S, false)"; break;
+    case ZYDIS_MNEMONIC_PSUBQ: expr = "Sub<uint64_t>(A, S, false)"; break;
+    case ZYDIS_MNEMONIC_PSUBSB: expr = "Sub<int8_t>(A, S, true)"; break;
+    case ZYDIS_MNEMONIC_PSUBSW: expr = "Sub<int16_t>(A, S, true)"; break;
+    case ZYDIS_MNEMONIC_PSUBUSB: expr = "Sub<uint8_t>(A, S, true)"; break;
+    case ZYDIS_MNEMONIC_PSUBUSW: expr = "Sub<uint16_t>(A, S, true)"; break;
+    case ZYDIS_MNEMONIC_PMULLW: expr = "Mullw(A, S)"; break;
+    case ZYDIS_MNEMONIC_PMULHW: expr = "Mulhw(A, S)"; break;
+    case ZYDIS_MNEMONIC_PMULHUW: expr = "Mulhuw(A, S)"; break;
+    case ZYDIS_MNEMONIC_PMADDWD: expr = "Maddwd(A, S)"; break;
+    case ZYDIS_MNEMONIC_PCMPEQB: expr = "CmpEq<uint8_t>(A, S)"; break;
+    case ZYDIS_MNEMONIC_PCMPEQW: expr = "CmpEq<uint16_t>(A, S)"; break;
+    case ZYDIS_MNEMONIC_PCMPEQD: expr = "CmpEq<uint32_t>(A, S)"; break;
+    case ZYDIS_MNEMONIC_PCMPGTB: expr = "CmpGt<int8_t>(A, S)"; break;
+    case ZYDIS_MNEMONIC_PCMPGTW: expr = "CmpGt<int16_t>(A, S)"; break;
+    case ZYDIS_MNEMONIC_PCMPGTD: expr = "CmpGt<int32_t>(A, S)"; break;
+    case ZYDIS_MNEMONIC_PSLLW: expr = "Shl<uint16_t>(A, S)"; break;
+    case ZYDIS_MNEMONIC_PSLLD: expr = "Shl<uint32_t>(A, S)"; break;
+    case ZYDIS_MNEMONIC_PSLLQ: expr = "Shl<uint64_t>(A, S)"; break;
+    case ZYDIS_MNEMONIC_PSRLW: expr = "Shr<uint16_t>(A, S)"; break;
+    case ZYDIS_MNEMONIC_PSRLD: expr = "Shr<uint32_t>(A, S)"; break;
+    case ZYDIS_MNEMONIC_PSRLQ: expr = "Shr<uint64_t>(A, S)"; break;
+    case ZYDIS_MNEMONIC_PSRAW: expr = "Sar<int16_t>(A, S)"; break;
+    case ZYDIS_MNEMONIC_PSRAD: expr = "Sar<int32_t>(A, S)"; break;
+    case ZYDIS_MNEMONIC_PACKSSWB: expr = "Pack<int16_t, int8_t>(A, S)"; break;
+    case ZYDIS_MNEMONIC_PACKSSDW: expr = "Pack<int32_t, int16_t>(A, S)"; break;
+    case ZYDIS_MNEMONIC_PACKUSWB: expr = "Pack<int16_t, uint8_t>(A, S)"; break;
+    case ZYDIS_MNEMONIC_PUNPCKLBW: expr = "Unpack<uint8_t>(A, S, false)"; break;
+    case ZYDIS_MNEMONIC_PUNPCKLWD: expr = "Unpack<uint16_t>(A, S, false)"; break;
+    case ZYDIS_MNEMONIC_PUNPCKLDQ: expr = "Unpack<uint32_t>(A, S, false)"; break;
+    case ZYDIS_MNEMONIC_PUNPCKHBW: expr = "Unpack<uint8_t>(A, S, true)"; break;
+    case ZYDIS_MNEMONIC_PUNPCKHWD: expr = "Unpack<uint16_t>(A, S, true)"; break;
+    case ZYDIS_MNEMONIC_PUNPCKHDQ: expr = "Unpack<uint32_t>(A, S, true)"; break;
+    case ZYDIS_MNEMONIC_PAND: expr = "Bits(A & S)"; break;
+    case ZYDIS_MNEMONIC_PANDN: expr = "Bits(~A & S)"; break;
+    case ZYDIS_MNEMONIC_POR: expr = "Bits(A | S)"; break;
+    case ZYDIS_MNEMONIC_PXOR: expr = "Bits(A ^ S)"; break;
+    default: return Unimpl();
+  }
+  L(Fmt("const uint64_t A = %s, S = %s;", a.c_str(), b.c_str()));
+  set(std::string("::recomp::mmx::") + expr);
+}
+
 void InsnEmitter::EmitSse() {
   using namespace std::string_literals;
   const auto m = d_.mnemonic;
@@ -1698,6 +1871,13 @@ void InsnEmitter::EmitSse() {
       if (!IsXmm(0)) return Unimpl();
       std::string s = src(1);
       L(Fmt("::recomp::sse::Rsqrt(%s, %s);", XmmRef(0).c_str(), s.c_str()));
+      return;
+    }
+    case ZYDIS_MNEMONIC_RCPPS: case ZYDIS_MNEMONIC_RCPSS: {
+      if (!IsXmm(0)) return Unimpl();
+      std::string s = src(1);
+      L(Fmt("::recomp::sse::%s(%s, %s);", m == ZYDIS_MNEMONIC_RCPSS ? "RcpSs" : "Rcp",
+            XmmRef(0).c_str(), s.c_str()));
       return;
     }
     case ZYDIS_MNEMONIC_PADDQ: {
@@ -2566,6 +2746,7 @@ void InsnEmitter::Emit() {
     return EmitX87();
   }
   if (d_.meta.isa_set == ZYDIS_ISA_SET_AVX) return EmitAvx();
+  if (UsesMmx(in_)) return EmitMmx();
   if (IsSse(d_)) return EmitSse();
   if (d_.meta.category == ZYDIS_CATEGORY_STRINGOP) return EmitString();
 
@@ -2990,11 +3171,38 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
       labels.insert(it->second.next());
   }
 
+  // Manifest hooks in this function: their ends are labels, and no x87 run
+  // may span one.
+  std::map<uint64_t, uint64_t> hooks;
+  for (const auto& [va, end] : p_.hooks)
+    if (f.insns.count(va)) {
+      if (!f.insns.count(end)) {
+        std::fprintf(stderr, "hook %08llX: end %08llX is not an instruction of the function\n",
+                     U(va), U(end));
+        std::exit(1);
+      }
+      hooks[va] = end;
+      labels.insert(end);
+    }
   auto runs = FindX87Runs(f, labels);
+  for (auto r = runs.begin(); r != runs.end();) {
+    bool cut = false;
+    for (const auto& [va, end] : hooks) cut |= va <= r->second && end > r->first;
+    r = cut ? runs.erase(r) : std::next(r);
+  }
+  uint64_t skip_until = 0;
 
   for (auto it = f.insns.begin(); it != f.insns.end(); ++it) {
     const Insn& in = it->second;
     if (labels.count(in.va)) o += Fmt("L_%08llX:\n", U(in.va));
+    if (in.va < skip_until) continue;  // replaced by a hook
+    if (auto h = hooks.find(in.va); h != hooks.end()) {
+      o += Fmt("  { // %08llX..%08llX: hook\n    void hook_%08llX(::recomp::Ctx&);\n"
+               "    LIFT_SPILL; hook_%08llX(c); LIFT_RELOAD;\n    goto L_%08llX;\n  }\n",
+               U(in.va), U(h->second), U(in.va), U(in.va), U(h->second));
+      skip_until = h->second;
+      continue;
+    }
     if (eh != p_.eh_frames.end() && in.va == eh->second.prolog_end) {
       const auto& e = eh->second;
       static const char* kRegs[16] = {"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
@@ -3052,6 +3260,8 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
 // Non-x87 instructions that may sit inside an x87 run: anything straight-
 // line that does not call out (the run's state is only in locals).
 static bool RunNeutral(const Insn& in) {
+  // MMX registers are the x87 registers, which a run keeps in locals.
+  if (UsesMmx(in)) return false;
   switch (in.d.meta.category) {
     case ZYDIS_CATEGORY_CALL: case ZYDIS_CATEGORY_RET:
     case ZYDIS_CATEGORY_COND_BR: case ZYDIS_CATEGORY_UNCOND_BR:

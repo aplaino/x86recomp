@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <string>
 #include <vector>
 
 #include "runtime/hle/user32_window.h"
@@ -16,6 +18,27 @@
 #include "runtime/watchdog.h"
 
 namespace recomp::hle {
+
+namespace {
+
+std::mutex g_shot_mu;
+std::string g_shot_path;  // RequestShot's, until the next frame saves it
+
+void SaveFrame(gfx::Device& dev, int w, int h, const std::string& path) {
+  std::vector<uint8_t> px(size_t(w) * h * 4);
+  dev.ReadBackFront({0, 0, w, h}, px.data(), uint32_t(w * 4), gfx::Format::X8R8G8B8);
+  if (SDL_Surface* surf = SDL_CreateSurfaceFrom(w, h, SDL_PIXELFORMAT_XRGB8888, px.data(), w * 4)) {
+    SDL_SaveBMP(surf, path.c_str());
+    SDL_DestroySurface(surf);
+  }
+}
+
+}  // namespace
+
+void RequestShot(const std::string& path) {
+  std::lock_guard<std::mutex> l(g_shot_mu);
+  g_shot_path = path;
+}
 
 // Dev aid: <ID>_SHOT_EVERY=N saves every Nth presented frame (from frame
 // <ID>_SHOT_FROM on) as $<ID>_SHOT_DIR/frame_NNNNN.bmp (default dir: current
@@ -29,22 +52,22 @@ void PresentFrame(gfx::Device& dev, int w, int h) {
     const char* e = Env("SHOT_FROM");
     return e ? std::atoi(e) : 0;
   }();
+  dev.Present();
+  // Shots after presenting: the front buffer holds the frame as shown.
   static int frame = 0;
   frame++;
   if (every > 0 && frame >= from && frame % every == 0) {
-    std::vector<uint8_t> px(size_t(w) * h * 4);
-    dev.ReadBack({0, 0, w, h}, px.data(), uint32_t(w * 4), gfx::Format::X8R8G8B8);
-    SDL_Surface* surf = SDL_CreateSurfaceFrom(w, h, SDL_PIXELFORMAT_XRGB8888,
-                                              px.data(), w * 4);
     const char* dir = Env("SHOT_DIR");
     char path[512];
     std::snprintf(path, sizeof path, "%s/frame_%05d.bmp", dir ? dir : ".", frame);
-    if (surf) {
-      SDL_SaveBMP(surf, path);
-      SDL_DestroySurface(surf);
-    }
+    SaveFrame(dev, w, h, path);
   }
-  dev.Present();
+  std::string requested;
+  {
+    std::lock_guard<std::mutex> l(g_shot_mu);
+    requested.swap(g_shot_path);
+  }
+  if (!requested.empty()) SaveFrame(dev, w, h, requested);
   // Loading screens present without pumping messages; keep answering the
   // window system (compositor pings) so the window does not look hung.
   // Events are only queued for the game, as Windows would.
@@ -125,6 +148,10 @@ uint64_t GfxWindowFlags() {
 std::unique_ptr<gfx::Device> CreateGfxDevice(SDL_Window* w) {
   std::unique_ptr<gfx::Device> d = gfx::CreateDevice(GfxBackend(), w);
   if (!d) FatalF("cannot create the graphics device");
+  const char* aa = Env("AA");
+  d->SetPostAntialiasing(aa ? *aa && *aa != '0' : Game().post_aa);
+  const char* aniso = Env("ANISO");
+  d->SetMinAnisotropy(aniso ? std::atoi(aniso) : Game().anisotropy);
   return d;
 }
 

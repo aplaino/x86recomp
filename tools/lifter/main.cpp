@@ -27,12 +27,14 @@
 // consistently. Then the functions are emitted into generated/gen_NNN.cpp
 // plus a table file.
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <deque>
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -224,7 +226,8 @@ int main(int argc, char** argv) {
         for (uint64_t a = sec.va; a + 4 <= sec.va + sec.vsize; a += 4)
           candidate(&m, p.mem.read<uint32_t>(a), &from_data_ptrs);
     }
-  size_t recovered_tables = 0;
+  size_t recovered_tables = 0, completed_tables = 0;
+  std::set<uint64_t> tables_read;  // jmps whose table was read from the image
   while (!work.empty()) {
     uint64_t e = work.front();
     work.pop_front();
@@ -232,17 +235,34 @@ int main(int argc, char** argv) {
     lifter::Function f;
     lifter::BuildFunction(p, dec, e, &f);
     // Switch tables Ghidra did not export: recover them and rebuild, as
-    // their targets may hold further switches.
+    // their targets may hold further switches. Tables it did export are
+    // read from the image too, and completed: its list can miss cases (a
+    // four-way switch in g_Rhapsody came with two targets, and the other
+    // two cases jumped out of the lifted code).
     for (bool more = true; more;) {
       more = false;
       for (const auto& [va, in] : f.insns) {
+        if (tables_read.count(va)) continue;
         std::vector<uint64_t> targets;
-        if (p.jumptables.count(va) ||
-            !lifter::RecoverJumpTable(p, f, in, &targets))
+        if (!lifter::RecoverJumpTable(p, f, in, &targets)) continue;
+        tables_read.insert(va);
+        auto known = p.jumptables.find(va);
+        if (known == p.jumptables.end()) {
+          p.jumptables[va] = std::move(targets);
+          recovered_tables++;
+          more = true;
           continue;
-        p.jumptables[va] = std::move(targets);
-        recovered_tables++;
-        more = true;
+        }
+        bool added = false;
+        for (uint64_t t : targets)
+          if (std::find(known->second.begin(), known->second.end(), t) == known->second.end()) {
+            known->second.push_back(t);
+            added = true;
+          }
+        if (added) {
+          completed_tables++;
+          more = true;
+        }
       }
       if (more) {
         f = {};
@@ -275,8 +295,8 @@ int main(int argc, char** argv) {
               "%zu via code pointers, %zu via data pointers; %zu weak)\n",
               p.entries.size(), initial, p.entries.size() - initial,
               from_code_ptrs, from_data_ptrs, p.weak.size());
-  std::printf("jump tables: %zu from Ghidra, %zu recovered\n",
-              p.jumptables.size() - recovered_tables, recovered_tables);
+  std::printf("jump tables: %zu from Ghidra (%zu completed from the image), %zu recovered\n",
+              p.jumptables.size() - recovered_tables, completed_tables, recovered_tables);
 
   // Pass 2: final CFGs and emission.
   std::filesystem::create_directories(outdir);

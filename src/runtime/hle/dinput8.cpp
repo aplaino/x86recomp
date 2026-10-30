@@ -1,15 +1,22 @@
 // dinput8: DirectInput8Create, IDirectInput8A and IDirectInputDevice8A for
-// the system keyboard and mouse.
+// the system keyboard and mouse, and the SDL gamepads as joysticks.
 //
 // Input comes from the event pump's raw input (input_state.h): the
 // keyboard by DIK code, the mouse in mickeys. Each acquired device keeps
 // its own state and, with DIPROP_BUFFERSIZE set, a buffer of events.
-// Game controllers are not enumerated: games that read pads through
-// XInput find them there.
+//
+// Game controllers are the XInput pads (xinput.h), read when the game
+// polls: a joystick with six axes, a POV hat and 16 buttons in the layout
+// of the PlayStation 2 USB adapters PC games of the time were written for
+// (see kPadButtons), so a modern pad (Xbox, DualSense, Switch Pro, ...)
+// works with a game's own default bindings. The first one is listed even
+// before a pad connects, so one connected later still works. Force
+// feedback effects rumble the pad.
 
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -55,6 +62,30 @@ constexpr uint32_t kMouseType = DI8DEVTYPE_MOUSE | (2 << 8);        // tradition
 constexpr uint32_t kKeyboardType = DI8DEVTYPE_KEYBOARD | (4 << 8);  // PC enhanced
 constexpr uint32_t kGamepadType = DI8DEVTYPE_GAMEPAD | (2 << 8) | 0x10000;  // standard, HID
 
+// Joystick object types (DIDFT_*) and properties (DIPROP_* are small
+// integers in place of GUID pointers).
+constexpr uint32_t DIDFT_RELAXIS = 0x1, DIDFT_ABSAXIS = 0x2, DIDFT_AXIS = 0x3,
+                   DIDFT_PSHBUTTON = 0x4, DIDFT_BUTTON = 0xC, DIDFT_POV = 0x10,
+                   DIDFT_FFACTUATOR = 0x01000000;
+constexpr uint32_t DIPROP_RANGE = 4, DIPROP_DEADZONE = 5, DIPROP_SATURATION = 6;
+constexpr uint32_t DIPH_DEVICE = 0, DIPH_BYOFFSET = 1, DIPH_BYID = 2;
+constexpr uint32_t DIDC_FORCEFEEDBACK = 0x100;
+constexpr uint32_t DIERR_NOTFOUND = 0x80070002;
+
+constexpr GUID kGUID_XAxis = {0xA36D02E0, 0xC9F3, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}};
+constexpr GUID kGUID_Button = {0xA36D02F0, 0xC9F3, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}};
+constexpr GUID kGUID_POV = {0xA36D02F2, 0xC9F3, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}};
+constexpr GUID kGUID_Sine = {0x13541C23, 0x8E33, 0x11D0, {0x9A, 0xD0, 0x00, 0xA0, 0xC9, 0xA0, 0x6E, 0x35}};
+constexpr GUID kIID_IDirectInputEffect = {0xE7E1F7C0, 0x88D2, 0x11D0, {0x9A, 0xD0, 0x00, 0xA0, 0xC9, 0xA0, 0x6E, 0x35}};
+
+// The pads' instance GUIDs (FillPadInstance): Data1 is this plus the
+// XInput user index.
+constexpr uint32_t kPadGuidBase = 0x9A6F1D20;
+constexpr int kPadButtonCount = 16;
+
+// DIJOYSTATE axes, in order: lX, lY, lZ, lRx, lRy, lRz (GUID_XAxis + i).
+constexpr int kPadAxes = 6;
+
 constexpr uint32_t DISCL_EXCLUSIVE = 0x1;
 constexpr uint32_t DIGDD_PEEK = 0x1;
 constexpr uint32_t DIPROP_BUFFERSIZE = 1, DIPROP_AXISMODE = 2;
@@ -88,6 +119,21 @@ struct DIDEVICEOBJECTDATA {
 
 struct Direct8 : com::Object {};
 
+// A pad axis' reporting (DIPROP_RANGE, _DEADZONE, _SATURATION).
+struct AxisProps {
+  int32_t min = 0, max = 65535;
+  uint32_t dead = 0, sat = 10000;
+};
+
+// A force feedback effect: Start rumbles its pad for the effect's
+// duration at its gain.
+struct Effect : com::Object {
+  uint32_t pad = 0;
+  GUID guid{};
+  uint32_t duration_us = 200000;  // DIEFFECT dwDuration (INFINITE: until Stop)
+  uint32_t gain = 10000;          // DIEFFECT dwGain
+};
+
 struct InputDevice : com::Object {
   bool keyboard = false;
   uint32_t data_size = 0;  // the data format's state size; 0 = not set
@@ -105,6 +151,9 @@ struct InputDevice : com::Object {
   uint8_t buttons[8] = {};
   // Keyboard: DIK state.
   uint8_t keys[256] = {};
+  // Joystick: the XInput user index of the pad it reads, or -1.
+  int pad = -1;
+  AxisProps axes[kPadAxes];
   ~InputDevice() override;
 };
 
@@ -217,13 +266,146 @@ void FillInstance(DIDEVICEINSTANCEA* di, bool keyboard) {
 void FillPadInstance(DIDEVICEINSTANCEA* di, const XInputPad& pad) {
   std::memset(di, 0, sizeof *di);
   di->dwSize = sizeof *di;
-  di->guidInstance = {0x9A6F1D20 + pad.index, 0xD5A0, 0x11CF, {'X', 'I', 'N', 'P', 'U', 'T', 0, 0}};
+  di->guidInstance = {kPadGuidBase + pad.index, 0xD5A0, 0x11CF, {'X', 'I', 'N', 'P', 'U', 'T', 0, 0}};
   di->guidProduct = {pad.vid | uint32_t(pad.pid) << 16, 0, 0, {0, 0, 'P', 'I', 'D', 'V', 'I', 'D'}};
   di->dwDevType = kGamepadType;
   std::snprintf(di->tszInstanceName, sizeof di->tszInstanceName, "%s", pad.name.c_str());
   std::snprintf(di->tszProductName, sizeof di->tszProductName, "%s", pad.name.c_str());
   di->wUsagePage = 1;  // generic desktop
   di->wUsage = 5;      // game pad
+}
+
+// ---- pads
+
+// DIJOYSTATE buttons from SDL's gamepad buttons, in the PS2 USB adapter
+// order: Triangle, Circle, Cross, Square, L2, R2, L1, R1, Select, Start,
+// R3, L3, d-pad up, down, left, right. -1 = a trigger (L2/R2) as a button.
+constexpr int kPadButtons[kPadButtonCount] = {
+    SDL_GAMEPAD_BUTTON_NORTH,         SDL_GAMEPAD_BUTTON_EAST,
+    SDL_GAMEPAD_BUTTON_SOUTH,         SDL_GAMEPAD_BUTTON_WEST,
+    -1,                               -2,
+    SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER,
+    SDL_GAMEPAD_BUTTON_BACK,          SDL_GAMEPAD_BUTTON_START,
+    SDL_GAMEPAD_BUTTON_RIGHT_STICK,   SDL_GAMEPAD_BUTTON_LEFT_STICK,
+    SDL_GAMEPAD_BUTTON_DPAD_UP,       SDL_GAMEPAD_BUTTON_DPAD_DOWN,
+    SDL_GAMEPAD_BUTTON_DPAD_LEFT,     SDL_GAMEPAD_BUTTON_DPAD_RIGHT,
+};
+
+// Raw stick value (-32768..32767) to the axis' range, through its dead
+// zone and saturation (ten-thousandths of the half range around centre).
+int32_t ScaleAxis(int v, const AxisProps& p) {
+  double x = std::clamp(v / 32767.0, -1.0, 1.0);
+  const double dead = p.dead / 10000.0, sat = std::max(p.sat / 10000.0, dead + 1e-6);
+  const double m = std::fabs(x);
+  x = m <= dead ? 0.0 : std::copysign(std::min((m - dead) / (sat - dead), 1.0), x);
+  return int32_t(std::lround(p.min + (x + 1.0) / 2.0 * (double(p.max) - p.min)));
+}
+
+// DIJOYSTATE (80 bytes) or DIJOYSTATE2 (272): lX, lY (left stick), lZ (the
+// triggers, L2 up and R2 down from centre), lRx and lRz (right stick X:
+// games of the time read it from either), lRy (right stick Y), sliders,
+// four POVs (the d-pad on the first), 32 or 128 buttons.
+void ReadPadState(const InputDevice& d, uint8_t* out, uint32_t size) {
+  std::memset(out, 0, size);
+  PadState p{};
+  const bool on = d.pad >= 0 && ReadPad(uint32_t(d.pad), &p);
+  const int trig = (p.axis[SDL_GAMEPAD_AXIS_RIGHT_TRIGGER] - p.axis[SDL_GAMEPAD_AXIS_LEFT_TRIGGER]) / 2;
+  const int raw[kPadAxes] = {p.axis[SDL_GAMEPAD_AXIS_LEFTX],  p.axis[SDL_GAMEPAD_AXIS_LEFTY],
+                             trig,                            p.axis[SDL_GAMEPAD_AXIS_RIGHTX],
+                             p.axis[SDL_GAMEPAD_AXIS_RIGHTY], p.axis[SDL_GAMEPAD_AXIS_RIGHTX]};
+  for (int a = 0; a < kPadAxes; a++) {
+    const int32_t v = ScaleAxis(on ? raw[a] : 0, d.axes[a]);
+    std::memcpy(out + 4 * a, &v, 4);
+  }
+  // POV: hundredths of a degree clockwise from up, -1 centred.
+  const bool up = p.button[SDL_GAMEPAD_BUTTON_DPAD_UP], down = p.button[SDL_GAMEPAD_BUTTON_DPAD_DOWN];
+  const bool left = p.button[SDL_GAMEPAD_BUTTON_DPAD_LEFT], right = p.button[SDL_GAMEPAD_BUTTON_DPAD_RIGHT];
+  const int dx = (right ? 1 : 0) - (left ? 1 : 0), dy = (down ? 1 : 0) - (up ? 1 : 0);
+  static const int32_t kPov[3][3] = {{31500, 0, 4500}, {27000, -1, 9000}, {22500, 18000, 13500}};
+  const int32_t pov = on ? kPov[dy + 1][dx + 1] : -1;
+  for (int i = 0; i < 4; i++) {
+    const int32_t v = i == 0 ? pov : -1;
+    std::memcpy(out + 32 + 4 * i, &v, 4);
+  }
+  if (!on) return;
+  constexpr int kTriggerDown = 32767 / 4;
+  for (int b = 0; b < kPadButtonCount; b++) {
+    const int src = kPadButtons[b];
+    const bool down = src == -1   ? p.axis[SDL_GAMEPAD_AXIS_LEFT_TRIGGER] > kTriggerDown
+                      : src == -2 ? p.axis[SDL_GAMEPAD_AXIS_RIGHT_TRIGGER] > kTriggerDown
+                                  : p.button[src];
+    out[48 + b] = down ? 0x80 : 0;
+  }
+}
+
+// The axis a DIPROPHEADER names (dwObj, dwHow), or -1; DIPH_DEVICE is -2.
+int PadAxisFor(uint32_t obj, uint32_t how) {
+  if (how == DIPH_DEVICE) return -2;
+  for (int a = 0; a < kPadAxes; a++) {
+    if (how == DIPH_BYOFFSET && obj == uint32_t(4 * a)) return a;
+    if (how == DIPH_BYID && (obj & 0xFFFFFF) == ((uint32_t(a) << 8) | DIDFT_ABSAXIS)) return a;
+  }
+  return -1;
+}
+
+// DIDEVICEOBJECTINSTANCEA (DirectX 8: 316 bytes) for object `i` of a pad:
+// the axes, then the POV, then the buttons.
+constexpr uint32_t kObjectInstanceSize = 316;
+constexpr int kPadObjects = kPadAxes + 1 + kPadButtonCount;
+
+void FillPadObject(uint8_t* o, int i) {
+  static const char* kAxisNames[kPadAxes] = {"X Axis", "Y Axis", "Z Axis",
+                                             "X Rotation", "Y Rotation", "Z Rotation"};
+  std::memset(o, 0, kObjectInstanceSize);
+  const uint32_t size = kObjectInstanceSize;
+  std::memcpy(o, &size, 4);
+  GUID type;
+  uint32_t ofs, dtype, usage;
+  char name[32];
+  if (i < kPadAxes) {
+    type = kGUID_XAxis;
+    type.Data1 += uint32_t(i);
+    ofs = 4 * uint32_t(i);
+    dtype = (uint32_t(i) << 8) | DIDFT_ABSAXIS | (i < 2 ? DIDFT_FFACTUATOR : 0);
+    usage = 0x30 + uint32_t(i);  // HID X, Y, Z, Rx, Ry, Rz
+    std::snprintf(name, sizeof name, "%s", kAxisNames[i]);
+  } else if (i == kPadAxes) {
+    type = kGUID_POV;
+    ofs = 32;
+    dtype = DIDFT_POV;
+    usage = 0x39;  // hat switch
+    std::snprintf(name, sizeof name, "Hat Switch");
+  } else {
+    const int b = i - kPadAxes - 1;
+    type = kGUID_Button;
+    ofs = 48 + uint32_t(b);
+    dtype = (uint32_t(b) << 8) | DIDFT_PSHBUTTON;
+    usage = uint32_t(b) + 1;
+    std::snprintf(name, sizeof name, "Button %d", b + 1);
+  }
+  std::memcpy(o + 4, &type, 16);
+  std::memcpy(o + 0x14, &ofs, 4);
+  std::memcpy(o + 0x18, &dtype, 4);
+  std::snprintf(reinterpret_cast<char*>(o + 0x20), 260, "%s", name);
+  const uint16_t page = i <= kPadAxes ? 1 : 9;  // generic desktop / button
+  std::memcpy(o + 0x134, &page, 2);
+  const uint16_t u = uint16_t(usage);
+  std::memcpy(o + 0x136, &u, 2);
+}
+
+bool PadObjectMatches(int i, uint32_t flags) {
+  const uint32_t kinds = flags & 0xFF;
+  if (kinds == 0) return true;  // DIDFT_ALL
+  if (i < kPadAxes) return kinds & DIDFT_AXIS;
+  if (i == kPadAxes) return kinds & DIDFT_POV;
+  return kinds & DIDFT_BUTTON;
+}
+
+bool IsPadGuid(uint32_t guid, int* index) {
+  const uint32_t d1 = Rd32(guid);
+  if (d1 < kPadGuidBase || d1 >= kPadGuidBase + 4 || Rd16(guid + 4) != 0xD5A0) return false;
+  *index = int(d1 - kPadGuidBase);
+  return true;
 }
 
 uint32_t QueryInterfaceFor(Ctx& c, const GUID& iid) {
@@ -260,12 +442,14 @@ HLE_NAMED("dinput8.dll", "IDirectInput8A::Release", DI8_Release, 1) { return com
 HLE_NAMED("dinput8.dll", "IDirectInput8A::CreateDevice", DI8_CreateDevice, 4) {
   uint32_t out = Arg(c, 2);
   bool keyboard = com::GuidEq(Arg(c, 1), kGUID_SysKeyboard);
-  if (!keyboard && !com::GuidEq(Arg(c, 1), kGUID_SysMouse)) {
+  int pad = -1;
+  if (!keyboard && !com::GuidEq(Arg(c, 1), kGUID_SysMouse) && !IsPadGuid(Arg(c, 1), &pad)) {
     Wr32(out, 0);
     return DIERR_DEVICENOTREG;
   }
   auto d = std::make_shared<InputDevice>();
   d->keyboard = keyboard;
+  d->pad = pad;
   Wr32(out, com::Publish(d, DeviceVtable()));
   SetRawInputSink(&OnRawInput);
   return DI_OK;
@@ -290,18 +474,27 @@ HLE_NAMED("dinput8.dll", "IDirectInput8A::EnumDevices", DI8_EnumDevices, 5) {
     FillInstance(di, kb);
     more = CallGuest(c, cb, {inst, ref});  // 0 = DIENUM_STOP
   }
-  if (pads)
-    for (const XInputPad& pad : XInputPads()) {
+  if (pads) {
+    std::vector<XInputPad> list = XInputPads();
+    // The first pad's slot even before one connects (pads that connect
+    // later, over Bluetooth for one, then still work). Not in automated
+    // runs, which see the host's pads only through the test pad.
+    if (list.empty() && !Background()) list.push_back({0, 0, 0, "Controller"});
+    for (const XInputPad& pad : list) {
       if (!more) break;
+      std::fprintf(stderr, "dinput8: game controller %u: %s\n", pad.index, pad.name.c_str());
       FillPadInstance(di, pad);
       more = CallGuest(c, cb, {inst, ref});
     }
+  }
   HeapFreeProcess(inst);
   return DI_OK;
 }
 
 HLE_NAMED("dinput8.dll", "IDirectInput8A::GetDeviceStatus", DI8_GetDeviceStatus, 2) {
-  return com::GuidEq(Arg(c, 1), kGUID_SysKeyboard) || com::GuidEq(Arg(c, 1), kGUID_SysMouse)
+  int pad;
+  return com::GuidEq(Arg(c, 1), kGUID_SysKeyboard) || com::GuidEq(Arg(c, 1), kGUID_SysMouse) ||
+                 IsPadGuid(Arg(c, 1), &pad)
              ? DI_OK
              : DIERR_DEVICENOTREG;
 }
@@ -320,6 +513,15 @@ HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::GetCapabilities", DID8_GetCapabi
   if (caps->dwSize != sizeof(DIDEVCAPS)) return DIERR_INVALIDPARAM;
   std::memset(reinterpret_cast<uint8_t*>(caps) + 4, 0, sizeof *caps - 4);
   caps->dwFlags = DIDC_ATTACHED;
+  if (d->pad >= 0) {
+    caps->dwFlags |= DIDC_FORCEFEEDBACK;
+    caps->dwDevType = kGamepadType;
+    caps->dwAxes = kPadAxes;
+    caps->dwButtons = kPadButtonCount;
+    caps->dwPOVs = 1;
+    caps->dwFFSamplePeriod = caps->dwFFMinTimeResolution = 1000;
+    return DI_OK;
+  }
   caps->dwDevType = d->keyboard ? kKeyboardType : kMouseType;
   caps->dwAxes = d->keyboard ? 0 : 3;
   caps->dwButtons = d->keyboard ? 128 : 5;
@@ -330,6 +532,16 @@ HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::GetDeviceInfo", DID8_GetDeviceIn
   InputDevice* d = Dev(c);
   DIDEVICEINSTANCEA* di = reinterpret_cast<DIDEVICEINSTANCEA*>(GPtr(Arg(c, 1)));
   if (di->dwSize != sizeof(DIDEVICEINSTANCEA)) return DIERR_INVALIDPARAM;
+  if (d->pad >= 0) {
+    std::string name = "Controller";
+    for (const XInputPad& p : XInputPads())
+      if (int(p.index) == d->pad) {
+        FillPadInstance(di, p);
+        return DI_OK;
+      }
+    FillPadInstance(di, {uint32_t(d->pad), 0, 0, name});
+    return DI_OK;
+  }
   FillInstance(di, d->keyboard);
   return DI_OK;
 }
@@ -340,9 +552,10 @@ HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::SetDataFormat", DID8_SetDataForm
   InputDevice* d = Dev(c);
   if (d->acquired) return DIERR_ACQUIRED;
   uint32_t size = Rd32(Arg(c, 1) + 12);  // DIDATAFORMAT.dwDataSize
-  bool ok = d->keyboard ? size == 256 : (size == 16 || size == 20);
+  bool ok = d->pad >= 0 ? (size == 80 || size == 272)
+                        : d->keyboard ? size == 256 : (size == 16 || size == 20);
   if (!ok) FatalF("dinput8: SetDataFormat with a %u-byte %s format", size,
-                  d->keyboard ? "keyboard" : "mouse");
+                  d->pad >= 0 ? "joystick" : d->keyboard ? "keyboard" : "mouse");
   d->data_size = size;
   return DI_OK;
 }
@@ -360,6 +573,23 @@ HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::SetProperty", DID8_SetProperty, 
   InputDevice* d = Dev(c);
   uint32_t prop = Arg(c, 1), ph = Arg(c, 2);
   uint32_t value = Rd32(ph + 16);  // DIPROPDWORD.dwData
+  if (d->pad >= 0 && (prop == DIPROP_RANGE || prop == DIPROP_DEADZONE || prop == DIPROP_SATURATION)) {
+    const int a = PadAxisFor(Rd32(ph + 8), Rd32(ph + 12));
+    if (a == -1) return DIERR_NOTFOUND;
+    for (int i = 0; i < kPadAxes; i++) {
+      if (a != -2 && a != i) continue;
+      AxisProps& p = d->axes[i];
+      if (prop == DIPROP_RANGE) {
+        p.min = int32_t(Rd32(ph + 16));
+        p.max = int32_t(Rd32(ph + 20));
+      } else if (prop == DIPROP_DEADZONE) {
+        p.dead = std::min<uint32_t>(value, 10000);
+      } else {
+        p.sat = std::min<uint32_t>(value, 10000);
+      }
+    }
+    return DI_OK;
+  }
   switch (prop) {
     case DIPROP_BUFFERSIZE: {
       std::lock_guard<std::mutex> l(g_mu);
@@ -380,6 +610,18 @@ HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::SetProperty", DID8_SetProperty, 
 HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::GetProperty", DID8_GetProperty, 3) {
   InputDevice* d = Dev(c);
   uint32_t prop = Arg(c, 1), ph = Arg(c, 2);
+  if (d->pad >= 0 && (prop == DIPROP_RANGE || prop == DIPROP_DEADZONE || prop == DIPROP_SATURATION)) {
+    int a = PadAxisFor(Rd32(ph + 8), Rd32(ph + 12));
+    if (a == -1) return DIERR_NOTFOUND;
+    const AxisProps& p = d->axes[a < 0 ? 0 : a];
+    if (prop == DIPROP_RANGE) {
+      Wr32(ph + 16, uint32_t(p.min));
+      Wr32(ph + 20, uint32_t(p.max));
+    } else {
+      Wr32(ph + 16, prop == DIPROP_DEADZONE ? p.dead : p.sat);
+    }
+    return DI_OK;
+  }
   switch (prop) {
     case DIPROP_BUFFERSIZE:
       Wr32(ph + 16, d->buffer_size);
@@ -400,6 +642,10 @@ HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::Acquire", DID8_Acquire, 1) {
   InputDevice* d = Dev(c);
   if (!d->data_size) return DIERR_INVALIDPARAM;
   if (d->acquired) return DI_NOEFFECT;
+  if (d->pad >= 0) {
+    d->acquired = true;
+    return DI_OK;
+  }
   {
     std::lock_guard<std::mutex> l(g_mu);
     if (d->keyboard) {
@@ -425,9 +671,12 @@ HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::Unacquire", DID8_Unacquire, 1) {
   return DI_OK;
 }
 
-// Devices with input of their own are not polled.
+// Devices with input of their own are not polled; pads are read in
+// GetDeviceState.
 HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::Poll", DID8_Poll, 1) {
-  return Dev(c)->acquired ? DI_NOEFFECT : DIERR_NOTACQUIRED;
+  InputDevice* d = Dev(c);
+  if (!d->acquired) return DIERR_NOTACQUIRED;
+  return d->pad >= 0 ? DI_OK : DI_NOEFFECT;
 }
 
 // (cbData, lpvData)
@@ -436,6 +685,10 @@ HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::GetDeviceState", DID8_GetDeviceS
   uint32_t size = Arg(c, 1), out = Arg(c, 2);
   if (!d->acquired) return DIERR_NOTACQUIRED;
   if (size != d->data_size) return DIERR_INVALIDPARAM;
+  if (d->pad >= 0) {
+    ReadPadState(*d, GPtr(out), size);
+    return DI_OK;
+  }
   std::lock_guard<std::mutex> l(g_mu);
   if (d->keyboard) {
     std::memcpy(GPtr(out), d->keys, 256);
@@ -465,6 +718,151 @@ HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::GetDeviceData", DID8_GetDeviceDa
   if (!(flags & DIGDD_PEEK)) d->overflow = false;
   return overflow ? DI_BUFFEROVERFLOW : DI_OK;
 }
+
+// (lpCallback, pvRef, dwFlags): a pad's objects of the DIDFT_ kinds in
+// dwFlags; the mouse and keyboard list none.
+HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::EnumObjects", DID8_EnumObjects, 4) {
+  InputDevice* d = Dev(c);
+  uint32_t cb = Arg(c, 1), ref = Arg(c, 2), flags = Arg(c, 3);
+  if (d->pad < 0) return DI_OK;
+  uint32_t inst = HeapAllocProcess(kObjectInstanceSize, true);
+  for (int i = 0; i < kPadObjects; i++) {
+    if (!PadObjectMatches(i, flags)) continue;
+    FillPadObject(GPtr(inst), i);
+    if (!CallGuest(c, cb, {inst, ref})) break;  // DIENUM_STOP
+  }
+  HeapFreeProcess(inst);
+  return DI_OK;
+}
+
+// (pdidoi, dwObj, dwHow)
+HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::GetObjectInfo", DID8_GetObjectInfo, 4) {
+  InputDevice* d = Dev(c);
+  uint32_t out = Arg(c, 1), obj = Arg(c, 2), how = Arg(c, 3);
+  if (d->pad < 0) return DIERR_NOTFOUND;
+  uint8_t o[kObjectInstanceSize];
+  for (int i = 0; i < kPadObjects; i++) {
+    FillPadObject(o, i);
+    uint32_t ofs, type;
+    std::memcpy(&ofs, o + 0x14, 4);
+    std::memcpy(&type, o + 0x18, 4);
+    if ((how == DIPH_BYOFFSET && ofs == obj) || (how == DIPH_BYID && (type & 0xFFFFFF) == (obj & 0xFFFFFF))) {
+      const uint32_t size = std::min<uint32_t>(Rd32(out), kObjectInstanceSize);
+      std::memcpy(GPtr(out + 4), o + 4, size - 4);
+      return DI_OK;
+    }
+  }
+  return DIERR_NOTFOUND;
+}
+
+uint32_t EffectVtable() {
+  return com::Vtable("dinput8.dll", "IDirectInputEffect",
+                     {"QueryInterface", "AddRef", "Release", "Initialize", "GetEffectGuid",
+                      "GetParameters", "SetParameters", "Start", "Stop", "GetEffectStatus",
+                      "Download", "Unload", "Escape"});
+}
+
+// DIEFFECT: dwDuration (+8, microseconds) and dwGain (+16), as its
+// dwFlags-independent fields; DIEP_DURATION 0x1, DIEP_GAIN 0x4 on SetParameters.
+void ReadEffectParams(Effect& e, uint32_t eff, uint32_t mask) {
+  if (!eff) return;
+  if (mask & 0x1) e.duration_us = Rd32(eff + 8);
+  if (mask & 0x4) e.gain = std::min<uint32_t>(Rd32(eff + 16), 10000);
+}
+
+// (rguid, lpeff, ppdeff, punkOuter): any effect type; it rumbles.
+HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::CreateEffect", DID8_CreateEffect, 5) {
+  InputDevice* d = Dev(c);
+  uint32_t guid = Arg(c, 1), eff = Arg(c, 2), out = Arg(c, 3);
+  if (d->pad < 0) return DIERR_UNSUPPORTED;
+  auto e = std::make_shared<Effect>();
+  e->pad = uint32_t(d->pad);
+  std::memcpy(&e->guid, GPtr(guid), sizeof e->guid);
+  ReadEffectParams(*e, eff, 0x5);
+  Wr32(out, com::Publish(e, EffectVtable()));
+  return DI_OK;
+}
+
+// (lpszFileName, pec, pvRef, dwFlags): the effects saved in a file
+// (DIFILEEFFECT: dwSize, GuidEffect, lpDiEffect, szFriendlyName). Games
+// ship their rumbles that way; where the file is missing (Getting Up's
+// Steam build has none) one short rumble stands in for them.
+HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::EnumEffectsInFile", DID8_EnumEffectsInFile, 5) {
+  InputDevice* d = Dev(c);
+  uint32_t cb = Arg(c, 2), ref = Arg(c, 3);
+  if (d->pad < 0) return DI_OK;
+  constexpr uint32_t kEffectSize = 0x44, kFileEffectSize = 4 + 16 + 4 + 260;
+  uint32_t mem = HeapAllocProcess(kFileEffectSize + kEffectSize, true);
+  const uint32_t eff = mem + kFileEffectSize;
+  Wr32(mem, kFileEffectSize);
+  std::memcpy(GPtr(mem + 4), &kGUID_Sine, 16);
+  Wr32(mem + 20, eff);
+  std::snprintf(reinterpret_cast<char*>(GPtr(mem + 24)), 260, "Rumble");
+  Wr32(eff, kEffectSize);
+  Wr32(eff + 8, 180000);  // dwDuration
+  Wr32(eff + 16, 10000);  // dwGain
+  CallGuest(c, cb, {mem, ref});
+  HeapFreeProcess(mem);
+  return DI_OK;
+}
+
+// (dwFlags): DISFFC_RESET 1, DISFFC_STOPALL 2 stop the rumble.
+HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::SendForceFeedbackCommand", DID8_SendFFCommand, 2) {
+  InputDevice* d = Dev(c);
+  if (d->pad < 0) return DIERR_UNSUPPORTED;
+  if (Arg(c, 1) & 3) RumblePad(uint32_t(d->pad), 0, 0, 0);
+  return DI_OK;
+}
+
+Effect* Eff(Ctx& c) {
+  Effect* e = com::As<Effect>(Arg(c, 0));
+  if (!e) FatalF("IDirectInputEffect call on unknown object %08X", uint32_t(Arg(c, 0)));
+  return e;
+}
+
+HLE_NAMED("dinput8.dll", "IDirectInputEffect::QueryInterface", DIE_QueryInterface, 3) {
+  return QueryInterfaceFor(c, kIID_IDirectInputEffect);
+}
+HLE_NAMED("dinput8.dll", "IDirectInputEffect::AddRef", DIE_AddRef, 1) { return com::AddRef(Arg(c, 0)); }
+HLE_NAMED("dinput8.dll", "IDirectInputEffect::Release", DIE_Release, 1) { return com::Release(Arg(c, 0)); }
+HLE_NAMED("dinput8.dll", "IDirectInputEffect::GetEffectGuid", DIE_GetEffectGuid, 2) {
+  std::memcpy(GPtr(Arg(c, 1)), &Eff(c)->guid, 16);
+  return DI_OK;
+}
+// (peff, dwFlags)
+HLE_NAMED("dinput8.dll", "IDirectInputEffect::SetParameters", DIE_SetParameters, 3) {
+  ReadEffectParams(*Eff(c), Arg(c, 1), Arg(c, 2));
+  return DI_OK;
+}
+HLE_NAMED("dinput8.dll", "IDirectInputEffect::GetParameters", DIE_GetParameters, 3) {
+  Effect* e = Eff(c);
+  uint32_t eff = Arg(c, 1), mask = Arg(c, 2);
+  if (mask & 0x1) Wr32(eff + 8, e->duration_us);
+  if (mask & 0x4) Wr32(eff + 16, e->gain);
+  return DI_OK;
+}
+// (dwIterations, dwFlags): both motors at the effect's gain, for its
+// duration times the iterations (INFINITE either way: until Stop).
+HLE_NAMED("dinput8.dll", "IDirectInputEffect::Start", DIE_Start, 3) {
+  Effect* e = Eff(c);
+  const uint32_t iterations = Arg(c, 1);
+  uint64_t ms = e->duration_us == 0xFFFFFFFF || iterations == 0xFFFFFFFF
+                    ? 0xFFFFFFFFull
+                    : uint64_t(e->duration_us) / 1000 * std::max<uint32_t>(iterations, 1);
+  const uint16_t level = uint16_t(uint32_t(e->gain) * 0xFFFF / 10000);
+  RumblePad(e->pad, level, level, uint32_t(std::min<uint64_t>(ms, 0xFFFFFFFF)));
+  return DI_OK;
+}
+HLE_NAMED("dinput8.dll", "IDirectInputEffect::Stop", DIE_Stop, 1) {
+  RumblePad(Eff(c)->pad, 0, 0, 0);
+  return DI_OK;
+}
+HLE_NAMED("dinput8.dll", "IDirectInputEffect::GetEffectStatus", DIE_GetEffectStatus, 2) {
+  Wr32(Arg(c, 1), 0);
+  return DI_OK;
+}
+HLE_NAMED("dinput8.dll", "IDirectInputEffect::Download", DIE_Download, 1) { return DI_OK; }
+HLE_NAMED("dinput8.dll", "IDirectInputEffect::Unload", DIE_Unload, 1) { return DI_OK; }
 
 }  // namespace
 }  // namespace recomp::hle

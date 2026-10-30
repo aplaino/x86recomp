@@ -123,6 +123,11 @@ inline uint64_t RetF(Ctx& c, float v) {
 // handler's thunk (PeImage::Load's binder).
 gaddr ImportThunk(const std::string& dll, const std::string& name);
 
+// Runs DllMain(PROCESS_ATTACH) of the lifted DLLs the EXE imports from
+// statically (and of their own lifted dependencies first), on the main
+// guest thread before the EXE's entry point, as the Windows loader does.
+void AttachExeImports(Ctx& c);
+
 // "KERNEL32.dll", "C:\x\Foo" -> "kernel32.dll", "foo.dll".
 std::string NormaliseDll(std::string dll);
 

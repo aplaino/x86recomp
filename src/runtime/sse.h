@@ -83,6 +83,10 @@ void Sqrt(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s, uint64_t va);
 // NaNs themselves quieted.
 void Rsqrt(Xmm& d, const Xmm& s);
 uint32_t RsqrtLane(uint32_t x);
+// RCPPS: d = 1/s in all four float lanes, by the same rule as RSQRTPS (no
+// architectural result): the correctly rounded quotient. No flags.
+void Rcp(Xmm& d, const Xmm& s);
+uint32_t RcpLane(uint32_t x);
 
 // CVTSI2SD: the low lane of d = (double)v (always exact).
 void Cvtsi2sd(Xmm& d, int32_t v);
@@ -113,6 +117,10 @@ void CvtIntToF(Ctx& c, bool dbl, bool src64, uint64_t v, Xmm& d, uint64_t va);
 // int32, 0x80000000 for NaN and out of range (invalid).
 void CvtToDq(Ctx& c, bool dbl, bool truncate, Xmm& d, const Xmm& s, uint64_t va);
 
+// RCPSS: the low lane of d = 1/(the low lane of s), as RcpLane.
+inline void RcpSs(Xmm& d, const Xmm& s) {
+  SetLane<uint32_t>(d, 0, RcpLane(Lane<uint32_t>(s, 0)));
+}
 // RSQRTSS: the low lane of d = 1/sqrt(the low lane of s), as RsqrtLane.
 inline void RsqrtSs(Xmm& d, const Xmm& s) {
   SetLane<uint32_t>(d, 0, RsqrtLane(Lane<uint32_t>(s, 0)));

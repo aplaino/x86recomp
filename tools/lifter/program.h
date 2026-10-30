@@ -51,6 +51,9 @@ struct Program {
   std::set<uint64_t> resume_sites;            // manifest: calls/jmps that
                                               // abandon the stack (SEH,
                                               // longjmp)
+  std::map<uint64_t, uint64_t> hooks;         // manifest: hook <va> <end>: the
+                                              // game project's hook_<VA>(c)
+                                              // runs in place of [va, end)
   std::set<uint64_t> setjmps;                 // manifest: setjmp functions
                                               // (their callers can be
                                               // resumed by longjmp)

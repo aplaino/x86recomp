@@ -188,6 +188,33 @@ HLE("advapi32.dll", RegQueryValueExA, 6) {
   return kErrorSuccess;
 }
 
+// (hKey, dwIndex, lpValueName, lpcchValueName, lpReserved, lpType, lpData,
+// lpcbData): the values in name order. Names come back in lower case (the
+// store keeps no other).
+HLE("advapi32.dll", RegEnumValueA, 8) {
+  std::lock_guard<std::mutex> l(g_reg_mu);
+  LoadOnce();
+  auto k = g_reg.find(RootName(Arg(c, 0)));
+  if (k == g_reg.end()) return kErrorInvalidHandle;
+  uint32_t index = Arg(c, 1), name = Arg(c, 2), name_len = Arg(c, 3);
+  uint32_t type_out = Arg(c, 5), data = Arg(c, 6), size_ptr = Arg(c, 7);
+  if (index >= k->second.size()) return kErrorNoMoreItems;
+  auto v = std::next(k->second.begin(), index);
+  const std::string& n = v->first;
+  if (Rd32(name_len) <= n.size()) return kErrorMoreData;
+  PutStr(name, n);
+  Wr32(name_len, uint32_t(n.size()));
+  if (type_out) Wr32(type_out, v->second.type);
+  uint32_t bytes = uint32_t(v->second.data.size());
+  if (size_ptr) {
+    uint32_t cap = Rd32(size_ptr);
+    Wr32(size_ptr, bytes);
+    if (data && cap < bytes) return kErrorMoreData;
+    if (data) std::memcpy(GPtr(data), v->second.data.data(), bytes);
+  }
+  return kErrorSuccess;
+}
+
 HLE("advapi32.dll", RegSetValueExA, 6) {
   std::lock_guard<std::mutex> l(g_reg_mu);
   LoadOnce();

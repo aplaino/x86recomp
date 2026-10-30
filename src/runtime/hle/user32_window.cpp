@@ -48,6 +48,17 @@ bool Background() {
   return bg;
 }
 
+// <ID>_HIDDEN=1 (automated runs on a desktop someone is using): host
+// windows are never shown; the game still sees them as visible, and
+// <ID>_SHOT_DIR frames show what it draws.
+void ShowHostWindow(SDL_Window* w) {
+  static const bool hidden = [] {
+    const char* e = Env("HIDDEN");
+    return e && *e && *e != '0';
+  }();
+  if (!hidden) SDL_ShowWindow(w);
+}
+
 namespace {
 
 
@@ -687,10 +698,15 @@ void ScreenFor(const Window& w, int* sw, int* sh) {
 // Whether a visible top-level window covers the whole screen the game
 // sees: DirectDraw exclusive mode, or a client area spanning the screen
 // (a fullscreen window after a display mode change, or a borderless one at
-// the desktop's size). Caller holds g_mu.
+// the desktop's size), or a framed window as large as the screen (a game
+// in its windowed mode at the desktop's resolution: no host window of
+// that size fits on the screen). Caller holds g_mu.
 bool CoversScreen(const Window& w) {
   if (w.destroyed || !w.sdl || !w.visible) return false;
   if (w.mode_w) return true;
+  if (!(w.style & WS_CHILD) && w.x <= 0 && w.y <= 0 && w.x + w.w >= g_display_w &&
+      w.y + w.h >= g_display_h)
+    return true;
   int ox, oy, cw, ch;
   WindowOrigin(w.hwnd, &ox, &oy);
   ClientSize(w, &cw, &ch);
@@ -712,7 +728,9 @@ void UpdateFullscreen(uint32_t hwnd) {
     if (!w || !w->sdl) return;
     want = FullscreenPolicy() != F::Window && CoversScreen(*w);
     ScreenFor(*w, &sw, &sh);
-    if (want == w->fullscreen && (!want || (w->fs_w == sw && w->fs_h == sh))) return;
+    // (Also when the host window left fullscreen by itself.)
+    const bool actual = SDL_GetWindowFlags(w->sdl) & SDL_WINDOW_FULLSCREEN;
+    if (want == w->fullscreen && (!want || (actual && w->fs_w == sw && w->fs_h == sh))) return;
     w->fullscreen = want;
     w->fs_w = sw;
     w->fs_h = sh;
@@ -750,8 +768,20 @@ void UpdateFullscreen(uint32_t hwnd) {
       }
       SDL_free(modes);
     }
+    // On the display whose size the game sees.
+    if (SDL_GetDisplayForWindow(sdl) != SDL_GetPrimaryDisplay())
+      SDL_SetWindowPosition(sdl, SDL_WINDOWPOS_CENTERED_DISPLAY(SDL_GetPrimaryDisplay()),
+                            SDL_WINDOWPOS_CENTERED_DISPLAY(SDL_GetPrimaryDisplay()));
     SDL_SetWindowFullscreenMode(sdl, exclusive ? &m : nullptr);
     SDL_SetWindowFullscreen(sdl, true);
+    SDL_SyncWindow(sdl);
+    if (!(SDL_GetWindowFlags(sdl) & SDL_WINDOW_FULLSCREEN)) {
+      // Not taken (yet): asked again at the next placement change or frame.
+      WarnF("user32: window %X: fullscreen not entered: %s\n", hwnd, SDL_GetError());
+      std::lock_guard<std::recursive_mutex> l(g_mu);
+      if (Window* w = Win(hwnd)) w->fullscreen = false;
+      return;
+    }
     if (exclusive)
       std::fprintf(stderr, "user32: window %X fullscreen for a %dx%d screen, host mode %dx%d\n",
                    hwnd, sw, sh, m.w, m.h);
@@ -784,6 +814,10 @@ void EnsureSdlVideo() {
   // Leave SIGINT/SIGTERM alone: SDL would turn them into quit events the
   // game may ignore, making the process hard to stop.
   SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
+  // macOS: fullscreen as a borderless window over the whole display, at
+  // once, not a Space of its own entered by animation (which a window
+  // just being shown or resized can miss, leaving it a window).
+  SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, "0");
   if (!SDL_Init(SDL_INIT_VIDEO)) FatalF("SDL_Init: %s", SDL_GetError());
   g_sdl_up = true;
   if (const SDL_DisplayMode* m = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay())) {
@@ -969,6 +1003,112 @@ void InjectTestInput() {
   }
 }
 
+TestPadHooks g_test_pad_hooks;
+
+}  // namespace
+
+void SetTestPadHooks(const TestPadHooks& hooks) { g_test_pad_hooks = hooks; }
+
+namespace {
+
+// Test hook: <ID>_INPUT_LIVE=<file> is read while the game runs: lines
+// appended to it act at once, for driving a game interactively from
+// outside:
+//   key <SDL scancode name> [seconds]   held for that long (default 0.08)
+//   pad <SDL gamepad button> [seconds]  the test pad (<ID>_TEST_PAD)
+//   stick <SDL gamepad axis> <-1..1> [seconds]  (default 0.5, y down)
+//   shot <path>                         save the next presented frame (BMP)
+void InjectLiveInput() {
+  static const char* path = Env("INPUT_LIVE");
+  if (!path) return;
+  static long offset = 0;
+  static std::vector<TestEvent> releases;  // key ups, by host time
+  const double now = SDL_GetTicks() / 1000.0;
+  // Test pad releases: (host time, button or -1 - axis).
+  static std::vector<std::pair<double, int>> pad_releases;
+  for (auto it = pad_releases.begin(); it != pad_releases.end();) {
+    if (it->first > now) {
+      ++it;
+      continue;
+    }
+    if (it->second >= 0 && g_test_pad_hooks.button) g_test_pad_hooks.button(it->second, false);
+    if (it->second < 0 && g_test_pad_hooks.axis) g_test_pad_hooks.axis(-1 - it->second, 0);
+    it = pad_releases.erase(it);
+  }
+  SDL_WindowID id = 0;
+  {
+    std::lock_guard<std::recursive_mutex> l(g_mu);
+    for (auto& [h, w] : g_windows)
+      if (w.sdl && !w.destroyed) id = SDL_GetWindowID(w.sdl);
+  }
+  if (!id) return;
+  for (auto it = releases.begin(); it != releases.end();) {
+    if (it->t > now) {
+      ++it;
+      continue;
+    }
+    it->e.key.windowID = id;
+    HandleSdlEvent(it->e);
+    it = releases.erase(it);
+  }
+  FILE* f = std::fopen(path, "r");
+  if (!f) return;
+  std::fseek(f, offset, SEEK_SET);
+  char line[256];
+  while (std::fgets(line, sizeof line, f)) {
+    size_t n = std::strlen(line);
+    if (!n || line[n - 1] != '\n') break;  // a line still being written
+    offset += long(n);
+    char cmd[32] = {}, a[200] = {}, b[64] = {};
+    int k = std::sscanf(line, "%31s %199s %63s", cmd, a, b);
+    std::string c = cmd;
+    if (c == "key" && k >= 2) {
+      SDL_Scancode sc = SDL_GetScancodeFromName(a);
+      if (sc == SDL_SCANCODE_UNKNOWN) {
+        WarnF("INPUT_LIVE: unknown key %s\n", a);
+        continue;
+      }
+      SDL_Event e{};
+      e.type = SDL_EVENT_KEY_DOWN;
+      e.key.scancode = sc;
+      e.key.key = SDL_GetKeyFromScancode(sc, SDL_KMOD_NONE, false);
+      e.key.down = true;
+      e.key.windowID = id;
+      HandleSdlEvent(e);
+      e.type = SDL_EVENT_KEY_UP;
+      e.key.down = false;
+      releases.push_back({now + (k >= 3 ? std::atof(b) : 0.08), e});
+    } else if (c == "pad" && k >= 2) {
+      // pad <SDL gamepad button name: a, b, x, y, start, dpup, ...> [hold s]
+      const SDL_GamepadButton btn = SDL_GetGamepadButtonFromString(a);
+      if (btn == SDL_GAMEPAD_BUTTON_INVALID) {
+        WarnF("INPUT_LIVE: unknown pad button %s\n", a);
+        continue;
+      }
+      if (g_test_pad_hooks.button) g_test_pad_hooks.button(btn, true);
+      pad_releases.push_back({now + (k >= 3 ? std::atof(b) : 0.08), int(btn)});
+    } else if (c == "stick" && k >= 3) {
+      // stick <SDL gamepad axis name: leftx, lefty, ...> <-1..1> [hold s]
+      // (y down); held 0.5 s by default, then centred.
+      const SDL_GamepadAxis ax = SDL_GetGamepadAxisFromString(a);
+      if (ax == SDL_GAMEPAD_AXIS_INVALID) {
+        WarnF("INPUT_LIVE: unknown pad axis %s\n", a);
+        continue;
+      }
+      char hold[64] = {};
+      std::sscanf(line, "%*s %*s %*s %63s", hold);
+      const float v = std::clamp(float(std::atof(b)), -1.0f, 1.0f);
+      if (g_test_pad_hooks.axis) g_test_pad_hooks.axis(ax, int16_t(v * 32767.0f));
+      pad_releases.push_back({now + (*hold ? std::atof(hold) : 0.5), -1 - int(ax)});
+    } else if (c == "shot" && k >= 2) {
+      hle::RequestShot(a);
+    } else if (k >= 1) {
+      WarnF("INPUT_LIVE: bad line: %s", line);
+    }
+  }
+  std::fclose(f);
+}
+
 // Test hook: <ID>_TEST_STALL="at,seconds" blocks the main thread once, to
 // exercise the hang watchdog.
 void InjectTestStall() {
@@ -1057,8 +1197,16 @@ void PumpHostEvents() {
       continue;
     DeliverHostEvent(e);
   }
+  // A window due for fullscreen that is not (refused, or left by the
+  // system) gets it again, about once a second.
+  static Uint64 next_fullscreen_check = 0;
+  if (SDL_GetTicks() >= next_fullscreen_check) {
+    next_fullscreen_check = SDL_GetTicks() + 1000;
+    UpdateFullscreenAll();
+  }
   InjectTestFocus();
   InjectTestInput();
+  InjectLiveInput();
   WatchdogHeartbeat();
 }
 
@@ -1095,7 +1243,7 @@ void ShowWindowNoActivate(uint32_t hwnd) {
     win->visible = true;
     sdl = win->sdl;
   }
-  if (sdl) SDL_ShowWindow(sdl);
+  if (sdl) ShowHostWindow(sdl);
   UpdateFullscreen(hwnd);
 }
 
@@ -1282,7 +1430,7 @@ HLE("user32.dll", CreateWindowExA, 12) {
       std::lock_guard<std::recursive_mutex> l(g_mu);
       if (Window* wp = Win(hwnd)) {
         wp->visible = true;
-        if (wp->sdl) SDL_ShowWindow(wp->sdl);
+        if (wp->sdl) ShowHostWindow(wp->sdl);
       }
     }
     UpdateFullscreen(hwnd);
@@ -1348,7 +1496,7 @@ HLE("user32.dll", ShowWindow, 2) {
     if (!show) {
       SDL_HideWindow(sdl);
     } else {
-      SDL_ShowWindow(sdl);
+      ShowHostWindow(sdl);
       // Behind an exclusive-mode "screen" the game's minimize on
       // deactivation is not carried out: the window simply stays put
       // while the game idles, and focusing it again resumes the game.
@@ -1459,7 +1607,7 @@ HLE("user32.dll", SetWindowPos, 7) {
   ApplyRect(hwnd, int32_t(Arg(c, 2)), int32_t(Arg(c, 3)), int32_t(Arg(c, 4)),
             int32_t(Arg(c, 5)), !nomove, !nosize);
   if (flags & 0x40) {  // SWP_SHOWWINDOW
-    if (SDL_Window* s = SdlWindowFor(hwnd)) SDL_ShowWindow(s);
+    if (SDL_Window* s = SdlWindowFor(hwnd)) ShowHostWindow(s);
     {
       std::lock_guard<std::recursive_mutex> l(g_mu);
       if (Window* w = Win(hwnd)) w->visible = true;

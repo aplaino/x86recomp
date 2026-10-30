@@ -42,6 +42,10 @@
 // SPIR-V words elsewhere.
 #include "ff_frag.h"
 #include "ff_vert.h"
+// kSmaaHlsl: SMAA.hlsl (smaa/, MIT), and its lookup textures.
+#include "runtime/gfx/smaa/AreaTex.h"
+#include "runtime/gfx/smaa/SearchTex.h"
+#include "smaa_hlsl.h"
 
 namespace recomp::gfx {
 
@@ -423,8 +427,13 @@ class GpuDevice final : public Device {
     for (auto& [k, s] : samplers_) SDL_ReleaseGPUSampler(dev_, s);
     for (auto& [id, t] : textures_) SDL_ReleaseGPUTexture(dev_, t.tex);
     for (auto& [id, d] : depths_) SDL_ReleaseGPUTexture(dev_, d.tex);
-    for (SDL_GPUTexture* t : {backbuffer_, front_, dummy_, dummy_2d_, dummy_cube_, dummy_3d_})
+    for (SDL_GPUTexture* t : {backbuffer_, front_, dummy_, dummy_2d_, dummy_cube_, dummy_3d_,
+                              smaa_area_, smaa_search_, smaa_edges_, smaa_blend_})
       if (t) SDL_ReleaseGPUTexture(dev_, t);
+    for (SDL_GPUGraphicsPipeline* p : smaa_pipe_)
+      if (p) SDL_ReleaseGPUGraphicsPipeline(dev_, p);
+    for (SDL_GPUSampler* s : {smaa_linear_, smaa_point_})
+      if (s) SDL_ReleaseGPUSampler(dev_, s);
     for (auto& b : blit_pool_) SDL_ReleaseGPUTexture(dev_, b.tex);
     for (SDL_GPUBuffer* b : {vbuf_, ibuf_})
       if (b) SDL_ReleaseGPUBuffer(dev_, b);
@@ -1341,16 +1350,35 @@ void r_color0(inout vec4 c) {
 
   void Present() override {
     std::lock_guard<std::recursive_mutex> l(mu_);
+    if (smaa_on_) SmaaPrepare();  // before Flush: it queues uploads
     Flush();
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(dev_);
-    SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
-    SDL_GPUTextureLocation s{}, d{};
-    s.texture = backbuffer_;
-    d.texture = front_;
-    SDL_CopyGPUTextureToTexture(cp, &s, &d, Uint32(bb_w_), Uint32(bb_h_), 1, false);
-    SDL_EndGPUCopyPass(cp);
+    if (smaa_on_) {
+      SmaaRun(cmd);
+    } else {
+      SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
+      SDL_GPUTextureLocation s{}, d{};
+      s.texture = backbuffer_;
+      d.texture = front_;
+      SDL_CopyGPUTextureToTexture(cp, &s, &d, Uint32(bb_w_), Uint32(bb_h_), 1, false);
+      SDL_EndGPUCopyPass(cp);
+    }
     Show(cmd);
     Submit(cmd);
+  }
+
+  void SetMinAnisotropy(int level) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    min_aniso_ = std::clamp(level, 0, 16);
+    for (auto& [k, s] : samplers_) SDL_ReleaseGPUSampler(dev_, s);
+    samplers_.clear();
+    if (min_aniso_ > 1) std::fprintf(stderr, "gfx: anisotropic filtering %dx\n", min_aniso_);
+  }
+
+  void SetPostAntialiasing(bool on) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    smaa_on_ = on;
+    std::fprintf(stderr, "gfx: post-process anti-aliasing %s\n", on ? "SMAA 1x" : "off");
   }
 
  private:
@@ -1824,6 +1852,193 @@ void r_color0(inout vec4 c) {
     pass_clear_color_ = pass_clear_depth_ = pass_clear_stencil_ = false;
   }
 
+  // ---- SMAA 1x (Jimenez et al., SMAA.hlsl): the back buffer goes to the
+  // front buffer through its three passes, at the back buffer's size:
+  // luma edges, blending weights (from the area and search lookup
+  // textures), then neighbourhood blending.
+
+  SDL_GPUGraphicsPipeline* SmaaPipeline(int pass, SDL_GPUTextureFormat target) {
+#if defined(__APPLE__)
+    const bool metal = true;
+#else
+    const bool metal = false;
+#endif
+    static const int kSamplers[3] = {1, 3, 2};  // per pass
+    SDL_GPUShader* sh[2] = {};
+    for (int stage = 0; stage < 2; stage++) {
+      const bool vertex = stage == 0;
+      auto binding = [&](int set, int b) {
+        return "set = " + std::to_string(metal ? 0 : set) + ", binding = " + std::to_string(b);
+      };
+      std::string glsl = "#version 450\n#define SMAA_GLSL_4 1\n#define SMAA_PRESET_HIGH 1\n"
+                         "#define SMAA_RT_METRICS smaa_metrics\n#define PASS " +
+                         std::to_string(pass) + "\n";
+      if (vertex) {
+        glsl += "#define SMAA_INCLUDE_PS 0\nlayout(std140, " + binding(1, 0) +
+                ") uniform SmaaVs { vec4 smaa_metrics; };\n";
+      } else {
+        glsl += "#define SMAA_INCLUDE_VS 0\nlayout(std140, " + binding(3, 0) +
+                ") uniform SmaaFs { vec4 smaa_metrics; };\n";
+        for (int i = 0; i < kSamplers[pass]; i++)
+          glsl += "layout(" + binding(2, i) + ") uniform sampler2D t" + std::to_string(i) + ";\n";
+      }
+      glsl += kSmaaHlsl;
+      glsl += vertex ? R"(
+layout(location = 0) out vec2 v_uv;
+layout(location = 1) out vec2 v_pix;
+layout(location = 2) out vec4 v_off[3];
+void main() {
+  // One triangle over the target; texture y runs down.
+  vec2 p = vec2(float((gl_VertexIndex << 1) & 2), float(gl_VertexIndex & 2));
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+  v_uv = vec2(p.x, 1.0 - p.y);
+  v_pix = vec2(0.0);
+  v_off[0] = v_off[1] = v_off[2] = vec4(0.0);
+#if PASS == 0
+  SMAAEdgeDetectionVS(v_uv, v_off);
+#elif PASS == 1
+  SMAABlendingWeightCalculationVS(v_uv, v_pix, v_off);
+#else
+  SMAANeighborhoodBlendingVS(v_uv, v_off[0]);
+#endif
+}
+)" : R"(
+layout(location = 0) in vec2 v_uv;
+layout(location = 1) in vec2 v_pix;
+layout(location = 2) in vec4 v_off[3];
+layout(location = 0) out vec4 o_color;
+void main() {
+#if PASS == 0
+  o_color = vec4(SMAALumaEdgeDetectionPS(v_uv, v_off, t0), 0.0, 0.0);
+#elif PASS == 1
+  o_color = SMAABlendingWeightCalculationPS(v_uv, v_pix, v_off, t0, t1, t2, vec4(0.0));
+#else
+  o_color = SMAANeighborhoodBlendingPS(v_uv, v_off[0], t0, t1);
+#endif
+}
+)";
+      std::vector<uint32_t> spirv;
+      std::string log;
+      if (!GlslToSpirv(glsl, vertex ? ShaderStage::Vertex : ShaderStage::Fragment, &spirv, &log))
+        FatalF("gfx: compiling SMAA pass %d: %s", pass, log.c_str());
+      SDL_GPUShaderCreateInfo si{};
+#if defined(__APPLE__)
+      std::string msl;
+      if (!SpirvToMsl(spirv, &msl, &log)) FatalF("gfx: SPIR-V to MSL: %s", log.c_str());
+      si.code = reinterpret_cast<const Uint8*>(msl.c_str());
+      si.code_size = msl.size();
+      si.entrypoint = "main0";
+      si.format = SDL_GPU_SHADERFORMAT_MSL;
+#else
+      si.code = reinterpret_cast<const Uint8*>(spirv.data());
+      si.code_size = spirv.size() * 4;
+      si.entrypoint = "main";
+      si.format = SDL_GPU_SHADERFORMAT_SPIRV;
+#endif
+      si.stage = vertex ? SDL_GPU_SHADERSTAGE_VERTEX : SDL_GPU_SHADERSTAGE_FRAGMENT;
+      si.num_samplers = vertex ? 0 : Uint32(kSamplers[pass]);
+      si.num_uniform_buffers = 1;
+      sh[stage] = SDL_CreateGPUShader(dev_, &si);
+      if (!sh[stage]) FatalF("gfx: SDL_CreateGPUShader (SMAA): %s", SDL_GetError());
+    }
+    SDL_GPUColorTargetDescription ctd{};
+    ctd.format = target;
+    SDL_GPUGraphicsPipelineCreateInfo pi{};
+    pi.vertex_shader = sh[0];
+    pi.fragment_shader = sh[1];
+    pi.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    pi.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    pi.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    pi.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    pi.target_info.color_target_descriptions = &ctd;
+    pi.target_info.num_color_targets = 1;
+    SDL_GPUGraphicsPipeline* p = SDL_CreateGPUGraphicsPipeline(dev_, &pi);
+    if (!p) FatalF("gfx: SDL_CreateGPUGraphicsPipeline (SMAA): %s", SDL_GetError());
+    SDL_ReleaseGPUShader(dev_, sh[0]);
+    SDL_ReleaseGPUShader(dev_, sh[1]);
+    return p;
+  }
+
+  SDL_GPUTexture* SmaaTexture(int w, int h, SDL_GPUTextureFormat fmt, bool target) {
+    SDL_GPUTextureCreateInfo ti{};
+    ti.type = SDL_GPU_TEXTURETYPE_2D;
+    ti.format = fmt;
+    ti.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | (target ? SDL_GPU_TEXTUREUSAGE_COLOR_TARGET : 0);
+    ti.width = Uint32(w);
+    ti.height = Uint32(h);
+    ti.layer_count_or_depth = 1;
+    ti.num_levels = 1;
+    SDL_GPUTexture* t = SDL_CreateGPUTexture(dev_, &ti);
+    if (!t) FatalF("gfx: SMAA texture %dx%d: %s", w, h, SDL_GetError());
+    return t;
+  }
+
+  // Pipelines, samplers and lookup textures once; the edge and weight
+  // targets at the back buffer's size.
+  void SmaaPrepare() {
+    if (!smaa_pipe_[0]) {
+      smaa_pipe_[0] = SmaaPipeline(0, SDL_GPU_TEXTUREFORMAT_R8G8_UNORM);
+      smaa_pipe_[1] = SmaaPipeline(1, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
+      smaa_pipe_[2] = SmaaPipeline(2, SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM);
+      SDL_GPUSamplerCreateInfo si{};
+      si.address_mode_u = si.address_mode_v = si.address_mode_w =
+          SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+      si.min_filter = si.mag_filter = SDL_GPU_FILTER_LINEAR;
+      smaa_linear_ = SDL_CreateGPUSampler(dev_, &si);
+      si.min_filter = si.mag_filter = SDL_GPU_FILTER_NEAREST;
+      smaa_point_ = SDL_CreateGPUSampler(dev_, &si);
+      if (!smaa_linear_ || !smaa_point_) FatalF("gfx: SMAA samplers: %s", SDL_GetError());
+      smaa_area_ = SmaaTexture(AREATEX_WIDTH, AREATEX_HEIGHT, SDL_GPU_TEXTUREFORMAT_R8G8_UNORM, false);
+      QueueUpload(smaa_area_, 0, 0, 0, AREATEX_WIDTH, AREATEX_HEIGHT, areaTexBytes, AREATEX_PITCH,
+                  AREATEX_HEIGHT, AREATEX_PITCH);
+      smaa_search_ = SmaaTexture(SEARCHTEX_WIDTH, SEARCHTEX_HEIGHT, SDL_GPU_TEXTUREFORMAT_R8_UNORM,
+                                 false);
+      QueueUpload(smaa_search_, 0, 0, 0, SEARCHTEX_WIDTH, SEARCHTEX_HEIGHT, searchTexBytes,
+                  SEARCHTEX_PITCH, SEARCHTEX_HEIGHT, SEARCHTEX_PITCH);
+    }
+    if (smaa_w_ != bb_w_ || smaa_h_ != bb_h_) {
+      for (SDL_GPUTexture* t : {smaa_edges_, smaa_blend_})
+        if (t) SDL_ReleaseGPUTexture(dev_, t);
+      smaa_edges_ = SmaaTexture(bb_w_, bb_h_, SDL_GPU_TEXTUREFORMAT_R8G8_UNORM, true);
+      smaa_blend_ = SmaaTexture(bb_w_, bb_h_, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, true);
+      smaa_w_ = bb_w_;
+      smaa_h_ = bb_h_;
+    }
+  }
+
+  void SmaaRun(SDL_GPUCommandBuffer* cmd) {
+    const float metrics[4] = {1.0f / float(bb_w_), 1.0f / float(bb_h_), float(bb_w_),
+                              float(bb_h_)};
+    struct Pass {
+      SDL_GPUTexture* target;
+      SDL_GPUTextureSamplerBinding in[3];
+      Uint32 inputs;
+    };
+    const Pass passes[3] = {
+        {smaa_edges_, {{backbuffer_, smaa_linear_}}, 1},
+        {smaa_blend_,
+         {{smaa_edges_, smaa_linear_}, {smaa_area_, smaa_linear_}, {smaa_search_, smaa_point_}},
+         3},
+        {front_, {{backbuffer_, smaa_linear_}, {smaa_blend_, smaa_linear_}}, 2},
+    };
+    for (int i = 0; i < 3; i++) {
+      SDL_GPUColorTargetInfo t{};
+      t.texture = passes[i].target;
+      // Edges and weights start at 0 (the edge pass discards where
+      // there is none); the last pass writes every pixel.
+      t.load_op = i < 2 ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_DONT_CARE;
+      t.store_op = SDL_GPU_STOREOP_STORE;
+      t.clear_color = {0, 0, 0, 0};
+      SDL_GPURenderPass* rp = SDL_BeginGPURenderPass(cmd, &t, 1, nullptr);
+      SDL_BindGPUGraphicsPipeline(rp, smaa_pipe_[i]);
+      SDL_PushGPUVertexUniformData(cmd, 0, metrics, sizeof metrics);
+      SDL_PushGPUFragmentUniformData(cmd, 0, metrics, sizeof metrics);
+      SDL_BindGPUFragmentSamplers(rp, 0, passes[i].in, passes[i].inputs);
+      SDL_DrawGPUPrimitives(rp, 3, 1, 0, 0);
+      SDL_EndGPURenderPass(rp);
+    }
+  }
+
   // Front buffer to the window: scaled to fit with its aspect kept,
   // black around it (FitRect).
   void Show(SDL_GPUCommandBuffer* cmd) {
@@ -2158,9 +2373,11 @@ void r_color0(inout vec4 c) {
         k.s_read = uint8_t(rs_[58]);
         k.s_write = uint8_t(rs_[59]);
       }
-      // D3D9's DEPTHBIAS is in depth-range units; D3D7's ZBIAS 0..16
-      // as the d3d9 backend maps it.
-      float bias = AsFloat(rs_[195]) - float(rs_[47]) * 0.000005f;
+      // D3D9's DEPTHBIAS is in depth-range units; D3D7/D3D8's ZBIAS 0..16
+      // in steps of a 16-bit depth buffer's resolution, as DXVK's d3d8 maps
+      // it (a smaller step leaves decals z-fighting with their wall, their
+      // edges shimmering, at grazing angles).
+      float bias = AsFloat(rs_[195]) - float(rs_[47]) * (1.0f / 65535.0f);
       k.bias_const = bias * pass_bias_scale_;
       k.bias_slope = AsFloat(rs_[175]);
     }
@@ -2241,8 +2458,10 @@ void r_color0(inout vec4 c) {
     // MIPFILTER NONE samples only the top level (or MAXMIPLEVEL).
     si.max_lod = k.mip == 0xFF ? k.min_lod : 1000.0f;
     if (k.mip == 0xFF) si.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
-    si.enable_anisotropy = k.aniso > 1;
-    si.max_anisotropy = float(k.aniso);
+    int aniso = k.aniso;
+    if (min_aniso_ > aniso && k.min == SDL_GPU_FILTER_LINEAR && k.mip != 0xFF) aniso = min_aniso_;
+    si.enable_anisotropy = aniso > 1;
+    si.max_anisotropy = float(aniso);
     SDL_GPUSampler* s = SDL_CreateGPUSampler(dev_, &si);
     if (!s) FatalF("gfx: SDL_CreateGPUSampler: %s", SDL_GetError());
     samplers_[k] = s;
@@ -2542,6 +2761,18 @@ void r_color0(inout vec4 c) {
   SDL_GPUTexture* front_ = nullptr;       // the DirectDraw primary
   SDL_GPUTexture* dummy_ = nullptr;
   int bb_w_ = 0, bb_h_ = 0;
+  // SMAA (SetPostAntialiasing): pipelines per pass, lookup textures, and
+  // the edge and weight targets (smaa_w_ x smaa_h_).
+  bool smaa_on_ = false;
+  int min_aniso_ = 0;  // SetMinAnisotropy
+  SDL_GPUGraphicsPipeline* smaa_pipe_[3] = {};
+  SDL_GPUSampler* smaa_linear_ = nullptr;
+  SDL_GPUSampler* smaa_point_ = nullptr;
+  SDL_GPUTexture* smaa_area_ = nullptr;
+  SDL_GPUTexture* smaa_search_ = nullptr;
+  SDL_GPUTexture* smaa_edges_ = nullptr;
+  SDL_GPUTexture* smaa_blend_ = nullptr;
+  int smaa_w_ = 0, smaa_h_ = 0;
   // Mailbox emulated on vsync (ResetSwapChain, Show).
   bool mailbox_emulated_ = false;
   uint64_t refresh_ns_ = 0, next_show_ns_ = 0;

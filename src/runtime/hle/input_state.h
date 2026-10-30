@@ -41,6 +41,14 @@ struct RawInput {
 using RawInputSink = void (*)(const RawInput&);
 // One sink (the DirectInput HLE); null to stop.
 void SetRawInputSink(RawInputSink sink);
+
+// <ID>_INPUT_LIVE's `pad` and `stick` lines drive the virtual test pad,
+// which xinput.cpp (a library above the runtime) registers here.
+struct TestPadHooks {
+  void (*button)(int sdl_button, bool down) = nullptr;
+  void (*axis)(int sdl_axis, int16_t value) = nullptr;
+};
+void SetTestPadHooks(const TestPadHooks& hooks);
 void EmitRawInput(RawInput::Kind kind, uint8_t code, int32_t value);
 
 }  // namespace recomp

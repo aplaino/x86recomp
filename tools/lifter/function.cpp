@@ -350,10 +350,36 @@ bool RecoverJumpTable(const Program& p, const Function& f, const Insn& jmp,
       continue;
     }
     if (in->d.mnemonic != ZYDIS_MNEMONIC_CMP ||
-        o0.type != ZYDIS_OPERAND_TYPE_REGISTER || Full(o0.reg.value) != Full(r) ||
-        o1.type != ZYDIS_OPERAND_TYPE_IMMEDIATE || o1.imm.value.u >= 4096)
+        o0.type != ZYDIS_OPERAND_TYPE_REGISTER || Full(o0.reg.value) != Full(r))
       return false;
-    uint32_t cases = static_cast<uint32_t>(o1.imm.value.u) + 1;
+    uint64_t bound;
+    if (o1.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+      bound = o1.imm.value.u;
+    } else if (o1.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+      // The bound in a register the compiler loaded with a constant
+      // earlier (hoisted out of a loop): the last write to it before the
+      // cmp must be that `mov reg, imm`.
+      ZydisRegister b = Full(o1.reg.value);
+      const Insn* w = in;
+      bool found = false;
+      for (int back = 0; back < 64 && !found; back++) {
+        w = Before(f, w->va);
+        if (!w) return false;
+        if (!WritesReg(*w, b)) continue;
+        if (w->d.mnemonic != ZYDIS_MNEMONIC_MOV ||
+            w->ops[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+            Full(w->ops[0].reg.value) != b ||
+            w->ops[1].type != ZYDIS_OPERAND_TYPE_IMMEDIATE)
+          return false;
+        bound = w->ops[1].imm.value.u;
+        found = true;
+      }
+      if (!found) return false;
+    } else {
+      return false;
+    }
+    if (bound >= 4096) return false;
+    uint32_t cases = static_cast<uint32_t>(bound) + 1;
     if (two_level) {
       // A byte index table picks the entry.
       if (!in_text(index, cases)) return false;

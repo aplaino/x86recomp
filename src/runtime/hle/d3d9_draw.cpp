@@ -8,10 +8,15 @@
 // D3D9 state in its terms: sampler states at D3D7's texture-stage
 // positions, D3D9's transform numbers mapped. Mixing a shader with the
 // fixed-function pipeline and fixed-function draws with a vertex
-// declaration (no FVF) are not supported yet (fatal, named).
+// declaration (no FVF) are not supported yet (fatal, named). A pixel shader
+// after the fixed-function vertex stage gets a vertex shader standing in
+// for that stage (FfVertexSource).
 
 #include <algorithm>
+#include <array>
 #include <cstring>
+#include <set>
+#include <string>
 #include <vector>
 
 #include "runtime/hle/d3d9_impl.h"
@@ -167,6 +172,289 @@ void DrawFixed(Device& d, gfx::ShaderDraw& sd, const char* what) {
               sd.indices ? idx.data() : nullptr, ni);
 }
 
+// The fixed-function vertex stage of an FVF draw as HLSL, for draws that
+// pair it with a pixel shader. Constants c0-c3: the columns of
+// World*View*Projection (untransformed vertices); c4: the viewport's x, y,
+// 2/width, -2/height (pretransformed XYZRHW ones, which become clip space
+// with w = 1/rhw); c5-c8: the columns of World*View; c12 + 4s: those of
+// texture stage s's transform. The outputs are what that stage gives a
+// pixel shader: diffuse (white without vertex colour) and specular
+// (black), and each stage's texture coordinates: its TEXCOORDINDEX set, or
+// generated in camera space (normal, position, reflection vector, sphere
+// map), then through the stage's transform when TEXTURETRANSFORMFLAGS has a
+// count (D3D's rules: a 2D set enters as (u, v, 1, 0)). Not done here
+// (warned once): lighting, fog.
+std::string FfVertexSource(const Device& d, uint32_t fvf) {
+  const bool rhw = (fvf & 0x400E) == 0x004;
+  const bool normal = (fvf & 0x010) != 0;
+  const uint32_t ntex = (fvf >> 8) & 0xF;
+  std::string in = "struct VSIN {\n  float4 pos : POSITION;\n";
+  if (normal && !rhw) in += "  float3 nrm : NORMAL;\n";
+  if (fvf & 0x040) in += "  float4 diff : COLOR0;\n";
+  if (fvf & 0x080) in += "  float4 spec : COLOR1;\n";
+  for (uint32_t i = 0; i < ntex && i < 8; i++)
+    in += "  float4 t" + std::to_string(i) + " : TEXCOORD" + std::to_string(i) + ";\n";
+  in += "};\n";
+  std::string out = "struct VSOUT {\n  float4 pos : POSITION;\n  float4 diff : COLOR0;\n"
+                    "  float4 spec : COLOR1;\n";
+  std::string body;
+  if (rhw) {
+    body += "  float w = v.pos.w != 0.0 ? 1.0 / v.pos.w : 1.0;\n"
+            "  o.pos = float4((v.pos.x - vp.x) * vp.z - 1.0, (v.pos.y - vp.y) * vp.w + 1.0,"
+            " v.pos.z, 1.0) * w;\n";
+  } else {
+    body += "  float4 p = float4(v.pos.xyz, 1.0);\n"
+            "  o.pos = float4(dot(p, m0), dot(p, m1), dot(p, m2), dot(p, m3));\n";
+  }
+  body += (fvf & 0x040) ? "  o.diff = v.diff;\n" : "  o.diff = float4(1.0, 1.0, 1.0, 1.0);\n";
+  body += (fvf & 0x080) ? "  o.spec = v.spec;\n" : "  o.spec = float4(0.0, 0.0, 0.0, 0.0);\n";
+  bool camera = false;  // camera-space position / normal needed
+  std::string gen;
+  for (uint32_t s = 0; s < 8; s++) {
+    const uint32_t set = d.tss[s][11] & 0xFFFF, tci = d.tss[s][11] >> 16;
+    const uint32_t count = d.tss[s][24] & 0xFF;
+    const std::string n = std::to_string(s);
+    std::string c;
+    if (tci == 0 || rhw) {
+      if (set >= ntex) continue;
+      // FVF texture coordinate size: 0 2D, 1 3D, 2 4D, 3 1D.
+      const uint32_t size = (fvf >> (16 + 2 * set)) & 3;
+      const std::string t = "v.t" + std::to_string(set);
+      c = !count ? t
+          : size == 0 ? "float4(" + t + ".xy, 1.0, 0.0)"
+          : size == 3 ? "float4(" + t + ".x, 1.0, 0.0, 0.0)"
+          : size == 1 ? "float4(" + t + ".xyz, 1.0)" : t;
+    } else {
+      camera = true;
+      if (tci == 1) c = "float4(cn, 1.0)";
+      else if (tci == 2) c = "float4(cp, 1.0)";
+      else if (tci == 3) c = "float4(cr, 1.0)";
+      else c = "float4(cr.xy / (2.0 * sqrt(cr.x * cr.x + cr.y * cr.y + (cr.z + 1.0) * (cr.z + 1.0))) + 0.5, 0.0, 1.0)";
+    }
+    out += "  float4 t" + n + " : TEXCOORD" + n + ";\n";
+    if (count) {
+      const std::string m = "tm" + n + "_";
+      gen += "  { float4 c = " + c + ";\n    o.t" + n + " = float4(dot(c, " + m + "0), dot(c, " + m +
+             "1), dot(c, " + m + "2), dot(c, " + m + "3)); }\n";
+    } else {
+      gen += "  o.t" + n + " = " + c + ";\n";
+    }
+  }
+  if (camera) {
+    // Camera space (World*View); the local viewer's eye vector.
+    body += "  float3 cp = float3(dot(p, wv0), dot(p, wv1), dot(p, wv2));\n";
+    body += normal ? "  float3 cn = normalize(float3(dot(v.nrm, wv0.xyz), dot(v.nrm, wv1.xyz),"
+                     " dot(v.nrm, wv2.xyz)));\n"
+                   : "  float3 cn = float3(0.0, 0.0, 0.0);\n";
+    body += "  float3 e = -normalize(cp);\n  float3 cr = 2.0 * dot(e, cn) * cn - e;\n";
+  }
+  body += gen;
+  out += "};\n";
+  std::string decl = "float4 m0 : register(c0);\nfloat4 m1 : register(c1);\nfloat4 m2 : register(c2);\n"
+                     "float4 m3 : register(c3);\nfloat4 vp : register(c4);\nfloat4 wv0 : register(c5);\n"
+                     "float4 wv1 : register(c6);\nfloat4 wv2 : register(c7);\n";
+  for (uint32_t s = 0; s < 8; s++)
+    if (d.tss[s][24] & 0xFF)
+      for (uint32_t r = 0; r < 4; r++)
+        decl += "float4 tm" + std::to_string(s) + "_" + std::to_string(r) + " : register(c" +
+                std::to_string(12 + 4 * s + r) + ");\n";
+  return decl + in + out + "VSOUT main(VSIN v) {\n  VSOUT o;\n" + body + "  return o;\n}\n";
+}
+
+// Whether the fixed-function vertex state is beyond FfVertexSource.
+void NoteFfVertexGaps(const Device& d, uint32_t fvf) {
+  static bool warned_light = false, warned_fog = false;
+  const bool rhw = (fvf & 0x400E) == 0x004;
+  if (!rhw && d.rs[137] && (fvf & 0x010) && !warned_light) {  // LIGHTING with normals
+    warned_light = true;
+    WarnF("d3d9: fixed-function lighting with a pixel shader is not emulated (vertex colours used)\n");
+  }
+  if (!rhw && d.rs[28] && d.rs[140] && !warned_fog) {  // FOGENABLE with FOGVERTEXMODE
+    warned_fog = true;
+    WarnF("d3d9: fixed-function vertex fog with a pixel shader is not emulated\n");
+  }
+}
+
+// The stand-in vertex shader for d.fvf (compiled once per source) and its
+// constants in `c`.
+const Device::FfVertexShader& FfVertexShaderFor(Device& d, float (*c)[4]) {
+  std::string src = FfVertexSource(d, d.fvf);
+  auto it = d.ff_vs.find(src);
+  if (it == d.ff_vs.end()) {
+    auto p = std::make_shared<hlsl::Program>();
+    std::string err;
+    if (!hlsl::Compile(src, {}, "main", "vs_2_0", 0, p.get(), &err))
+      FatalF("d3d9: the fixed-function vertex shader for FVF %X does not translate: %s", d.fvf,
+             err.c_str());
+    Device::FfVertexShader v;
+    v.id = d.gfx->CreateShader(*p);
+    v.program = std::move(p);
+    it = d.ff_vs.emplace(src, std::move(v)).first;
+  }
+  NoteFfVertexGaps(d, d.fvf);
+  // World * View * Projection (row vectors), stored by column.
+  static const std::array<float, 16> kIdentity = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+  auto get = [&](uint32_t t) {
+    auto f = d.transforms.find(t);
+    return f != d.transforms.end() ? f->second : kIdentity;
+  };
+  auto mul = [](const std::array<float, 16>& a, const std::array<float, 16>& b) {
+    std::array<float, 16> r{};
+    for (int i = 0; i < 4; i++)
+      for (int j = 0; j < 4; j++)
+        for (int k = 0; k < 4; k++) r[size_t(i * 4 + j)] += a[size_t(i * 4 + k)] * b[size_t(k * 4 + j)];
+    return r;
+  };
+  const std::array<float, 16> wv = mul(get(256), get(2));
+  std::array<float, 16> m = mul(wv, get(3));
+  for (int j = 0; j < 4; j++)
+    for (int i = 0; i < 4; i++) {
+      c[j][i] = m[size_t(i * 4 + j)];
+      c[5 + j][i] = wv[size_t(i * 4 + j)];
+    }
+  // Texture transforms (D3DTS_TEXTURE0 + s = 16 + s), by column.
+  for (uint32_t s = 0; s < 8; s++) {
+    if (!(d.tss[s][24] & 0xFF)) continue;
+    const std::array<float, 16> t = get(16 + s);
+    for (int j = 0; j < 4; j++)
+      for (int i = 0; i < 4; i++) c[12 + 4 * s + uint32_t(j)][i] = t[size_t(i * 4 + j)];
+  }
+  const guest::D3DVIEWPORT9& v = d.viewport;
+  c[4][0] = float(v.X);
+  c[4][1] = float(v.Y);
+  c[4][2] = v.Width ? 2.0f / float(v.Width) : 0.0f;
+  c[4][3] = v.Height ? -2.0f / float(v.Height) : 0.0f;
+  return it->second;
+}
+
+// The fixed-function texture stages (D3D9 numbering) as HLSL, for draws
+// with a vertex shader and no pixel shader. Stage s samples its texture at
+// TEXCOORD[TEXCOORDINDEX] (the vertex shader's oT registers); c0 is
+// TEXTUREFACTOR. Each stage's colour and alpha operations, arguments and
+// modifiers, and its result to CURRENT or TEMP, are D3D's, as are
+// projected coordinates; specular is added after the last stage when
+// SPECULARENABLE is set. Not done here (fatal or warned once): bump
+// mapping, PREMODULATE, fog.
+std::string FfPixelSource(const Device& d) {
+  std::string decl = "float4 tf : register(c0);\n";
+  std::string in = "struct PSIN {\n  float4 diff : COLOR0;\n  float4 spec : COLOR1;\n";
+  std::string body = "  float4 cur = i.diff;\n  float4 temp = float4(0.0, 0.0, 0.0, 0.0);\n"
+                     "  float4 tex;\n  float4 r;\n";
+  std::set<uint32_t> sets;
+  auto arg = [&](uint32_t a, bool alpha_replicate_ok) {
+    std::string v;
+    switch (a & 0xF) {
+      case 0: v = "i.diff"; break;
+      case 1: v = "cur"; break;
+      case 2: v = "tex"; break;
+      case 3: v = "tf"; break;
+      case 4: v = "i.spec"; break;
+      case 5: v = "temp"; break;
+      default: FatalF("d3d9: fixed-function pixel stage argument %X with a vertex shader", a);
+    }
+    if (a & 0x10) v = "(1.0 - " + v + ")";              // COMPLEMENT
+    if ((a & 0x20) && alpha_replicate_ok) v = v + ".aaaa";  // ALPHAREPLICATE
+    return v;
+  };
+  // The operation on float4 arguments a1, a2, a0 (tex and cur in scope).
+  auto op = [&](uint32_t o, const std::string& a1, const std::string& a2, const std::string& a0) {
+    switch (o) {
+      case 2: return a1;
+      case 3: return a2;
+      case 4: return a1 + " * " + a2;
+      case 5: return a1 + " * " + a2 + " * 2.0";
+      case 6: return a1 + " * " + a2 + " * 4.0";
+      case 7: return a1 + " + " + a2;
+      case 8: return a1 + " + " + a2 + " - 0.5";
+      case 9: return "(" + a1 + " + " + a2 + " - 0.5) * 2.0";
+      case 10: return a1 + " - " + a2;
+      case 11: return a1 + " + " + a2 + " - " + a1 + " * " + a2;
+      case 12: return "lerp(" + a2 + ", " + a1 + ", i.diff.a)";
+      case 13: return "lerp(" + a2 + ", " + a1 + ", tex.a)";
+      case 14: return "lerp(" + a2 + ", " + a1 + ", tf.a)";
+      case 15: return a1 + " + " + a2 + " * (1.0 - tex.a)";
+      case 16: return "lerp(" + a2 + ", " + a1 + ", cur.a)";
+      case 18: return "(" + a1 + " + " + a1 + ".aaaa * " + a2 + ")";
+      case 19: return "(" + a1 + " * " + a2 + " + " + a1 + ".aaaa)";
+      case 20: return "((1.0 - " + a1 + ".aaaa) * " + a2 + " + " + a1 + ")";
+      case 21: return "((1.0 - " + a1 + ") * " + a2 + " + " + a1 + ".aaaa)";
+      case 24: return "dot((" + a1 + ".rgb - 0.5) * 2.0, (" + a2 + ".rgb - 0.5) * 2.0).xxxx";
+      case 25: return a0 + " + " + a1 + " * " + a2;
+      case 26: return "lerp(" + a2 + ", " + a1 + ", " + a0 + ")";
+      default:
+        FatalF("d3d9: fixed-function pixel operation %u with a vertex shader is not supported", o);
+    }
+  };
+  for (uint32_t s = 0; s < 8; s++) {
+    const uint32_t* t = d.tss[s];
+    if (t[1] == 1) break;  // COLOROP DISABLE: this and the later stages are off
+    const auto* tx = com::As<Texture>(d.textures[s]);
+    const uint32_t set = t[11] & 0xFFFF;
+    if (tx) {
+      const std::string n = std::to_string(s), tc = "i.t" + std::to_string(set);
+      decl += std::string(tx->cube ? "samplerCUBE" : "sampler2D") + " s" + n + " : register(s" + n + ");\n";
+      sets.insert(set);
+      // TEXTURETRANSFORMFLAGS PROJECTED: the coordinates divided by their
+      // last one (COUNTn: the n-th; no count, as from a vertex shader: w).
+      const uint32_t ttff = t[24], count = ttff & 0xFF;
+      std::string uv = tc + ".xy";
+      if ((ttff & 0x100) && !tx->cube)
+        uv = count == 2 ? "float2(" + tc + ".x / " + tc + ".y, 0.0)"
+           : count == 3 ? tc + ".xy / " + tc + ".z"
+                        : tc + ".xy / " + tc + ".w";
+      body += "  tex = " + std::string(tx->cube ? "texCUBE(s" + n + ", " + tc + ".xyz)"
+                                                : "tex2D(s" + n + ", " + uv + ")") + ";\n";
+    } else {
+      body += "  tex = float4(0.0, 0.0, 0.0, 1.0);\n";
+    }
+    std::string color = op(t[1], arg(t[2], true), arg(t[3], true), arg(t[26], true));
+    // ALPHAOP DISABLE with colour on: the alpha passes through.
+    std::string alpha = t[4] == 1 ? "cur" : op(t[4], arg(t[5], false), arg(t[6], false), arg(t[27], false));
+    const std::string dst = t[28] == 5 ? "temp" : "cur";  // RESULTARG
+    body += "  r = float4((" + color + ").rgb, (" + alpha + ").a);\n";
+    body += "  " + dst + " = saturate(r);\n";
+  }
+  if (d.rs[29]) body += "  cur.rgb = saturate(cur.rgb + i.spec.rgb);\n";  // SPECULARENABLE
+  for (uint32_t set : sets)
+    in += "  float4 t" + std::to_string(set) + " : TEXCOORD" + std::to_string(set) + ";\n";
+  in += "};\n";
+  return decl + in + "float4 main(PSIN i) : COLOR {\n" + body + "  return cur;\n}\n";
+}
+
+void NoteFfPixelGaps(const Device& d) {
+  static bool warned_fog = false;
+  if (d.rs[28] && !warned_fog) {  // FOGENABLE
+    warned_fog = true;
+    WarnF("d3d9: fog with a vertex shader and the fixed-function pixel stage is not emulated\n");
+  }
+}
+
+// The stand-in pixel shader for the current stages (compiled once per
+// source) and its constants in `c`.
+const Device::FfVertexShader& FfPixelShaderFor(Device& d, float (*c)[4]) {
+  std::string src = FfPixelSource(d);
+  auto it = d.ff_ps.find(src);
+  if (it == d.ff_ps.end()) {
+    auto p = std::make_shared<hlsl::Program>();
+    std::string err;
+    if (!hlsl::Compile(src, {}, "main", "ps_2_0", 0, p.get(), &err))
+      FatalF("d3d9: the fixed-function pixel shader does not translate: %s\n%s", err.c_str(),
+             src.c_str());
+    Device::FfVertexShader v;
+    v.id = d.gfx->CreateShader(*p);
+    v.program = std::move(p);
+    it = d.ff_ps.emplace(src, std::move(v)).first;
+  }
+  NoteFfPixelGaps(d);
+  // TEXTUREFACTOR (A8R8G8B8) as a colour.
+  const uint32_t f = d.rs[60];
+  c[0][0] = float((f >> 16) & 0xFF) / 255.0f;
+  c[0][1] = float((f >> 8) & 0xFF) / 255.0f;
+  c[0][2] = float(f & 0xFF) / 255.0f;
+  c[0][3] = float(f >> 24) / 255.0f;
+  return it->second;
+}
+
 // Completes `sd` (primitive, counts, and any streams already given) from
 // the device's bindings and draws it.
 void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
@@ -176,9 +464,21 @@ void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
     DrawFixed(d, sd, what);
     return;
   }
-  if (!vs || !ps)
-    FatalF("d3d9: %s with a %s shader and the fixed-function %s stage is not supported yet",
-           what, vs ? "vertex" : "pixel", vs ? "pixel" : "vertex");
+  // The fixed-function pixel stage after a vertex shader: a pixel shader in
+  // its place.
+  const Device::FfVertexShader* ffp = nullptr;
+  static float ffp_consts[224][4];
+  if (!ps) ffp = &FfPixelShaderFor(d, ffp_consts);
+  // A pixel shader after the fixed-function vertex stage: a vertex shader
+  // in its place (FVF draws only).
+  const Device::FfVertexShader* ff = nullptr;
+  static float ff_consts[256][4];
+  if (!vs) {
+    if (com::As<VertexDecl>(d.decl) || !d.fvf)
+      FatalF("d3d9: %s with a pixel shader, no vertex shader and a vertex declaration", what);
+    ff = &FfVertexShaderFor(d, ff_consts);
+  }
+  const hlsl::Program& vprog = ff ? *ff->program : *vs->program;
 
   std::vector<guest::D3DVERTEXELEMENT9> from_fvf;
   const std::vector<guest::D3DVERTEXELEMENT9>* elements = nullptr;
@@ -186,11 +486,15 @@ void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
     elements = &decl->elements;
   } else if (d.fvf) {
     from_fvf = FvfElements(d.fvf);
+    // The stand-in shader reads a pretransformed position as POSITION.
+    if (ff)
+      for (auto& e : from_fvf)
+        if (e.Usage == USAGE_POSITIONT) e.Usage = USAGE_POSITION;
     elements = &from_fvf;
   } else {
     FatalF("d3d9: %s without a vertex declaration or FVF", what);
   }
-  const auto& sem = vs->program->inputs;
+  const auto& sem = vprog.inputs;
   std::vector<gfx::VertexInput> inputs(sem.size());
   for (size_t i = 0; i < sem.size(); i++) {
     for (const auto& e : *elements) {
@@ -216,12 +520,12 @@ void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
                      st.stride};
   }
 
-  sd.vs = vs->id;
-  sd.ps = ps->id;
-  sd.vs_float = d.vs_f;
+  sd.vs = ff ? ff->id : vs->id;
+  sd.ps = ffp ? ffp->id : ps->id;
+  sd.vs_float = ff ? ff_consts : d.vs_f;
   sd.vs_int = d.vs_i;
   sd.vs_bool = reinterpret_cast<const uint32_t*>(d.vs_b);
-  sd.ps_float = d.ps_f;
+  sd.ps_float = ffp ? ffp_consts : d.ps_f;
   sd.ps_int = d.ps_i;
   sd.ps_bool = reinterpret_cast<const uint32_t*>(d.ps_b);
   for (int i = 0; i < 20; i++) {

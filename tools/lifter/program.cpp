@@ -159,6 +159,15 @@ bool Program::LoadManifest(const std::string& path, std::string* err) {
       entries.insert(va);
       setjmps.insert(va);
       if (!name.empty()) names[va] = name;
+    } else if (kind == "hook") {
+      // hook <va> <end>: straight-line code [va, end) of one function
+      // becomes a call to the game project's hook_<VA>(Ctx&) (registers and
+      // flags in Ctx), then continues at end.
+      if (name.empty()) {
+        *err = path + ":" + std::to_string(no) + ": hook needs an end address";
+        return false;
+      }
+      hooks[va] = Hex(name) + (img.image_base - img.preferred_base);
     } else if (kind == "probe") {
       entries.insert(va);
       probes[va] = name.empty() ? "probe" : name;

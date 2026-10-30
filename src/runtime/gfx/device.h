@@ -243,6 +243,12 @@ class Device {
                          uint32_t index_count) = 0;
   virtual void DrawMapped(uint32_t prim, uint32_t fvf) = 0;
   virtual void Present() = 0;
+  // Post-process anti-aliasing (SMAA 1x) of each presented frame, where the
+  // backend has it (SDL_GPU).
+  virtual void SetPostAntialiasing(bool on) { (void)on; }
+  // Anisotropic filtering of at least `level` (2..16; 0: as the game sets
+  // it) for mipmapped textures sampled with linear filtering.
+  virtual void SetMinAnisotropy(int level) { (void)level; }
 
   // ---- programmable pipeline. A shader from the HLSL translation (null
   // on failure); render states (blend, depth, stencil, cull, colour

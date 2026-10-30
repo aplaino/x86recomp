@@ -28,6 +28,8 @@
 
 #include "runtime/hle/mss32.h"
 
+#include <unistd.h>
+
 #include <algorithm>
 #include <bit>
 #include <chrono>
@@ -497,7 +499,9 @@ uint32_t SetFile(Ctx& c, uint32_t h, uint32_t image, bool is3d, const char* fn) 
 // "Version 6.5e" in the game's own mss32.dll: 6.5 or later uses the F32
 // API variants.
 bool GameMilesIsFloatApi() {
-  std::string path = HostPath(GuestGameDir() + "\\mss32.dll");
+  // Next to the EXE, which may be in a subfolder of the install.
+  std::string exe = GuestExePath();
+  std::string path = HostPath(exe.substr(0, exe.find_last_of('\\')) + "\\mss32.dll");
   FILE* f = std::fopen(path.c_str(), "rb");
   if (!f) return false;
   std::vector<char> b(1 << 20);
@@ -1468,7 +1472,23 @@ HLE_NAMED("mss32.dll", "_AIL_open_stream@12", AIL_open_stream, 3) {
     if (!S().driver || Arg(c, 0) != S().driver) return 0;
   }
   auto bytes = std::make_shared<std::vector<uint8_t>>();
-  if (!ReadThroughCallbacks(c, Arg(c, 1), bytes.get()) || bytes->empty()) {
+  // "\\<file handle>,<length>[.ext]": the stream is `length` bytes of a
+  // Win32 file the game opened, from its current position.
+  size_t skip = name.find_first_not_of('\\');
+  unsigned fh = 0, len = 0;
+  if (skip >= 2 && skip != std::string::npos &&
+      std::sscanf(name.c_str() + skip, "%u,%u", &fh, &len) == 2) {
+    int fd = HostFileFd(fh);
+    off_t at = fd >= 0 ? lseek(fd, 0, SEEK_CUR) : -1;
+    if (at >= 0) {
+      bytes->resize(len);
+      ssize_t got = pread(fd, bytes->data(), len, at);
+      bytes->resize(got > 0 ? size_t(got) : 0);
+    }
+  } else if (!ReadThroughCallbacks(c, Arg(c, 1), bytes.get())) {
+    bytes->clear();
+  }
+  if (bytes->empty()) {
     WarnF("mss32: AIL_open_stream(%s): cannot read the file\n", name.c_str());
     SetError("Unable to open file " + name);
     return 0;
@@ -1896,6 +1916,151 @@ HLE_NAMED("mss32.dll", "_AIL_WAV_info@8", AIL_WAV_info, 2) {
   Wr32(info + 0x1C, w.block_align);
   Wr32(info + 0x20, data + w.data_offset);
   return 1;
+}
+
+// ---- the quick-integration API ------------------------------------------------------
+//
+// Miles' own quick API is a thin layer over the digital driver and 2D
+// samples; so is this one, through the handlers above. An HAUDIO is the
+// guest AUDIO_TYPE (mss.h) Miles hands out, because games read it: its
+// sample handle is at +0x0C (games pause the sound through it with
+// AIL_stop_sample / AIL_resume_sample) and its status at +0x10.
+
+constexpr uint32_t kQstatDone = 1, kQstatLoaded = 2, kQstatPlaying = 3;
+constexpr uint32_t kQuickDigitalType = 2;
+// AUDIO_TYPE fields.
+constexpr uint32_t kAtData = 0x00, kAtSize = 0x04, kAtType = 0x08, kAtHandle = 0x0C,
+                   kAtStatus = 0x10, kAtSpeed = 0x18, kAtVolume = 0x1C, kAtExtravol = 0x20;
+constexpr uint32_t kAudioTypeSize = 0x50;
+
+uint32_t CallAil(Ctx& c, const char* name, std::initializer_list<uint64_t> args) {
+  return uint32_t(CallGuest(c, ThunkFor("mss32.dll", name), args));
+}
+
+uint32_t g_quick_driver = 0;
+
+// AIL_quick_startup(use_digital, use_MIDI, output_rate, output_bits,
+// output_channels): the library and a digital driver (no MIDI).
+HLE_NAMED("mss32.dll", "_AIL_quick_startup@20", AIL_quick_startup, 5) {
+  uint32_t digital = Arg(c, 0), rate = Arg(c, 2), bits = Arg(c, 3), channels = Arg(c, 4);
+  CallAil(c, "_AIL_startup@0", {});
+  if (!digital) return 1;
+  g_quick_driver = CallAil(c, "_AIL_open_digital_driver@16", {rate, bits, channels, 0});
+  return g_quick_driver ? 1 : 0;
+}
+
+HLE_NAMED("mss32.dll", "_AIL_quick_shutdown@0", AIL_quick_shutdown, 0) {
+  g_quick_driver = 0;
+  CallAil(c, "_AIL_shutdown@0", {});
+  return 0;
+}
+
+// (pdig, pmdi, pdls)
+HLE_NAMED("mss32.dll", "_AIL_quick_handles@12", AIL_quick_handles, 3) {
+  if (Arg(c, 0)) Wr32(Arg(c, 0), g_quick_driver);
+  if (Arg(c, 1)) Wr32(Arg(c, 1), 0);
+  if (Arg(c, 2)) Wr32(Arg(c, 2), 0);
+  return 0;
+}
+
+// (mem, size): a digital sound (WAV or MP3 image) on a sample of its own.
+HLE_NAMED("mss32.dll", "_AIL_quick_load_mem@8", AIL_quick_load_mem, 2) {
+  uint32_t mem = Arg(c, 0), size = Arg(c, 1);
+  if (!g_quick_driver) return 0;
+  uint32_t smp = CallAil(c, "_AIL_allocate_sample_handle@4", {g_quick_driver});
+  if (!smp) return 0;
+  if (!CallAil(c, "_AIL_set_sample_file@12", {smp, mem, 0})) {
+    CallAil(c, "_AIL_release_sample_handle@4", {smp});
+    return 0;
+  }
+  uint32_t a = HeapAllocProcess(kAudioTypeSize, true);
+  Wr32(a + kAtData, mem);
+  Wr32(a + kAtSize, size);
+  Wr32(a + kAtType, kQuickDigitalType);
+  Wr32(a + kAtHandle, smp);
+  Wr32(a + kAtStatus, kQstatLoaded);
+  Wr32(a + kAtSpeed, CallAil(c, "_AIL_sample_playback_rate@4", {smp}));
+  Wr32(a + kAtVolume, std::bit_cast<uint32_t>(1.0f));
+  Wr32(a + kAtExtravol, std::bit_cast<uint32_t>(0.5f));
+  return a;
+}
+
+HLE_NAMED("mss32.dll", "_AIL_quick_unload@4", AIL_quick_unload, 1) {
+  uint32_t a = Arg(c, 0);
+  if (!a) return 0;
+  CallAil(c, "_AIL_release_sample_handle@4", {Rd32(a + kAtHandle)});
+  HeapFreeProcess(a);
+  return 0;
+}
+
+// (audio, loop_count): from the start; 0 loops forever.
+HLE_NAMED("mss32.dll", "_AIL_quick_play@8", AIL_quick_play, 2) {
+  uint32_t a = Arg(c, 0), loops = Arg(c, 1);
+  if (!a) return 0;
+  uint32_t smp = Rd32(a + kAtHandle);
+  CallAil(c, "_AIL_set_sample_loop_count@8", {smp, loops});
+  CallAil(c, "_AIL_start_sample@4", {smp});
+  Wr32(a + kAtStatus, kQstatPlaying);
+  return 1;
+}
+
+HLE_NAMED("mss32.dll", "_AIL_quick_halt@4", AIL_quick_halt, 1) {
+  uint32_t a = Arg(c, 0);
+  if (!a) return 0;
+  CallAil(c, "_AIL_end_sample@4", {Rd32(a + kAtHandle)});
+  Wr32(a + kAtStatus, kQstatDone);
+  return 0;
+}
+
+// Playing until its sample is done (a stopped one still counts as playing).
+HLE_NAMED("mss32.dll", "_AIL_quick_status@4", AIL_quick_status, 1) {
+  uint32_t a = Arg(c, 0);
+  if (!a) return kQstatDone;
+  if (Rd32(a + kAtStatus) == kQstatPlaying &&
+      CallAil(c, "_AIL_sample_status@4", {Rd32(a + kAtHandle)}) == kSmpDone)
+    Wr32(a + kAtStatus, kQstatDone);
+  return Rd32(a + kAtStatus);
+}
+
+// (audio, F32 volume, F32 extravol): extravol is a digital sound's pan.
+HLE_NAMED("mss32.dll", "_AIL_quick_set_volume@12", AIL_quick_set_volume, 3) {
+  uint32_t a = Arg(c, 0);
+  if (!a) return 0;
+  Wr32(a + kAtVolume, Arg(c, 1));
+  Wr32(a + kAtExtravol, Arg(c, 2));
+  CallAil(c, "_AIL_set_sample_volume_pan@12", {Rd32(a + kAtHandle), Arg(c, 1), Arg(c, 2)});
+  return 0;
+}
+
+// (audio, speed): the playback rate in Hz.
+HLE_NAMED("mss32.dll", "_AIL_quick_set_speed@8", AIL_quick_set_speed, 2) {
+  uint32_t a = Arg(c, 0);
+  if (!a) return 0;
+  Wr32(a + kAtSpeed, Arg(c, 1));
+  CallAil(c, "_AIL_set_sample_playback_rate@8", {Rd32(a + kAtHandle), Arg(c, 1)});
+  return 0;
+}
+
+HLE_NAMED("mss32.dll", "_AIL_quick_ms_position@4", AIL_quick_ms_position, 1) {
+  uint32_t a = Arg(c, 0);
+  if (!a) return 0;
+  static uint32_t out = HeapAllocProcess(8, true);  // total, current
+  CallAil(c, "_AIL_sample_ms_position@12", {Rd32(a + kAtHandle), out, out + 4});
+  return Rd32(out + 4);
+}
+
+// Mixing and timers run on host threads: nothing to serve, no late timers.
+HLE_NAMED("mss32.dll", "_AIL_serve@0", AIL_serve, 0) { return 0; }
+HLE_NAMED("mss32.dll", "_AIL_get_timer_highest_delay@0", AIL_get_timer_highest_delay, 0) { return 0; }
+
+// (S, F32 left_level, F32 right_level): Miles 6.6's per-speaker levels, as
+// the volume and pan that give them.
+HLE_NAMED("mss32.dll", "_AIL_set_stream_volume_levels@12", AIL_set_stream_volume_levels, 3) {
+  float l = F(Arg(c, 1)), r = F(Arg(c, 2));
+  float vol = std::max(l, r), pan = l + r > 0 ? r / (l + r) : 0.5f;
+  CallAil(c, "_AIL_set_stream_volume_pan@12",
+          {Arg(c, 0), std::bit_cast<uint32_t>(vol), std::bit_cast<uint32_t>(pan)});
+  return 0;
 }
 
 }  // namespace

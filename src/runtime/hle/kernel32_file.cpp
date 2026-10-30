@@ -134,7 +134,8 @@ std::string GuestExePath() { return GuestGameDir() + "\\" + Game().exe_name; }
 
 std::string GuestCurrentDir() {
   std::lock_guard<std::mutex> l(g_cwd_mu);
-  return g_cwd.empty() ? GuestGameDir() : g_cwd;
+  if (!g_cwd.empty()) return g_cwd;
+  return Game().current_dir.empty() ? GuestGameDir() : Game().current_dir;
 }
 
 namespace {
@@ -179,6 +180,10 @@ bool CopyHostFile(const std::string& from, const std::string& to) {
 
 std::string HostPath(const std::string& guest_path, PathAccess access) {
   std::string g = AbsGuest(guest_path);
+  if (access == PathAccess::kRead && Game().read_redirect) {
+    std::string r = Game().read_redirect(g);
+    if (!r.empty()) g = AbsGuest(r);
+  }
   std::vector<std::string> comps;
   if (InstallComponents(g, &comps)) {
     std::string over = Resolve(OverlayRoot(), comps);
@@ -386,6 +391,63 @@ HLE64("kernel32.dll", ReadFile, 5) {
     return 0;
   }
   if (out) Wr32(out, uint32_t(r));
+  return 1;
+}
+
+// User APCs: completion routines of ReadFileEx, queued per guest thread and
+// run by that thread's next alertable wait (SleepEx).
+struct UserApc {
+  uint32_t routine, error, bytes, overlapped;
+};
+std::mutex g_apc_mu;
+std::map<uint32_t, std::vector<UserApc>> g_apcs;  // by thread id
+
+}  // namespace
+
+int HostFileFd(uint32_t handle) { return FdOf(handle); }
+
+bool RunUserApcs(Ctx& c) {
+  std::vector<UserApc> q;
+  {
+    std::lock_guard<std::mutex> l(g_apc_mu);
+    auto it = g_apcs.find(CurrentThread()->tid);
+    if (it == g_apcs.end() || it->second.empty()) return false;
+    q.swap(it->second);
+  }
+  for (const UserApc& a : q) CallGuest(c, a.routine, {a.error, a.bytes, a.overlapped});
+  return true;
+}
+
+namespace {
+
+// (hFile, lpBuffer, nNumberOfBytesToRead, lpOverlapped, lpCompletionRoutine):
+// the read is done at once, at the OVERLAPPED's offset; its completion
+// routine runs at the thread's next alertable wait, as on Windows. Reading
+// at or past the end completes with ERROR_HANDLE_EOF.
+HLE("kernel32.dll", ReadFileEx, 5) {
+  int fd = FdOf(Arg(c, 0));
+  gaddr buf = Arg(c, 1), ovl = Arg(c, 3);
+  uint32_t n = uint32_t(Arg(c, 2)), routine = uint32_t(Arg(c, 4));
+  if (fd < 0 || !ovl) {
+    SetLastError(kErrorInvalidHandle);
+    return 0;
+  }
+  off_t at = off_t(uint64_t(Rd32(ovl + 8)) | uint64_t(Rd32(ovl + 12)) << 32);
+  lazy::Touch(buf, n);
+  ssize_t r = n ? pread(fd, GPtr(buf), n, at) : 0;
+  if (r < 0) {
+    SetLastError(ErrnoToWin(errno));
+    return 0;
+  }
+  constexpr uint32_t kErrorHandleEof = 38, kStatusEndOfFile = 0xC0000011;
+  uint32_t err = (n && r == 0) ? kErrorHandleEof : 0;
+  Wr32(ovl + 0, err ? kStatusEndOfFile : 0);  // Internal: the status
+  Wr32(ovl + 4, uint32_t(r));                 // InternalHigh: bytes
+  {
+    std::lock_guard<std::mutex> l(g_apc_mu);
+    g_apcs[CurrentThread()->tid].push_back({routine, err, uint32_t(r), uint32_t(ovl)});
+  }
+  SetLastError(0);
   return 1;
 }
 
@@ -662,6 +724,22 @@ HLE("kernel32.dll", GetCurrentDirectoryA, 2) {
   std::string d = GuestCurrentDir();
   return CopyOut(buf, size, d);
 }
+
+// Relative paths resolve against the new directory from then on; it must
+// exist as a directory.
+uint32_t SetCurrentDirectory(const std::string& path) {
+  std::string g = AbsGuest(path);
+  struct stat st;
+  if (!Exists(HostPath(g), &st) || !S_ISDIR(st.st_mode)) {
+    SetLastError(kErrorPathNotFound);
+    return 0;
+  }
+  std::lock_guard<std::mutex> l(g_cwd_mu);
+  g_cwd = g;
+  return 1;
+}
+HLE("kernel32.dll", SetCurrentDirectoryA, 1) { return SetCurrentDirectory(GStr(Arg(c, 0))); }
+HLE("kernel32.dll", SetCurrentDirectoryW, 1) { return SetCurrentDirectory(WidePath(Arg(c, 0))); }
 
 HLE("kernel32.dll", GetFullPathNameA, 4) {
   std::string full = AbsGuest(GStr(Arg(c, 0)));

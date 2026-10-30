@@ -32,6 +32,11 @@ uint32_t NewThread(uint64_t stack, gaddr entry, uint64_t param, bool suspended, 
 // Waits for the thread behind handle h to finish: its exit code, or false
 // if h is not a thread.
 bool JoinThread(uint32_t h, uint32_t* exit_code);
+// Runs the user APCs queued for the calling guest thread (ReadFileEx
+// completion routines); false if there were none. Alertable waits call it.
+bool RunUserApcs(Ctx& c);
+// The host file descriptor behind a guest file handle; -1 if it is not one.
+int HostFileFd(uint32_t handle);
 }  // namespace hle
 
 // QueryPerformanceCounter's clock: 100 ns ticks (QueryPerformanceFrequency

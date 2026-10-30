@@ -347,6 +347,11 @@ uint32_t NewSurface(Device& d, uint32_t device, Surface::Kind kind, uint32_t w,
   return com::Publish(s, SurfaceVtable());
 }
 
+uint32_t SurfaceRefTarget(uint32_t surface) {
+  Surface* s = com::As<Surface>(surface);
+  return s && s->container ? s->container : surface;
+}
+
 void BindTargets(Device& d) {
   Surface* z = com::As<Surface>(d.depth_stencil);
   gfx::ColorTarget color[4] = {};
@@ -719,11 +724,7 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetPixelShaderConstantB", D3DDev9_GetPi
 
 // ---- IDirect3DSurface9 -------------------------------------------------------------
 
-// A texture level's reference count is its texture's.
-uint32_t RefTarget(uint32_t self) {
-  Surface* s = com::As<Surface>(self);
-  return s && s->container ? s->container : self;
-}
+uint32_t RefTarget(uint32_t self) { return SurfaceRefTarget(self); }
 
 HLE_NAMED("d3d9.dll", "IDirect3DSurface9::QueryInterface", D3DSurf9_QueryInterface, 3) {
   if (com::GuidEq(Arg(c, 1), kIID_IDirect3DSurface9) ||

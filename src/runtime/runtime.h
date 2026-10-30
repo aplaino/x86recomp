@@ -25,8 +25,12 @@ struct GameConfig {
   // Where the game believes it is installed, e.g. "C:\Games\Game";
   // guest paths below it map onto the host game directory.
   std::string guest_dir;
-  // The EXE's file name in guest_dir (GetModuleFileName, command line).
+  // The EXE's file name in guest_dir (GetModuleFileName, command line);
+  // may be in a subfolder ("bin\\game.exe").
   std::string exe_name;
+  // The process's initial current directory (a guest path), for games that
+  // are started from a subfolder of their install; empty = guest_dir.
+  std::string current_dir;
 
   // Registry values the retail installer would have written, seeded on
   // the first run (the registry file does not exist yet). Keys are full
@@ -56,6 +60,27 @@ struct GameConfig {
     Exclusive,  // fullscreen in the host display mode closest to the game's
   };
   Fullscreen fullscreen = Fullscreen::Desktop;
+
+  // Post-process anti-aliasing (SMAA 1x) of the presented frame (SDL_GPU
+  // backend); <ID>_AA=0|1 overrides.
+  bool post_aa = false;
+  // Anisotropic filtering at least this (2..16) for the game's mipmapped
+  // textures; 0 keeps the game's own. <ID>_ANISO overrides.
+  int anisotropy = 0;
+
+  // Install files the game reads, with text appended: the game's own
+  // config extended by the port (extra key bindings, say). Written into
+  // the overlay at every start from the install's copy, so they follow it.
+  struct FileAppend {
+    std::string name;  // below guest_dir, e.g. "engine\\binds_pc.cfg"
+    std::string text;
+  };
+  std::vector<FileAppend> file_appends;
+
+  // Optional: install files read in place of others (guest path in, the
+  // one to read instead out, or "" for itself), e.g. a game's keyboard
+  // prompt images swapped for a pad's while one is connected.
+  std::string (*read_redirect)(const std::string& guest_path) = nullptr;
 
   // Video memory DirectDraw reports, in MB. Games pick detail settings
   // from it; a game's best profile may need more than the default.
@@ -173,6 +198,10 @@ const PeImage* ImageAt(gaddr va);
 
 // (Re)maps lifted DLL m from its file: fresh data, imports bound.
 void MapModule(Module& m);
+
+// IAT value for a static import dll!name of the EXE or a lifted DLL: the
+// export itself when dll is a lifted DLL, otherwise its HLE thunk.
+gaddr BindImport(const std::string& dll, const std::string& name);
 
 // Calls guest function `va` with stdcall/cdecl arguments from the host
 // (WndProc, enumeration callbacks, thread start routines). Returns eax.

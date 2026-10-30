@@ -212,6 +212,16 @@ std::unique_ptr<Source> MakeWavSource(Bytes data, std::string* err) {
     *err = "malformed WAV";
     return nullptr;
   }
+  // WAVE_FORMAT_IMA_ADPCM: the headerless decoder's block layout is WAV's.
+  if (w.format == 0x11 && w.bits == 4 && (w.channels == 1 || w.channels == 2) && w.rate &&
+      w.block_align > 4u * w.channels) {
+    RawFormat f;
+    f.adpcm = true;
+    f.channels = w.channels;
+    f.rate = int(w.rate);
+    f.block_size = w.block_align;
+    return MakeRawSource(data->data() + w.data_offset, w.data_len, f, err);
+  }
   if (w.format != 1 || (w.bits != 8 && w.bits != 16) || w.channels < 1 ||
       w.channels > 2 || w.block_align != w.channels * w.bits / 8 || !w.rate) {
     *err = "unsupported WAV format " + std::to_string(w.format) + " (" +

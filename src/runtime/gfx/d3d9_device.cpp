@@ -426,7 +426,7 @@ class D3D9Device final : public Device {
     state_.rs[s] = v;
     switch (s) {
       case 47: {  // D3DRENDERSTATE_ZBIAS (0..16) -> DEPTHBIAS
-        float bias = -float(v) * 0.000005f;
+        float bias = -float(v) * (1.0f / 65535.0f);  // as DXVK d3d8: D16 steps
         uint32_t bits;
         std::memcpy(&bits, &bias, 4);
         dev_->SetRenderState(D3DRS_DEPTHBIAS, bits);

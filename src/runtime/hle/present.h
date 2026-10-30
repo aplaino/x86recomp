@@ -6,12 +6,17 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 
 #include "runtime/gfx/device.h"
 
 namespace recomp::hle {
 
 void PresentFrame(gfx::Device& dev, int w, int h);
+
+// Saves the next presented frame as a BMP at `path` (a test hook's
+// screenshot request; any thread).
+void RequestShot(const std::string& path);
 
 // The gfx::Device backend every graphics API uses: <ID>_GFX=d3d9 or gpu;
 // by default d3d9 where the build has it, else SDL_GPU.

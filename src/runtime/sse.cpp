@@ -373,6 +373,29 @@ uint32_t RsqrtLane(uint32_t x) {
   }
 }
 
+// The float nearest to 1/x (one rounding of the exact quotient). Like the
+// CPU, a zero or denormal operand gives the signed infinity and a result
+// below the normal range the signed zero.
+uint32_t RcpLane(uint32_t x) {
+  const uint32_t exp = (x >> 23) & 0xFF, frac = x & 0x7FFFFF, sign = x & 0x80000000u;
+  if (exp == 0xFF && frac) return x | 0x00400000u;  // NaN: quieted
+  if (exp == 0) return sign | 0x7F800000u;           // ±0, denormal: ±inf
+  if (exp == 0xFF) return sign;                      // ±inf: ±0
+  const uint_fast8_t mode = softfloat_roundingMode, flags = softfloat_exceptionFlags;
+  softfloat_roundingMode = softfloat_round_near_even;
+  uint32_t r = f32_div(float32_t{0x3F800000u}, float32_t{x}).v;
+  softfloat_roundingMode = mode;
+  softfloat_exceptionFlags = flags;
+  if (((r >> 23) & 0xFF) == 0) return sign;  // denormal result: flushed
+  return r;
+}
+
+void Rcp(Xmm& d, const Xmm& s) {
+  Xmm r;
+  for (int i = 0; i < 4; i++) SetLane<uint32_t>(r, i, RcpLane(Lane<uint32_t>(s, i)));
+  d = r;
+}
+
 void Rsqrt(Xmm& d, const Xmm& s) {
   Xmm r;
   for (int i = 0; i < 4; i++) SetLane<uint32_t>(r, i, RsqrtLane(Lane<uint32_t>(s, i)));

@@ -258,7 +258,7 @@ static void CheckHostFp() {
 // point, or with `param`) on the calling host thread as guest thread t.
 // Returns its exit code.
 static uint32_t RunGuestThread(Thread* t, gaddr entry,
-                               const uint64_t* param) {
+                               const uint64_t* param, bool process_start = false) {
   // Thread start is a full barrier on Windows. pthread_create already
   // makes the creator's writes visible here; the fence states it for
   // weakly ordered hosts like every other guest sync point
@@ -270,6 +270,7 @@ static uint32_t RunGuestThread(Thread* t, gaddr entry,
   RegisterGuestHostThread("guest", t->tid);
   uint32_t r;
   try {
+    if (process_start) hle::AttachExeImports(t->ctx);
     r = uint32_t(param ? CallGuest(t->ctx, entry, {*param}) : CallGuest(t->ctx, entry, {}));
   } catch (const GuestThreadExit& e) {
     r = e.code;
@@ -337,7 +338,7 @@ gaddr g_main_entry = 0;
 uint32_t g_main_exit = 0;
 
 void GuestMainTrampoline() {
-  g_main_exit = RunGuestThread(g_main_thread, g_main_entry, nullptr);
+  g_main_exit = RunGuestThread(g_main_thread, g_main_entry, nullptr, true);
 }
 }  // namespace
 
@@ -360,11 +361,24 @@ const PeImage* ImageAt(gaddr va) {
   return nullptr;
 }
 
-void MapModule(Module& m) {
+gaddr BindImport(const std::string& dll, const std::string& name) {
+  const std::string n = hle::NormaliseDll(dll);
+  for (const Module& m : g_proc->modules) {
+    if (m.name != n) continue;
+    const bool by_ordinal = name.size() > 1 && name[0] == '#';
+    const uint32_t ordinal = by_ordinal ? uint32_t(std::stoul(name.substr(1))) : 0;
+    for (const PeExport& e : m.img.exports)
+      if (by_ordinal ? e.ordinal == ordinal : e.name == name) return e.va;
+    FatalF("import %s!%s: the lifted DLL does not export it", n.c_str(), name.c_str());
+  }
+  return hle::ImportThunk(dll, name);
+}
+
+static void MapModuleWith(Module& m, const ImportBinder& bind) {
   Process& p = *g_proc;
   if (m.img.image_size) p.mem.Decommit(m.img.image_base, m.img.image_size);
   std::string err;
-  if (!m.img.Load(m.host_path, p.mem, &err, m.base, hle::ImportThunk))
+  if (!m.img.Load(m.host_path, p.mem, &err, m.base, bind))
     FatalF("lifted DLL %s: %s", m.name.c_str(), err.c_str());
   // Windows XP did not set up static TLS for LoadLibrary'd DLLs either,
   // so 32-bit DLLs of that era have none. x64 ones get a slot of their own
@@ -384,6 +398,8 @@ void MapModule(Module& m) {
   m.stale = false;
 }
 
+void MapModule(Module& m) { MapModuleWith(m, BindImport); }
+
 int RunProcess(const GameConfig& game, const std::string& exe_path,
                const std::string& game_dir, const std::string& game_args) {
   g_proc = new Process;
@@ -395,6 +411,22 @@ int RunProcess(const GameConfig& game, const std::string& exe_path,
   const char* doubles = Env("X87_DOUBLE");
   x87::run::g_doubles = !(doubles && doubles[0] == '0');
   p.game_args = game_args;
+  for (const auto& f : game.file_appends) {
+    std::string rel = f.name;
+    std::replace(rel.begin(), rel.end(), '\\', '/');
+    const std::string guest = GuestGameDir() + "\\" + f.name;
+    FILE* in = std::fopen((game_dir + "/" + rel).c_str(), "rb");
+    if (!in) FatalF("file_appends: %s not found in the install", f.name.c_str());
+    std::string text;
+    char buf[65536];
+    for (size_t n; (n = std::fread(buf, 1, sizeof buf, in)) > 0;) text.append(buf, n);
+    std::fclose(in);
+    text += "\n" + f.text;
+    FILE* out = std::fopen(HostPath(guest, PathAccess::kWrite).c_str(), "wb");
+    if (!out || std::fwrite(text.data(), 1, text.size(), out) != text.size())
+      FatalF("file_appends: cannot write the overlay copy of %s", f.name.c_str());
+    std::fclose(out);
+  }
   StartWatchdog();
   p.x64 = PeImage::IsX64File(exe_path);
   if (!p.mem.Reserve(p.x64 ? kArenaBits64 : 32)) FatalF("cannot reserve the guest arena");
@@ -407,16 +439,21 @@ int RunProcess(const GameConfig& game, const std::string& exe_path,
   // Its upper half holds the HLE's data exports, which are variables.
   p.mem.Protect(thunks + hle::kDataExportOffset, kThunkRegionSize - hle::kDataExportOffset,
                 Prot::RW);
-  std::string err;
-  if (!p.img.Load(exe_path, p.mem, &err, 0, hle::ImportThunk))
-    FatalF("%s", err.c_str());
+  // The EXE and the lifted DLLs may import from each other statically
+  // (an engine split into DLLs, a DLL CRT). So every lifted DLL's export
+  // table is read first, its imports left unbound; then each DLL is mapped
+  // again with its imports bound (BindImport), and the EXE after them.
   for (const auto& d : game.lifted_dlls) {
     Module& m = p.modules.emplace_back();
     m.name = hle::NormaliseDll(d.name);
     m.host_path = HostPath(GuestGameDir() + "\\" + d.name);
     m.base = d.base;
-    MapModule(m);
+    MapModuleWith(m, [](const std::string&, const std::string&) { return gaddr(0); });
   }
+  for (Module& m : p.modules) MapModule(m);
+  std::string err;
+  if (!p.img.Load(exe_path, p.mem, &err, 0, BindImport))
+    FatalF("%s", err.c_str());
 
   if (p.x64) {
     // Everything above 4 GiB, below the TEBs (runtime.h).

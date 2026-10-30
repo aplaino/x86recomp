@@ -24,6 +24,7 @@ inline constexpr uint32_t kErrorProcNotFound = 127;
 inline constexpr uint32_t kErrorAlreadyExists = 183;
 inline constexpr uint32_t kErrorEnvVarNotFound = 203;
 inline constexpr uint32_t kErrorMoreData = 234;
+inline constexpr uint32_t kErrorNoMoreItems = 259;
 inline constexpr uint32_t kErrorTooManyPosts = 298;
 inline constexpr uint32_t kErrorInvalidAddress = 487;
 inline constexpr uint32_t kErrorDllInitFailed = 1114;

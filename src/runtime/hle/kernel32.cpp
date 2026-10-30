@@ -3,6 +3,7 @@
 // kernel32_file.cpp, kernel32_sync.cpp, kernel32_misc.cpp and
 // kernel32_seh.cpp.
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -186,6 +187,59 @@ bool CallDllMain(Ctx& c, Module& m, uint32_t reason) {
   return uint32_t(CallGuest(c, m.img.entry, {m.img.image_base, reason, 0})) != 0;
 }
 
+// The lifted DLLs m imports from statically, each once.
+std::vector<Module*> LiftedDeps(Module& m) {
+  std::vector<Module*> deps;
+  for (const PeImport& imp : m.img.imports) {
+    Module* d = LiftedDll(imp.dll);
+    if (d && d != &m && std::find(deps.begin(), deps.end(), d) == deps.end()) deps.push_back(d);
+  }
+  return deps;
+}
+
+void ReleaseLifted(Ctx& c, Module& m);
+
+// Takes a reference on each lifted DLL m imports from, loading (and
+// initialising) those not loaded yet, then runs m's DllMain(PROCESS_ATTACH):
+// as the Windows loader orders it, a module's static dependencies are
+// initialised before it, and they stay loaded while it is. Caller holds
+// the loader lock and has counted m's reference.
+bool AttachLifted(Ctx& c, Module& m) {
+  std::vector<Module*> taken;
+  auto undo = [&] {
+    for (Module* d : taken)
+      if (--d->refs == 0) ReleaseLifted(c, *d);
+  };
+  for (Module* d : LiftedDeps(m)) {
+    if (d->refs++) {
+      taken.push_back(d);
+      continue;
+    }
+    if (d->stale) MapModule(*d);
+    if (!AttachLifted(c, *d)) {
+      WarnF("%s: DllMain of its dependency %s failed\n", m.name.c_str(), d->name.c_str());
+      d->refs = 0;
+      undo();
+      return false;
+    }
+    taken.push_back(d);
+  }
+  if (!CallDllMain(c, m, kDllProcessAttach)) {
+    undo();
+    return false;
+  }
+  return true;
+}
+
+// The last reference to m is gone: DllMain(PROCESS_DETACH), then its
+// references on its dependencies, which unload in turn when that was their
+// last. m maps afresh on its next load (CallDllMain marked it stale).
+void ReleaseLifted(Ctx& c, Module& m) {
+  CallDllMain(c, m, kDllProcessDetach);
+  for (Module* d : LiftedDeps(m))
+    if (d->refs && --d->refs == 0) ReleaseLifted(c, *d);
+}
+
 // A guest string argument, ANSI or UTF-16.
 std::string GArg(gaddr p, bool wide) { return wide ? Narrow(GWStr(p)) : GStr(p); }
 
@@ -235,7 +289,7 @@ gaddr LoadModule(Ctx& c, const char* api, const std::string& n) {
     std::lock_guard<std::recursive_mutex> l(g_loader_mu);
     if (m->refs++) return m->img.image_base;
     if (m->stale) MapModule(*m);
-    if (!CallDllMain(c, *m, kDllProcessAttach)) {
+    if (!AttachLifted(c, *m)) {
       WarnF("%s(%s): DllMain failed\n", api, n.c_str());
       m->refs = 0;
       SetLastError(kErrorDllInitFailed);
@@ -264,8 +318,7 @@ HLE64("kernel32.dll", LoadLibraryExW, 3) {
 
 HLE64("kernel32.dll", FreeLibrary, 1) {
   std::lock_guard<std::recursive_mutex> l(g_loader_mu);
-  if (Module* m = LoadedDllAt(Arg(c, 0)); m && --m->refs == 0)
-    CallDllMain(c, *m, kDllProcessDetach);
+  if (Module* m = LoadedDllAt(Arg(c, 0)); m && --m->refs == 0) ReleaseLifted(c, *m);
   return 1;
 }
 
@@ -886,6 +939,16 @@ bool TryEnterCs(gaddr cs) {
 
 }  // namespace
 
+void AttachExeImports(Ctx& c) {
+  std::lock_guard<std::recursive_mutex> l(g_loader_mu);
+  for (const PeImport& imp : g_proc->img.imports) {
+    Module* d = LiftedDll(imp.dll);
+    if (!d || d->refs) continue;
+    d->refs = 1;
+    if (!AttachLifted(c, *d)) FatalF("%s: DllMain failed at startup", d->name.c_str());
+  }
+}
+
 void EnterCs(gaddr cs) {
   uint32_t tid = CurrentThread()->tid;
   uint32_t* lock_count = CsField(cs, Cs().lock_count);
@@ -1080,6 +1143,16 @@ HLE("kernel32.dll", Sleep, 1) {
   return 0;
 }
 
+// (dwMilliseconds, bAlertable): an alertable sleep returns
+// WAIT_IO_COMPLETION as soon as it has run queued completion routines.
+HLE("kernel32.dll", SleepEx, 2) {
+  GuestSyncPoint sync;
+  constexpr uint32_t kWaitIoCompletion = 0xC0;
+  if (Arg(c, 1) && RunUserApcs(c)) return kWaitIoCompletion;
+  std::this_thread::sleep_for(std::chrono::milliseconds(Arg(c, 0)));
+  return 0;
+}
+
 // ---- code pages and locale -----------------------------------------------
 
 HLE("kernel32.dll", GetACP, 0) { return 1252; }
@@ -1213,6 +1286,8 @@ HLE("kernel32.dll", LCMapStringA, 6) {
 
 HLE("kernel32.dll", GetUserDefaultLCID, 0) { return 0x0409; }
 HLE("kernel32.dll", GetUserDefaultLangID, 0) { return 0x0409; }
+HLE("kernel32.dll", GetUserDefaultUILanguage, 0) { return 0x0409; }
+HLE("kernel32.dll", GetSystemDefaultUILanguage, 0) { return 0x0409; }
 HLE("kernel32.dll", IsValidLocale, 2) { return Arg(c, 0) == 0x0409 ? 1 : 0; }
 
 HLE("kernel32.dll", EnumSystemLocalesA, 2) {
