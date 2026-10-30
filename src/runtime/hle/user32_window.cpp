@@ -1844,6 +1844,7 @@ HLE("user32.dll", BringWindowToTop, 1) {
 HLE("user32.dll", PeekMessageA, 5) {
   uint32_t msg_va = Arg(c, 0), hwnd = Arg(c, 1), lo = Arg(c, 2), hi = Arg(c, 3),
            flags = Arg(c, 4);
+  hle::g_peek_messages.fetch_add(1, std::memory_order_relaxed);
   PumpHostEvents();
   Msg m;
   if (!TakeMessage(hwnd, lo, hi, flags & 1 /* PM_REMOVE */, &m)) return 0;

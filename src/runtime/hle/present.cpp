@@ -43,6 +43,8 @@ void SaveFrame(gfx::Device& dev, int w, int h, const std::string& path) {
 
 }  // namespace
 
+std::atomic<uint64_t> g_peek_messages{0};
+
 void RequestShot(const std::string& path) {
   std::lock_guard<std::mutex> l(g_shot_mu);
   g_shot_path = path;
@@ -113,9 +115,13 @@ void PresentFrame(gfx::Device& dev, int w, int h) {
     if ((now - first) / 1e9 >= report_s && !dts.empty()) {
       std::sort(dts.begin(), dts.end());
       auto q = [&](double p) { return dts[size_t(p * double(dts.size() - 1) + 0.5)]; };
-      WarnF("fps: %.2f at t=%.1f s (interval ms: min %.3f p1 %.3f median %.3f p99 %.3f max %.3f)\n",
+      static uint64_t peeks_before = 0;
+      const uint64_t peeks = g_peek_messages.load(std::memory_order_relaxed);
+      WarnF("fps: %.2f at t=%.1f s (interval ms: min %.3f p1 %.3f median %.3f p99 %.3f max %.3f; "
+            "%.1f PeekMessage a frame)\n",
             dts.size() / ((now - first) / 1e9), (now - t0) / 1e9, dts.front(), q(0.01),
-            q(0.5), q(0.99), dts.back());
+            q(0.5), q(0.99), dts.back(), double(peeks - peeks_before) / double(dts.size()));
+      peeks_before = peeks;
       dts.clear();
       first = now;
     }

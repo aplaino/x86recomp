@@ -1,4 +1,6 @@
 #pragma once
+#include <atomic>
+#include <cstdint>
 // Presents a finished frame of a w x h back buffer on `dev`, with the dev
 // aids every graphics API shares (<ID>_SHOT_EVERY / _SHOT_FROM / _SHOT_DIR
 // screenshots, <ID>_HITCH long-frame and <ID>_FPS_REPORT frame-rate
@@ -11,6 +13,10 @@
 #include "runtime/gfx/device.h"
 
 namespace recomp::hle {
+
+// PeekMessage calls so far (the FPS report gives them per frame: a game
+// loop that never waits peeks many times a frame).
+extern std::atomic<uint64_t> g_peek_messages;
 
 void PresentFrame(gfx::Device& dev, int w, int h);
 

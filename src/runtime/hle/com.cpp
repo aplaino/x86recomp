@@ -21,6 +21,8 @@ std::vector<std::pair<guest::GUID, CreateFn>> g_classes;
 
 }  // namespace
 
+std::atomic<uint32_t> g_generation{0};
+
 uint32_t Vtable(const char* dll, const char* iface,
                 const std::vector<const char*>& methods) {
   std::lock_guard<std::recursive_mutex> l(g_mu);
@@ -69,6 +71,7 @@ uint32_t Release(uint32_t guest) {
     if (!left) {
       dead = it->second;
       g_objects.erase(it);
+      g_generation.fetch_add(1, std::memory_order_acq_rel);
       // Poison the guest block so a use-after-release is caught.
       Wr32(guest, 0);
       Wr32(guest + 4, 0);

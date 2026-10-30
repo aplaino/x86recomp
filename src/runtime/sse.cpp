@@ -10,6 +10,9 @@
 
 #include "runtime/sse.h"
 
+#include <bit>
+#include <type_traits>
+
 extern "C" {
 #include "softfloat.h"
 }
@@ -144,6 +147,47 @@ typename Fmt<D>::U ArithLane(Scope& sc, Op op, typename Fmt<D>::U a,
   return r;
 }
 
+// The host's IEEE arithmetic gives SoftFloat's results bit for bit where
+// nothing exceptional can happen: MXCSR in its usual state (round to
+// nearest, no DAZ/FTZ, every exception masked) with PE already set, both
+// operands normal or zero, the result normal, or a zero that is exact (a
+// sum of equals, or a product/quotient with a zero operand). The only flag
+// such an operation can raise is PE, which is set already. Anything else
+// returns false and takes the exact path.
+bool FastMxcsr(uint32_t mxcsr) { return (mxcsr & 0xFFE0u) == 0x1FA0u; }
+
+template <bool D>
+bool NormalOrZero(typename Fmt<D>::U v) {
+  const typename Fmt<D>::U e = v & Fmt<D>::kExp;
+  return e != Fmt<D>::kExp && (e || !(v & Fmt<D>::kFrac));
+}
+
+template <bool D>
+bool FastArithLane(Op op, typename Fmt<D>::U a, typename Fmt<D>::U b, typename Fmt<D>::U* out) {
+  using U = typename Fmt<D>::U;
+  using F = std::conditional_t<D, double, float>;
+  constexpr U kSign = U(1) << (sizeof(U) * 8 - 1);
+  if (!NormalOrZero<D>(a) || !NormalOrZero<D>(b)) return false;
+  const F x = std::bit_cast<F>(a), y = std::bit_cast<F>(b);
+  F r;
+  switch (op) {
+    case kAdd: r = x + y; break;
+    case kSub: r = x - y; break;
+    case kMul: r = x * y; break;
+    default: r = x / y; break;
+  }
+  const U v = std::bit_cast<U>(r);
+  const U e = v & Fmt<D>::kExp;
+  if (e == Fmt<D>::kExp) return false;  // overflow, a quotient by zero
+  if (!e) {
+    if (v & Fmt<D>::kFrac) return false;  // denormal: underflow
+    // A zero product or quotient of non-zero operands underflowed.
+    if ((op == kMul || op == kDiv) && (a & ~kSign) && (b & ~kSign)) return false;
+  }
+  *out = v;
+  return true;
+}
+
 template <bool D>
 typename Fmt<D>::U SqrtLane(Scope& sc, typename Fmt<D>::U a) {
   if (IsNaN<D>(a)) {
@@ -178,6 +222,16 @@ void SqrtT(Ctx& c, int lanes, Xmm& d, const Xmm& s, uint64_t va) {
 template <bool D>
 void ArithT(Ctx& c, Op op, int lanes, Xmm& d, const Xmm& s, uint64_t va) {
   using U = typename Fmt<D>::U;
+  if (FastMxcsr(c.mxcsr)) {
+    Xmm r = d;
+    int i = 0;
+    for (U v; i < lanes && FastArithLane<D>(op, Lane<U>(d, i), Lane<U>(s, i), &v); i++)
+      SetLane<U>(r, i, v);
+    if (i == lanes) {
+      d = r;
+      return;
+    }
+  }
   Scope sc(c, va);
   Xmm r = d;
   for (int i = 0; i < lanes; i++)

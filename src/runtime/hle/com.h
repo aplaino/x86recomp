@@ -10,6 +10,7 @@
 // Each host object has exactly one guest pointer; QueryInterface for the
 // same interface returns it again, other interfaces are separate objects.
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -36,10 +37,27 @@ uint32_t Publish(std::shared_ptr<Object> obj, uint32_t vtable);
 // Host object behind a guest interface pointer (nullptr if not ours).
 std::shared_ptr<Object> Lookup(uint32_t guest);
 
+// Bumped whenever an object leaves the table (its guest block can then be
+// reused): what As remembers is valid while the generation is unchanged.
+extern std::atomic<uint32_t> g_generation;
+
+// The host object behind `guest` as a T (nullptr if not ours or not a T).
+// Each thread remembers its last answer per T: draws ask for the same
+// device and buffers over and over, and the table lookup (a lock, a map, a
+// dynamic_cast) is then skipped.
 template <typename T>
 T* As(uint32_t guest) {
+  struct Last {
+    uint32_t guest = 0, generation = ~0u;
+    T* object = nullptr;
+  };
+  thread_local Last last;
+  const uint32_t gen = g_generation.load(std::memory_order_acquire);
+  if (guest && last.guest == guest && last.generation == gen) return last.object;
   auto o = Lookup(guest);
-  return dynamic_cast<T*>(o.get());
+  T* t = dynamic_cast<T*>(o.get());
+  last = {guest, gen, t};
+  return t;
 }
 
 uint32_t AddRef(uint32_t guest);
