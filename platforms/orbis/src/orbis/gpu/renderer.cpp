@@ -25,9 +25,9 @@ using gfx::Format;
 
 // Context registers.
 constexpr uint32_t kDbRenderControl = 0x000, kDbZInfo = 0x010, kDbStencilInfo = 0x011,
-                   kDbZReadBase = 0x012, kDbDepthSize = 0x016, kDbDepthClear = 0x00B,
-                   kDbStencilClear = 0x00A, kScreenScissorTl = 0x00C, kWindowScissorTl = 0x081,
-                   kGenericScissorTl = 0x090, kVportScissorTl = 0x094, kCbTargetMask = 0x08E,
+                   kDbZReadBase = 0x012, kDbStencilReadBase = 0x013, kDbDepthSize = 0x016,
+                   kDbDepthClear = 0x00B, kDbStencilClear = 0x00A, kScreenScissorTl = 0x00C,
+                   kWindowScissorTl = 0x081, kGenericScissorTl = 0x090, kVportScissorTl = 0x094, kCbTargetMask = 0x08E,
                    kCbBlendRed = 0x105, kDbStencilControl = 0x10B, kDbStencilRefMask = 0x10C,
                    kVportXScale = 0x10F, kPsInputCntl = 0x191,
                    kPsInputEna = 0x1B3, kPsInputAddr = 0x1B4, kZFormat = 0x1C4, kColFormat = 0x1C5,
@@ -172,6 +172,7 @@ struct DepthTarget {
   uint32_t w, h;
   Format fmt;
   gfx::DepthId depth;
+  gaddr stencil;  // DB_STENCIL_READ_BASE (0: no stencil)
 };
 struct Texture {
   gfx::TextureId tex = 0;
@@ -189,6 +190,7 @@ struct State {
   gfx::Device* dev = nullptr;
   std::vector<Target> targets;
   std::vector<TargetView> views;
+  gfx::ProgramId stencil_program = 0;  // SampledStencil's
   std::vector<DepthTarget> depths;
   std::map<std::string, Texture> textures;
   std::unordered_map<std::string, Program> programs;
@@ -249,9 +251,13 @@ gfx::TextureId ColorTarget(State& s, gaddr addr, uint32_t w, uint32_t h, Format 
   return tex;
 }
 
-gfx::DepthId DepthTargetAt(State& s, gaddr addr, uint32_t w, uint32_t h, Format fmt) {
+gfx::DepthId DepthTargetAt(State& s, gaddr addr, uint32_t w, uint32_t h, Format fmt,
+                           gaddr stencil) {
   for (DepthTarget& d : s.depths)
-    if (d.addr == addr && d.w == w && d.h == h && d.fmt == fmt) return d.depth;
+    if (d.addr == addr && d.w == w && d.h == h && d.fmt == fmt) {
+      d.stencil = stencil;
+      return d.depth;
+    }
   s.depths.erase(std::remove_if(s.depths.begin(), s.depths.end(),
                                 [&](const DepthTarget& d) {
                                   if (d.addr != addr) return false;
@@ -268,7 +274,7 @@ gfx::DepthId DepthTargetAt(State& s, gaddr addr, uint32_t w, uint32_t h, Format 
                 s.views.end());
   const gfx::DepthId id = s.dev->CreateDepth(int(w), int(h), fmt);
   if (id) s.dev->ClearDepth(id, 1.0f, fmt == Format::D32FS8 ? 0 : -1);
-  s.depths.push_back({addr, w, h, fmt, id});
+  s.depths.push_back({addr, w, h, fmt, id, stencil});
   return id;
 }
 
@@ -317,6 +323,75 @@ gfx::TextureId SampledDepth(State& s, const DepthTarget& dt, uint32_t w, uint32_
   return view->depth;
 }
 
+// A depth target's stencil as a T# of w x h in an 8-bit UNORM format
+// samples it (the stencil plane in guest memory, which the host's
+// depth-stencil image keeps instead): an R8 image of stencil / 255, made
+// each time it is bound. Eight full-screen draws over the depth target,
+// one a bit, pass where that stencil bit is set and add its weight.
+gfx::TextureId SampledStencil(State& s, const DepthTarget& dt, const uint32_t t[8], uint32_t w,
+                              uint32_t h) {
+  Format fmt;
+  if (!TextureFormat(t, &fmt) || fmt != Format::R8) {
+    WarnOnce(11, "a stencil sampled in a format other than R8 is not drawn yet (read as black)");
+    return 0;
+  }
+  w = std::min(w, dt.w);
+  h = std::min(h, dt.h);
+  if (!s.stencil_program) {
+    gfx::ProgramDesc pd;
+    pd.vs.glsl =
+        "void main() {\n"
+        "  gl_Position = vec4(float((gl_VertexIndex & 1) * 4 - 1), float((gl_VertexIndex & 2) * 2 - 1), 0.0, 1.0);\n"
+        "}\n";
+    pd.fs.glsl =
+        "layout(std140, R_UNIFORMS) uniform RWeight { vec4 r_weight; };\n"
+        "layout(location = 0) out vec4 r_color0;\n"
+        "void main() { r_color0 = r_weight; }\n";
+    pd.fs.uniform_bytes = 16;
+    s.stencil_program = s.dev->CreateProgram(pd);
+    if (!s.stencil_program) return 0;
+  }
+  TargetView* view = nullptr;
+  for (TargetView& v : s.views)
+    if (v.addr == dt.stencil && v.tex && v.w == w && v.h == h) view = &v;
+  if (!view) {
+    gfx::ImageDesc d;
+    d.w = int(w);
+    d.h = int(h);
+    d.fmt = Format::R8;
+    d.color_target = true;
+    const gfx::TextureId tex = s.dev->CreateImage(d);
+    if (!tex) return 0;
+    s.views.push_back({dt.stencil, w, h, tex, 0});
+    view = &s.views.back();
+  }
+  s.dev->ClearImage(view->tex, 0, {0, 0, 0, 0});
+  gfx::ProgramDraw d;
+  d.program = s.stencil_program;
+  d.targets[0] = {view->tex, 0};
+  d.depth = dt.depth;
+  d.viewport = {0, 0, w, h, 0.0f, 1.0f};
+  d.scissor = {0, 0, int32_t(w), int32_t(h)};
+  d.vertex_count = 3;
+  gfx::PipelineState& ps = d.state;
+  ps.stencil = true;
+  ps.stencil_front = {gfx::StencilOp::Keep, gfx::StencilOp::Keep, gfx::StencilOp::Keep,
+                      gfx::CompareOp::Equal};
+  ps.stencil_back = ps.stencil_front;
+  ps.stencil_write_mask = 0;
+  ps.blend[0].enable = true;
+  ps.blend[0].src_color = ps.blend[0].dst_color = gfx::BlendFactor::One;
+  ps.blend[0].src_alpha = ps.blend[0].dst_alpha = gfx::BlendFactor::One;
+  for (int bit = 0; bit < 8; bit++) {
+    const float weight = float(1 << bit) / 255.0f;
+    const float u[4] = {weight, weight, weight, weight};
+    ps.stencil_read_mask = ps.stencil_ref = uint8_t(1 << bit);
+    d.fs.uniforms = u;
+    s.dev->DrawProgram(d);
+  }
+  return view->tex;
+}
+
 // A T#'s texture: the colour target at its address, else its texels from
 // guest memory (compared once a submission and uploaded when they change).
 // Level 0 only, in the tile modes tiling.h reads.
@@ -326,8 +401,10 @@ gfx::TextureId TextureFor(State& s, const ImageRef& ref) {
   const uint32_t w = (t[2] & 0x3FFF) + 1, h = ((t[2] >> 14) & 0x3FFF) + 1;
   for (Target& tg : s.targets)
     if (tg.addr == addr) return SampledTarget(s, tg, w, h);
-  for (DepthTarget& d : s.depths)
+  for (DepthTarget& d : s.depths) {
     if (d.addr == addr) return SampledDepth(s, d, w, h);
+    if (d.stencil && d.stencil == addr) return SampledStencil(s, d, t, w, h);
+  }
   Format fmt;
   if (!TextureFormat(t, &fmt)) {
     WarnOnce(2, "a texture format is not drawn yet (textures read as black)");
@@ -519,7 +596,8 @@ void Draw(const Regs& r, const DrawCall& call) {
     const uint32_t size = cx[kDbDepthSize];
     const uint32_t dw = ((size & 0x7FF) + 1) * 8, dh = (((size >> 11) & 0x7FF) + 1) * 8;
     const Format f = zfmt == 1 ? Format::D16 : stencil ? Format::D32FS8 : Format::D32;
-    d.depth = DepthTargetAt(s, uint64_t(cx[kDbZReadBase]) << 8, dw, dh, f);
+    d.depth = DepthTargetAt(s, uint64_t(cx[kDbZReadBase]) << 8, dw, dh, f,
+                            stencil ? uint64_t(cx[kDbStencilReadBase]) << 8 : 0);
     // A depth (and stencil) clear: the draw writes the clear values.
     if (cx[kDbRenderControl] & 3) {
       s.dev->ClearDepth(d.depth, AsFloat(cx[kDbDepthClear]),

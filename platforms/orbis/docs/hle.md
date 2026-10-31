@@ -66,24 +66,25 @@ library.
   shaders translated to GLSL (orbis/gpu/shader.h), colour and depth
   targets as device images found by their guest address (never written
   back to guest memory; as large as their padded pitch and slice or
-  DB_DEPTH_SIZE, and sampled through a copy of their top-left corner
-  when a T# describes less of them), textures read from guest memory once a
-  submission when they change. Compute image stores write such a target
-  at the image's address (2D, level 0), so draws sample what compute
-  stored. CLEAR_STATE loads the Sea Islands clear state's scissors, masks
-  and depth ranges (AMD's published values), not the console's driver's,
-  which are not measured. Not drawn yet: geometry
-  and tessellation stages, fans, rectangle and quad lists, indirect draws
-  and dispatches, cross-lane instructions
-  (ds_swizzle's bit-mask mode, lane counts; its quad mode is a subgroup
-  quad broadcast), a depth target's stencil sampled as a texture (it
-  reads zeros), cube, 3D and array textures, mip levels past
-  the first, and textures in rotated, thick and PRT tile modes (read as
-  black). The tile mode table (GB_TILE_MODE0-31, GB_MACROTILE_MODE0-15) is
-  the console's, read on firmware 11.00; its GB_ADDR_CONFIG read back 0,
-  and the pipe interleave (256 bytes), pipes (8) and row size (1 KiB) are
-  the firmware's own addressing's (its GL library). Fast clears through
-  CMASK and HTILE are not modelled; the depth clear of DB_RENDER_CONTROL is.
+  DB_DEPTH_SIZE, and sampled through a copy of their top-left corner when
+  a T# describes less of them; a T# at a depth target's
+  DB_STENCIL_READ_BASE samples its stencil, resolved into an R8 image),
+  textures read from guest memory once a submission when they change.
+  Compute image stores write such a target at the image's address (2D,
+  level 0), so draws sample what compute stored. CLEAR_STATE loads the Sea
+  Islands clear state's scissors, masks and depth ranges (AMD's published
+  values), not the console's driver's, which are not measured. Not drawn
+  yet: geometry and tessellation stages, fans, rectangle and quad lists,
+  indirect draws and dispatches, cross-lane instructions (ds_swizzle's
+  bit-mask mode, lane counts; its quad mode is a subgroup quad broadcast),
+  cube, 3D and array textures, mip levels past the first, and textures in
+  rotated, thick and PRT tile modes (read as black). The tile mode table
+  (GB_TILE_MODE0-31, GB_MACROTILE_MODE0-15) is the console's, read on
+  firmware 11.00; its GB_ADDR_CONFIG read back 0, and the pipe interleave
+  (256 bytes), pipes (8) and row size (1 KiB) are the firmware's own
+  addressing's (its GL library). Stencil REPLACE_OP writes the test value,
+  not DB_STENCILREFMASK's op value. Fast clears through CMASK and HTILE
+  are not modelled; the depth clear of DB_RENDER_CONTROL is.
 - recomp_orbis_system also: libScePlayGo (the game is installed in full:
   every chunk local, nothing to do, ETAs 0) and libSceDiscMap (a disc
   game's file locations from its sce_discmap.plt: MD5 of the path below
