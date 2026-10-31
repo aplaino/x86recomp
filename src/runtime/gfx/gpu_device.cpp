@@ -368,9 +368,19 @@ class GpuDevice final : public Device {
     const char* entry = "main";
     size_t vs_size = sizeof kFfVert, fs_size = sizeof kFfFrag;
 #endif
-    dev_ = SDL_CreateGPUDevice(format, false, nullptr);
+    // Vulkan 1.1 rather than SDL's 1.0: shaders use subgroup operations.
+    SDL_GPUVulkanOptions vk{};
+    vk.vulkan_api_version = (1u << 22) | (1u << 12);  // VK_API_VERSION_1_1
+    const SDL_PropertiesID props = SDL_CreateProperties();
+    SDL_SetBooleanProperty(props, format == SDL_GPU_SHADERFORMAT_MSL ? SDL_PROP_GPU_DEVICE_CREATE_SHADERS_MSL_BOOLEAN
+                                                                     : SDL_PROP_GPU_DEVICE_CREATE_SHADERS_SPIRV_BOOLEAN,
+                           true);
+    SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_DEBUGMODE_BOOLEAN, false);
+    SDL_SetPointerProperty(props, SDL_PROP_GPU_DEVICE_CREATE_VULKAN_OPTIONS_POINTER, &vk);
+    dev_ = SDL_CreateGPUDeviceWithProperties(props);
+    SDL_DestroyProperties(props);
     if (!dev_) {
-      WarnF("gfx: SDL_CreateGPUDevice: %s\n", SDL_GetError());
+      WarnF("gfx: SDL_CreateGPUDeviceWithProperties: %s\n", SDL_GetError());
       return false;
     }
     if (!SDL_ClaimWindowForGPUDevice(dev_, window_)) {

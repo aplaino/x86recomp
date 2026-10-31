@@ -73,7 +73,8 @@ library.
   which are not measured. Not drawn yet: geometry
   and tessellation stages, fans, rectangle and quad lists, indirect draws
   and dispatches, cross-lane instructions
-  (ds_swizzle, lane counts), cube, 3D and array textures, mip levels past
+  (ds_swizzle's bit-mask mode, lane counts; its quad mode is a subgroup
+  quad broadcast), cube, 3D and array textures, mip levels past
   the first, and textures in rotated, thick and PRT tile modes (read as
   black). The tile mode table (GB_TILE_MODE0-31, GB_MACROTILE_MODE0-15) is
   the console's, read on firmware 11.00; its GB_ADDR_CONFIG read back 0,

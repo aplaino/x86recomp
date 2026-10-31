@@ -446,7 +446,7 @@ struct Translator {
   std::set<uint32_t> params;           // VS: exported parameters
   std::map<uint32_t, bool> inputs;     // PS: input locations, flat
   std::set<uint32_t> mrts;             // PS: exported targets
-  bool depth = false, uses_lds = false;
+  bool depth = false, uses_lds = false, uses_quad = false;
   std::map<gaddr, int> block_of;
   std::vector<int> ro_of, rw_of;       // binding -> RO / RW index (-1: not that kind)
   int nro = 0, nrw = 0;
@@ -1042,6 +1042,28 @@ struct Translator {
     Fail(pc, "an LDS instruction not translated yet");
   }
 
+  // ds_swizzle_b32 in its quad mode (offset bit 15): each lane of a quad
+  // reads the lane of its quad that its 2-bit field of offset[7:0] selects.
+  // Host quads are laid out as the GPU's (0-3: top left, top right, bottom
+  // left, bottom right). Every invocation takes part, whatever its EXEC
+  // bit: the swizzle reads the source lanes' registers.
+  void Swizzle(gaddr pc, const Instr& in) {
+    const uint32_t offset = in.w0 & 0xFFFF;
+    const uint32_t addr = in.w1 & 0xFF, vdst = in.w1 >> 24;
+    if (!(offset & 0x8000)) return Fail(pc, "ds_swizzle_b32's bit-mask mode not translated yet");
+    uses_quad = true;
+    const uint32_t sel[4] = {offset & 3, (offset >> 2) & 3, (offset >> 4) & 3, (offset >> 6) & 3};
+    if (sel[0] == sel[1] && sel[0] == sel[2] && sel[0] == sel[3]) {
+      Line("r_t = subgroupQuadBroadcast(" + V(addr) + ", " + U(sel[0]) + ");");
+    } else {
+      Line("r_q = gl_SubgroupInvocationID & 3u;");
+      Line("r_t = r_q == 0u ? subgroupQuadBroadcast(" + V(addr) + ", " + U(sel[0]) + ") : r_q == 1u ? "
+           "subgroupQuadBroadcast(" + V(addr) + ", " + U(sel[1]) + ") : r_q == 2u ? subgroupQuadBroadcast(" +
+           V(addr) + ", " + U(sel[2]) + ") : subgroupQuadBroadcast(" + V(addr) + ", " + U(sel[3]) + ");");
+    }
+    Line("if ((exec_lo & 1u) != 0u) " + V(vdst) + " = r_t;");
+  }
+
   // A scalar instruction.
   void Scalar(gaddr pc, const Instr& in, gaddr next) {
     const uint32_t w = in.w0;
@@ -1342,6 +1364,7 @@ struct Translator {
       case Fmt::Exp:
         return Export(pc, in);
       case Fmt::Ds:
+        if (in.op == 53) return Swizzle(pc, in);
         Line("if ((exec_lo & 1u) != 0u) {");
         Lds(pc, in);
         Line("}");
@@ -1411,6 +1434,7 @@ struct Translator {
   std::string Glsl() {
     std::string g;
     char b[256];
+    if (uses_quad) g += "#extension GL_KHR_shader_subgroup_quad : require\n";
     // The uniform block: user data, the code bases, each range's base and
     // size (Uniforms()).
     g += "layout(std140, R_UNIFORMS) uniform RUser {\n  uvec4 r_user[4];\n  uvec4 r_misc;\n  uvec4 r_misc2;\n";
@@ -1487,7 +1511,7 @@ struct Translator {
     }
     g += "void main() {\n";
     g += "  uint scc = 0u, m0 = 0u, vcc_lo = 0u, vcc_hi = 0u, exec_lo = 1u, exec_hi = 0u;\n";
-    g += "  uint r_t, r_t2, r_a, r_w, r_w1, r_w2, r_w3, r_unused; uvec4 r_v4, r_t4; uint r_c[4], r_d[4];\n";
+    g += "  uint r_t, r_t2, r_a, r_w, r_w1, r_w2, r_w3, r_unused; uvec4 r_v4, r_t4; uint r_c[4], r_d[4], r_q;\n";
     for (int i = 0; i < 104; i++) {
       const std::string init = i < 16 ? "r_user[" + std::to_string(i / 4) + "][" + std::to_string(i % 4) + "]" : "0u";
       std::snprintf(b, sizeof b, "%ss%d = %s%s", i % 8 ? " " : "  uint ", i, init.c_str(), i % 8 == 7 ? ";\n" : ",");

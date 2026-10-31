@@ -23,8 +23,9 @@ bool GlslToSpirv(const std::string& glsl, ShaderStage stage, std::vector<uint32_
   const char* src = glsl.c_str();
   sh.setStrings(&src, 1);
   sh.setEnvInput(glslang::EShSourceGlsl, lang, glslang::EShClientVulkan, 100);
-  sh.setEnvClient(glslang::EShClientVulkan, glslang::EShTargetVulkan_1_0);
-  sh.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_0);
+  // Vulkan 1.1 (the device asks for it): subgroup operations.
+  sh.setEnvClient(glslang::EShClientVulkan, glslang::EShTargetVulkan_1_1);
+  sh.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_3);
   const EShMessages msg = EShMessages(EShMsgSpvRules | EShMsgVulkanRules);
   if (!sh.parse(GetDefaultResources(), 450, false, msg)) {
     *log = sh.getInfoLog();

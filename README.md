@@ -50,7 +50,7 @@ every guest shares (`src/runtime`), a core per guest CPU (the x86 core:
   GLSL, for the programmable pipeline on SDL_GPU.
 - **Tools**: Ghidra export scripts (`tools/ghidra`), a PE symbol dumper
   (`tools/pe_symbols.py`), dev-time reference checks
-  (`platforms/win32/tools/layout`, `platforms/win32/tools/undname`), and
+  (`platforms/win32/platforms/win32/tools/layout`, `platforms/win32/platforms/win32/tools/undname`), and
   EAX reference measurement (`tools/eax_capture`: a Windows 98 recorder
   for Creative hardware, the same cases rendered by the runtime, and
   their comparison).
@@ -62,7 +62,7 @@ its own branch.
 
 [ARCHITECTURE.md](ARCHITECTURE.md) describes the design; each platform's
 `docs/` the observed behaviour of what it reimplements
-([platforms/win32/docs/miles.md](platforms/win32/docs/miles.md)).
+([platforms/win32/platforms/win32/docs/miles.md](platforms/win32/platforms/win32/docs/miles.md)).
 
 ## Using it from a game project
 
@@ -94,8 +94,8 @@ game.dll --symbols dir [--manifest file]`, repeated) and listed in
 ## Requirements
 
 Linux x86-64, or macOS on Apple Silicon. Clang and LLVM (the static
-`libLLVMDemangle.a` for dbghelp), CMake 3.25+, Ninja, SDL3 (3.2+ for
-SDL_GPU); ffmpeg for Miles/Bink; glslang (`glslangValidator`) for the
+`libLLVMDemangle.a` for dbghelp), CMake 3.25+, Ninja, SDL3 (3.4+: SDL_GPU
+on Vulkan 1.1); ffmpeg for Miles/Bink; glslang (`glslangValidator`) for the
 shaders, and on macOS SPIRV-Cross (`spirv-cross`) too. Graphics (D3D7
 and OpenGL) use SDL_GPU: Vulkan on Linux, native Metal on macOS. On
 Linux a dxvk-native build (Direct3D 9 only, SDL3 window system) is

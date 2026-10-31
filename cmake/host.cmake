@@ -3,7 +3,7 @@
 
 include(FetchContent)
 
-find_package(SDL3 REQUIRED CONFIG)
+find_package(SDL3 3.4 REQUIRED CONFIG)  # SDL_GPUVulkanOptions
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 # ffmpeg (LGPL, linked dynamically): MP3 for Miles streams, Bink and
