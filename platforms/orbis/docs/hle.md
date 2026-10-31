@@ -66,11 +66,13 @@ library.
   shaders translated to GLSL (orbis/gpu/shader.h), colour and depth
   targets as device images found by their guest address (never written
   back to guest memory), textures read from guest memory once a
-  submission when they change. CLEAR_STATE loads the Sea Islands clear
-  state's scissors, masks and depth ranges (AMD's published values), not
-  the console's driver's, which are not measured. Not drawn yet: geometry
+  submission when they change. Compute image stores write such a target
+  at the image's address (2D, level 0), so draws sample what compute
+  stored. CLEAR_STATE loads the Sea Islands clear state's scissors, masks
+  and depth ranges (AMD's published values), not the console's driver's,
+  which are not measured. Not drawn yet: geometry
   and tessellation stages, fans, rectangle and quad lists, indirect draws
-  and dispatches, compute image stores, cross-lane instructions
+  and dispatches, cross-lane instructions
   (ds_swizzle, lane counts), cube, 3D and array textures, mip levels past
   the first, and textures in rotated, thick and PRT tile modes (read as
   black). The tile mode table (GB_TILE_MODE0-31, GB_MACROTILE_MODE0-15) is

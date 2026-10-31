@@ -78,43 +78,6 @@ bool ColorFormat(uint32_t info, Format* out) {
   return false;
 }
 
-// A texture's format from a T# (IMG_DATA_FORMAT, IMG_NUM_FORMAT); BGRA
-// (destination selects Z, Y, X, W) as the B8G8R8A8 formats.
-bool TextureFormat(const uint32_t t[8], Format* out) {
-  const uint32_t dfmt = (t[1] >> 20) & 0x3F, nfmt = (t[1] >> 26) & 0xF;
-  const bool bgra = (t[3] & 0xFFF) == (6 | 5 << 3 | 4 << 6 | 7 << 9);
-  const bool un = nfmt == 0, fl = nfmt == 7, srgb = nfmt == 9, ui = nfmt == 4, si = nfmt == 5;
-  switch (dfmt) {
-    case 1: if (un) return *out = Format::R8, true; if (ui) return *out = Format::R8Uint, true; break;
-    case 2: if (fl) return *out = Format::R16F, true; if (un) return *out = Format::R16, true;
-            if (ui) return *out = Format::R16Uint, true; break;
-    case 3: if (un) return *out = Format::R8G8, true; break;
-    case 4: if (fl) return *out = Format::R32F, true; if (ui) return *out = Format::R32Uint, true;
-            if (si) return *out = Format::R32Sint, true; break;
-    case 5: if (fl) return *out = Format::G16R16F, true; if (un) return *out = Format::R16G16, true;
-            if (nfmt == 1) return *out = Format::R16G16Snorm, true; break;
-    case 7: if (fl) return *out = Format::R11G11B10F, true; break;
-    case 9: if (un) return *out = Format::R10G10B10A2, true; break;
-    case 10:
-      if (un) return *out = bgra ? Format::A8R8G8B8 : Format::R8G8B8A8, true;
-      if (srgb) return *out = bgra ? Format::B8G8R8A8Srgb : Format::R8G8B8A8Srgb, true;
-      if (nfmt == 1) return *out = Format::R8G8B8A8Snorm, true;
-      if (ui) return *out = Format::R8G8B8A8Uint, true;
-      break;
-    case 11: if (fl) return *out = Format::G32R32F, true; break;
-    case 12: if (fl) return *out = Format::A16B16G16R16F, true; if (un) return *out = Format::R16G16B16A16, true; break;
-    case 14: if (fl) return *out = Format::A32B32G32R32F, true; if (ui) return *out = Format::R32G32B32A32Uint, true; break;
-    case 35: return *out = srgb ? Format::Bc1Srgb : Format::Bc1, true;
-    case 36: return *out = srgb ? Format::Bc2Srgb : Format::Bc2, true;
-    case 37: return *out = srgb ? Format::Bc3Srgb : Format::Bc3, true;
-    case 38: return *out = Format::Bc4, true;
-    case 39: return *out = Format::Bc5, true;
-    case 40: return *out = nfmt == 1 || si ? Format::Bc6hSfloat : Format::Bc6hUfloat, true;
-    case 41: return *out = srgb ? Format::Bc7Srgb : Format::Bc7, true;
-  }
-  return false;
-}
-
 gfx::BlendFactor Factor(uint32_t f) {
   using B = gfx::BlendFactor;
   switch (f) {
@@ -193,6 +156,7 @@ struct Target {
   uint32_t w, h;
   Format fmt;
   gfx::TextureId tex;
+  bool storage;  // also a compute stage's storage image
 };
 struct DepthTarget {
   gaddr addr;
@@ -232,14 +196,23 @@ uint64_t Fnv(const uint8_t* p, size_t n) {
   return h;
 }
 
+// A T#'s base address: 38 bits of 256-byte units (word 1's bits 6-7 are
+// a cache policy, MTYPE_L2).
+gaddr ImageBase(const uint32_t t[8]) {
+  return (uint64_t(t[0]) | uint64_t(t[1] & 0x3F) << 32) << 8;
+}
+
 bool Readable(gaddr a, uint64_t n) {
   return n && g_proc->vm.mem().IsCommitted(a) && g_proc->vm.mem().IsCommitted(a + n - 1);
 }
 
-gfx::TextureId ColorTarget(State& s, gaddr addr, uint32_t w, uint32_t h, Format fmt) {
+gfx::TextureId ColorTarget(State& s, gaddr addr, uint32_t w, uint32_t h, Format fmt,
+                           bool storage = false) {
   for (Target& t : s.targets)
-    if (t.addr == addr && t.w == w && t.h == h && t.fmt == fmt) return t.tex;
-  // A different target at that address replaces the old one.
+    if (t.addr == addr && t.w == w && t.h == h && t.fmt == fmt && (t.storage || !storage))
+      return t.tex;
+  // A different target at that address (or one compute cannot write)
+  // replaces the old one.
   s.targets.erase(std::remove_if(s.targets.begin(), s.targets.end(),
                                  [&](const Target& t) {
                                    if (t.addr != addr) return false;
@@ -252,9 +225,10 @@ gfx::TextureId ColorTarget(State& s, gaddr addr, uint32_t w, uint32_t h, Format 
   d.h = int(h);
   d.fmt = fmt;
   d.color_target = true;
+  d.storage = storage;
   const gfx::TextureId tex = s.dev->CreateImage(d);
   if (tex) s.dev->ClearImage(tex, 0, {0, 0, 0, 0});
-  s.targets.push_back({addr, w, h, fmt, tex});
+  s.targets.push_back({addr, w, h, fmt, tex, storage});
   return tex;
 }
 
@@ -279,7 +253,7 @@ gfx::DepthId DepthTargetAt(State& s, gaddr addr, uint32_t w, uint32_t h, Format 
 // Level 0 only, in the tile modes tiling.h reads.
 gfx::TextureId TextureFor(State& s, const ImageRef& ref) {
   const uint32_t* t = ref.t;
-  const gaddr addr = (uint64_t(t[0]) | uint64_t(t[1] & 0xFF) << 32) << 8;
+  const gaddr addr = ImageBase(t);
   const uint32_t w = (t[2] & 0x3FFF) + 1, h = ((t[2] >> 14) & 0x3FFF) + 1;
   for (Target& tg : s.targets)
     if (tg.addr == addr) return tg.tex;
@@ -330,6 +304,22 @@ gfx::TextureId TextureFor(State& s, const ImageRef& ref) {
   return e.tex;
 }
 
+// A compute stage's storage image: a colour target at the T#'s address
+// that compute can write, so what it stores the next draws sample. 2D,
+// level 0 only.
+gfx::TextureId StorageImage(State& s, const ImageRef& ref) {
+  const uint32_t* t = ref.t;
+  const gaddr addr = ImageBase(t);
+  const uint32_t w = (t[2] & 0x3FFF) + 1, h = ((t[2] >> 14) & 0x3FFF) + 1;
+  Format fmt;
+  if (t[3] >> 28 != 9 || ((t[3] >> 12) & 0xF) != 0 || !TextureFormat(t, &fmt) ||
+      !StorageQualifier(fmt)) {
+    WarnOnce(5, "a compute image store is not drawn yet (not 2D, past level 0, or its format)");
+    return 0;
+  }
+  return ColorTarget(s, addr, w, h, fmt, true);
+}
+
 // The device's view of a stage's resolved resources: its buffers, its
 // textures with their samplers, its uniforms.
 struct Bound {
@@ -350,8 +340,7 @@ void Bind(State& s, const StageState& st, const Resolved& r, Bound& b) {
   }
   for (const ImageRef& ref : r.images) {
     if (ref.storage) {
-      WarnOnce(5, "compute image stores are not drawn yet");
-      b.images.push_back({});
+      b.images.push_back({StorageImage(s, ref), 0});
       continue;
     }
     b.textures.push_back(TextureFor(s, ref));
@@ -642,7 +631,7 @@ void Dispatch(const Regs& r, const uint32_t groups[3]) {
   Bound b;
   Bind(s, cs, rc, b);
   for (const gfx::ColorTarget& img : b.images)
-    if (!img.tex) return;  // image stores: not yet
+    if (!img.tex) return;
   gfx::ProgramDispatch d;
   d.program = pr.id;
   d.cs = b.res;

@@ -85,4 +85,11 @@ Translated Translate(const StageState& st, const Resolved& r);
 // size of each bound range, and the code's address (for s_getpc).
 std::vector<uint32_t> Uniforms(const StageState& st, const Resolved& r);
 
+// A T#'s format (IMG_DATA_FORMAT, IMG_NUM_FORMAT, BGRA by its destination
+// selects) as a device format; false for one not drawn yet.
+bool TextureFormat(const uint32_t t[8], gfx::Format* out);
+// The GLSL format qualifier of a storage image of format f; null for one
+// not written yet.
+const char* StorageQualifier(gfx::Format f);
+
 }  // namespace recomp::orbis::gpu

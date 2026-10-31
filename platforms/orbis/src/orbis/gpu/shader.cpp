@@ -888,6 +888,9 @@ struct Translator {
       return;
     }
     if (in.op == 8) {  // image_store (compute)
+      gfx::Format f;
+      if (!TextureFormat(ref.t, &f) || !StorageQualifier(f))
+        return Fail(pc, "an image store format not translated yet");
       std::string c = dims == 2 ? "ivec2(int(" + V(vaddr) + "), int(" + V(vaddr + 1) + "))"
                                 : "ivec3(int(" + V(vaddr) + "), int(" + V(vaddr + 1) + "), int(" + V(vaddr + 2) + "))";
       std::string v[4] = {"0u", "0u", "0u", "0u"};
@@ -1444,8 +1447,10 @@ struct Translator {
       const char type = ImageType(ref.t);
       const std::string prefix = type == 'f' ? "" : std::string(1, type == 'u' ? 'u' : 'i');
       if (ref.storage) {
+        gfx::Format f;
+        const char* q = TextureFormat(ref.t, &f) ? StorageQualifier(f) : nullptr;
         std::snprintf(b, sizeof b, "layout(R_IMAGE(%zu), %s) uniform writeonly %simage%s r_img%zu;\n", ImgSlot(i),
-                      type == 'u' ? "r32ui" : type == 'i' ? "r32i" : "rgba8", prefix.c_str(),
+                      q ? q : "rgba8", prefix.c_str(),
                       k == gfx::TextureKind::Tex3D ? "3D" : k == gfx::TextureKind::Tex2DArray ? "2DArray" : "2D", i);
         g += b;
         continue;
@@ -1594,7 +1599,7 @@ Resolved Resolve(const StageState& st) {
   Resolver rv(st);
   if (!rv.Run()) return rv.r;
   // The key: the stage, its registers that shape the code, the code's
-  // words, each memory instruction's binding and the formats it reads.
+  // words, each memory instruction's binding and the formats it reads or writes.
   std::string& k = rv.r.key;
   const uint32_t head[] = {uint32_t(st.stage), st.rsrc1, st.rsrc2, st.ps_input_addr,
                            st.col_format, st.z_format, st.threads[0], st.threads[1], st.threads[2]};
@@ -1610,7 +1615,8 @@ Resolved Resolve(const StageState& st) {
     k += Hex(site, sizeof site);
     if (s.image >= 0) {
       const ImageRef& ref = rv.r.images[size_t(s.image)];
-      const uint32_t f[3] = {ref.t[1] & 0x3C000000, ref.t[3] & 0xF0000FFF, ref.s[0] & 0x7000};
+      const uint32_t f[3] = {ref.t[1] & (ref.storage ? 0x3FF00000 : 0x3C000000), ref.t[3] & 0xF0000FFF,
+                             ref.s[0] & 0x7000};
       k += Hex(f, sizeof f);
     }
   }
@@ -1665,6 +1671,75 @@ std::vector<uint32_t> Uniforms(const StageState& st, const Resolved& r) {
       u.push_back(0);
     }
   return u;
+}
+
+// A texture's format from a T# (IMG_DATA_FORMAT, IMG_NUM_FORMAT); BGRA
+// (destination selects Z, Y, X, W) as the B8G8R8A8 formats.
+bool TextureFormat(const uint32_t t[8], gfx::Format* out) {
+  using F = gfx::Format;
+  const uint32_t dfmt = (t[1] >> 20) & 0x3F, nfmt = (t[1] >> 26) & 0xF;
+  const bool bgra = (t[3] & 0xFFF) == (6 | 5 << 3 | 4 << 6 | 7 << 9);
+  const bool un = nfmt == 0, fl = nfmt == 7, srgb = nfmt == 9, ui = nfmt == 4, si = nfmt == 5;
+  switch (dfmt) {
+    case 1: if (un) return *out = F::R8, true; if (ui) return *out = F::R8Uint, true; break;
+    case 2: if (fl) return *out = F::R16F, true; if (un) return *out = F::R16, true;
+            if (ui) return *out = F::R16Uint, true; break;
+    case 3: if (un) return *out = F::R8G8, true; break;
+    case 4: if (fl) return *out = F::R32F, true; if (ui) return *out = F::R32Uint, true;
+            if (si) return *out = F::R32Sint, true; break;
+    case 5: if (fl) return *out = F::G16R16F, true; if (un) return *out = F::R16G16, true;
+            if (nfmt == 1) return *out = F::R16G16Snorm, true; break;
+    case 7: if (fl) return *out = F::R11G11B10F, true; break;
+    case 9: if (un) return *out = F::R10G10B10A2, true; break;
+    case 10:
+      if (un) return *out = bgra ? F::A8R8G8B8 : F::R8G8B8A8, true;
+      if (srgb) return *out = bgra ? F::B8G8R8A8Srgb : F::R8G8B8A8Srgb, true;
+      if (nfmt == 1) return *out = F::R8G8B8A8Snorm, true;
+      if (ui) return *out = F::R8G8B8A8Uint, true;
+      break;
+    case 11: if (fl) return *out = F::G32R32F, true; break;
+    case 12: if (fl) return *out = F::A16B16G16R16F, true; if (un) return *out = F::R16G16B16A16, true; break;
+    case 14: if (fl) return *out = F::A32B32G32R32F, true; if (ui) return *out = F::R32G32B32A32Uint, true; break;
+    case 35: return *out = srgb ? F::Bc1Srgb : F::Bc1, true;
+    case 36: return *out = srgb ? F::Bc2Srgb : F::Bc2, true;
+    case 37: return *out = srgb ? F::Bc3Srgb : F::Bc3, true;
+    case 38: return *out = F::Bc4, true;
+    case 39: return *out = F::Bc5, true;
+    case 40: return *out = nfmt == 1 || si ? F::Bc6hSfloat : F::Bc6hUfloat, true;
+    case 41: return *out = srgb ? F::Bc7Srgb : F::Bc7, true;
+  }
+  return false;
+}
+
+// The GLSL format qualifier of a storage image of format f; null for one
+// not written yet.
+const char* StorageQualifier(gfx::Format f) {
+  using F = gfx::Format;
+  switch (f) {
+    case F::R8: return "r8";
+    case F::R8Uint: return "r8ui";
+    case F::R16F: return "r16f";
+    case F::R16: return "r16";
+    case F::R16Uint: return "r16ui";
+    case F::R8G8: return "rg8";
+    case F::R32F: return "r32f";
+    case F::R32Uint: return "r32ui";
+    case F::R32Sint: return "r32i";
+    case F::G16R16F: return "rg16f";
+    case F::R16G16: return "rg16";
+    case F::R16G16Snorm: return "rg16_snorm";
+    case F::R11G11B10F: return "r11f_g11f_b10f";
+    case F::R10G10B10A2: return "rgb10_a2";
+    case F::R8G8B8A8: return "rgba8";
+    case F::R8G8B8A8Snorm: return "rgba8_snorm";
+    case F::R8G8B8A8Uint: return "rgba8ui";
+    case F::G32R32F: return "rg32f";
+    case F::A16B16G16R16F: return "rgba16f";
+    case F::R16G16B16A16: return "rgba16";
+    case F::A32B32G32R32F: return "rgba32f";
+    case F::R32G32B32A32Uint: return "rgba32ui";
+    default: return nullptr;
+  }
 }
 
 }  // namespace recomp::orbis::gpu
