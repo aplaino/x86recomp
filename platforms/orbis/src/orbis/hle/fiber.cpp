@@ -1,8 +1,12 @@
 // libSceFiber HLE: fibers as host coroutines (platform::Coroutine), one
 // host stack each, since lifted code keeps its call frames on the host
 // stack. A fiber's guest stack is the context memory the game gives it.
-// Switching saves the running fiber's registers (all of Ctx) and loads
-// the next one's. The SceFiber block (256 bytes, 8-aligned) is the
+// Each fiber has registers of its own (a Ctx, which its lifted frames
+// refer to), so a fiber can be resumed on another thread than the one it
+// last ran on, as libSceFiber allows; resuming gives it the running
+// thread's TLS base and thread. A fiber counts as running until its host
+// stack is left, so another thread cannot resume it while it is still in
+// use. The SceFiber block (256 bytes, 8-aligned) is the
 // game's: it gets the magic words libSceFiber 11.00 checks and its idle
 // state; the rest of its fields are libSceFiber's own and stay unwritten.
 // Checks and error codes are 11.00's. A fiber made without context memory
@@ -11,6 +15,7 @@
 
 #include <sys/mman.h>
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -36,26 +41,29 @@ struct Fiber {
   std::string name;
   void* host_stack = nullptr;
   platform::Coroutine* co = nullptr;
-  Ctx saved;  // its registers while another runs
-  bool running = false;
+  Ctx ctx;  // its registers
+  std::atomic<bool> running{false};
   uint64_t arg_in = 0;  // what the switch that resumes it passes
   gaddr stack_top = 0;  // without context memory: where it starts
 };
 
-// The calling thread's fibers: its own context, its registers while a
-// fiber runs, the running fiber and what it returns to the thread.
+// The calling thread's fibers: its own context, the running fiber, what
+// it returns to the thread, and the fiber this thread just switched away
+// from (idle once its host stack is left: Settle).
 struct ThreadFibers {
   platform::Coroutine* self = nullptr;
-  Ctx saved;
   Fiber* current = nullptr;
   uint64_t ret_arg = 0;
+  Fiber* leaving = nullptr;
 };
 thread_local ThreadFibers* t_fibers = nullptr;
 
 std::mutex g_mu;
 std::map<gaddr, std::unique_ptr<Fiber>> g_fibers;
 
-ThreadFibers& Mine() {
+// Not inlined: a fiber may resume on another thread, so the thread's
+// fibers are looked up anew after every switch.
+[[gnu::noinline]] ThreadFibers& Mine() {
   if (!t_fibers) {
     t_fibers = new ThreadFibers;
     t_fibers->self = platform::ThreadCoroutine();
@@ -75,35 +83,46 @@ uint32_t Lookup(gaddr f, Fiber** out) {
   return 0;
 }
 
+// Run on the thread right after a switch lands on it: the fiber it
+// switched away from no longer uses its host stack.
+void Settle() {
+  ThreadFibers& t = Mine();
+  if (t.leaving) t.leaving->running = false;
+  t.leaving = nullptr;
+}
+
 // A fiber's first run, on its coroutine: entry(arg_init, arg_on_run) on
 // its context memory.
 void Start(void* arg) {
+  Settle();
   Fiber* f = static_cast<Fiber*>(arg);
-  Ctx& c = CurrentThread()->ctx;
+  Ctx& c = f->ctx;
   c.rsp = f->context ? (f->context + f->context_size) & ~uint64_t(15) : f->stack_top;
   CallGuest(c, f->entry, {f->arg_init, f->arg_in});
   FatalF("fiber %s returned from its entry function", f->name.c_str());
 }
 
-// Switches the thread from `from` (its registers in `from_saved`) to fiber
-// `to`, delivering arg; returns once something switches back to `from`.
-void SwitchTo(Ctx& c, platform::Coroutine* from, Ctx* from_saved, Fiber* to, uint64_t arg) {
+// Switches the thread from `from` (with registers c; `leaving` the fiber
+// it runs, if any) to fiber `to`, already marked running, delivering arg;
+// returns once something switches back to `from`.
+void SwitchTo(Ctx& c, platform::Coroutine* from, Fiber* leaving, Fiber* to, uint64_t arg) {
   ThreadFibers& t = Mine();
-  *from_saved = c;
   t.current = to;
-  to->running = true;
+  t.leaving = leaving;
   to->arg_in = arg;
   if (!to->co) {
+    to->ctx = c;  // FPU and SSE control as the thread has them
     // Below the frame of the call that starts it (a red zone further).
     if (!to->context) to->stack_top = (c.rsp - 0x100) & ~uint64_t(15);
     to->host_stack = mmap(nullptr, kHostStack, PROT_READ | PROT_WRITE,
                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (to->host_stack == MAP_FAILED) FatalF("fiber %s: no host stack", to->name.c_str());
     to->co = platform::NewCoroutine(to->host_stack, kHostStack, Start, to);
-  } else {
-    c = to->saved;
   }
+  to->ctx.fs_base = c.fs_base;
+  to->ctx.thread = c.thread;
   platform::SwitchCoroutine(from, to->co);
+  Settle();
 }
 
 }  // namespace
@@ -161,10 +180,10 @@ ORBIS_HLE("libSceFiber", sceFiberRun, 3) {
   if (uint32_t e = Lookup(Arg(c, 0), &f)) return e;
   ThreadFibers& t = Mine();
   if (t.current) return kErrPermission;
-  if (f->running) return kErrState;
-  SwitchTo(c, t.self, &t.saved, f, Arg(c, 1));
-  // Back on the thread (sceFiberReturnToThread restored its registers).
-  if (Arg(c, 2)) recomp::Wr64(Arg(c, 2), t.ret_arg);
+  if (f->running.exchange(true)) return kErrState;
+  SwitchTo(c, t.self, nullptr, f, Arg(c, 1));
+  // Back on the thread.
+  if (Arg(c, 2)) recomp::Wr64(Arg(c, 2), Mine().ret_arg);
   return 0;
 }
 
@@ -175,10 +194,9 @@ ORBIS_HLE("libSceFiber", sceFiberSwitch, 3) {
   if (uint32_t e = Lookup(Arg(c, 0), &to)) return e;
   ThreadFibers& t = Mine();
   if (!t.current) return kErrPermission;
-  if (to->running) return kErrState;
+  if (to->running.exchange(true)) return kErrState;
   Fiber* self = t.current;
-  self->running = false;
-  SwitchTo(c, self->co, &self->saved, to, Arg(c, 1));
+  SwitchTo(c, self->co, self, to, Arg(c, 1));
   if (Arg(c, 2)) recomp::Wr64(Arg(c, 2), self->arg_in);
   return 0;
 }
@@ -188,13 +206,12 @@ ORBIS_HLE("libSceFiber", sceFiberReturnToThread, 2) {
   ThreadFibers& t = Mine();
   Fiber* self = t.current;
   if (!self) return kErrPermission;
-  self->saved = c;
-  self->running = false;
   t.ret_arg = Arg(c, 0);
   t.current = nullptr;
-  c = t.saved;
+  t.leaving = self;
   recomp::platform::SwitchCoroutine(self->co, t.self);
-  // Resumed by sceFiberRun or sceFiberSwitch, which loaded its registers.
+  // Resumed by sceFiberRun or sceFiberSwitch, perhaps on another thread.
+  Settle();
   if (Arg(c, 1)) recomp::Wr64(Arg(c, 1), self->arg_in);
   return 0;
 }

@@ -1,5 +1,6 @@
 // orbis_process_test's checks of the other system libraries' HLE, from
-// lifted code: fibers (libSceFiber), directory reads and event queues
+// lifted code: fibers (libSceFiber, one resumed on another thread too),
+// directory reads and event queues
 // (libkernel), and the GPU (libSceGnmDriver's packets and submission, the
 // command processor's memory writes and end-of-pipe event).
 // system_checks() returns how many failed.
@@ -17,6 +18,10 @@ int sceFiberSwitch(Fiber* f, unsigned long arg, unsigned long* got);
 int sceFiberReturnToThread(unsigned long ret, unsigned long* got);
 int sceFiberGetSelf(Fiber** f);
 int sceFiberFinalize(Fiber* f);
+typedef unsigned long Handle;
+int scePthreadCreate(Handle* t, const Handle* attr, void* (*entry)(void*), void* arg,
+                     const char* name);
+int scePthreadJoin(Handle t, void** ret);
 
 int sceKernelOpen(const char* path, int flags, int mode);
 int sceKernelClose(int fd);
@@ -112,6 +117,37 @@ static void fiber_b(unsigned long init, unsigned long run) {
   sceFiberReturnToThread(0, &got);
 }
 
+// ---- a fiber that yields on one thread and is resumed on another: its
+// locals survive, and it sees the thread it runs on, both through fs (the
+// TCB pointer at fs:0, read again in the same function) and through TLS.
+
+static Fiber fm;
+static _Alignas(16) char stack_m[0x4000];
+static __thread long thread_no;
+static unsigned long tcb[2], moved_ret[2];
+
+static unsigned long fs_tcb(void) {
+  unsigned long p;
+  __asm__ volatile("movq %%fs:0, %0" : "=r"(p));
+  return p;
+}
+static __attribute__((noinline)) long current_thread_no(void) { return thread_no; }
+
+static void fiber_m(unsigned long init, unsigned long run) {
+  volatile long kept = (long)run;  // 5, from thread 1
+  unsigned long got, seen = fs_tcb() == tcb[0];
+  sceFiberReturnToThread(1, &got);
+  seen += 2 * (fs_tcb() == tcb[1]) + 4 * (current_thread_no() == 2);
+  sceFiberReturnToThread((unsigned long)(kept * 100 + (long)got * 10) + seen, &got);
+}
+
+static void* run_moved(void* arg) {
+  thread_no = (long)arg;
+  tcb[thread_no - 1] = fs_tcb();
+  sceFiberRun(&fm, thread_no == 1 ? 5 : 7, &moved_ret[thread_no - 1]);
+  return 0;
+}
+
 static int fiber_checks(void) {
   int failed = 0;
   failed += test_check(70, _sceFiberInitializeImpl(&fa, "a", fiber_a, 1, stack_a, sizeof stack_a, 0,
@@ -131,6 +167,16 @@ static int fiber_checks(void) {
   Fiber* self;
   failed += test_check(76, (unsigned)sceFiberGetSelf(&self), 0x80590005);  // not in a fiber
   failed += test_check(77, sceFiberFinalize(&fa) + sceFiberFinalize(&fb), 0);
+  _sceFiberInitializeImpl(&fm, "m", fiber_m, 0, stack_m, sizeof stack_m, 0, 0x3500000);
+  for (long i = 1; i <= 2; i++) {
+    Handle t;
+    void* r;
+    scePthreadCreate(&t, 0, run_moved, (void*)i, "fiber");
+    scePthreadJoin(t, &r);
+  }
+  failed += test_check(192, (long)moved_ret[0], 1);
+  failed += test_check(193, (long)moved_ret[1], 577);  // kept 5, got 7, then fs and TLS
+  failed += test_check(194, sceFiberFinalize(&fm), 0);
   return failed;
 }
 

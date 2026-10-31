@@ -640,7 +640,9 @@ bool Cas128(uint8_t* p, uint64_t* lo, uint64_t* hi, uint64_t new_lo, uint64_t ne
 // Register/flag caching. Lifted functions keep guest registers in locals
 // (which nothing can alias) and write them back before anything that may
 // observe or change them. Files lifted from x64 images define
-// RECOMP_LIFT_X64 before including this header.
+// RECOMP_LIFT_X64 before including this header. Their segment bases are
+// read from c at each use, not kept: a fiber resumed on another thread
+// (libSceFiber) must see that thread's TLS, as its fs reads do.
 #ifndef RECOMP_LIFT_X64
 #define LIFT_ENTER                                                       \
   uint8_t* const B = ::recomp::g_guest_base;                                \
@@ -659,7 +661,7 @@ bool Cas128(uint8_t* p, uint64_t* lo, uint64_t* hi, uint64_t new_lo, uint64_t ne
            r13 = c.r13, r14 = c.r14, r15 = c.r15;                        \
   ::recomp::Flags F;                                                        \
   ::recomp::UnpackEFlags(F, c.eflags);                                   \
-  const uint64_t FS = c.fs_base, GS = c.gs_base;                         \
+  const uint64_t &FS = c.fs_base, &GS = c.gs_base;                       \
   (void)FS, (void)GS;
 #endif
 
