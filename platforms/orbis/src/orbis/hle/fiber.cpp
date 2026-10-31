@@ -4,9 +4,10 @@
 // Each fiber has registers of its own (a Ctx, which its lifted frames
 // refer to), so a fiber can be resumed on another thread than the one it
 // last ran on, as libSceFiber allows; resuming gives it the running
-// thread's TLS base and thread. A fiber counts as running until its host
-// stack is left, so another thread cannot resume it while it is still in
-// use. The SceFiber block (256 bytes, 8-aligned) is the
+// thread's TLS base and thread. A fiber that switches away is leaving
+// until its host stack is left: another thread that runs or switches to
+// it meanwhile waits for that (a few instructions on the console) instead
+// of finding it running. The SceFiber block (256 bytes, 8-aligned) is the
 // game's: it gets the magic words libSceFiber 11.00 checks and its idle
 // state; the rest of its fields are libSceFiber's own and stay unwritten.
 // Checks and error codes are 11.00's. A fiber made without context memory
@@ -20,6 +21,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 
 #include "orbis/hle.h"
 #include "runtime/log.h"
@@ -32,7 +34,8 @@ namespace {
 constexpr uint32_t kErrNull = 0x80590001, kErrAlignment = 0x80590002, kErrRange = 0x80590003,
                    kErrInvalid = 0x80590004, kErrPermission = 0x80590005, kErrState = 0x80590006;
 constexpr uint32_t kMagicStart = 0xDEF1649C, kMagicEnd = 0xB37592A0, kOptMagic = 0xBB40E64D;
-constexpr uint32_t kStateIdle = 2;
+constexpr uint32_t kStateIdle = 2;  // the SceFiber block's
+enum : int { kIdle, kRunning, kLeaving };
 constexpr size_t kHostStack = 64u << 20;
 
 struct Fiber {
@@ -42,7 +45,7 @@ struct Fiber {
   void* host_stack = nullptr;
   platform::Coroutine* co = nullptr;
   Ctx ctx;  // its registers
-  std::atomic<bool> running{false};
+  std::atomic<int> state{kIdle};  // kIdle, kRunning or kLeaving
   uint64_t arg_in = 0;  // what the switch that resumes it passes
   gaddr stack_top = 0;  // without context memory: where it starts
 };
@@ -83,11 +86,22 @@ uint32_t Lookup(gaddr f, Fiber** out) {
   return 0;
 }
 
+// Marks f running (true), once it has left its host stack if it was
+// leaving; false if it is running.
+bool Claim(Fiber* f) {
+  for (;;) {
+    int s = kIdle;
+    if (f->state.compare_exchange_weak(s, kRunning)) return true;
+    if (s == kRunning) return false;
+    std::this_thread::yield();
+  }
+}
+
 // Run on the thread right after a switch lands on it: the fiber it
 // switched away from no longer uses its host stack.
 void Settle() {
   ThreadFibers& t = Mine();
-  if (t.leaving) t.leaving->running = false;
+  if (t.leaving) t.leaving->state = kIdle;
   t.leaving = nullptr;
 }
 
@@ -109,6 +123,7 @@ void SwitchTo(Ctx& c, platform::Coroutine* from, Fiber* leaving, Fiber* to, uint
   ThreadFibers& t = Mine();
   t.current = to;
   t.leaving = leaving;
+  if (leaving) leaving->state = kLeaving;
   to->arg_in = arg;
   if (!to->co) {
     to->ctx = c;  // FPU and SSE control as the thread has them
@@ -162,7 +177,8 @@ ORBIS_HLE("libSceFiber", _sceFiberInitializeImpl, 8) {
 ORBIS_HLE("libSceFiber", sceFiberFinalize, 1) {
   Fiber* f;
   if (uint32_t e = Lookup(Arg(c, 0), &f)) return e;
-  if (f->running) return kErrState;
+  while (f->state == kLeaving) std::this_thread::yield();
+  if (f->state == kRunning) return kErrState;
   if (f->co) {
     recomp::platform::FreeCoroutine(f->co);
     munmap(f->host_stack, kHostStack);
@@ -180,7 +196,7 @@ ORBIS_HLE("libSceFiber", sceFiberRun, 3) {
   if (uint32_t e = Lookup(Arg(c, 0), &f)) return e;
   ThreadFibers& t = Mine();
   if (t.current) return kErrPermission;
-  if (f->running.exchange(true)) return kErrState;
+  if (!Claim(f)) return kErrState;
   SwitchTo(c, t.self, nullptr, f, Arg(c, 1));
   // Back on the thread.
   if (Arg(c, 2)) recomp::Wr64(Arg(c, 2), Mine().ret_arg);
@@ -194,7 +210,7 @@ ORBIS_HLE("libSceFiber", sceFiberSwitch, 3) {
   if (uint32_t e = Lookup(Arg(c, 0), &to)) return e;
   ThreadFibers& t = Mine();
   if (!t.current) return kErrPermission;
-  if (to->running.exchange(true)) return kErrState;
+  if (!Claim(to)) return kErrState;
   Fiber* self = t.current;
   SwitchTo(c, self->co, self, to, Arg(c, 1));
   if (Arg(c, 2)) recomp::Wr64(Arg(c, 2), self->arg_in);
@@ -209,6 +225,7 @@ ORBIS_HLE("libSceFiber", sceFiberReturnToThread, 2) {
   t.ret_arg = Arg(c, 0);
   t.current = nullptr;
   t.leaving = self;
+  self->state = kLeaving;
   recomp::platform::SwitchCoroutine(self->co, t.self);
   // Resumed by sceFiberRun or sceFiberSwitch, perhaps on another thread.
   Settle();
