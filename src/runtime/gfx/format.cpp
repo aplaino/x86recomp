@@ -17,6 +17,7 @@ void Device::UpdateImage(TextureId, int, int, const Rect&, const void*, uint32_t
 void Device::ReadImage(TextureId, int, int, const Rect&, void*, uint32_t) {}
 void Device::ClearImage(TextureId, int, const Color&) {}
 void Device::ClearDepth(DepthId, float, int) {}
+void Device::CopyDepth(DepthId, DepthId, const Rect&) {}
 void Device::DrawProgram(const ProgramDraw&) {}
 void Device::DispatchProgram(const ProgramDispatch&) {}
 void Device::DrawImage(TextureId, const Rect&) {}

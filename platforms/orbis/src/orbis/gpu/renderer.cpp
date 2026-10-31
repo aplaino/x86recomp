@@ -158,6 +158,15 @@ struct Target {
   gfx::TextureId tex;
   bool storage;  // also a compute stage's storage image
 };
+// A copy of a target's top-left corner at the size a T# samples it with
+// (targets are as large as their pitch and slice, or DB_DEPTH_SIZE, which
+// the hardware pads): a colour image, or a depth one for a depth target.
+struct TargetView {
+  gaddr addr;
+  uint32_t w, h;
+  gfx::TextureId tex;
+  gfx::DepthId depth;
+};
 struct DepthTarget {
   gaddr addr;
   uint32_t w, h;
@@ -179,6 +188,7 @@ struct State {
   std::mutex mu;
   gfx::Device* dev = nullptr;
   std::vector<Target> targets;
+  std::vector<TargetView> views;
   std::vector<DepthTarget> depths;
   std::map<std::string, Texture> textures;
   std::unordered_map<std::string, Program> programs;
@@ -220,6 +230,13 @@ gfx::TextureId ColorTarget(State& s, gaddr addr, uint32_t w, uint32_t h, Format 
                                    return true;
                                  }),
                   s.targets.end());
+  s.views.erase(std::remove_if(s.views.begin(), s.views.end(),
+                               [&](const TargetView& v) {
+                                 if (v.addr != addr || !v.tex) return false;
+                                 s.dev->DestroyTexture(v.tex);
+                                 return true;
+                               }),
+                s.views.end());
   gfx::ImageDesc d;
   d.w = int(w);
   d.h = int(h);
@@ -242,10 +259,62 @@ gfx::DepthId DepthTargetAt(State& s, gaddr addr, uint32_t w, uint32_t h, Format 
                                   return true;
                                 }),
                  s.depths.end());
+  s.views.erase(std::remove_if(s.views.begin(), s.views.end(),
+                               [&](const TargetView& v) {
+                                 if (v.addr != addr || !v.depth) return false;
+                                 s.dev->DestroyDepth(v.depth);
+                                 return true;
+                               }),
+                s.views.end());
   const gfx::DepthId id = s.dev->CreateDepth(int(w), int(h), fmt);
   if (id) s.dev->ClearDepth(id, 1.0f, fmt == Format::D32FS8 ? 0 : -1);
   s.depths.push_back({addr, w, h, fmt, id});
   return id;
+}
+
+// A colour target as a T# of w x h samples it: the target itself if the
+// T# covers it, else a copy of its top-left w x h, made each time (draws
+// in between may have changed the target). Normalized coordinates then
+// span what the T# describes, not the target's padding.
+gfx::TextureId SampledTarget(State& s, const Target& tg, uint32_t w, uint32_t h) {
+  w = std::min(w, tg.w);
+  h = std::min(h, tg.h);
+  if (w == tg.w && h == tg.h) return tg.tex;
+  TargetView* view = nullptr;
+  for (TargetView& v : s.views)
+    if (v.addr == tg.addr && v.tex && v.w == w && v.h == h) view = &v;
+  if (!view) {
+    gfx::ImageDesc d;
+    d.w = int(w);
+    d.h = int(h);
+    d.fmt = tg.fmt;
+    d.color_target = true;
+    const gfx::TextureId tex = s.dev->CreateImage(d);
+    if (!tex) return 0;
+    s.views.push_back({tg.addr, w, h, tex, 0});
+    view = &s.views.back();
+  }
+  const gfx::Rect r{0, 0, int32_t(w), int32_t(h)};
+  s.dev->StretchRect({tg.tex, 0}, r, {view->tex, 0}, r, false);
+  return view->tex;
+}
+
+// The same for a depth target.
+gfx::TextureId SampledDepth(State& s, const DepthTarget& dt, uint32_t w, uint32_t h) {
+  w = std::min(w, dt.w);
+  h = std::min(h, dt.h);
+  if (w == dt.w && h == dt.h) return dt.depth;
+  TargetView* view = nullptr;
+  for (TargetView& v : s.views)
+    if (v.addr == dt.addr && v.depth && v.w == w && v.h == h) view = &v;
+  if (!view) {
+    const gfx::DepthId depth = s.dev->CreateDepth(int(w), int(h), dt.fmt);
+    if (!depth) return 0;
+    s.views.push_back({dt.addr, w, h, 0, depth});
+    view = &s.views.back();
+  }
+  s.dev->CopyDepth(dt.depth, view->depth, {0, 0, int32_t(w), int32_t(h)});
+  return view->depth;
 }
 
 // A T#'s texture: the colour target at its address, else its texels from
@@ -256,9 +325,9 @@ gfx::TextureId TextureFor(State& s, const ImageRef& ref) {
   const gaddr addr = ImageBase(t);
   const uint32_t w = (t[2] & 0x3FFF) + 1, h = ((t[2] >> 14) & 0x3FFF) + 1;
   for (Target& tg : s.targets)
-    if (tg.addr == addr) return tg.tex;
+    if (tg.addr == addr) return SampledTarget(s, tg, w, h);
   for (DepthTarget& d : s.depths)
-    if (d.addr == addr) return d.depth;
+    if (d.addr == addr) return SampledDepth(s, d, w, h);
   Format fmt;
   if (!TextureFormat(t, &fmt)) {
     WarnOnce(2, "a texture format is not drawn yet (textures read as black)");

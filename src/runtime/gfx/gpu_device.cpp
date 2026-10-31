@@ -1590,6 +1590,25 @@ void r_color0(inout vec4 c) {
     Submit(cmd);
   }
 
+  void CopyDepth(DepthId src, DepthId dst, const Rect& r) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    auto s = depths_.find(src), d = depths_.find(dst);
+    if (s == depths_.end() || d == depths_.end() || s->second.gpu_format != d->second.gpu_format) return;
+    const Rect a = Clip(Clip(r, s->second.w, s->second.h), d->second.w, d->second.h);
+    if (a.right <= a.left || a.bottom <= a.top) return;
+    Flush();
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(dev_);
+    SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
+    SDL_GPUTextureLocation from{}, to{};
+    from.texture = s->second.tex;
+    from.x = to.x = Uint32(a.left);
+    from.y = to.y = Uint32(a.top);
+    to.texture = d->second.tex;
+    SDL_CopyGPUTextureToTexture(cp, &from, &to, Uint32(a.right - a.left), Uint32(a.bottom - a.top), 1, false);
+    SDL_EndGPUCopyPass(cp);
+    Submit(cmd);
+  }
+
   void DrawProgram(const ProgramDraw& d) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     auto pit = programs_.find(d.program);

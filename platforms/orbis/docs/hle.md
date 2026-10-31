@@ -65,7 +65,9 @@ library.
 - recomp_orbis_gpu draws on gfx::Device (orbis/gpu/renderer.h): its
   shaders translated to GLSL (orbis/gpu/shader.h), colour and depth
   targets as device images found by their guest address (never written
-  back to guest memory), textures read from guest memory once a
+  back to guest memory; as large as their padded pitch and slice or
+  DB_DEPTH_SIZE, and sampled through a copy of their top-left corner
+  when a T# describes less of them), textures read from guest memory once a
   submission when they change. Compute image stores write such a target
   at the image's address (2D, level 0), so draws sample what compute
   stored. CLEAR_STATE loads the Sea Islands clear state's scissors, masks
@@ -74,7 +76,8 @@ library.
   and tessellation stages, fans, rectangle and quad lists, indirect draws
   and dispatches, cross-lane instructions
   (ds_swizzle's bit-mask mode, lane counts; its quad mode is a subgroup
-  quad broadcast), cube, 3D and array textures, mip levels past
+  quad broadcast), a depth target's stencil sampled as a texture (it
+  reads zeros), cube, 3D and array textures, mip levels past
   the first, and textures in rotated, thick and PRT tile modes (read as
   black). The tile mode table (GB_TILE_MODE0-31, GB_MACROTILE_MODE0-15) is
   the console's, read on firmware 11.00; its GB_ADDR_CONFIG read back 0,

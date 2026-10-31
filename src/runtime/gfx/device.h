@@ -407,6 +407,9 @@ class Device {
   // and, if `stencil` >= 0, stencil).
   virtual void ClearImage(TextureId t, int level, const Color& c);
   virtual void ClearDepth(DepthId d, float z, int stencil);
+  // Copies `r` of a depth target to the same place in another of its
+  // format (depth and stencil).
+  virtual void CopyDepth(DepthId src, DepthId dst, const Rect& r);
   virtual void DrawProgram(const ProgramDraw& d);
   // Runs at once (with what was drawn before it) when it has read-write
   // buffers, which it writes back before returning.
