@@ -65,7 +65,8 @@ target_link_libraries(recomp_orbis_videoout PUBLIC recomp_orbis_kernel recomp_or
 # The GPU (orbis/gpu): the command processor, beside the CPU, and its
 # shaders' instructions.
 add_library(recomp_orbis_gpu SHARED src/orbis/gpu/cp.cpp src/orbis/gpu/gcn.cpp
-            src/orbis/gpu/shader.cpp src/orbis/gpu/renderer.cpp)
+            src/orbis/gpu/shader.cpp src/orbis/gpu/renderer.cpp
+            src/orbis/gpu/tiling.cpp)
 target_link_libraries(recomp_orbis_gpu PUBLIC recomp_orbis_kernel recomp_gfx)
 # libSceGnmDriver, which submits to the GPU.
 add_library(recomp_orbis_gnm SHARED src/orbis/hle/gnm_driver.cpp)
@@ -90,6 +91,11 @@ add_executable(orbis_gcn_test tests/orbis_gcn_test.cpp)
 target_link_libraries(orbis_gcn_test PRIVATE recomp_orbis_gpu)
 recomp_bundle(orbis_gcn_test)
 add_test(NAME orbis_gcn COMMAND orbis_gcn_test)
+
+add_executable(orbis_tiling_test tests/orbis_tiling_test.cpp)
+target_link_libraries(orbis_tiling_test PRIVATE recomp_orbis_gpu)
+recomp_bundle(orbis_tiling_test)
+add_test(NAME orbis_tiling COMMAND orbis_tiling_test)
 
 # orbis_process_test: tests/e2e (C for FreeBSD x86-64, linked by ld.lld
 # and made SCE ELFs) lifted at build time and run through the loader.

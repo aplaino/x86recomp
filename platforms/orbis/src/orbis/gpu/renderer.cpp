@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "orbis/gpu/shader.h"
+#include "orbis/gpu/tiling.h"
 #include "runtime/log.h"
 #include "x86/runtime.h"
 
@@ -231,21 +232,6 @@ uint64_t Fnv(const uint8_t* p, size_t n) {
   return h;
 }
 
-// Micro tiling (Sea Islands, as AMD's addressing library describes it):
-// 8x8 elements (pixels, or 4x4 blocks of a compressed format) a tile, in
-// the "thin" (non-displayable) order inside it: index bits x0 y0 x1 y1 x2
-// y2. 1D-tiled surfaces lay their tiles out row by row.
-void Detile1dThin(const uint8_t* src, uint8_t* dst, uint32_t w, uint32_t h, uint32_t pitch,
-                  uint32_t bpe, uint32_t dst_row) {
-  const uint32_t tiles_per_row = pitch / 8, tile_bytes = 64 * bpe;
-  for (uint32_t y = 0; y < h; y++)
-    for (uint32_t x = 0; x < w; x++) {
-      const uint32_t i = (x & 1) | (y & 1) << 1 | (x & 2) << 1 | (y & 2) << 2 | (x & 4) << 2 | (y & 4) << 3;
-      const uint64_t at = uint64_t(tile_bytes) * ((y / 8) * tiles_per_row + x / 8) + uint64_t(i) * bpe;
-      std::memcpy(dst + uint64_t(y) * dst_row + uint64_t(x) * bpe, src + at, bpe);
-    }
-}
-
 bool Readable(gaddr a, uint64_t n) {
   return n && g_proc->vm.mem().IsCommitted(a) && g_proc->vm.mem().IsCommitted(a + n - 1);
 }
@@ -290,7 +276,7 @@ gfx::DepthId DepthTargetAt(State& s, gaddr addr, uint32_t w, uint32_t h, Format 
 
 // A T#'s texture: the colour target at its address, else its texels from
 // guest memory (compared once a submission and uploaded when they change).
-// Only level 0 and linear layouts are read as they are yet.
+// Level 0 only, in the tile modes tiling.h reads.
 gfx::TextureId TextureFor(State& s, const ImageRef& ref) {
   const uint32_t* t = ref.t;
   const gaddr addr = (uint64_t(t[0]) | uint64_t(t[1] & 0xFF) << 32) << 8;
@@ -309,16 +295,17 @@ gfx::TextureId TextureFor(State& s, const ImageRef& ref) {
     WarnOnce(3, "texture types other than 2D are not drawn yet (read as black)");
     return 0;
   }
-  // Tile modes (the console's table): 8 and 31 linear, 13 1D-tiled thin;
-  // the others (2D, depth) are read as linear yet.
   const uint32_t tiling = (t[3] >> 20) & 0x1F;
-  const bool tiled1d = tiling == 13;
-  if (tiling != 8 && tiling != 31 && !tiled1d)
-    WarnOnce(4, "2D-tiled and depth-tiled textures are read as linear yet (they look scrambled)");
   const uint32_t pitch = ((t[4] >> 13) & 0x3FFF) + 1;
-  const uint32_t row = gfx::RowPitch(fmt, pitch);
-  const uint32_t rows = tiled1d ? (gfx::RowCount(fmt, h) + 7) & ~7u : gfx::RowCount(fmt, h);
-  const uint64_t bytes = uint64_t(row) * rows;
+  const bool bc = gfx::IsCompressed(fmt);
+  const uint32_t bpe = bc ? gfx::BitsPerPixel(fmt) * 2 : gfx::BitsPerPixel(fmt) / 8;
+  const uint32_t wel = bc ? (w + 3) / 4 : w, pel = bc ? (pitch + 3) / 4 : pitch;
+  const uint32_t hel = gfx::RowCount(fmt, h);
+  const uint64_t bytes = TiledBytes(tiling, pel, hel, bpe);
+  if (!bytes) {
+    WarnOnce(4, "a texture tile mode (rotated, thick, PRT) is not read yet (read as black)");
+    return 0;
+  }
   if (!Readable(addr, bytes)) return 0;
   char k[96];
   std::snprintf(k, sizeof k, "%llx:%u:%u:%u:%u", (unsigned long long)addr, w, h, unsigned(fmt), pitch);
@@ -337,16 +324,9 @@ gfx::TextureId TextureFor(State& s, const ImageRef& ref) {
   }
   e.hash = hash;
   if (!e.tex) return 0;
-  if (tiled1d) {
-    const uint32_t bpe = gfx::IsCompressed(fmt) ? gfx::BitsPerPixel(fmt) * 2 : gfx::BitsPerPixel(fmt) / 8;
-    const uint32_t wel = gfx::IsCompressed(fmt) ? (w + 3) / 4 : w;
-    const uint32_t pel = gfx::IsCompressed(fmt) ? (pitch + 3) / 4 : pitch;
-    std::vector<uint8_t> lin(uint64_t(wel) * bpe * gfx::RowCount(fmt, h));
-    Detile1dThin(p, lin.data(), wel, gfx::RowCount(fmt, h), pel, bpe, wel * bpe);
-    s.dev->UpdateImage(e.tex, 0, 0, {0, 0, int(w), int(h)}, lin.data(), wel * bpe);
-  } else {
-    s.dev->UpdateImage(e.tex, 0, 0, {0, 0, int(w), int(h)}, p, row);
-  }
+  std::vector<uint8_t> lin(uint64_t(wel) * bpe * hel);
+  Detile(tiling, p, lin.data(), wel, hel, pel, bpe, wel * bpe);
+  s.dev->UpdateImage(e.tex, 0, 0, {0, 0, int(w), int(h)}, lin.data(), wel * bpe);
   return e.tex;
 }
 

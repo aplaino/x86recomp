@@ -72,10 +72,12 @@ library.
   and tessellation stages, fans, rectangle and quad lists, indirect draws
   and dispatches, compute image stores, cross-lane instructions
   (ds_swizzle, lane counts), cube, 3D and array textures, mip levels past
-  the first, and textures in tile modes other than linear (8, 31) and 1D
-  thin (13): 2D-tiled (14) and depth-tiled (0) ones need the console's
-  tile mode table and are read as linear. Fast clears through CMASK and
-  HTILE are not modelled; the depth clear of DB_RENDER_CONTROL is.
+  the first, and textures in rotated, thick and PRT tile modes (read as
+  black). The tile mode table (GB_TILE_MODE0-31, GB_MACROTILE_MODE0-15) is
+  the console's, read on firmware 11.00; its GB_ADDR_CONFIG read back 0,
+  and the pipe interleave (256 bytes), pipes (8) and row size (1 KiB) are
+  the firmware's own addressing's (its GL library). Fast clears through
+  CMASK and HTILE are not modelled; the depth clear of DB_RENDER_CONTROL is.
 - recomp_orbis_system also: libScePlayGo (the game is installed in full:
   every chunk local, nothing to do, ETAs 0) and libSceDiscMap (a disc
   game's file locations from its sce_discmap.plt: MD5 of the path below
