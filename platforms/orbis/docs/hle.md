@@ -186,16 +186,23 @@ library.
   signals to the guest) and libScePosix's clock_gettime.
 - The loader (orbis/process.cpp) provides __tls_get_addr.
 
+## Measured on hardware
+Firmware 11.00, a base (not Neo) console, from a payload's process, not
+a game's:
+- The default thread stack (2 MiB) and priority (700), for an
+  initialised attribute and for a thread created without one.
+- The GPU's core clock: 800 MHz.
+- sceKernelGetTscFrequency: the console reports 1,593,756,095 Hz (its
+  CPU clock; rdtsc against the process clock agrees). The HLE reports
+  3 GHz instead, the rate of the core's rdtsc model (lifted.h kTscHz),
+  so the two stay consistent with each other.
+
 ## Not measured on hardware yet
 - sceKernelGetDirectMemorySize: 5 GiB, the commonly documented game
-  budget.
-- The default thread stack (2 MiB, FreeBSD's) and priority (700).
-- sceKernelGetTscFrequency: 3 GHz, the rate of the core's rdtsc model
-  (lifted.h kTscHz); the console's own TSC runs at its CPU clock.
+  budget. A payload's process reads 768 MiB, its own budget.
 - The signed-in user's id and name.
 - The display's refresh (60 Hz) and the flip event's data below bit 16.
-- The GPU's clocks for timestamps (the 100 MHz reference clock, the
-  800 MHz core clock).
+- The GPU's 100 MHz reference clock for timestamps.
 - libScePad's touch pad (44.86 dots/mm, 1920 x 943) and stick dead
   zones (13).
 - PlayGo's chunk count (every id below 1000 is accepted) and its
