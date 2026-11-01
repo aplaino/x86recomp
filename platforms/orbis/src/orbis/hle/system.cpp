@@ -20,7 +20,7 @@ enum : int {
 };
 constexpr uint64_t kSystemServiceErrorParameter = 0x80A10003;
 
-constexpr int kUserId = 1;  // the one signed-in user
+constexpr int kUserId = 0x10000000;  // the one signed-in user, as the console numbers its first
 constexpr uint64_t kUserServiceErrorAlreadyInitialized = 0x80960002;
 constexpr uint64_t kUserServiceErrorNoSuchUser = 0x80960009;
 

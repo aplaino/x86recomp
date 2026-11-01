@@ -35,7 +35,7 @@ constexpr uint32_t kMountCreated = 1;
 constexpr int kMaxMounts = 16;
 constexpr uint64_t kMinBlocks = 96;
 constexpr size_t kParamSize = 0x530;  // SceSaveDataParam
-constexpr uint32_t kUser = 1;         // the one user (libSceUserService)
+constexpr uint32_t kUser = 0x10000000;  // the one user (libSceUserService)
 
 struct Mounted {
   std::string dir, guest;
@@ -46,8 +46,8 @@ std::mutex g_mu;
 bool g_init = false;
 Mounted* g_mounts[kMaxMounts] = {};
 
-std::string Root(uint32_t user) { return recomp::DataDir() + "/savedata/" + std::to_string(user); }
-std::string Root() { return Root(kUser); }
+// The host folder is named for the user's slot (the first), not the id.
+std::string Root() { return recomp::DataDir() + "/savedata/1"; }
 
 bool Zero(recomp::gaddr p, size_t n) {
   for (size_t i = 0; i < n; i++)

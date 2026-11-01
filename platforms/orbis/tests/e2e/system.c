@@ -86,6 +86,7 @@ int sceNgs2VoiceGetState(unsigned long voice, void* state, unsigned long size);
 int sceNgs2SystemRender(unsigned long sys, const void* buffers, unsigned count);
 
 #define SCE_ETIMEDOUT 0x8002003C
+#define USER 0x10000000  // the one signed-in user (sceUserServiceGetInitialUser)
 
 // ---- fibers: a ping-pong between two, each on its own stack.
 
@@ -291,7 +292,7 @@ typedef struct {
 static int save_checks(void) {
   int failed = 0;
   failed += test_check(110, sceSaveDataInitialize(0), 0);
-  SaveMount m = {1, 0, 0, "SAVE0001", 0, 96, 2 | 4};  // read-write, create
+  SaveMount m = {USER, 0, 0, "SAVE0001", 0, 96, 2 | 4};  // read-write, create
   SaveMountResult r = {0};
   failed += test_check(111, sceSaveDataMount(&m, &r), 0);
   failed += test_check(112, streq(r.mount_point, "/savedata0") && r.status == 1, 1);
@@ -319,7 +320,7 @@ static int save_checks(void) {
     const char* dir;
     unsigned key, order;
     char reserved[32];
-  } cond = {1, 0, 0, "SAVE%", 0, 0};
+  } cond = {USER, 0, 0, "SAVE%", 0, 0};
   char names[4][32];
   unsigned char params[4][0x530];
   struct {
@@ -340,7 +341,7 @@ static int save_checks(void) {
     const char* dir;
     unsigned unused;
     char reserved[32];
-  } del = {1, 0, 0, "SAVE0001"};
+  } del = {USER, 0, 0, "SAVE0001"};
   failed += test_check(125, sceSaveDataDelete(&del), 0);
   failed += test_check(126, (unsigned)sceSaveDataDelete(&del), 0x809F0008);  // not found
   m.mode = 2;
@@ -375,9 +376,9 @@ static int pad_checks(void) {
   int failed = 0;
   unsigned char data[2][0x80];
   failed += test_check(140, scePadInit(), 0);
-  const int h = scePadOpen(1, 0, 0, 0);
+  const int h = scePadOpen(USER, 0, 0, 0);
   failed += test_check(141, h, 1);
-  failed += test_check(142, (unsigned)scePadOpen(1, 0, 0, 0), 0x80920004);  // opened already
+  failed += test_check(142, (unsigned)scePadOpen(USER, 0, 0, 0), 0x80920004);  // opened already
   failed += test_check(143, (unsigned)scePadRead(h, data, 0), 0x80920001);
   failed += test_check(144, scePadRead(h, data, 2), 1);
   failed += test_check(145, *(unsigned*)data[0] == 0 && data[0][4] == 0x80 && data[0][7] == 0x80 &&
@@ -390,7 +391,7 @@ static int pad_checks(void) {
 
 static int trophy_checks(void) {
   int failed = 0, ctx = 0, h = 0, platinum = 0;
-  failed += test_check(150, sceNpTrophyCreateContext(&ctx, 1, 0, 0), 0);
+  failed += test_check(150, sceNpTrophyCreateContext(&ctx, USER, 0, 0), 0);
   failed += test_check(151, sceNpTrophyCreateHandle(&h), 0);
   failed += test_check(152, sceNpTrophyRegisterContext(ctx, h, 0), 0);
   failed += test_check(153, sceNpTrophyUnlockTrophy(ctx, h, 3, &platinum), 0);

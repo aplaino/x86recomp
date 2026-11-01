@@ -44,7 +44,7 @@ constexpr int32_t kErrInvalidEventQueue = int32_t(0x8029000C);
 constexpr int kHandle = 1;  // the main port's
 constexpr int kBuffers = 16;
 constexpr int16_t kFilterVideoOut = -13;
-constexpr uint64_t kFlipIdent = (uint64_t(6) << 48) | (uint64_t(kHandle) << 40);
+constexpr uint64_t kFlipIdent = uint64_t(6) << 48;
 
 // Pixel formats.
 constexpr uint32_t kA8R8G8B8Srgb = 0x80000000;
@@ -65,7 +65,7 @@ struct Flip {
 
 struct Port {
   bool open = false;
-  uint32_t rate = 0;  // 0: 60 Hz, 1: 30, 2: 20
+  uint32_t rate = 0;  // 0: every vblank, 1: every second, 2: every third
   gaddr buffers[kBuffers] = {};
   Attr attrs[kBuffers] = {};
   gaddr labels = 0;
@@ -153,13 +153,12 @@ show:
   hle::PresentFrame(*p.dev, w, h);
 }
 
-// Vblanks at 60 Hz; a flip queued before one runs at it if the flip rate
-// allows, on the host thread.
+// Vblanks at 59.94 Hz (60000/1001, a console's 1080p output); a flip
+// queued before one runs at it if the flip rate allows, on the host thread.
 void VblankThread() {
-  auto next = Clock::now();
+  const auto start = Clock::now();
   for (uint64_t vblank = 1;; vblank++) {
-    next += std::chrono::nanoseconds(1000000000 / 60);
-    std::this_thread::sleep_until(next);
+    std::this_thread::sleep_until(start + std::chrono::nanoseconds(vblank * 1001000000 / 60000));
     std::lock_guard<std::mutex> l(g_mu);
     if (g_port.queue.empty() || vblank % (g_port.rate + 1)) continue;
     // The GPU first finishes what was submitted before the flip, as it
@@ -251,7 +250,8 @@ ORBIS_HLE("libSceVideoOut", sceVideoOutSetBufferAttribute, 7) {
   return 0;
 }
 
-// int sceVideoOutSetFlipRate(int handle, int rate): 0 60 Hz, 1 30 Hz, 2 20 Hz.
+// int sceVideoOutSetFlipRate(int handle, int rate): 0 59.94 Hz, 1 29.97 Hz,
+// 2 19.98 Hz.
 ORBIS_HLE("libSceVideoOut", sceVideoOutSetFlipRate, 2) {
   std::lock_guard<std::mutex> l(g_mu);
   if (int(Arg(c, 0)) != kHandle || !g_port.open) return uint32_t(kErrInvalidHandle);

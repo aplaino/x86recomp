@@ -23,6 +23,7 @@ using recomp::gaddr;
 constexpr uint32_t kErrInvalidArg = 0x80920001, kErrInvalidHandle = 0x80920003,
                    kErrAlreadyOpened = 0x80920004, kErrNotInitialized = 0x80920005;
 constexpr int32_t kHandle = 1;  // the user's standard controller
+constexpr int32_t kUser = 0x10000000;  // the one user (libSceUserService)
 constexpr size_t kDataSize = 0x80;
 
 enum : uint32_t {
@@ -151,7 +152,7 @@ ORBIS_HLE("libScePad", scePadOpen, 4) {
   const uint32_t type = uint32_t(Arg(c, 1));
   if (type > 0x10 || !((0x10005u >> type) & 1) || (type == 0x10 && int32_t(Arg(c, 0)) != 0xFF))
     return kErrInvalidArg;
-  if (type != 0 || int32_t(Arg(c, 2)) != 0 || int32_t(Arg(c, 0)) != 1)
+  if (type != 0 || int32_t(Arg(c, 2)) != 0 || int32_t(Arg(c, 0)) != kUser)
     recomp::FatalF("scePadOpen: user %d type %u index %d not implemented yet", int32_t(Arg(c, 0)),
                    type, int32_t(Arg(c, 2)));
   if (g_open) return kErrAlreadyOpened;
@@ -236,7 +237,8 @@ ORBIS_HLE("libScePad", scePadSetTiltCorrectionState, 2) {
 
 // int scePadGetControllerInformation(int handle,
 // ScePadControllerInformation* info): a DualShock 4's touch pad (44.86
-// dots per mm, 1920 x 943) and stick dead zones, connected locally.
+// dots per mm, 1920 x 942) and stick dead zones, connected locally, as a
+// console reports them.
 ORBIS_HLE("libScePad", scePadGetControllerInformation, 2) {
   std::lock_guard<std::mutex> l(g_mu);
   if (!g_init) return kErrNotInitialized;
@@ -246,7 +248,7 @@ ORBIS_HLE("libScePad", scePadGetControllerInformation, 2) {
   std::memset(recomp::GPtr(p), 0, 0x1C);
   PutF(p, 44.86f);
   recomp::Wr16(p + 4, 1920);
-  recomp::Wr16(p + 6, 943);
+  recomp::Wr16(p + 6, 942);
   recomp::GPtr(p)[8] = 13;  // dead zones
   recomp::GPtr(p)[9] = 13;
   recomp::GPtr(p)[10] = 0;   // local connection

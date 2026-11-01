@@ -59,9 +59,10 @@ struct RwLock {
   uint32_t readers = 0;
 };
 
-// FreeBSD's default thread stack (not measured on hardware) and libkernel's
-// default priority.
-constexpr uint64_t kDefaultStack = 2u << 20;
+// The default thread stack and priority in a game's process (measured on
+// firmware 11.00: an initialised attribute and a thread created without
+// one; a payload's process gets 2 MiB).
+constexpr uint64_t kDefaultStack = 64u << 10;
 constexpr int kDefaultPrio = 700;
 
 struct ThreadAttr {

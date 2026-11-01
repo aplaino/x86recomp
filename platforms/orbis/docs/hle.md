@@ -187,24 +187,33 @@ library.
 - The loader (orbis/process.cpp) provides __tls_get_addr.
 
 ## Measured on hardware
-Firmware 11.00, a base (not Neo) console, from a payload's process, not
-a game's:
-- The default thread stack (2 MiB) and priority (700), for an
-  initialised attribute and for a thread created without one.
-- The GPU's core clock: 800 MHz.
+Firmware 11.00, a base (not Neo) console, in a game's process unless
+noted:
+- sceKernelGetDirectMemorySize: 4.5 GiB (0x120000000). A payload's
+  process reads 768 MiB, its own budget.
+- The default thread stack (64 KiB) and priority (700), for an
+  initialised attribute and for a thread created without one. A
+  payload's process gets 2 MiB.
+- The signed-in user's id: 0x10000000. The HLE keeps that user's save
+  data in the host folder savedata/1.
+- The display: 1920 x 1080 at 59.94 Hz. The flip event's ident is
+  6 << 48 (no handle bits) and its data the flip's argument from bit 16
+  and 1 in bits 12-15.
+- libScePad's touch pad (44.86 dots/mm, 1920 x 942) and stick dead zones
+  (13), a DualShock 4 connected locally.
+- The GPU's core clock: 800 MHz (in a payload's process).
 - sceKernelGetTscFrequency: the console reports 1,593,756,095 Hz (its
   CPU clock; rdtsc against the process clock agrees). The HLE reports
   3 GHz instead, the rate of the core's rdtsc model (lifted.h kTscHz),
   so the two stay consistent with each other.
 
 ## Not measured on hardware yet
-- sceKernelGetDirectMemorySize: 5 GiB, the commonly documented game
-  budget. A payload's process reads 768 MiB, its own budget.
-- The signed-in user's id and name.
-- The display's refresh (60 Hz) and the flip event's data below bit 16.
+- The user's name.
+- The flip event's data below bit 12 (it varies on the console; the HLE
+  gives 0).
+- The handles' values (the console's video out and pad handles are not
+  small numbers; the HLE's are 1).
 - The GPU's 100 MHz reference clock for timestamps.
-- libScePad's touch pad (44.86 dots/mm, 1920 x 943) and stick dead
-  zones (13).
 - PlayGo's chunk count (every id below 1000 is accepted; a package's
   count is in its playgo-chunk.dat, package entry 0x1001, which a copy of
   app0 does not hold), what an id past it returns, and the default

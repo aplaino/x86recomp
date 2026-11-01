@@ -61,9 +61,9 @@ gaddr Map(gaddr addr, uint64_t len, int prot, bool fixed, bool no_overwrite) {
   return at;
 }
 
-// The pool's size: the 5 GiB commonly documented as a game's direct
-// memory budget (not measured on hardware yet).
-constexpr uint64_t kDirectMemorySize = 5ull << 30;
+// The pool's size: a game's direct memory on a base console (4.5 GiB,
+// measured on firmware 11.00 in a game's process).
+constexpr uint64_t kDirectMemorySize = 0x120000000;
 
 struct DirectBlock {
   uint64_t len;
