@@ -1679,6 +1679,7 @@ void r_color0(inout vec4 c) {
     pc.instances = d.instance_count;
     pc.blend_constant = {d.state.blend_constant.r, d.state.blend_constant.g,
                          d.state.blend_constant.b, d.state.blend_constant.a};
+    draw_spans_.clear();
     RecordStage(pc.stage[0], pr.vs, d.vs, true);
     RecordStage(pc.stage[1], pr.fs, d.fs, true);
     c.program = int(program_cmds_.size());
@@ -3250,14 +3251,38 @@ void r_color0(inout vec4 c) {
       std::vector<uint32_t> table(4 * size_t(st.buffers), 0);
       for (uint32_t b = 0; b < st.buffers; b++) {
         if (pmem_.size() + r.buffers[b].size > kMaxArena) FatalF("gfx: a draw's buffers pass the arena");
-        table[4 * b] = uint32_t(pmem_.size() / 4);
+        table[4 * b] = uint32_t(DrawBuffer(r.buffers[b]) / 4);
         table[4 * b + 1] = r.buffers[b].size;
-        AppendWords(pmem_, r.buffers[b].data, r.buffers[b].size);
       }
       sc.storage = true;
       AppendUniform(sc, table.data(), uint32_t(table.size() * 4));
     }
     if (st.uniform_bytes) AppendUniform(sc, r.uniforms, st.uniform_bytes);
+  }
+
+  // A draw's buffer in the arena: its byte offset there. Buffers that
+  // overlap one copied earlier in the same draw (a vertex buffer's
+  // interleaved streams, each bound from its own offset) share its copy:
+  // inside it, they are found there; past its end, if it is the arena's
+  // last, it grows by what they add.
+  size_t DrawBuffer(const BufferData& bd) {
+    const auto* p = static_cast<const uint8_t*>(bd.data);
+    if (p && bd.size) {
+      for (DrawSpan& sp : draw_spans_) {
+        if (p < sp.p || (p - sp.p) % 4) continue;
+        const size_t off = size_t(p - sp.p), end = off + bd.size;
+        if (end <= sp.n) return sp.at + off;
+        if (off > sp.n || sp.at + ((sp.n + 3) & ~size_t(3)) != pmem_.size()) continue;
+        pmem_.resize(sp.at + ((end + 3) & ~size_t(3)), 0);
+        std::memcpy(pmem_.data() + sp.at + sp.n, sp.p + sp.n, end - sp.n);
+        sp.n = end;
+        return sp.at + off;
+      }
+    }
+    const size_t at = pmem_.size();
+    AppendWords(pmem_, bd.data, bd.size);
+    if (p && bd.size) draw_spans_.push_back({p, at, bd.size});
+    return at;
   }
 
   void AppendUniform(ProgramStageCmd& sc, const void* data, uint32_t len) {
@@ -3545,6 +3570,12 @@ void r_color0(inout vec4 c) {
   std::map<ProgramSamplerKey, SDL_GPUSampler*> program_samplers_;
   std::vector<ProgramCmd> program_cmds_;
   std::vector<uint8_t> pmem_;
+  struct DrawSpan {
+    const uint8_t* p;  // guest memory copied
+    size_t at;         // its offset in pmem_
+    size_t n;          // bytes
+  };
+  std::vector<DrawSpan> draw_spans_;  // the current draw's (DrawBuffer)
   SDL_GPUBuffer* pbuf_ = nullptr;
   SDL_GPUBuffer* cro_ = nullptr;
   SDL_GPUBuffer* crw_ = nullptr;
