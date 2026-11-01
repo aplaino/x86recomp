@@ -522,9 +522,9 @@ struct Translator {
   }
   // A float result with VOP3's output modifier and clamp.
   std::string FOut(std::string f, uint32_t omod, bool clamp) {
-    if (omod == 1) f = "(" + f + " * 2.0)";
-    else if (omod == 2) f = "(" + f + " * 4.0)";
-    else if (omod == 3) f = "(" + f + " * 0.5)";
+    if (omod == 1) f = "((" + f + ") * 2.0)";
+    else if (omod == 2) f = "((" + f + ") * 4.0)";
+    else if (omod == 3) f = "((" + f + ") * 0.5)";
     if (clamp) f = "clamp(" + f + ", 0.0, 1.0)";
     return Bits(f);
   }
