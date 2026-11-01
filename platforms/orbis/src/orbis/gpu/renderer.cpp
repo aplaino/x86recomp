@@ -161,6 +161,7 @@ struct Target {
   Format fmt;
   gfx::TextureId tex;
   bool storage;  // also a compute stage's storage image
+  uint32_t swap;  // CB_COLORn_INFO's COMP_SWAP (the image is in the shader's order)
 };
 // A copy of a target's top-left corner at the size a T# samples it with
 // (targets are as large as their pitch and slice, or DB_DEPTH_SIZE, which
@@ -227,9 +228,10 @@ bool Readable(gaddr a, uint64_t n) {
 }
 
 gfx::TextureId ColorTarget(State& s, gaddr addr, uint32_t w, uint32_t h, Format fmt,
-                           bool storage = false) {
+                           uint32_t swap, bool storage = false) {
   for (Target& t : s.targets)
-    if (t.addr == addr && t.w == w && t.h == h && t.fmt == fmt && (t.storage || !storage))
+    if (t.addr == addr && t.w == w && t.h == h && t.fmt == fmt && t.swap == swap &&
+        (t.storage || !storage))
       return t.tex;
   // A different target at that address (or one compute cannot write)
   // replaces the old one.
@@ -255,7 +257,7 @@ gfx::TextureId ColorTarget(State& s, gaddr addr, uint32_t w, uint32_t h, Format 
   d.storage = storage;
   const gfx::TextureId tex = s.dev->CreateImage(d);
   if (tex) s.dev->ClearImage(tex, 0, {0, 0, 0, 0});
-  s.targets.push_back({addr, w, h, fmt, tex, storage});
+  s.targets.push_back({addr, w, h, fmt, tex, storage, swap});
   return tex;
 }
 
@@ -326,6 +328,29 @@ void HtileWritten(State& s, gaddr base, uint64_t size) {
     for (uint64_t i = 0; clear && i + 4 <= size; i += 4) clear = !(p[i] & 0xF);
     if (clear) d.htile_clear = true;
     else WarnOnce(17, "an HTILE write other than a full depth clear is not modelled");
+  }
+}
+
+// A colour target holds its components in the shader's order; in memory
+// COMP_SWAP orders them, and a T#'s destination selects pick memory
+// components. A stage's T#s of targets with a swap get selects of the
+// components the image holds (and its key a note of them).
+void TargetSelects(const State& s, Resolved& r) {
+  // The shader component in each memory component: STD (RGBA), ALT
+  // (BGRA), STD_REV (ABGR), ALT_REV (ARGB).
+  static const uint32_t kOrder[4][4] = {{0, 1, 2, 3}, {2, 1, 0, 3}, {3, 2, 1, 0}, {3, 0, 1, 2}};
+  for (size_t i = 0; i < r.images.size(); i++) {
+    uint32_t* t = r.images[i].t;
+    const auto tg = std::find_if(s.targets.begin(), s.targets.end(),
+                                 [&](const Target& g) { return g.addr == ImageBase(t); });
+    if (r.images[i].storage || tg == s.targets.end() || !tg->swap) continue;
+    uint32_t sel = 0;
+    for (int c = 0; c < 4; c++) {
+      const uint32_t d = (t[3] >> (3 * c)) & 7;
+      sel |= (d < 4 ? d : 4 + kOrder[tg->swap][d - 4]) << (3 * c);
+    }
+    t[3] = (t[3] & ~0xFFFu) | sel;
+    r.key += "|t" + std::to_string(i) + ':' + std::to_string(tg->swap);
   }
 }
 
@@ -524,7 +549,7 @@ gfx::TextureId StorageImage(State& s, const ImageRef& ref) {
     WarnOnce(5, "a compute image store is not drawn yet (not 2D, past level 0, or its format)");
     return 0;
   }
-  return ColorTarget(s, addr, w, h, fmt, true);
+  return ColorTarget(s, addr, w, h, fmt, 0, true);
 }
 
 // The device's view of a stage's resolved resources: its buffers, its
@@ -590,6 +615,11 @@ StageState PixelState(const Regs& r) {
   std::memcpy(ps.ps_input_cntl, r.context + kPsInputCntl, sizeof ps.ps_input_cntl);
   ps.z_format = r.context[kZFormat];
   ps.col_format = r.context[kColFormat];
+  for (uint32_t i = 0; i < 8; i++) {
+    const uint32_t info = r.context[kCbColor0Base + 0xF * i + 4], cf = (info >> 2) & 0x1F;
+    const uint32_t n = cf == 1 || cf == 2 || cf == 4 ? 1 : cf == 3 || cf == 5 || cf == 11 ? 2 : 0;
+    if (n && (info >> 11) & 3) ps.col_swap |= (n << 2 | ((info >> 11) & 3)) << (4 * i);
+  }
   return ps;
 }
 
@@ -673,6 +703,8 @@ bool SetUpGeometry(State& s, const Regs& r, const DrawCall& call, Resolved& rv, 
   g->gs = ShaderState(r, Stage::Geometry, kPgmLoGs);
   g->re = Resolve(g->es);
   g->rg = Resolve(g->gs);
+  TargetSelects(s, g->re);
+  TargetSelects(s, g->rg);
   const std::string& err = !g->re.error.empty() ? g->re.error : g->rg.error;
   if (!err.empty()) {
     WarnOnce(13, ("a geometry shader stage cannot run yet (draws skipped): " + err).c_str());
@@ -841,7 +873,14 @@ void Draw(const Regs& r, const DrawCall& call) {
     }
     const uint32_t pitch = ((cb[1] & 0x7FF) + 1) * 8;
     const uint32_t height = uint32_t((uint64_t(cb[2] & 0x3FFFFF) + 1) * 64 / pitch);
-    d.targets[i] = {ColorTarget(s, uint64_t(cb[0]) << 8, pitch, height, fmt), 0};
+    // COMP_SWAP: a target of four components keeps the shader's order
+    // (TargetSelects), one of fewer memory order (the pixel shader's
+    // export, ExportOrder).
+    const uint32_t swap = (cb[4] >> 11) & 3, cf = (cb[4] >> 2) & 0x1F;
+    const bool four = cf == 9 || cf == 10 || cf == 12 || cf == 14;
+    if (swap && cf == 7)
+      WarnOnce(18, "a colour target's component swap is not drawn yet (three components)");
+    d.targets[i] = {ColorTarget(s, uint64_t(cb[0]) << 8, pitch, height, fmt, four ? swap : 0), 0};
     ntargets++;
   }
   const uint32_t zfmt = cx[kDbZInfo] & 3;
@@ -879,6 +918,7 @@ void Draw(const Regs& r, const DrawCall& call) {
   // Shaders.
   StageState vs = ShaderState(r, Stage::Vertex, kPgmLoVs), ps = PixelState(r);
   Resolved rv = Resolve(vs);
+  TargetSelects(s, rv);
   if (!rv.error.empty()) {
     WarnOnce(8, ("a vertex shader cannot run yet (draws skipped): " + rv.error).c_str());
     return;
@@ -890,6 +930,7 @@ void Draw(const Regs& r, const DrawCall& call) {
   Resolved rp;
   if (ps.code) {
     rp = Resolve(ps);
+    TargetSelects(s, rp);
     if (!rp.error.empty()) {
       WarnOnce(9, ("a pixel shader cannot run yet (draws skipped): " + rp.error).c_str());
       return;
@@ -982,8 +1023,13 @@ void Draw(const Regs& r, const DrawCall& call) {
       b.alpha_op = b.color_op;
       b.dst_alpha = b.dst_color;
     }
-    b.write_mask = uint8_t((mask >> (4 * i)) & 0xF);
+    int from[4];
+    ExportOrder(ps.col_swap, uint32_t(i), from);
+    b.write_mask = 0;
+    for (int c = 0; c < 4; c++) b.write_mask |= ((mask >> (4 * i + from[c])) & 1) << c;
     if (!(pr.ps.mrt_mask & (1u << i))) b.write_mask = 0;
+    if (b.enable && from[0] == 3 && (bc & (1u << 29)))
+      WarnOnce(19, "blending into an alpha-only target is not drawn as the console does");
   }
   ps_.blend_constant = {AsFloat(cx[kCbBlendRed]), AsFloat(cx[kCbBlendRed + 1]),
                         AsFloat(cx[kCbBlendRed + 2]), AsFloat(cx[kCbBlendRed + 3])};
@@ -1040,6 +1086,7 @@ void Dispatch(const Regs& r, const uint32_t groups[3]) {
   std::memcpy(cs.user, r.sh + kComputeUser, sizeof cs.user);
   for (int i = 0; i < 3; i++) cs.threads[i] = r.sh[kComputeThreads + i] & 0x3FF;
   Resolved rc = Resolve(cs);
+  TargetSelects(s, rc);
   if (!rc.error.empty()) {
     WarnOnce(11, ("a compute shader cannot run yet (dispatches skipped): " + rc.error).c_str());
     return;

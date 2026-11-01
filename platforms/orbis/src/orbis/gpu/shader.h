@@ -45,9 +45,10 @@ struct StageState {
   uint32_t rsrc1 = 0, rsrc2 = 0;
   uint32_t user[16] = {};
   // Pixel: SPI_PS_INPUT_ENA, SPI_PS_INPUT_ADDR, SPI_PS_INPUT_CNTL_0-31,
-  // SPI_SHADER_COL_FORMAT and SPI_SHADER_Z_FORMAT.
+  // SPI_SHADER_COL_FORMAT and SPI_SHADER_Z_FORMAT; per target, 4 bits:
+  // the COMP_SWAP of one of one or two components (bits 2-3: how many).
   uint32_t ps_input_ena = 0, ps_input_addr = 0, ps_input_cntl[32] = {};
-  uint32_t col_format = 0, z_format = 0;
+  uint32_t col_format = 0, z_format = 0, col_swap = 0;
   // Compute: COMPUTE_NUM_THREAD_X/Y/Z.
   uint32_t threads[3] = {1, 1, 1};
   // Export and Geometry passes: their invocations (a draw's vertices, its
@@ -105,8 +106,11 @@ Translated Translate(const StageState& st, const Resolved& r);
 // it emits (bit 0 set: emitted; bit 1: a strip starts with it).
 std::vector<uint32_t> Uniforms(const StageState& st, const Resolved& r);
 
-// A T#'s format (IMG_DATA_FORMAT, IMG_NUM_FORMAT, BGRA by its destination
-// selects) as a device format; false for one not drawn yet.
+// The shader component in each of a target's components (col_swap): a
+// target of one or two components holds them in memory order.
+void ExportOrder(uint32_t col_swap, uint32_t target, int from[4]);
+// A T#'s format (IMG_DATA_FORMAT, IMG_NUM_FORMAT), its components in
+// memory order, as a device format; false for one not drawn yet.
 bool TextureFormat(const uint32_t t[8], gfx::Format* out);
 // The GLSL format qualifier of a storage image of format f; null for one
 // not written yet.

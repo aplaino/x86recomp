@@ -72,6 +72,11 @@ library.
   a depth target drawn one DB_DEPTH_VIEW slice at a time, or sampled
   through an array T#, becomes a 2D array of as many slices as used),
   textures read from guest memory once a submission when they change.
+  A colour target of four components holds them in the shader's order
+  and a T# of it reads them through its COMP_SWAP; one of one or two holds
+  them in memory order (the pixel shader exports what COMP_SWAP puts
+  there, blending such an alpha-only target uses the colour equation); a
+  swap of three components is not modelled.
   Compute image stores write such a target at the image's address (2D,
   level 0), so draws sample what compute stored. CLEAR_STATE loads the Sea
   Islands clear state's scissors, masks and depth ranges (AMD's published

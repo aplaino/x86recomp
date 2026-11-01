@@ -984,18 +984,19 @@ struct Translator {
     if (st.stage == Stage::Pixel) {
       if (target < 8) {
         const uint32_t fmt = (st.col_format >> (4 * target)) & 0xF;
-        if (compr && fmt != 4) {
-          if (fmt == 5) {
-            Line("r_color" + std::to_string(target) + " = vec4(unpackUnorm2x16(" + v[0] + "), unpackUnorm2x16(" + v[1] + "));");
-            mrts.insert(target);
-          } else {
-            Fail(pc, "a packed export format not translated yet");
-          }
+        if (compr && fmt == 5) {
+          for (int i = 0; i < 4; i++)
+            c[i] = "unpackUnorm2x16(" + v[i / 2] + ")." + "xy"[i % 2];
+        }
+        if (compr && fmt != 4 && fmt != 5) {
+          Fail(pc, "a packed export format not translated yet");
         } else {
+          int from[4];
+          ExportOrder(st.col_swap, target, from);
           mrts.insert(target);
           for (int i = 0; i < 4; i++)
-            if (compr || (en & (1u << i)))
-              Line("r_color" + std::to_string(target) + "[" + std::to_string(i) + "] = " + c[i] + ";");
+            if (compr || (en & (1u << from[i])))
+              Line("r_color" + std::to_string(target) + "[" + std::to_string(i) + "] = " + c[from[i]] + ";");
         }
       } else if (target == 8) {
         depth = true;
@@ -1704,7 +1705,8 @@ Resolved Resolve(const StageState& st) {
   // words, each memory instruction's binding and the formats it reads or writes.
   std::string& k = rv.r.key;
   const uint32_t head[] = {uint32_t(st.stage), st.rsrc1, st.rsrc2, st.ps_input_addr,
-                           st.col_format, st.z_format, st.threads[0], st.threads[1], st.threads[2]};
+                           st.col_format, st.z_format, st.col_swap, st.threads[0], st.threads[1],
+                           st.threads[2]};
   k = Hex(head, sizeof head);
   if (st.stage == Stage::Pixel) k += Hex(st.ps_input_cntl, sizeof st.ps_input_cntl);
   for (auto& [pc, in] : rv.code.at) {
@@ -1733,7 +1735,7 @@ Translated Translate(const StageState& st, const Resolved& r) {
     t.error = rv.r.error;
     return t;
   }
-  (void)r;
+  rv.r.images = r.images;  // the caller's (its destination selects can differ)
   Translator tr(st, rv);
   if (!tr.Run(&t)) {
     t.error = tr.error;
@@ -1784,12 +1786,21 @@ std::vector<uint32_t> Uniforms(const StageState& st, const Resolved& r) {
   return u;
 }
 
-// A texture's format from a T# (IMG_DATA_FORMAT, IMG_NUM_FORMAT); BGRA
-// (destination selects Z, Y, X, W) as the B8G8R8A8 formats.
+void ExportOrder(uint32_t col_swap, uint32_t target, int from[4]) {
+  // Memory X (and Y) by COMP_SWAP: STD R (RG), ALT G (RA), STD_REV B
+  // (GR), ALT_REV A (AR).
+  static const int kOne[4] = {0, 1, 2, 3}, kTwo[4][2] = {{0, 1}, {0, 3}, {1, 0}, {3, 0}};
+  const uint32_t sw = (col_swap >> (4 * target)) & 0xF, swap = sw & 3;
+  for (int i = 0; i < 4; i++) from[i] = i;
+  if (sw >> 2 == 1) from[0] = kOne[swap];
+  if (sw >> 2 == 2) from[0] = kTwo[swap][0], from[1] = kTwo[swap][1];
+}
+
+// A texture's format from a T# (IMG_DATA_FORMAT, IMG_NUM_FORMAT), its
+// components in memory order (the destination selects reorder them).
 bool TextureFormat(const uint32_t t[8], gfx::Format* out) {
   using F = gfx::Format;
   const uint32_t dfmt = (t[1] >> 20) & 0x3F, nfmt = (t[1] >> 26) & 0xF;
-  const bool bgra = (t[3] & 0xFFF) == (6 | 5 << 3 | 4 << 6 | 7 << 9);
   const bool un = nfmt == 0, fl = nfmt == 7, srgb = nfmt == 9, ui = nfmt == 4, si = nfmt == 5;
   switch (dfmt) {
     case 1: if (un) return *out = F::R8, true; if (ui) return *out = F::R8Uint, true; break;
@@ -1803,8 +1814,8 @@ bool TextureFormat(const uint32_t t[8], gfx::Format* out) {
     case 7: if (fl) return *out = F::R11G11B10F, true; break;
     case 9: if (un) return *out = F::R10G10B10A2, true; break;
     case 10:
-      if (un) return *out = bgra ? F::A8R8G8B8 : F::R8G8B8A8, true;
-      if (srgb) return *out = bgra ? F::B8G8R8A8Srgb : F::R8G8B8A8Srgb, true;
+      if (un) return *out = F::R8G8B8A8, true;
+      if (srgb) return *out = F::R8G8B8A8Srgb, true;
       if (nfmt == 1) return *out = F::R8G8B8A8Snorm, true;
       if (ui) return *out = F::R8G8B8A8Uint, true;
       break;
