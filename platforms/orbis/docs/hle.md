@@ -93,9 +93,12 @@ library.
   the console's, read on firmware 11.00; its GB_ADDR_CONFIG read back 0,
   and the pipe interleave (256 bytes), pipes (8) and row size (1 KiB) are
   the firmware's own addressing's (its GL library). Stencil REPLACE_OP
-  writes the test value, not DB_STENCILREFMASK's op value. Fast clears
-  through CMASK and HTILE are not modelled; the depth clear of
-  DB_RENDER_CONTROL is.
+  writes the test value, not DB_STENCILREFMASK's op value. Colour fast
+  clears through CMASK are not modelled. A depth target's HTILE (one that
+  tracks depth alone) written in full as cleared, every tile's ZMASK 0,
+  by a dispatch or DMA_DATA, clears the target to DB_DEPTH_CLEAR at its
+  next draw; other HTILE writes are not modelled. The depth clear of
+  DB_RENDER_CONTROL is modelled.
 - recomp_orbis_system also: libScePlayGo (the game is installed in full:
   every chunk local, nothing to do, ETAs 0) and libSceDiscMap (a disc
   game's file locations from its sce_discmap.plt: MD5 of the path below

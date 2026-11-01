@@ -24,16 +24,16 @@ namespace {
 using gfx::Format;
 
 // Context registers.
-constexpr uint32_t kDbRenderControl = 0x000, kDbDepthView = 0x002, kDbZInfo = 0x010,
-                   kDbStencilInfo = 0x011, kDbZReadBase = 0x012, kDbStencilReadBase = 0x013,
+constexpr uint32_t kDbRenderControl = 0x000, kDbDepthView = 0x002, kDbHtileDataBase = 0x005,
+                   kDbZInfo = 0x010, kDbStencilInfo = 0x011, kDbZReadBase = 0x012, kDbStencilReadBase = 0x013,
                    kDbDepthSize = 0x016,
                    kDbDepthClear = 0x00B, kDbStencilClear = 0x00A, kScreenScissorTl = 0x00C,
                    kWindowScissorTl = 0x081, kGenericScissorTl = 0x090, kVportScissorTl = 0x094, kCbTargetMask = 0x08E,
                    kCbBlendRed = 0x105, kDbStencilControl = 0x10B, kDbStencilRefMask = 0x10C,
                    kVportXScale = 0x10F, kPsInputCntl = 0x191,
                    kPsInputEna = 0x1B3, kPsInputAddr = 0x1B4, kZFormat = 0x1C4, kColFormat = 0x1C5,
-                   kBlendControl = 0x1E0, kDbDepthControl = 0x200, kPaClClipCntl = 0x204,
-                   kPaSuScModeCntl = 0x205, kPolyOffsetScale = 0x20B, kVgtGsMode = 0x290,
+                   kBlendControl = 0x1E0, kDbDepthControl = 0x200, kCbColorControl = 0x202, kPaClClipCntl = 0x204,
+                   kPaSuScModeCntl = 0x205, kVgtGsMode = 0x290, kPolyOffsetDbFmt = 0x2DE,
                    kVgtGsOutPrimType = 0x29B, kStepRate0 = 0x2A8, kVgtEsgsRingItemsize = 0x2AB,
                    kVgtGsvsRingItemsize = 0x2AC, kVgtGsMaxVertOut = 0x2CE, kVgtShaderStagesEn = 0x2D5,
                    kVgtGsInstanceCnt = 0x2E4, kCbColor0Base = 0x318;
@@ -178,6 +178,9 @@ struct DepthTarget {
   gfx::DepthId depth;
   gaddr stencil;  // DB_STENCIL_READ_BASE (0: no stencil)
   uint32_t layers;  // 0: 2D; else a 2D array of them
+  gaddr htile = 0;  // DB_HTILE_DATA_BASE (0: none)
+  bool htile_stencil = false;  // the HTILE tracks stencil too
+  bool htile_clear = false;  // its HTILE says cleared, not applied yet
 };
 struct Texture {
   gfx::TextureId tex = 0;
@@ -309,6 +312,21 @@ DepthTarget* DepthTargetAt(State& s, gaddr addr, uint32_t w, uint32_t h, Format 
     s.dev->ClearDepth(id, 1.0f, fmt == Format::D32FS8 ? 0 : -1, int(i));
   s.depths.push_back({addr, w, h, fmt, id, stencil, layers});
   return &s.depths.back();
+}
+
+// Guest memory a dispatch or a DMA wrote: a depth target's HTILE written
+// from its start with every tile's ZMASK (bits 0-3) 0 is the fast clear
+// (each tile reads as DB_DEPTH_CLEAR), applied at the target's next draw.
+// HTILE that tracks depth alone; other writes into it are not modelled.
+void HtileWritten(State& s, gaddr base, uint64_t size) {
+  for (DepthTarget& d : s.depths) {
+    if (!d.htile || d.htile < base || d.htile >= base + size) continue;
+    const uint8_t* p = GPtr(d.htile);
+    bool clear = d.htile == base && !d.htile_stencil;
+    for (uint64_t i = 0; clear && i + 4 <= size; i += 4) clear = !(p[i] & 0xF);
+    if (clear) d.htile_clear = true;
+    else WarnOnce(17, "an HTILE write other than a full depth clear is not modelled");
+  }
 }
 
 // A colour target as a T# of w x h samples it: the target itself if the
@@ -808,10 +826,12 @@ void Draw(const Regs& r, const DrawCall& call) {
   if (!s.dev || !call.count) return;
   const uint32_t* cx = r.context;
 
-  // Targets: colour targets 0 on while they have a format, the depth.
+  // Targets: colour targets 0 on while they have a format (none while
+  // CB_COLOR_CONTROL's MODE is CB_DISABLE), the depth.
   gfx::ProgramDraw d;
   int ntargets = 0;
-  for (int i = 0; i < 4; i++) {
+  const bool cb_on = (cx[kCbColorControl] >> 4) & 7;
+  for (int i = 0; i < 4 && cb_on; i++) {
     const uint32_t* cb = cx + kCbColor0Base + 0xF * i;
     if (((cb[4] >> 2) & 0x1F) == 0) break;
     Format fmt;
@@ -833,10 +853,17 @@ void Draw(const Regs& r, const DrawCall& call) {
     // DB_DEPTH_VIEW: the array slices drawn, SLICE_START to SLICE_MAX.
     const uint32_t first = cx[kDbDepthView] & 0x7FF;
     const uint32_t last = std::max((cx[kDbDepthView] >> 13) & 0x7FF, first);
-    const DepthTarget* dt = DepthTargetAt(s, uint64_t(cx[kDbZReadBase]) << 8, dw, dh, f,
-                                          stencil ? uint64_t(cx[kDbStencilReadBase]) << 8 : 0,
-                                          last ? last + 1 : 0);
+    DepthTarget* dt = DepthTargetAt(s, uint64_t(cx[kDbZReadBase]) << 8, dw, dh, f,
+                                    stencil ? uint64_t(cx[kDbStencilReadBase]) << 8 : 0,
+                                    last ? last + 1 : 0);
     d.depth = dt->depth;
+    dt->htile = (cx[kDbZInfo] & (1u << 29)) ? uint64_t(cx[kDbHtileDataBase]) << 8 : 0;
+    dt->htile_stencil = stencil && !(cx[kDbStencilInfo] & (1u << 29));  // TILE_STENCIL_DISABLE
+    if (dt->htile_clear) {
+      dt->htile_clear = false;
+      for (uint32_t i = 0; i < std::max(dt->layers, 1u); i++)
+        s.dev->ClearDepth(d.depth, AsFloat(cx[kDbDepthClear]), -1, int(i));
+    }
     // A depth (and stencil) clear: the draw writes the clear values.
     if (cx[kDbRenderControl] & 3) {
       for (uint32_t i = first; i <= last; i++)
@@ -907,9 +934,18 @@ void Draw(const Regs& r, const DrawCall& call) {
                              : gfx::CullMode::None;
   if ((mode & 3) == 3) return;  // both faces culled
   ps_.front_ccw = !(mode & 4);
+  // Polygon offset (PA_SU_POLY_OFFSET_*: DB_FMT_CNTL, CLAMP, then scale
+  // and offset of front and back faces): front's, or back's when only back
+  // faces have it. The scale is in 1/16ths of the slope; the offset in
+  // units of 2^NEG_NUM_DB_BITS (of the exponent's for float depth), the
+  // device's of the depth format's own bits (16; 23 of mantissa).
   if (mode & 0x1800) {
-    ps_.depth_bias = AsFloat(cx[kPolyOffsetScale + 1]);
-    ps_.depth_bias_slope = AsFloat(cx[kPolyOffsetScale]);
+    const uint32_t* po = cx + kPolyOffsetDbFmt;
+    const uint32_t face = (mode & 0x800) ? 0 : 2;
+    const int bits = int(int8_t(po[0] & 0xFF)) + (zfmt == 1 ? 16 : 23);
+    ps_.depth_bias_slope = AsFloat(po[2 + face]) / 16;
+    ps_.depth_bias = std::ldexp(AsFloat(po[3 + face]), bits);
+    ps_.depth_bias_clamp = AsFloat(po[1]);
   }
   const uint32_t dc = cx[kDbDepthControl];
   ps_.depth_test = dc & 2;
@@ -1042,6 +1078,13 @@ void Dispatch(const Regs& r, const uint32_t groups[3]) {
     b.uniforms[23] = first;
     s.dev->DispatchProgram(d);
   }
+  for (const BufferRange& br : rc.buffers)
+    if (br.written) HtileWritten(s, br.base, br.size);
+}
+
+void MemoryWritten(gaddr base, uint64_t size) {
+  std::lock_guard<std::mutex> l(G().mu);
+  HtileWritten(G(), base, size);
 }
 
 void NextSubmission() {

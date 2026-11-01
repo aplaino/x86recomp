@@ -245,6 +245,7 @@ bool Step(Engines& e, Stream& s, bool ce) {
       } else {
         FatalF("GPU: DMA_DATA from GDS not implemented yet");
       }
+      MemoryWritten(dst, bytes);
       break;
     }
     case kIndirectBuffer: case kIndirectBufferConst: {

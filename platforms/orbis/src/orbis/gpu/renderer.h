@@ -35,6 +35,9 @@ void SetDevice(gfx::Device* dev);
 
 void Draw(const Regs& r, const DrawCall& d);
 void Dispatch(const Regs& r, const uint32_t groups[3]);
+// Guest memory the command processor wrote (DMA_DATA): a depth target's
+// HTILE cleared there clears it.
+void MemoryWritten(gaddr base, uint64_t size);
 // A new submission: textures read from memory are compared again.
 void NextSubmission();
 
