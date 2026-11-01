@@ -205,5 +205,7 @@ a game's:
 - The GPU's 100 MHz reference clock for timestamps.
 - libScePad's touch pad (44.86 dots/mm, 1920 x 943) and stick dead
   zones (13).
-- PlayGo's chunk count (every id below 1000 is accepted) and its
-  default install speed (full).
+- PlayGo's chunk count (every id below 1000 is accepted; a package's
+  count is in its playgo-chunk.dat, package entry 0x1001, which a copy of
+  app0 does not hold), what an id past it returns, and the default
+  install speed (full).
