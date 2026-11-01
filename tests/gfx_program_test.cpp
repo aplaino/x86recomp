@@ -130,7 +130,7 @@ int main() {
         "the scissor keeps the draw in its columns");
 
   // Depth: the nearer triangle wins whichever is drawn last.
-  dev->ClearDepth(depth, 1.0f, -1);
+  dev->ClearDepth(depth, 1.0f, -1, 0);
   const float red[4] = {1, 0, 0, 1}, blue[4] = {0, 0, 1, 1};
   draw(Cover(0.25f), red, {0, 0, 4, 4}, true);
   draw(Cover(0.5f), blue, {0, 0, 4, 4}, true);

@@ -256,6 +256,7 @@ struct ProgramDraw {
   PipelineState state;
   ColorTarget targets[4];
   DepthId depth = 0;
+  int depth_layer = 0;  // the layer of an array depth target drawn into
   Viewport viewport{};
   Rect scissor{};
   uint32_t vertex_count = 0, instance_count = 1;
@@ -396,6 +397,10 @@ class Device {
   virtual ProgramId CreateProgram(const ProgramDesc& p);
   virtual void DestroyProgram(ProgramId p);
   virtual TextureId CreateImage(const ImageDesc& d);
+  // A depth target that is a 2D array of `layers` (also for one layer):
+  // draws go into one layer (ProgramDraw::depth_layer), programs sample
+  // it as a 2D array.
+  virtual DepthId CreateDepthArray(int w, int h, int layers, Format fmt);
   // Uploads `r` of a level and layer of an image, as it is in memory.
   virtual void UpdateImage(TextureId t, int level, int layer, const Rect& r, const void* src,
                            uint32_t pitch);
@@ -403,12 +408,12 @@ class Device {
   // the GPU).
   virtual void ReadImage(TextureId t, int level, int layer, const Rect& r, void* dst,
                          uint32_t pitch);
-  // Clear a colour image's level (all layers) or a depth target (depth
-  // and, if `stencil` >= 0, stencil).
+  // Clear a colour image's level (all layers) or a depth target's layer
+  // (depth and, if `stencil` >= 0, stencil).
   virtual void ClearImage(TextureId t, int level, const Color& c);
-  virtual void ClearDepth(DepthId d, float z, int stencil);
+  virtual void ClearDepth(DepthId d, float z, int stencil, int layer);
   // Copies `r` of a depth target to the same place in another of its
-  // format (depth and stencil).
+  // format (depth and stencil), in each layer both have.
   virtual void CopyDepth(DepthId src, DepthId dst, const Rect& r);
   virtual void DrawProgram(const ProgramDraw& d);
   // Runs at once (with what was drawn before it) when it has read-write

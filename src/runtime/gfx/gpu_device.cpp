@@ -654,11 +654,17 @@ class GpuDevice final : public Device {
   }
 
 
-  DepthId CreateDepth(int w, int h, Format fmt) override {
+  DepthId CreateDepth(int w, int h, Format fmt) override { return NewDepth(w, h, 0, fmt); }
+  DepthId CreateDepthArray(int w, int h, int layers, Format fmt) override {
+    return layers > 0 ? NewDepth(w, h, layers, fmt) : 0;
+  }
+  // A 2D depth target (layers 0) or a 2D array of `layers`.
+  DepthId NewDepth(int w, int h, int layers, Format fmt) {
     std::lock_guard<std::recursive_mutex> l(mu_);
     Depth d;
     d.w = w;
     d.h = h;
+    d.layers = std::max(layers, 1);
     d.fmt = fmt;
     switch (fmt) {
       case Format::D16: d.gpu_format = SDL_GPU_TEXTUREFORMAT_D16_UNORM; d.bias_scale = 65535.0f; break;
@@ -671,17 +677,17 @@ class GpuDevice final : public Device {
         d.gpu_format == SDL_GPU_TEXTUREFORMAT_D24_UNORM_S8_UINT)
       d.bias_scale = 16777215.0f;
     SDL_GPUTextureCreateInfo ti{};
-    ti.type = SDL_GPU_TEXTURETYPE_2D;
+    ti.type = layers ? SDL_GPU_TEXTURETYPE_2D_ARRAY : SDL_GPU_TEXTURETYPE_2D;
     ti.format = d.gpu_format;
     // Sampled too where the GPU can (programs read depth targets).
     ti.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
-    if (SDL_GPUTextureSupportsFormat(dev_, d.gpu_format, SDL_GPU_TEXTURETYPE_2D,
+    if (SDL_GPUTextureSupportsFormat(dev_, d.gpu_format, ti.type,
                                      SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET |
                                          SDL_GPU_TEXTUREUSAGE_SAMPLER))
       ti.usage |= SDL_GPU_TEXTUREUSAGE_SAMPLER;
     ti.width = Uint32(w);
     ti.height = Uint32(h);
-    ti.layer_count_or_depth = 1;
+    ti.layer_count_or_depth = Uint32(d.layers);
     ti.num_levels = 1;
     d.tex = SDL_CreateGPUTexture(dev_, &ti);
     if (!d.tex) {
@@ -1572,10 +1578,10 @@ void r_color0(inout vec4 c) {
     Submit(cmd);
   }
 
-  void ClearDepth(DepthId id, float z, int stencil) override {
+  void ClearDepth(DepthId id, float z, int stencil, int layer) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     auto it = depths_.find(id);
-    if (it == depths_.end()) return;
+    if (it == depths_.end() || layer < 0 || layer >= it->second.layers) return;
     Flush();
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(dev_);
     SDL_GPUDepthStencilTargetInfo dt{};
@@ -1586,6 +1592,7 @@ void r_color0(inout vec4 c) {
     dt.stencil_load_op = stencil >= 0 ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
     dt.stencil_store_op = SDL_GPU_STOREOP_STORE;
     dt.clear_stencil = Uint8(stencil >= 0 ? stencil : 0);
+    dt.layer = Uint8(layer);
     SDL_EndGPURenderPass(SDL_BeginGPURenderPass(cmd, nullptr, 0, &dt));
     Submit(cmd);
   }
@@ -1604,7 +1611,11 @@ void r_color0(inout vec4 c) {
     from.x = to.x = Uint32(a.left);
     from.y = to.y = Uint32(a.top);
     to.texture = d->second.tex;
-    SDL_CopyGPUTextureToTexture(cp, &from, &to, Uint32(a.right - a.left), Uint32(a.bottom - a.top), 1, false);
+    for (int i = 0; i < std::min(s->second.layers, d->second.layers); i++) {
+      from.layer = to.layer = Uint32(i);
+      SDL_CopyGPUTextureToTexture(cp, &from, &to, Uint32(a.right - a.left), Uint32(a.bottom - a.top), 1,
+                                  false);
+    }
     SDL_EndGPUCopyPass(cp);
     Submit(cmd);
   }
@@ -1636,12 +1647,13 @@ void r_color0(inout vec4 c) {
     const Depth* depth = nullptr;
     if (d.depth) {
       auto dit = depths_.find(d.depth);
-      if (dit == depths_.end()) FatalF("gfx: DrawProgram: no depth target %u", d.depth);
+      if (dit == depths_.end() || d.depth_layer < 0 || d.depth_layer >= dit->second.layers)
+        FatalF("gfx: DrawProgram: no depth target %u (layer %d)", d.depth, d.depth_layer);
       depth = &dit->second;
       if (!n) w = depth->w, h = depth->h;
     }
     if (!n && !depth) return;
-    SetPass(colors, fmts, depth, w, h, true, levels);
+    SetPass(colors, fmts, depth, w, h, true, levels, d.depth_layer);
 
     Cmd c{};
     const Rect sc = Intersect(Clip(d.scissor, w, h), Rect{0, 0, w, h});
@@ -1847,7 +1859,7 @@ void r_color0(inout vec4 c) {
   };
   struct Depth {
     SDL_GPUTexture* tex = nullptr;
-    int w = 0, h = 0;
+    int w = 0, h = 0, layers = 1;
     Format fmt = Format::Unknown;
     SDL_GPUTextureFormat gpu_format = SDL_GPU_TEXTUREFORMAT_INVALID;
     bool stencil = false;
@@ -2087,12 +2099,16 @@ void r_color0(inout vec4 c) {
   }
 
   void SetPass(const std::array<SDL_GPUTexture*, 4>& colors, const std::array<uint8_t, 4>& fmts,
-               const Depth* d, int w, int h, bool alpha, const std::array<int, 4>& levels = {}) {
+               const Depth* d, int w, int h, bool alpha, const std::array<int, 4>& levels = {},
+               int depth_layer = 0) {
     SDL_GPUTexture* depth = d ? d->tex : nullptr;
-    if (colors == pass_colors_ && levels == pass_levels_ && depth == pass_depth_) return;
+    if (colors == pass_colors_ && levels == pass_levels_ && depth == pass_depth_ &&
+        depth_layer == pass_depth_layer_)
+      return;
     Flush();
     pass_colors_ = colors;
     pass_levels_ = levels;
+    pass_depth_layer_ = depth_layer;
     pass_fmts_ = fmts;
     pass_color_ = colors[0];
     pass_targets_ = 0;
@@ -2274,6 +2290,7 @@ void r_color0(inout vec4 c) {
         dt.stencil_load_op = pass_clear_stencil_ ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
         dt.stencil_store_op = SDL_GPU_STOREOP_STORE;
         dt.clear_stencil = clear_stencil_;
+        dt.layer = Uint8(pass_depth_layer_);
       }
       SDL_GPURenderPass* rp =
           SDL_BeginGPURenderPass(cmd, cts, Uint32(pass_targets_), pass_depth_ ? &dt : nullptr);
@@ -3475,6 +3492,7 @@ void r_color0(inout vec4 c) {
   int pass_targets_ = 0;
   SDL_GPUTexture* pass_color_ = nullptr;
   SDL_GPUTexture* pass_depth_ = nullptr;
+  int pass_depth_layer_ = 0;
   int pass_w_ = 0, pass_h_ = 0;
   bool pass_alpha_ = false, pass_stencil_ = false;
   SDL_GPUTextureFormat pass_depth_format_ = SDL_GPU_TEXTUREFORMAT_INVALID;

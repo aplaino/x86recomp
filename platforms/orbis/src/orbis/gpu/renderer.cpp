@@ -24,8 +24,9 @@ namespace {
 using gfx::Format;
 
 // Context registers.
-constexpr uint32_t kDbRenderControl = 0x000, kDbZInfo = 0x010, kDbStencilInfo = 0x011,
-                   kDbZReadBase = 0x012, kDbStencilReadBase = 0x013, kDbDepthSize = 0x016,
+constexpr uint32_t kDbRenderControl = 0x000, kDbDepthView = 0x002, kDbZInfo = 0x010,
+                   kDbStencilInfo = 0x011, kDbZReadBase = 0x012, kDbStencilReadBase = 0x013,
+                   kDbDepthSize = 0x016,
                    kDbDepthClear = 0x00B, kDbStencilClear = 0x00A, kScreenScissorTl = 0x00C,
                    kWindowScissorTl = 0x081, kGenericScissorTl = 0x090, kVportScissorTl = 0x094, kCbTargetMask = 0x08E,
                    kCbBlendRed = 0x105, kDbStencilControl = 0x10B, kDbStencilRefMask = 0x10C,
@@ -176,6 +177,7 @@ struct DepthTarget {
   Format fmt;
   gfx::DepthId depth;
   gaddr stencil;  // DB_STENCIL_READ_BASE (0: no stencil)
+  uint32_t layers;  // 0: 2D; else a 2D array of them
 };
 struct Texture {
   gfx::TextureId tex = 0;
@@ -254,12 +256,45 @@ gfx::TextureId ColorTarget(State& s, gaddr addr, uint32_t w, uint32_t h, Format 
   return tex;
 }
 
-gfx::DepthId DepthTargetAt(State& s, gaddr addr, uint32_t w, uint32_t h, Format fmt,
-                           gaddr stencil) {
+void DropDepthViews(State& s, gaddr addr) {
+  s.views.erase(std::remove_if(s.views.begin(), s.views.end(),
+                               [&](const TargetView& v) {
+                                 if (v.addr != addr || !v.depth) return false;
+                                 s.dev->DestroyDepth(v.depth);
+                                 return true;
+                               }),
+                s.views.end());
+}
+
+gfx::DepthId NewDepth(State& s, uint32_t w, uint32_t h, uint32_t layers, Format fmt) {
+  return layers ? s.dev->CreateDepthArray(int(w), int(h), int(layers), fmt)
+                : s.dev->CreateDepth(int(w), int(h), fmt);
+}
+
+// A depth target with at least `layers` array layers (0: a 2D one will
+// do). Slices are drawn (DB_DEPTH_VIEW) and sampled (an array T#) one at
+// a time, so a target grows into an array of as many as the game has
+// used, its layers so far kept.
+void EnsureLayers(State& s, DepthTarget& d, uint32_t layers) {
+  if (!layers || (d.layers && d.layers >= layers)) return;
+  const gfx::DepthId id = NewDepth(s, d.w, d.h, layers, d.fmt);
+  if (!id) return;
+  for (uint32_t i = 0; i < layers; i++)
+    s.dev->ClearDepth(id, 1.0f, d.fmt == Format::D32FS8 ? 0 : -1, int(i));
+  s.dev->CopyDepth(d.depth, id, {0, 0, int32_t(d.w), int32_t(d.h)});
+  s.dev->DestroyDepth(d.depth);
+  DropDepthViews(s, d.addr);
+  d.depth = id;
+  d.layers = layers;
+}
+
+DepthTarget* DepthTargetAt(State& s, gaddr addr, uint32_t w, uint32_t h, Format fmt, gaddr stencil,
+                           uint32_t layers) {
   for (DepthTarget& d : s.depths)
     if (d.addr == addr && d.w == w && d.h == h && d.fmt == fmt) {
       d.stencil = stencil;
-      return d.depth;
+      EnsureLayers(s, d, layers);
+      return &d;
     }
   s.depths.erase(std::remove_if(s.depths.begin(), s.depths.end(),
                                 [&](const DepthTarget& d) {
@@ -268,17 +303,12 @@ gfx::DepthId DepthTargetAt(State& s, gaddr addr, uint32_t w, uint32_t h, Format 
                                   return true;
                                 }),
                  s.depths.end());
-  s.views.erase(std::remove_if(s.views.begin(), s.views.end(),
-                               [&](const TargetView& v) {
-                                 if (v.addr != addr || !v.depth) return false;
-                                 s.dev->DestroyDepth(v.depth);
-                                 return true;
-                               }),
-                s.views.end());
-  const gfx::DepthId id = s.dev->CreateDepth(int(w), int(h), fmt);
-  if (id) s.dev->ClearDepth(id, 1.0f, fmt == Format::D32FS8 ? 0 : -1);
-  s.depths.push_back({addr, w, h, fmt, id, stencil});
-  return id;
+  DropDepthViews(s, addr);
+  const gfx::DepthId id = NewDepth(s, w, h, layers, fmt);
+  for (uint32_t i = 0; id && i < std::max(layers, 1u); i++)
+    s.dev->ClearDepth(id, 1.0f, fmt == Format::D32FS8 ? 0 : -1, int(i));
+  s.depths.push_back({addr, w, h, fmt, id, stencil, layers});
+  return &s.depths.back();
 }
 
 // A colour target as a T# of w x h samples it: the target itself if the
@@ -317,7 +347,7 @@ gfx::TextureId SampledDepth(State& s, const DepthTarget& dt, uint32_t w, uint32_
   for (TargetView& v : s.views)
     if (v.addr == dt.addr && v.depth && v.w == w && v.h == h) view = &v;
   if (!view) {
-    const gfx::DepthId depth = s.dev->CreateDepth(int(w), int(h), dt.fmt);
+    const gfx::DepthId depth = NewDepth(s, w, h, dt.layers, dt.fmt);
     if (!depth) return 0;
     s.views.push_back({dt.addr, w, h, 0, depth});
     view = &s.views.back();
@@ -335,7 +365,7 @@ gfx::TextureId SampledStencil(State& s, const DepthTarget& dt, const uint32_t t[
                               uint32_t h) {
   Format fmt;
   if (!TextureFormat(t, &fmt) || fmt != Format::R8) {
-    WarnOnce(11, "a stencil sampled in a format other than R8 is not drawn yet (read as black)");
+    WarnOnce(14, "a stencil sampled in a format other than R8 is not drawn yet (read as black)");
     return 0;
   }
   w = std::min(w, dt.w);
@@ -404,8 +434,19 @@ gfx::TextureId TextureFor(State& s, const ImageRef& ref) {
   const uint32_t w = (t[2] & 0x3FFF) + 1, h = ((t[2] >> 14) & 0x3FFF) + 1;
   for (Target& tg : s.targets)
     if (tg.addr == addr) return SampledTarget(s, tg, w, h);
+  const uint32_t type = t[3] >> 28;
   for (DepthTarget& d : s.depths) {
-    if (d.addr == addr) return SampledDepth(s, d, w, h);
+    if (d.addr == addr) {
+      // A 2D array (type 13) from BASE_ARRAY to LAST_ARRAY.
+      const uint32_t base = t[5] & 0x1FFF, last = (t[5] >> 13) & 0x1FFF;
+      if (type == 13 && !base) EnsureLayers(s, d, last + 1);
+      if ((type == 13) != (d.layers != 0) || base) {
+        WarnOnce(16, "a depth target sampled other than as all its slices is not drawn yet "
+                     "(read as black)");
+        return 0;
+      }
+      return SampledDepth(s, d, w, h);
+    }
     if (d.stencil && d.stencil == addr) return SampledStencil(s, d, t, w, h);
   }
   Format fmt;
@@ -413,7 +454,6 @@ gfx::TextureId TextureFor(State& s, const ImageRef& ref) {
     WarnOnce(2, "a texture format is not drawn yet (textures read as black)");
     return 0;
   }
-  const uint32_t type = t[3] >> 28;
   if (type != 9) {
     WarnOnce(3, "texture types other than 2D are not drawn yet (read as black)");
     return 0;
@@ -790,14 +830,22 @@ void Draw(const Regs& r, const DrawCall& call) {
     const uint32_t size = cx[kDbDepthSize];
     const uint32_t dw = ((size & 0x7FF) + 1) * 8, dh = (((size >> 11) & 0x7FF) + 1) * 8;
     const Format f = zfmt == 1 ? Format::D16 : stencil ? Format::D32FS8 : Format::D32;
-    d.depth = DepthTargetAt(s, uint64_t(cx[kDbZReadBase]) << 8, dw, dh, f,
-                            stencil ? uint64_t(cx[kDbStencilReadBase]) << 8 : 0);
+    // DB_DEPTH_VIEW: the array slices drawn, SLICE_START to SLICE_MAX.
+    const uint32_t first = cx[kDbDepthView] & 0x7FF;
+    const uint32_t last = std::max((cx[kDbDepthView] >> 13) & 0x7FF, first);
+    const DepthTarget* dt = DepthTargetAt(s, uint64_t(cx[kDbZReadBase]) << 8, dw, dh, f,
+                                          stencil ? uint64_t(cx[kDbStencilReadBase]) << 8 : 0,
+                                          last ? last + 1 : 0);
+    d.depth = dt->depth;
     // A depth (and stencil) clear: the draw writes the clear values.
     if (cx[kDbRenderControl] & 3) {
-      s.dev->ClearDepth(d.depth, AsFloat(cx[kDbDepthClear]),
-                        (cx[kDbRenderControl] & 2) ? int(cx[kDbStencilClear] & 0xFF) : -1);
+      for (uint32_t i = first; i <= last; i++)
+        s.dev->ClearDepth(d.depth, AsFloat(cx[kDbDepthClear]),
+                          (cx[kDbRenderControl] & 2) ? int(cx[kDbStencilClear] & 0xFF) : -1, int(i));
       return;
     }
+    if (last != first) WarnOnce(15, "a draw into several depth slices is drawn into the first only");
+    d.depth_layer = dt->layers ? int(first) : 0;
   }
   if (!ntargets && !d.depth) return;
 

@@ -13,10 +13,13 @@ void Device::DestroyProgram(ProgramId) {}
 TextureId Device::CreateImage(const ImageDesc&) {
   FatalF("gfx: this backend has no programs (console GPUs need SDL_GPU)");
 }
+DepthId Device::CreateDepthArray(int, int, int, Format) {
+  FatalF("gfx: this backend has no programs (console GPUs need SDL_GPU)");
+}
 void Device::UpdateImage(TextureId, int, int, const Rect&, const void*, uint32_t) {}
 void Device::ReadImage(TextureId, int, int, const Rect&, void*, uint32_t) {}
 void Device::ClearImage(TextureId, int, const Color&) {}
-void Device::ClearDepth(DepthId, float, int) {}
+void Device::ClearDepth(DepthId, float, int, int) {}
 void Device::CopyDepth(DepthId, DepthId, const Rect&) {}
 void Device::DrawProgram(const ProgramDraw&) {}
 void Device::DispatchProgram(const ProgramDispatch&) {}

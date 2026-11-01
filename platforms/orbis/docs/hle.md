@@ -68,7 +68,9 @@ library.
   back to guest memory; as large as their padded pitch and slice or
   DB_DEPTH_SIZE, and sampled through a copy of their top-left corner when
   a T# describes less of them; a T# at a depth target's
-  DB_STENCIL_READ_BASE samples its stencil, resolved into an R8 image),
+  DB_STENCIL_READ_BASE samples its stencil, resolved into an R8 image;
+  a depth target drawn one DB_DEPTH_VIEW slice at a time, or sampled
+  through an array T#, becomes a 2D array of as many slices as used),
   textures read from guest memory once a submission when they change.
   Compute image stores write such a target at the image's address (2D,
   level 0), so draws sample what compute stored. CLEAR_STATE loads the Sea
@@ -84,8 +86,9 @@ library.
   tessellation stages, on-chip and instanced GS, GS streams 1-3, fans,
   rectangle and quad lists, indirect draws and dispatches, cross-lane
   instructions (ds_swizzle's bit-mask mode, lane counts; its quad mode is
-  a subgroup quad broadcast), cube, 3D and array textures, mip levels past
-  the first, and textures in rotated, thick and PRT tile modes (read as
+  a subgroup quad broadcast), cube, 3D and array textures other than
+  depth targets, draws into several slices at once, mip levels past the
+  first, and textures in rotated, thick and PRT tile modes (read as
   black). The tile mode table (GB_TILE_MODE0-31, GB_MACROTILE_MODE0-15) is
   the console's, read on firmware 11.00; its GB_ADDR_CONFIG read back 0,
   and the pipe interleave (256 bytes), pipes (8) and row size (1 KiB) are
