@@ -151,13 +151,14 @@ struct Resolver {
 
   explicit Resolver(const StageState& st) : st(st) {}
 
-  int Buffer(gaddr base, uint32_t size, bool written) {
+  int Buffer(gaddr base, uint32_t size, bool written, const uint32_t* vsharp = nullptr) {
     for (size_t i = 0; i < r.buffers.size(); i++)
       if (r.buffers[i].base == base && r.buffers[i].size == size) {
         r.buffers[i].written |= written;
         return int(i);
       }
     r.buffers.push_back({base, size, written});
+    if (vsharp) std::memcpy(r.buffers.back().vsharp, vsharp, sizeof r.buffers.back().vsharp);
     return int(r.buffers.size() - 1);
   }
 
@@ -176,8 +177,10 @@ struct Resolver {
   }
 
   // A V#'s range: stride x records, or records bytes without a stride.
+  // Addresses are 40 bits: the bits above (set in the ring V#s) are not
+  // part of the address.
   static void Range(const uint32_t v[4], gaddr* base, uint32_t* size) {
-    *base = v[0] | uint64_t(v[1] & 0xFFFF) << 32;
+    *base = v[0] | uint64_t(v[1] & 0xFF) << 32;
     const uint32_t stride = (v[1] >> 16) & 0x3FFF;
     const uint64_t bytes = stride ? uint64_t(stride) * v[2] : v[2];
     *size = uint32_t(std::min<uint64_t>(bytes, 256u << 20));
@@ -338,7 +341,7 @@ struct Resolver {
         uint32_t size;
         Range(v, &base, &size);
         Site& site = sites[pc];
-        site.buffer = Buffer(base, size, store);
+        site.buffer = Buffer(base, size, store, v);
         std::memcpy(site.vsharp, v, sizeof v);
         return true;
       }
@@ -450,6 +453,7 @@ struct Translator {
   std::map<gaddr, int> block_of;
   std::vector<int> ro_of, rw_of;       // binding -> RO / RW index (-1: not that kind)
   int nro = 0, nrw = 0;
+  int ids = -1, emits = -1;            // Export: the vertex indices; Geometry: its emits
 
   Translator(const StageState& st, const Resolver& res) : st(st), res(res) {}
 
@@ -708,20 +712,36 @@ struct Translator {
   }
 
   // A buffer instruction's byte address (low 32 bits) for element index
-  // and offset VGPRs, its V# in SGPRs.
-  std::string BufAddr(const Instr& in, gaddr pc, uint32_t* stride_out) {
+  // and offset VGPRs, its V# in SGPRs (v: as resolved). ADD_TID_ENABLE
+  // adds the lane to the index; SWIZZLE_ENABLE interleaves the lanes'
+  // elements (of ELEMENT_SIZE bytes, INDEX_STRIDE lanes in a row).
+  std::string BufAddr(const Instr& in, gaddr pc, const uint32_t v[4], uint32_t* stride_out) {
     const uint32_t w0 = in.w0, w1 = in.w1;
     const uint32_t vaddr = w1 & 0xFF, srsrc = ((w1 >> 16) & 0x1F) * 4, soff = w1 >> 24;
     const bool offen = w0 & 0x1000, idxen = w0 & 0x2000;
     if (w0 & 0x8000) Fail(pc, "a 64-bit buffer address not translated yet");
+    const std::string stride = "((" + S(srsrc + 1) + " >> 16) & 0x3FFFu)";
     std::string a = S(srsrc) + " + " + U(w0 & 0xFFF) + " + " + Src(soff, in, pc);
+    *stride_out = 0;
+    const bool swizzle = v[1] >> 31, tid = (v[3] >> 23) & 1;
+    if (swizzle || tid) {
+      std::string index = tid ? "r_lane" : "0u", offset = U(w0 & 0xFFF);
+      uint32_t next = vaddr;
+      if (idxen) index += " + " + V(next++);
+      if (offen) offset += " + " + V(next);
+      a = S(srsrc) + " + " + Src(soff, in, pc);
+      if (!swizzle) return "(" + a + " + (" + index + ") * " + stride + " + " + offset + ")";
+      const std::string es = U(2u << ((v[3] >> 19) & 3)), is = U(8u << ((v[3] >> 21) & 3));
+      Line("r_i = " + index + "; r_o = " + offset + ";");
+      return "(" + a + " + ((r_i / " + is + ") * " + stride + " + r_o / " + es + ") * " + es + " * " + is +
+             " + (r_i % " + is + ") * " + es + " + r_o % " + es + ")";
+    }
     uint32_t next = vaddr;
     if (idxen) {
-      a += " + " + V(next) + " * ((" + S(srsrc + 1) + " >> 16) & 0x3FFFu)";
+      a += " + " + V(next) + " * " + stride;
       next++;
     }
     if (offen) a += " + " + V(next);
-    *stride_out = 0;
     return "(" + a + ")";
   }
 
@@ -802,7 +822,7 @@ struct Translator {
   void Buffer(gaddr pc, const Instr& in, const Site& site) {
     const uint32_t vdata = (in.w1 >> 8) & 0xFF;
     uint32_t stride;
-    const std::string addr = BufAddr(in, pc, &stride);
+    const std::string addr = BufAddr(in, pc, site.vsharp, &stride);
     const int b = site.buffer;
     // Records past num_records read 0 and are not written (with an index
     // or a stride: index >= records; else offset >= records).
@@ -1325,8 +1345,9 @@ struct Translator {
     switch (in.fmt) {
       case Fmt::Sopp: {
         switch (in.op) {
-          case 0: case 12: case 13: case 14: case 15: case 16: case 17: case 19: return;  // s_nop, s_waitcnt, ...
+          case 0: case 12: case 13: case 14: case 15: case 17: case 19: return;  // s_nop, s_waitcnt, ...
           case 1: End(); return;
+          case 16: return SendMsg(in);
           case 10: Line("barrier();"); return;
         }
         if (IsBranch(in)) {
@@ -1372,6 +1393,21 @@ struct Translator {
     }
   }
 
+  // s_sendmsg: a GS's cuts and emits on stream 0 (the one drawn) as its
+  // emit words (Uniforms()); other messages are not acted on.
+  void SendMsg(const Instr& in) {
+    const uint32_t imm = in.w0 & 0xFFFF, op = (imm >> 4) & 3;
+    if (st.stage != Stage::Geometry || (imm & 0xF) != 2 || ((imm >> 8) & 3) != 0) return;
+    Line("if ((exec_lo & 1u) != 0u) {");
+    if (op & 2) {
+      Line("if (r_nv < r_misc3.z) r_wr(" + std::to_string(emits) +
+           ", (r_id * r_misc3.z + r_nv) * 4u, 1u | (r_cut << 1));");
+      Line("r_nv++; r_cut = 0u;");
+    }
+    if (op & 1) Line("r_cut = 1u;");
+    Line("}");
+  }
+
   void End() {
     if (st.stage == Stage::Pixel && mrts.empty() && !depth) Line("if ((exec_lo & 1u) == 0u) discard;");
     Line("return;");
@@ -1382,13 +1418,15 @@ struct Translator {
   bool Run(Translated* out) {
     // Bindings: in a compute stage, written ranges are read-write.
     for (const BufferRange& b : res.r.buffers) {
-      const bool rw = st.stage == Stage::Compute && b.written;
+      const bool rw = RunsAsCompute(st.stage) && b.written;
       ro_of.push_back(rw ? -1 : nro);
       rw_of.push_back(rw ? nrw : -1);
       (rw ? nrw : nro)++;
     }
+    if (st.stage == Stage::Export) ids = nro++;
+    if (st.stage == Stage::Geometry) emits = nrw++;
     for (const BufferRange& b : res.r.buffers)
-      if (b.written && st.stage != Stage::Compute) {
+      if (b.written && !RunsAsCompute(st.stage)) {
         error = "a store outside a compute stage not translated yet";
         return false;
       }
@@ -1437,7 +1475,8 @@ struct Translator {
     if (uses_quad) g += "#extension GL_KHR_shader_subgroup_quad : require\n";
     // The uniform block: user data, the code bases, each range's base and
     // size (Uniforms()).
-    g += "layout(std140, R_UNIFORMS) uniform RUser {\n  uvec4 r_user[4];\n  uvec4 r_misc;\n  uvec4 r_misc2;\n";
+    g += "layout(std140, R_UNIFORMS) uniform RUser {\n  uvec4 r_user[4];\n  uvec4 r_misc;\n  uvec4 r_misc2;\n"
+         "  uvec4 r_misc3;\n";
     if (nro) g += "  uvec4 r_region[" + std::to_string(nro) + "];\n";
     if (nrw) g += "  uvec4 r_rwregion[" + std::to_string(nrw) + "];\n";
     g += "};\n";
@@ -1511,7 +1550,8 @@ struct Translator {
     }
     g += "void main() {\n";
     g += "  uint scc = 0u, m0 = 0u, vcc_lo = 0u, vcc_hi = 0u, exec_lo = 1u, exec_hi = 0u;\n";
-    g += "  uint r_t, r_t2, r_a, r_w, r_w1, r_w2, r_w3, r_unused; uvec4 r_v4, r_t4; uint r_c[4], r_d[4], r_q;\n";
+    g += "  uint r_t, r_t2, r_a, r_w, r_w1, r_w2, r_w3, r_unused; uvec4 r_v4, r_t4; uint r_c[4], r_d[4], r_q;\n"
+         "  uint r_i, r_o, r_lane = 0u;\n";
     for (int i = 0; i < 104; i++) {
       const std::string init = i < 16 ? "r_user[" + std::to_string(i / 4) + "][" + std::to_string(i % 4) + "]" : "0u";
       std::snprintf(b, sizeof b, "%ss%d = %s%s", i % 8 ? " " : "  uint ", i, init.c_str(), i % 8 == 7 ? ";\n" : ",");
@@ -1560,6 +1600,10 @@ struct Translator {
       std::snprintf(b, sizeof b, "  v%u = %s;\n", n, e);
       g += b;
     };
+    auto sg = [&](uint32_t n, const char* e) {
+      std::snprintf(b, sizeof b, "  s%u = %s;\n", n, e);
+      g += b;
+    };
     switch (st.stage) {
       case Stage::Vertex: {
         vg(0, "uint(gl_VertexIndex)");
@@ -1567,6 +1611,40 @@ struct Translator {
         if (comps >= 1) vg(1, "uint(gl_InstanceIndex) / max(r_misc2.x, 1u)");
         if (comps >= 2) vg(2, "uint(gl_InstanceIndex) / max(r_misc2.y, 1u)");
         if (comps >= 3) vg(3, "uint(gl_InstanceIndex)");
+        // SO_EN: the stream-out configuration (stream 0: a copy shader
+        // exports that stream), write index and enabled buffers' offsets.
+        if (st.rsrc2 & (1u << 12)) {
+          uint32_t s = user;
+          sg(s++, "0u");
+          sg(s++, "0u");
+          for (int i = 0; i < 4; i++)
+            if (st.rsrc2 & (1u << (8 + i))) sg(s++, "0u");
+        }
+        break;
+      }
+      // The passes' invocations: one per vertex (Export) or primitive
+      // (Geometry), in waves of 64, each wave's place in its ring (ESGS,
+      // GSVS) the next SGPR after the user data. A GS's vertex offsets are
+      // the dwords of its vertices' ES lanes in the ESGS ring.
+      case Stage::Export: case Stage::Geometry: {
+        g += "  uint r_id = gl_GlobalInvocationID.x;\n  if (r_id >= r_misc2.z) return;\n"
+             "  r_lane = gl_LocalInvocationID.x;\n";
+        if (st.stage == Stage::Export) {
+          sg(user, "gl_WorkGroupID.x * r_misc3.x");
+          vg(0, ("r_rd(" + std::to_string(ids) + ", r_id * 4u)").c_str());
+          break;
+        }
+        g += "  uint r_nv = 0u, r_cut = 1u;\n";
+        sg(user, "gl_WorkGroupID.x * r_misc3.y");
+        sg(user + 1, "gl_WorkGroupID.x");
+        static const uint32_t kVertexVgpr[6] = {0, 1, 3, 4, 5, 6};
+        for (uint32_t i = 0; i < 6; i++) {
+          const std::string at = "(r_id * r_misc2.w + " + U(i) + ")";
+          vg(kVertexVgpr[i], ("r_misc2.w > " + U(i) + " ? (" + at + " >> 6) * (r_misc3.x >> 2) + (" + at +
+                              " & 63u) : 0u").c_str());
+        }
+        vg(2, "r_misc3.w + r_id");
+        vg(7, "0u");
         break;
       }
       case Stage::Pixel: {
@@ -1635,7 +1713,7 @@ Resolved Resolve(const StageState& st) {
     auto it = rv.sites.find(pc);
     if (it == rv.sites.end()) continue;
     const Site& s = it->second;
-    const uint32_t site[3] = {uint32_t(s.buffer), uint32_t(s.image), s.vsharp[3]};
+    const uint32_t site[4] = {uint32_t(s.buffer), uint32_t(s.image), s.vsharp[3], s.vsharp[1] >> 31};
     k += Hex(site, sizeof site);
     if (s.image >= 0) {
       const ImageRef& ref = rv.r.images[size_t(s.image)];
@@ -1684,16 +1762,25 @@ std::vector<uint32_t> Uniforms(const StageState& st, const Resolved& r) {
   u[17] = uint32_t(st.code >> 32);
   u[18] = uint32_t(r.fetch);
   u[19] = uint32_t(r.fetch >> 32);
-  // r_misc2: instance step rates (set by the caller after).
-  for (int pass = 0; pass < 2; pass++)
+  // r_misc2: instance step rates (set by the caller after); the passes'
+  // invocations and vertices per primitive. r_misc3: the passes' rings.
+  if (st.stage == Stage::Export || st.stage == Stage::Geometry) {
+    u[22] = st.invocations;
+    u[23] = st.prim_verts;
+  }
+  u.insert(u.end(), {st.es_wave_bytes, st.gs_wave_bytes, st.max_vert, st.first_prim});
+  for (int pass = 0; pass < 2; pass++) {
     for (const BufferRange& b : r.buffers) {
-      const bool rw = st.stage == Stage::Compute && b.written;
+      const bool rw = RunsAsCompute(st.stage) && b.written;
       if (rw != (pass == 1)) continue;
       u.push_back(uint32_t(b.base));
       u.push_back(uint32_t(b.base >> 32));
       u.push_back(b.size);
       u.push_back(0);
     }
+    if (pass == 0 && st.stage == Stage::Export) u.insert(u.end(), {0, 0, st.invocations * 4, 0});
+    if (pass == 1 && st.stage == Stage::Geometry) u.insert(u.end(), {0, 0, st.invocations * st.max_vert * 4, 0});
+  }
   return u;
 }
 

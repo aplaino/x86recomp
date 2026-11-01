@@ -14,7 +14,11 @@
 // the SGPR pairs that hold them) keep that lane's bit in bit 0, so a
 // comparison sets or clears bit 0 and a branch on an empty EXEC branches
 // when this lane is inactive. What needs the other lanes (counts of
-// active lanes, cross-lane moves) is not translated yet.
+// active lanes, cross-lane moves) is not translated yet. Export (ES) and
+// Geometry (GS) stages run as compute passes of 64-invocation groups, one
+// group per wave and the invocation's index in it as its lane, which
+// swizzled buffer accesses (the rings between ES, GS and the copy shader)
+// address by.
 
 #include <cstdint>
 #include <memory>
@@ -26,7 +30,12 @@
 
 namespace recomp::orbis::gpu {
 
-enum class Stage : uint8_t { Vertex, Pixel, Compute };
+enum class Stage : uint8_t { Vertex, Pixel, Compute, Export, Geometry };
+
+// Stages that run as compute programs: they can write their ranges.
+inline bool RunsAsCompute(Stage s) {
+  return s == Stage::Compute || s == Stage::Export || s == Stage::Geometry;
+}
 
 // How a stage starts: its code, its SPI_SHADER_PGM_RSRC1/2 and user data
 // registers and, per stage, what the hardware gives it beside them.
@@ -41,6 +50,12 @@ struct StageState {
   uint32_t col_format = 0, z_format = 0;
   // Compute: COMPUTE_NUM_THREAD_X/Y/Z.
   uint32_t threads[3] = {1, 1, 1};
+  // Export and Geometry passes: their invocations (a draw's vertices, its
+  // primitives), each ES and GS wave's bytes in its ring, the vertices of
+  // an input primitive, the pass's first primitive and the GS's maximum
+  // output vertices. They reach the code as uniforms (not in the key).
+  uint32_t invocations = 0, es_wave_bytes = 0, gs_wave_bytes = 0, prim_verts = 0, first_prim = 0,
+           max_vert = 0;
 };
 
 // A guest range a stage reads or writes, and a texture with its sampler.
@@ -48,6 +63,7 @@ struct BufferRange {
   gaddr base = 0;
   uint32_t size = 0;
   bool written = false;
+  uint32_t vsharp[4] = {};  // the V# of its first buffer access (none: 0)
 };
 struct ImageRef {
   uint32_t t[8] = {};  // T#
@@ -82,7 +98,11 @@ Resolved Resolve(const StageState& st);
 Translated Translate(const StageState& st, const Resolved& r);
 
 // The stage's uniform block for a draw: its user data, the guest base and
-// size of each bound range, and the code's address (for s_getpc).
+// size of each bound range, and the code's address (for s_getpc). An
+// Export stage binds one more read-only range after its own: the vertex
+// index of each invocation (32 bits, at address 0); a Geometry stage one
+// more read-write range: per invocation, max_vert words for the vertices
+// it emits (bit 0 set: emitted; bit 1: a strip starts with it).
 std::vector<uint32_t> Uniforms(const StageState& st, const Resolved& r);
 
 // A T#'s format (IMG_DATA_FORMAT, IMG_NUM_FORMAT, BGRA by its destination

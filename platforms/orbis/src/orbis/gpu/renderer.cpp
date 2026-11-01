@@ -32,10 +32,13 @@ constexpr uint32_t kDbRenderControl = 0x000, kDbZInfo = 0x010, kDbStencilInfo = 
                    kVportXScale = 0x10F, kPsInputCntl = 0x191,
                    kPsInputEna = 0x1B3, kPsInputAddr = 0x1B4, kZFormat = 0x1C4, kColFormat = 0x1C5,
                    kBlendControl = 0x1E0, kDbDepthControl = 0x200, kPaClClipCntl = 0x204,
-                   kPaSuScModeCntl = 0x205, kPolyOffsetScale = 0x20B, kStepRate0 = 0x2A8,
-                   kVgtShaderStagesEn = 0x2D5, kCbColor0Base = 0x318;
+                   kPaSuScModeCntl = 0x205, kPolyOffsetScale = 0x20B, kVgtGsMode = 0x290,
+                   kVgtGsOutPrimType = 0x29B, kStepRate0 = 0x2A8, kVgtEsgsRingItemsize = 0x2AB,
+                   kVgtGsvsRingItemsize = 0x2AC, kVgtGsMaxVertOut = 0x2CE, kVgtShaderStagesEn = 0x2D5,
+                   kVgtGsInstanceCnt = 0x2E4, kCbColor0Base = 0x318;
 // SH registers.
-constexpr uint32_t kPgmLoPs = 0x008, kPgmLoVs = 0x048, kComputeThreads = 0x207,
+constexpr uint32_t kPgmLoPs = 0x008, kPgmLoVs = 0x048, kPgmLoGs = 0x088, kPgmLoEs = 0x0C8,
+                   kComputeThreads = 0x207,
                    kComputePgmLo = 0x20C, kComputeRsrc1 = 0x212, kComputeUser = 0x240;
 // Uconfig.
 constexpr uint32_t kPrimitiveType = 0x242;
@@ -479,7 +482,7 @@ struct Bound {
 };
 void Bind(State& s, const StageState& st, const Resolved& r, Bound& b) {
   for (const BufferRange& br : r.buffers) {
-    const bool rw = st.stage == Stage::Compute && br.written;
+    const bool rw = RunsAsCompute(st.stage) && br.written;
     const bool ok = Readable(br.base, br.size);
     if (rw) b.rw.push_back({ok ? GPtr(br.base) : nullptr, ok ? br.size : 0});
     else b.ro.push_back({ok ? GPtr(br.base) : nullptr, ok ? br.size : 0});
@@ -507,14 +510,15 @@ gfx::ProgramStage PixelStub() {
 
 // ---- draws
 
-StageState VertexState(const Regs& r) {
-  StageState vs;
-  vs.stage = Stage::Vertex;
-  vs.code = uint64_t(r.sh[kPgmLoVs]) << 8 | uint64_t(r.sh[kPgmLoVs + 1] & 0xFF) << 40;
-  vs.rsrc1 = r.sh[kPgmLoVs + 2];
-  vs.rsrc2 = r.sh[kPgmLoVs + 3];
-  std::memcpy(vs.user, r.sh + kPgmLoVs + 4, sizeof vs.user);
-  return vs;
+// A stage from its SPI_SHADER_PGM_LO_xS register on.
+StageState ShaderState(const Regs& r, Stage stage, uint32_t lo) {
+  StageState st;
+  st.stage = stage;
+  st.code = uint64_t(r.sh[lo]) << 8 | uint64_t(r.sh[lo + 1] & 0xFF) << 40;
+  st.rsrc1 = r.sh[lo + 2];
+  st.rsrc2 = r.sh[lo + 3];
+  std::memcpy(st.user, r.sh + lo + 4, sizeof st.user);
+  return st;
 }
 StageState PixelState(const Regs& r) {
   StageState ps;
@@ -545,6 +549,200 @@ gfx::Rect Scissor(const Regs& r) {
   return s;
 }
 
+// ---- geometry shaders
+
+// A draw with an ES, a GS and a copy shader runs as two compute passes and
+// a draw, in parts that fit the rings: the ES once per vertex of the
+// draw's primitives (in index order, a vertex shared by primitives once
+// for each), writing its outputs to the ESGS ring; the GS once per
+// primitive, reading them there and writing the vertices it emits to the
+// GSVS ring; then the copy shader draws them, read from that ring, as
+// lists of the GS's output primitive. The rings are the guest's (at their
+// V#s' addresses); each part's waves start at the rings' starts.
+struct Geometry {
+  StageState es, gs;
+  Resolved re, rg;
+  gfx::ProgramId pe = 0, pg = 0;
+  gaddr gsvs = 0;
+  uint32_t gsvs_vsharp[4] = {};
+  uint32_t part = 0;  // primitives per part
+};
+
+// The compute program of an Export or Geometry stage.
+gfx::ProgramId PassProgram(State& s, const StageState& st, const Resolved& r) {
+  Program& pr = s.compute[r.key];
+  if (!pr.id && pr.error.empty()) {
+    pr.vs = Translate(st, r);
+    pr.error = pr.vs.error;
+    if (pr.error.empty()) {
+      gfx::ProgramDesc pd;
+      pd.cs = pr.vs.stage;
+      pd.local_size[0] = 64;
+      pr.id = s.dev->CreateProgram(pd);
+    } else {
+      WarnF("GPU: a geometry shader stage is not translated yet (such draws are skipped): %s\n",
+            pr.error.c_str());
+    }
+  }
+  return pr.id;
+}
+
+// The ES, GS and rings of a draw (VGT_SHADER_STAGES_EN: real ES, GS, copy
+// shader, VGT_GS_MODE: SCENARIO_G, off chip; one GS instance), the copy
+// shader's resolution sized to the rings' parts; false if it is not drawn.
+bool SetUpGeometry(State& s, const Regs& r, const DrawCall& call, Resolved& rv, Geometry* g,
+                   gfx::Topology* topology) {
+  const uint32_t* cx = r.context;
+  if (cx[kVgtShaderStagesEn] != 0xB0 || (cx[kVgtGsMode] & 0x600003) != 3 || (cx[kVgtGsInstanceCnt] & 1) ||
+      call.instances > 1) {
+    WarnOnce(6, "draws with tessellation, on-chip or instanced geometry shaders are skipped");
+    return false;
+  }
+  uint32_t k;
+  switch (r.uconfig[kPrimitiveType]) {
+    case 1: k = 1; break;
+    case 2: k = 2; break;
+    case 4: k = 3; break;
+    default: WarnOnce(12, "a geometry shader's input primitive type is not drawn yet"); return false;
+  }
+  switch (cx[kVgtGsOutPrimType] & 0x3F) {
+    case 0: *topology = gfx::Topology::PointList; break;
+    case 1: *topology = gfx::Topology::LineList; break;
+    case 2: *topology = gfx::Topology::TriangleList; break;
+    default: WarnOnce(12, "a geometry shader's output primitive type is not drawn yet"); return false;
+  }
+  g->es = ShaderState(r, Stage::Export, kPgmLoEs);
+  g->gs = ShaderState(r, Stage::Geometry, kPgmLoGs);
+  g->re = Resolve(g->es);
+  g->rg = Resolve(g->gs);
+  const std::string& err = !g->re.error.empty() ? g->re.error : g->rg.error;
+  if (!err.empty()) {
+    WarnOnce(13, ("a geometry shader stage cannot run yet (draws skipped): " + err).c_str());
+    return false;
+  }
+  // The rings: what the ES writes, what the GS writes (stream 0 alone).
+  auto written = [](const Resolved& res, BufferRange* out) {
+    int n = 0;
+    for (const BufferRange& b : res.buffers)
+      if (b.written) *out = b, n++;
+    return n == 1;
+  };
+  BufferRange esgs, gsvs;
+  if (!written(g->re, &esgs) || !written(g->rg, &gsvs) || !(gsvs.vsharp[1] >> 31)) {
+    WarnOnce(13, "a geometry shader's rings are not drawn yet (not one each, or GSVS not swizzled)");
+    return false;
+  }
+  // Their sizes: the V#s the GS and the copy shader read them with.
+  auto capacity = [](const Resolved& res, gaddr base) {
+    uint32_t c = 0;
+    for (const BufferRange& b : res.buffers)
+      if (!b.written && b.base == base) c = std::max(c, b.size);
+    return c;
+  };
+  const uint32_t es_wave = cx[kVgtEsgsRingItemsize] * 256, gs_wave = cx[kVgtGsvsRingItemsize] * 256;
+  const uint32_t max_vert = cx[kVgtGsMaxVertOut] & 0x7FF;
+  if (!es_wave || !gs_wave || !max_vert) return false;
+  const uint32_t waves =
+      std::min(capacity(g->rg, esgs.base) / (es_wave * k), capacity(rv, gsvs.base) / gs_wave);
+  if (!waves) {
+    WarnOnce(13, "a geometry shader's rings are not drawn yet (smaller than a wave)");
+    return false;
+  }
+  g->part = 64 * waves;
+  for (Resolved* res : {&g->re, &g->rg, &rv})
+    for (BufferRange& b : res->buffers) {
+      if (b.base == esgs.base) b.size = waves * k * es_wave;
+      if (b.base == gsvs.base) b.size = waves * gs_wave;
+    }
+  g->gsvs = gsvs.base;
+  std::memcpy(g->gsvs_vsharp, gsvs.vsharp, sizeof g->gsvs_vsharp);
+  for (StageState* st : {&g->es, &g->gs}) {
+    st->es_wave_bytes = es_wave;
+    st->gs_wave_bytes = gs_wave;
+    st->prim_verts = k;
+    st->max_vert = max_vert;
+  }
+  g->pe = PassProgram(s, g->es, g->re);
+  g->pg = PassProgram(s, g->gs, g->rg);
+  return g->pe && g->pg;
+}
+
+// Runs a compute pass of n invocations with one more range (Uniforms()).
+void RunPass(State& s, gfx::ProgramId program, const StageState& st, const Resolved& r, void* extra,
+             uint32_t extra_bytes) {
+  Bound b;
+  Bind(s, st, r, b);
+  if (st.stage == Stage::Export) b.ro.push_back({extra, extra_bytes});
+  else b.rw.push_back({extra, extra_bytes});
+  b.res.buffers = b.ro.data();
+  gfx::ProgramDispatch d;
+  d.program = program;
+  d.cs = b.res;
+  d.rw_buffers = b.rw.data();
+  d.rw_images = b.images.data();
+  d.groups[0] = (st.invocations + 63) / 64;
+  s.dev->DispatchProgram(d);
+}
+
+// The draw's parts: the passes, then the copy shader over the emitted
+// vertices, each as the copy shader's vertex index (its dword in the GSVS
+// ring: the GS wave's place, then the lane's and the vertex's under the
+// ring V#'s swizzle, vertex j at dword j).
+void DrawGeometry(State& s, const DrawCall& call, gfx::ProgramDraw& d, Geometry& g) {
+  const uint32_t k = g.es.prim_verts, max_vert = g.gs.max_vert, prims = call.count / k;
+  if (call.indices && !Readable(call.indices, uint64_t(call.count) * call.index_size)) return;
+  const uint32_t* v = g.gsvs_vsharp;
+  const uint32_t es = 2u << ((v[3] >> 19) & 3), is = 8u << ((v[3] >> 21) & 3), stride = (v[1] >> 16) & 0x3FFF;
+  std::vector<uint32_t> ids, emits, indices, strip;
+  for (uint32_t first = 0; first < prims; first += g.part) {
+    const uint32_t n = std::min(prims - first, g.part);
+    ids.resize(size_t(n) * k);
+    for (uint32_t i = 0; i < n * k; i++) {
+      const uint64_t at = uint64_t(first) * k + i;
+      ids[i] = uint32_t(at);
+      if (call.indices) {
+        ids[i] = 0;
+        std::memcpy(&ids[i], GPtr(call.indices + at * call.index_size), call.index_size);
+      }
+    }
+    g.es.invocations = n * k;
+    RunPass(s, g.pe, g.es, g.re, ids.data(), n * k * 4);
+    g.gs.invocations = n;
+    g.gs.first_prim = first;
+    emits.assign(size_t(n) * max_vert, 0);
+    RunPass(s, g.pg, g.gs, g.rg, emits.data(), n * max_vert * 4);
+    indices.clear();
+    for (uint32_t p = 0; p < n; p++) {
+      const uint32_t t = p % 64;
+      strip.clear();
+      for (uint32_t j = 0; j < max_vert; j++) {
+        const uint32_t e = emits[size_t(p) * max_vert + j];
+        if (!(e & 1)) break;
+        if (e & 2) strip.clear();
+        const uint32_t o = 4 * j;
+        strip.push_back(((p / 64) * g.gs.gs_wave_bytes + ((t / is) * stride + o / es) * es * is +
+                         (t % is) * es + o % es) / 4);
+        const size_t m = strip.size();
+        if (d.state.topology == gfx::Topology::PointList) {
+          indices.push_back(strip[m - 1]);
+        } else if (d.state.topology == gfx::Topology::LineList && m >= 2) {
+          indices.insert(indices.end(), {strip[m - 2], strip[m - 1]});
+        } else if (d.state.topology == gfx::Topology::TriangleList && m >= 3) {
+          // A strip's odd triangles swap their first two vertices (winding).
+          if (m % 2) indices.insert(indices.end(), {strip[m - 3], strip[m - 2], strip[m - 1]});
+          else indices.insert(indices.end(), {strip[m - 2], strip[m - 3], strip[m - 1]});
+        }
+      }
+    }
+    if (indices.empty()) continue;
+    d.indices = indices.data();
+    d.index_size = 4;
+    d.vertex_count = uint32_t(indices.size());
+    d.instance_count = 1;
+    s.dev->DrawProgram(d);
+  }
+}
+
 }  // namespace
 
 void SetDevice(gfx::Device* dev) {
@@ -569,10 +767,6 @@ void Draw(const Regs& r, const DrawCall& call) {
   std::lock_guard<std::mutex> l(s.mu);
   if (!s.dev || !call.count) return;
   const uint32_t* cx = r.context;
-  if (cx[kVgtShaderStagesEn] & 0x3F) {
-    WarnOnce(6, "draws with geometry or tessellation shaders are skipped");
-    return;
-  }
 
   // Targets: colour targets 0 on while they have a format, the depth.
   gfx::ProgramDraw d;
@@ -608,12 +802,16 @@ void Draw(const Regs& r, const DrawCall& call) {
   if (!ntargets && !d.depth) return;
 
   // Shaders.
-  StageState vs = VertexState(r), ps = PixelState(r);
+  StageState vs = ShaderState(r, Stage::Vertex, kPgmLoVs), ps = PixelState(r);
   Resolved rv = Resolve(vs);
   if (!rv.error.empty()) {
     WarnOnce(8, ("a vertex shader cannot run yet (draws skipped): " + rv.error).c_str());
     return;
   }
+  const bool gs = cx[kVgtShaderStagesEn] & 0x3F;
+  Geometry geo;
+  gfx::Topology gs_topology = gfx::Topology::TriangleList;
+  if (gs && !SetUpGeometry(s, r, call, rv, &geo, &gs_topology)) return;
   Resolved rp;
   if (ps.code) {
     rp = Resolve(ps);
@@ -643,7 +841,8 @@ void Draw(const Regs& r, const DrawCall& call) {
 
   // Fixed state.
   gfx::PipelineState& ps_ = d.state;
-  switch (r.uconfig[kPrimitiveType]) {
+  switch (gs ? ~0u : r.uconfig[kPrimitiveType]) {
+    case ~0u: ps_.topology = gs_topology; break;
     case 1: ps_.topology = gfx::Topology::PointList; break;
     case 2: ps_.topology = gfx::Topology::LineList; break;
     case 3: ps_.topology = gfx::Topology::LineStrip; break;
@@ -734,6 +933,7 @@ void Draw(const Regs& r, const DrawCall& call) {
   d.program = pr.id;
   d.vs = bv.res;
   d.fs = bp.res;
+  if (gs) return DrawGeometry(s, call, d, geo);
   d.vertex_count = call.count;
   d.instance_count = std::max(call.instances, 1u);
   if (call.indices) {
