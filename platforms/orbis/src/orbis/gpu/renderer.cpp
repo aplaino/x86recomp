@@ -211,9 +211,23 @@ State& G() {
   return *s;
 }
 
-uint64_t Fnv(const uint8_t* p, size_t n) {
-  uint64_t h = 0xCBF29CE484222325ull;
-  for (size_t i = 0; i < n; i++) h = (h ^ p[i]) * 0x100000001B3ull;
+// A hash of guest memory, to see whether texels changed: four lanes of
+// xxHash64's round over 32-byte blocks, the tail a byte at a time (one
+// FNV-1a lane over every byte was most of the GPU thread's time).
+uint64_t ContentHash(const uint8_t* p, size_t n) {
+  constexpr uint64_t k1 = 0x9E3779B185EBCA87ull, k2 = 0xC2B2AE3D27D4EB4Full;
+  const auto rotl = [](uint64_t x, int r) { return (x << r) | (x >> (64 - r)); };
+  uint64_t lane[4] = {k1, k2, ~k1, ~k2};
+  size_t i = 0;
+  for (; i + 32 <= n; i += 32)
+    for (int l = 0; l < 4; l++) {
+      uint64_t w;
+      std::memcpy(&w, p + i + 8 * l, 8);
+      lane[l] = rotl(lane[l] + w * k2, 31) * k1;
+    }
+  uint64_t h = n;
+  for (int l = 0; l < 4; l++) h = (rotl(h, 27) ^ lane[l]) * k1;
+  for (; i < n; i++) h = (h ^ p[i]) * 0x100000001B3ull;
   return h;
 }
 
@@ -520,7 +534,7 @@ gfx::TextureId TextureFor(State& s, const ImageRef& ref) {
   Texture& e = s.textures[k];
   if (e.tex && e.checked == s.submission) return e.tex;
   const uint8_t* p = GPtr(addr);
-  const uint64_t hash = Fnv(p, size_t(bytes));
+  const uint64_t hash = ContentHash(p, size_t(bytes));
   e.checked = s.submission;
   if (e.tex && e.hash == hash) return e.tex;
   if (!e.tex) {
@@ -734,12 +748,17 @@ bool SetUpGeometry(State& s, const Regs& r, const DrawCall& call, Resolved& rv, 
   const uint32_t es_wave = cx[kVgtEsgsRingItemsize] * 256, gs_wave = cx[kVgtGsvsRingItemsize] * 256;
   const uint32_t max_vert = cx[kVgtGsMaxVertOut] & 0x7FF;
   if (!es_wave || !gs_wave || !max_vert) return false;
-  const uint32_t waves =
+  uint32_t waves =
       std::min(capacity(g->rg, esgs.base) / (es_wave * k), capacity(rv, gsvs.base) / gs_wave);
   if (!waves) {
     WarnOnce(13, "a geometry shader's rings are not drawn yet (smaller than a wave)");
     return false;
   }
+  // No more than the draw's primitives fill: each pass copies its rings
+  // to the host and back, and whole rings for a draw of a few waves cost
+  // most of a frame.
+  waves = std::min(waves, (call.count / k + 63) / 64);
+  if (!waves) return false;
   g->part = 64 * waves;
   for (Resolved* res : {&g->re, &g->rg, &rv})
     for (BufferRange& b : res->buffers) {

@@ -10,6 +10,7 @@
 #include <cstring>
 #include <functional>
 #include <map>
+#include <memory>
 #include <set>
 
 #include "orbis/gpu/gcn.h"
@@ -30,6 +31,13 @@ struct Code {
   std::set<gaddr> fetch;      // the fetch shader's instructions
   gaddr base[2] = {};         // the stage's code, the fetch shader
   bool branches = false;      // any branch, call or return
+  // The words decoded, in runs of consecutive ones: the code is still
+  // what was walked while they are.
+  struct Run {
+    gaddr at;
+    std::vector<uint32_t> words;
+  };
+  std::vector<Run> runs;
 };
 
 constexpr uint32_t kMaxInstructions = 1 << 16;
@@ -75,6 +83,10 @@ bool Walk(gaddr entry, Code& c, std::string* err) {
         return false;
       }
       c.at[pc] = in;
+      if (c.runs.empty() || c.runs.back().at + 4 * c.runs.back().words.size() != pc)
+        c.runs.push_back({pc, {}});
+      const auto* words = reinterpret_cast<const uint32_t*>(GPtr(pc));
+      c.runs.back().words.insert(c.runs.back().words.end(), words, words + in.dwords);
       const gaddr next = pc + 4 * uint64_t(in.dwords);
       if (IsSopp(in, 1)) break;  // s_endpgm
       if (in.fmt == Fmt::Sop1 && in.op == 32) {  // s_setpc_b64: a fetch shader's return
@@ -97,6 +109,39 @@ bool Walk(gaddr entry, Code& c, std::string* err) {
     }
   }
   return true;
+}
+
+// Whether the code walked is still in memory: its words, and the bytes
+// after each run that Walk found mapped (an instruction's 12).
+bool Unchanged(const Code& c) {
+  for (const Code::Run& run : c.runs) {
+    const uint64_t n = 4 * uint64_t(run.words.size());
+    if (!Readable(run.at, n + 8) || std::memcmp(GPtr(run.at), run.words.data(), n)) return false;
+  }
+  return true;
+}
+
+// Walks from a stage's code (fetch 0), or of its code with the fetch
+// shader at fetch merged in (Resolver::Step), kept while their code is
+// unchanged: draws run the same few shaders over and over, and walking
+// them again for each was most of the GPU thread's time.
+using Walks = std::map<std::pair<gaddr, gaddr>, std::shared_ptr<const Code>>;
+Walks& WalkCache() {
+  static Walks* w = new Walks;  // under the renderer's lock, until exit
+  return *w;
+}
+std::shared_ptr<const Code> CachedWalk(gaddr entry, gaddr fetch) {
+  Walks& w = WalkCache();
+  auto it = w.find({entry, fetch});
+  if (it == w.end()) return nullptr;
+  if (Unchanged(*it->second)) return it->second;
+  w.erase(it);
+  return nullptr;
+}
+void KeepWalk(gaddr entry, gaddr fetch, std::shared_ptr<const Code> c) {
+  Walks& w = WalkCache();
+  if (w.size() >= 1024) w.clear();
+  w[{entry, fetch}] = std::move(c);
 }
 
 // ---- the scalar evaluation (Resolve)
@@ -144,7 +189,8 @@ struct Site {
 
 struct Resolver {
   const StageState& st;
-  Code code;
+  std::shared_ptr<const Code> walked;  // the code (shared with WalkCache)
+  const Code& code() const { return *walked; }
   Resolved r;
   Scalars s;
   std::map<gaddr, Site> sites;
@@ -165,7 +211,7 @@ struct Resolver {
   bool Fail(gaddr pc, const char* what) {
     char b[160];
     std::snprintf(b, sizeof b, "%s at %llX (%s)", what, (unsigned long long)pc,
-                  gcn::Disassemble(code.at[pc]).c_str());
+                  code().at.count(pc) ? gcn::Disassemble(code().at.at(pc)).c_str() : "?");
     r.error = b;
     return false;
   }
@@ -224,26 +270,34 @@ struct Resolver {
             if (!s.Get(w & 0xFF, &lo) || !s.Get((w & 0xFF) + 1, &hi))
               return Fail(pc, "a call to an unknown address");
             const gaddr target = lo | uint64_t(hi & 0xFFFF) << 32;
-            if (code.base[1] && code.base[1] != target)
+            if (code().base[1] && code().base[1] != target)
               return Fail(pc, "calls to more than one fetch shader");
-            code.base[1] = target;
             r.fetch = target;
             s.Set(d, uint32_t(pc + 4));
             s.Set(d + 1, uint32_t((pc + 4) >> 32));
-            Code fc;
-            if (!Walk(target, fc, &r.error)) return false;
-            if (fc.branches && !std::any_of(fc.at.begin(), fc.at.end(), [](auto& e) {
-                  return e.second.fmt == Fmt::Sop1 && e.second.op == 32;
-                }))
-              return Fail(pc, "a fetch shader without a return");
-            for (auto& [a, i] : fc.at) {
-              if (IsBranch(i)) return Fail(a, "a branch in a fetch shader");
-              code.at[a] = i;
-              code.fetch.insert(a);
+            if (auto c = CachedWalk(st.code, target)) {
+              walked = std::move(c);
+            } else {
+              Code fc;
+              if (!Walk(target, fc, &r.error)) return false;
+              if (fc.branches && !std::any_of(fc.at.begin(), fc.at.end(), [](auto& e) {
+                    return e.second.fmt == Fmt::Sop1 && e.second.op == 32;
+                  }))
+                return Fail(pc, "a fetch shader without a return");
+              auto merged = std::make_shared<Code>(code());
+              for (auto& [a, i] : fc.at) {
+                if (IsBranch(i)) return Fail(a, "a branch in a fetch shader");
+                merged->at[a] = i;
+                merged->fetch.insert(a);
+              }
+              merged->base[1] = target;
+              merged->leaders.insert(target);
+              merged->runs.insert(merged->runs.end(), fc.runs.begin(), fc.runs.end());
+              KeepWalk(st.code, target, merged);
+              walked = std::move(merged);
             }
-            code.leaders.insert(target);
-            for (auto& [a, i] : fc.at)
-              if (!Step(a, i)) return false;
+            for (gaddr a : code().fetch)
+              if (!Step(a, code().at.at(a))) return false;
             return true;
           }
           case 32: return true;  // s_setpc_b64 (the fetch shader's return)
@@ -393,16 +447,22 @@ struct Resolver {
   }
 
   bool Run() {
-    code.base[0] = st.code;
-    if (!Walk(st.code, code, &r.error)) return false;
+    walked = CachedWalk(st.code, 0);
+    if (!walked) {
+      auto c = std::make_shared<Code>();
+      c->base[0] = st.code;
+      walked = c;
+      if (!Walk(st.code, *c, &r.error)) return false;
+      KeepWalk(st.code, 0, c);
+    }
+    const std::shared_ptr<const Code> own = walked;  // Step may swap in the fetch shader's
     const uint32_t user = (st.rsrc2 >> 1) & 0x1F;
     for (uint32_t i = 0; i < user && i < 16; i++) s.Set(i, st.user[i]);
     s.Set(gcn::kExecLo, 1);
     s.Set(gcn::kExecHi, 0);
     // Program order: the stage's code by address, a call running the
     // fetch shader where it is.
-    std::vector<std::pair<gaddr, Instr>> order(code.at.begin(), code.at.end());
-    for (auto& [pc, in] : order)
+    for (auto& [pc, in] : own->at)
       if (!Step(pc, in)) return false;
     return true;
   }
@@ -460,9 +520,9 @@ struct Translator {
   void Fail(gaddr pc, const char* what) {
     if (!error.empty()) return;
     char b[200];
-    auto it = res.code.at.find(pc);
+    auto it = res.code().at.find(pc);
     std::snprintf(b, sizeof b, "%s at %llX (%s)", what, (unsigned long long)pc,
-                  it == res.code.at.end() ? "?" : gcn::Disassemble(it->second).c_str());
+                  it == res.code().at.end() ? "?" : gcn::Disassemble(it->second).c_str());
     error = b;
   }
 
@@ -1129,15 +1189,15 @@ struct Translator {
           }
           case 7: Line(Dst(d) + " = ~" + src(s0) + "; scc = " + Dst(d) + " != 0u ? 1u : 0u;"); return;
           case 31: {  // s_getpc_b64: the code base from the uniforms
-            const int region = res.code.fetch.count(pc) ? 1 : 0;
-            const gaddr rel = next - res.code.base[region];
+            const int region = res.code().fetch.count(pc) ? 1 : 0;
+            const gaddr rel = next - res.code().base[region];
             Line(Dst(d) + " = r_misc[" + std::to_string(2 * region) + "] + " + U(uint32_t(rel)) + ";");
             Line(Dst(d + 1) + " = r_misc[" + std::to_string(2 * region + 1) + "];");
             return;
           }
           case 33: {  // s_swappc_b64: call the fetch shader; the return block in sdst
             Line(Dst(d) + " = " + U(uint32_t(block_of.at(next))) + "; " + Dst(d + 1) + " = 0xFFFFFFFFu;");
-            Line("pc = " + U(uint32_t(block_of.at(res.code.base[1]))) + "; continue;");
+            Line("pc = " + U(uint32_t(block_of.at(res.code().base[1]))) + "; continue;");
             return;
           }
           case 32:  // s_setpc_b64: the return
@@ -1432,11 +1492,11 @@ struct Translator {
         return false;
       }
     int n = 0;
-    for (gaddr l : res.code.leaders)
-      if (res.code.at.count(l)) block_of[l] = n++;
+    for (gaddr l : res.code().leaders)
+      if (res.code().at.count(l)) block_of[l] = n++;
     // Blocks in address order (the fetch shader is a region of its own).
-    std::vector<std::pair<gaddr, Instr>> order(res.code.at.begin(), res.code.at.end());
-    const bool loop = res.code.branches;
+    std::vector<std::pair<gaddr, Instr>> order(res.code().at.begin(), res.code().at.end());
+    const bool loop = res.code().branches;
     if (loop) {
       Line("uint pc = " + U(uint32_t(block_of.at(st.code))) + ";");
       Line("for (;;) {");
@@ -1585,7 +1645,7 @@ struct Translator {
   bool UsesCompare(int image) const {
     for (auto& [pc, site] : res.sites)
       if (site.image == image) {
-        const Instr& in = res.code.at.at(pc);
+        const Instr& in = res.code().at.at(pc);
         if (in.fmt == Fmt::Mimg && in.op >= 32 && in.op <= 63 && ((in.op - 32) & 8)) return true;
       }
     return false;
@@ -1709,7 +1769,7 @@ Resolved Resolve(const StageState& st) {
                            st.threads[2]};
   k = Hex(head, sizeof head);
   if (st.stage == Stage::Pixel) k += Hex(st.ps_input_cntl, sizeof st.ps_input_cntl);
-  for (auto& [pc, in] : rv.code.at) {
+  for (auto& [pc, in] : rv.code().at) {
     const uint32_t words[3] = {in.w0, in.w1, in.literal};
     k += Hex(words, sizeof words);
     auto it = rv.sites.find(pc);
