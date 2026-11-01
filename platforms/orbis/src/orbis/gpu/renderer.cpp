@@ -470,7 +470,8 @@ gfx::TextureId SampledStencil(State& s, const DepthTarget& dt, const uint32_t t[
 
 // A T#'s texture: the colour target at its address, else its texels from
 // guest memory (compared once a submission and uploaded when they change).
-// Level 0 only, in the tile modes tiling.h reads.
+// Level 0 only, in the tile modes tiling.h reads; nothing (black) where
+// memory is not mapped.
 gfx::TextureId TextureFor(State& s, const ImageRef& ref) {
   const uint32_t* t = ref.t;
   const gaddr addr = ImageBase(t);
@@ -492,6 +493,7 @@ gfx::TextureId TextureFor(State& s, const ImageRef& ref) {
     }
     if (d.stencil && d.stencil == addr) return SampledStencil(s, d, t, w, h);
   }
+  if (!Readable(addr, 1)) return 0;
   Format fmt;
   if (!TextureFormat(t, &fmt)) {
     WarnOnce(2, "a texture format is not drawn yet (textures read as black)");
