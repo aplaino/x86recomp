@@ -468,7 +468,7 @@ class GpuDevice final : public Device {
   ~GpuDevice() override {
     if (!dev_) return;
     SDL_WaitForGPUIdle(dev_);
-    for (SDL_GPUFence* f : in_flight_) SDL_ReleaseGPUFence(dev_, f);
+    for (const InFlight& f : in_flight_) SDL_ReleaseGPUFence(dev_, f.fence);
     for (auto& [t, rd] : reads_) FinishRead(rd, nullptr, 0, Format::Unknown);
     for (auto& [k, p] : pipelines_) SDL_ReleaseGPUGraphicsPipeline(dev_, p);
     for (auto& [k, p] : shader_pipelines_) SDL_ReleaseGPUGraphicsPipeline(dev_, p);
@@ -712,7 +712,7 @@ class GpuDevice final : public Device {
     std::memcpy(MapUpload(size), src, size);
     SDL_UnmapGPUTransferBuffer(dev_, upload_tb_);
     SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
-    SDL_GPUTransferBufferLocation from{upload_tb_, 0};
+    SDL_GPUTransferBufferLocation from{upload_tb_, upload_at_};
     SDL_GPUBufferRegion to{it->second.b, at, size};
     SDL_UploadToGPUBuffer(cp, &from, &to, false);
     SDL_EndGPUCopyPass(cp);
@@ -1817,7 +1817,7 @@ void r_color0(inout vec4 c) {
         EnsureBuffer(cro_, cro_cap_, ro.size(), SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ);
         bool cycle = true;
         HostSpans(ro_in, ro.size(), [&](size_t at, size_t n) {
-          SDL_GPUTransferBufferLocation src{tb, Uint32(at)};
+          SDL_GPUTransferBufferLocation src{tb, Uint32(upload_at_ + at)};
           SDL_GPUBufferRegion dst{cro_, Uint32(at), Uint32(n)};
           SDL_UploadToGPUBuffer(cp, &src, &dst, cycle);
           cycle = false;
@@ -1829,7 +1829,7 @@ void r_color0(inout vec4 c) {
                      SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ |
                          SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE);
         HostSpans(rw_in, rw.size(), [&](size_t at, size_t n) {
-          SDL_GPUTransferBufferLocation src{tb, Uint32(ro.size() + at)};
+          SDL_GPUTransferBufferLocation src{tb, Uint32(upload_at_ + ro.size() + at)};
           SDL_GPUBufferRegion dst{crw_, Uint32(at), Uint32(n)};
           SDL_UploadToGPUBuffer(cp, &src, &dst, false);
         });
@@ -2279,37 +2279,62 @@ void r_color0(inout vec4 c) {
 
   // ---- flush: one copy pass, then one render pass for the target
 
-  // upload_tb_ with room for `bytes`, mapped cycling (Submit).
+  // Room for `bytes` in upload_tb_, a ring: its offset is upload_at_.
+  // Submissions take its space in order and each one's end is kept with
+  // its fence (Submit), so writing waits only for the submissions whose
+  // uploads the new ones would overwrite. The ring grows (once everything
+  // is finished) when one upload needs more than half of it.
   uint8_t* MapUpload(size_t bytes) {
-    if (!upload_tb_ || upload_tb_cap_ < bytes) {
+    bytes = (bytes + 255) & ~size_t(255);
+    if (!upload_tb_ || upload_tb_cap_ < 2 * bytes) {
+      Drain();
       if (upload_tb_) SDL_ReleaseGPUTransferBuffer(dev_, upload_tb_);
-      upload_tb_cap_ = std::max<uint32_t>(upload_tb_cap_ ? upload_tb_cap_ : 4u << 20, 4u << 20);
-      while (upload_tb_cap_ < bytes) upload_tb_cap_ *= 2;
+      upload_tb_cap_ = std::max<uint32_t>(upload_tb_cap_, 32u << 20);
+      while (upload_tb_cap_ < 2 * bytes) upload_tb_cap_ *= 2;
       SDL_GPUTransferBufferCreateInfo tbi{};
       tbi.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
       tbi.size = upload_tb_cap_;
       upload_tb_ = SDL_CreateGPUTransferBuffer(dev_, &tbi);
       if (!upload_tb_) FatalF("gfx: transfer buffer: %s", SDL_GetError());
+      upload_head_ = upload_tail_ = 0;
     }
-    return static_cast<uint8_t*>(SDL_MapGPUTransferBuffer(dev_, upload_tb_, true));
+    if (upload_head_ % upload_tb_cap_ + bytes > upload_tb_cap_)
+      upload_head_ += upload_tb_cap_ - upload_head_ % upload_tb_cap_;
+    while (upload_head_ + bytes - upload_tail_ > upload_tb_cap_) Retire();
+    upload_at_ = Uint32(upload_head_ % upload_tb_cap_);
+    upload_head_ += bytes;
+    auto* p = static_cast<uint8_t*>(SDL_MapGPUTransferBuffer(dev_, upload_tb_, false));
+    return p + upload_at_;
   }
 
-  // Submits cmd, keeping at most kMaxInFlight submissions unfinished.
-  // Each flush maps the upload transfer buffer cycling: while earlier
-  // submissions still use it, SDL gives the mapping a fresh buffer of the
-  // same size and keeps it for reuse. Unbounded, a burst of flushes with
-  // no present to pace it (every texture upload while a level loads) piled
-  // up tens of GB of staging memory.
+  // Waits for the oldest unfinished submission; its uploads' room in the
+  // ring is free again.
+  void Retire() {
+    if (in_flight_.empty()) {
+      upload_tail_ = upload_head_;
+      return;
+    }
+    SDL_WaitForGPUFences(dev_, true, &in_flight_.front().fence, 1);
+    SDL_ReleaseGPUFence(dev_, in_flight_.front().fence);
+    upload_tail_ = in_flight_.front().upload_end;
+    in_flight_.pop_front();
+  }
+
+  void Drain() {
+    while (!in_flight_.empty()) Retire();
+    upload_tail_ = upload_head_;
+  }
+
+  // Submits cmd, keeping at most kMaxInFlight submissions unfinished:
+  // resources uploaded cycling (vertex, index and arena buffers, textures)
+  // get a fresh copy from SDL per submission still using the last one.
   void Submit(SDL_GPUCommandBuffer* cmd) {
     SDL_GPUFence* f = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
     if (!f) FatalF("gfx: SDL_SubmitGPUCommandBuffer: %s", SDL_GetError());
-    in_flight_.push_back(f);
+    in_flight_.push_back({f, upload_head_});
     while (!in_flight_.empty() &&
-           (in_flight_.size() > kMaxInFlight || SDL_QueryGPUFence(dev_, in_flight_.front()))) {
-      SDL_WaitForGPUFences(dev_, true, &in_flight_.front(), 1);
-      SDL_ReleaseGPUFence(dev_, in_flight_.front());
-      in_flight_.pop_front();
-    }
+           (in_flight_.size() > kMaxInFlight || SDL_QueryGPUFence(dev_, in_flight_.front().fence)))
+      Retire();
   }
 
   void Flush() {
@@ -2335,7 +2360,7 @@ void r_color0(inout vec4 c) {
       for (const Upload& u : uploads_) {
         SDL_GPUTextureTransferInfo src{};
         src.transfer_buffer = upload_tb_;
-        src.offset = u.offset;
+        src.offset = upload_at_ + u.offset;
         src.pixels_per_row = u.pixels_per_row;
         src.rows_per_layer = u.rows;
         SDL_GPUTextureRegion dst{};
@@ -2351,13 +2376,13 @@ void r_color0(inout vec4 c) {
       }
       if (vbytes) {
         EnsureBuffer(vbuf_, vbuf_cap_, vbytes, SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
-        SDL_GPUTransferBufferLocation src{upload_tb_, Uint32(ubytes)};
+        SDL_GPUTransferBufferLocation src{upload_tb_, Uint32(upload_at_ + ubytes)};
         SDL_GPUBufferRegion dst{vbuf_, 0, Uint32(vbytes)};
         SDL_UploadToGPUBuffer(cp, &src, &dst, true);
       }
       if (ibytes) {
         EnsureBuffer(ibuf_, ibuf_cap_, ibytes, SDL_GPU_BUFFERUSAGE_INDEX);
-        SDL_GPUTransferBufferLocation src{upload_tb_, Uint32(ubytes + vbytes)};
+        SDL_GPUTransferBufferLocation src{upload_tb_, Uint32(upload_at_ + ubytes + vbytes)};
         SDL_GPUBufferRegion dst{ibuf_, 0, Uint32(ibytes)};
         SDL_UploadToGPUBuffer(cp, &src, &dst, true);
       }
@@ -2365,7 +2390,7 @@ void r_color0(inout vec4 c) {
         EnsureBuffer(pbuf_, pbuf_cap_, pbytes, SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
         bool cycle = true;
         HostSpans(draw_copies_, pbytes, [&](size_t at, size_t n) {
-          SDL_GPUTransferBufferLocation src{upload_tb_, Uint32(ubytes + vbytes + ibytes + at)};
+          SDL_GPUTransferBufferLocation src{upload_tb_, Uint32(upload_at_ + ubytes + vbytes + ibytes + at)};
           SDL_GPUBufferRegion dst{pbuf_, Uint32(at), Uint32(n)};
           SDL_UploadToGPUBuffer(cp, &src, &dst, cycle);
           cycle = false;
@@ -3730,8 +3755,14 @@ void r_color0(inout vec4 c) {
   SDL_GPUBuffer* ibuf_ = nullptr;
   uint32_t vbuf_cap_ = 0, ibuf_cap_ = 0;
   SDL_GPUTransferBuffer* upload_tb_ = nullptr;
-  static constexpr size_t kMaxInFlight = 4;
-  std::deque<SDL_GPUFence*> in_flight_;  // submitted, not known finished
+  static constexpr size_t kMaxInFlight = 32;
+  struct InFlight {
+    SDL_GPUFence* fence;
+    uint64_t upload_end;  // upload_head_ when it was submitted
+  };
+  std::deque<InFlight> in_flight_;  // submitted, not known finished
+  uint64_t upload_head_ = 0, upload_tail_ = 0;  // ring positions, not wrapped
+  Uint32 upload_at_ = 0;                        // MapUpload's offset
   SDL_GPUTransferBuffer* download_tb_ = nullptr;
   std::map<uint32_t, Read> reads_;  // StartReadBack tickets
   uint32_t next_read_ = 1;
