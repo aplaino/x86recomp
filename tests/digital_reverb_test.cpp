@@ -16,7 +16,7 @@
 // the x87 model at the Windows default control word (0x27F), and every
 // fragment of output, the on/off state and the coefficients must match
 // bit for bit. Addresses and driver-block offsets used here are documented
-// in docs/miles.md ("Miles 6.5e digital reverb").
+// in platforms/win32/docs/miles.md ("Miles 6.5e digital reverb").
 // The coefficients are also compared over a sweep of reverb times and
 // dampings, for both of the CRT's pow paths (x87 and SSE2).
 
@@ -34,9 +34,9 @@
 #include <cstdarg>
 #include <string>
 
-#include "runtime/lifted.h"
 #include "runtime/log.h"
-#include "runtime/pe_image.h"
+#include "x86/lifted.h"
+#include "x86/pe_image.h"
 #endif
 
 namespace {
@@ -256,7 +256,7 @@ void RaiseDivideError(Ctx&, uint32_t va) {
 void Cpuid(Ctx&) { std::abort(); }
 uint64_t Rdtsc(Ctx&) { std::abort(); }
 void Probe(Ctx&, uint32_t, const char*) {}
-void FatalF(const char* fmt, ...) {  // runtime/sse.cpp's #XM
+void FatalF(const char* fmt, ...) {  // x86/sse.cpp's #XM
   va_list ap;
   va_start(ap, fmt);
   std::vprintf(fmt, ap);

@@ -1,7 +1,7 @@
 # SwARc: shared lifter + runtime for the PC recomps
 
 Rules only. Design in ARCHITECTURE.md; observed behaviour of the APIs
-and middleware reimplemented here in docs/ (e.g. docs/miles.md). Game
+and middleware reimplemented here in docs/ (e.g. platforms/win32/docs/miles.md). Game
 projects keep their own CLAUDE.md/FINDINGS.md for what is specific to
 that game; behaviour of a Windows or middleware API goes here, even when
 a game is where it came up.
@@ -23,7 +23,7 @@ a game is where it came up.
   run its ctest (with <ID>_GAME_EXE set, the EXE-derived oracle tests run
   too).
 - Lifter output must not change unintentionally: when touching
-  tools/lifter, diff a game's generated/ before and after.
+  tools/lifter_x86, diff a game's generated/ before and after.
 
 ## Product constraints (see ARCHITECTURE.md)
 - No emulation in the shipping binary: no interpreter, JIT, runtime x86
@@ -45,15 +45,15 @@ a game is where it came up.
   - its proof next to the code or in ARCHITECTURE.md;
   - a fallback to the exact model for everything outside the proof's
     conditions;
-  - fuzz tests against the SoftFloat model (tests/x87_fast_test) that
+  - fuzz tests against the SoftFloat model (tests/x86/x87_fast_test) that
     mutations of the path make fail.
   Only in the host's default floating-point environment (never change
   the rounding mode), and code that runs such a path is built with
   RECOMP_X87_FP_FLAGS (-ffp-contract=off, no fast-math).
-- SSE and AVX: lanes through runtime/sse.cpp (SoftFloat + x86 NaN
+- SSE and AVX: lanes through x86/sse.cpp (SoftFloat + x86 NaN
   rules + exact MXCSR flags), never host float/double arithmetic.
-  Changes must keep tests/lift_sse_test and (for x64 images)
-  tests/lift_x64_test passing.
+  Changes must keep tests/x86/lift_sse_test and (for x64 images)
+  tests/x86/lift_x64_test passing.
 - CPUID is a fixed CPU, never the host's: SSE2-class for 32-bit guests,
   AMD family 16h for x64 ones (ARCHITECTURE.md, "64-bit guests"). Claim
   a feature only once the lifter implements it bit-exactly and an oracle
@@ -86,7 +86,7 @@ a game is where it came up.
   CMakeLists.txt (their registrars run when it loads). Every library
   links what it uses: --no-undefined (Linux) and ld64 (macOS) refuse
   anything else.
-- lifted.h semantics changes must keep tests/lift_semantics_test.cpp
+- lifted.h semantics changes must keep tests/x86/lift_semantics_test.cpp
   passing (bit-exact against the host CPU).
 - Another session may be working in the main checkout: do parallel work
   in a separate git worktree (e.g. ../SwARc-<topic>) and build games

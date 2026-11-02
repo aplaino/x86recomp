@@ -15,16 +15,16 @@ The game ports built on it and their status are on the
 
 ## What is here
 
-- **Lifter** (`tools/lifter`, `recomp_lift`): decodes a PE with Zydis and
+- **Lifter** (`tools/lifter_x86`, `recomp_lift`): decodes a PE with Zydis and
   emits C++ for every function, one basic block at a time, with exact
   x86 integer and flag semantics. Straight-line x87 code becomes guarded
   "runs" that keep the FPU register stack in locals. 32-bit and x64
   images both lift; x64 code runs on the Win64 ABI against a fixed CPU
   model (AMD family 16h; SSE3 to SSE4.1, AVX and LZCNT so far).
-- **x87 model** (`src/runtime/x87.cpp`): exact 80-bit x87 (precision and
+- **x87 model** (`src/x86/x87.cpp`): exact 80-bit x87 (precision and
   rounding control, status-word flags) on Berkeley SoftFloat with
   integer fast paths, tested bit for bit against a real x87.
-- **SSE and AVX** (`src/runtime/sse.cpp`): the XMM/YMM registers and MXCSR,
+- **SSE and AVX** (`src/x86/sse.cpp`): the XMM/YMM registers and MXCSR,
   with SoftFloat lanes and x86 NaN rules, tested bit for bit against the
   CPU like the x87 model.
 - **Runtime** (`src/runtime`): the guest address space (4 GiB for
@@ -42,8 +42,8 @@ The game ports built on it and their status are on the
   HLSL dialect and compiled Direct3D 9 shaders (shader models 1-3) to
   GLSL, for the programmable pipeline on SDL_GPU.
 - **Tools**: Ghidra export scripts (`tools/ghidra`), a PE symbol dumper
-  (`tools/pe_symbols.py`), dev-time reference checks (`tools/layout`,
-  `tools/undname`), and EAX reference measurement (`tools/eax_capture`:
+  (`tools/pe_symbols.py`), dev-time reference checks (`platforms/win32/tools/layout`,
+  `platforms/win32/tools/undname`), and EAX reference measurement (`tools/eax_capture`:
   a Windows 98 recorder for Creative hardware, the same cases rendered by
   the runtime, and their comparison).
 
@@ -54,7 +54,7 @@ its own branch.
 
 [ARCHITECTURE.md](ARCHITECTURE.md) describes the design; `docs/` the
 observed behaviour of the middleware reimplemented here
-([docs/miles.md](docs/miles.md)).
+([platforms/win32/docs/miles.md](platforms/win32/docs/miles.md)).
 
 ## Using it from a game project
 

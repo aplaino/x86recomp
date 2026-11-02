@@ -1,11 +1,11 @@
 # CORE-MATH (MIT): correctly rounded elementary functions, behind the x64
-# CRT's math imports (src/runtime/hle/ucrt.cpp). Correct rounding makes the
-# results the same on every host and compiler, which neither the host libm
-# (glibc and Apple's differ) nor a port of the UCRT's own (not correctly
-# rounded) would give; see ARCHITECTURE.md, "64-bit guests". Only the
-# functions games import are built. On x86-64 a few of them take
-# intrinsic-based fast paths for bit operations and flag handling; arm64
-# takes their portable branches, with the same results.
+# CRT's math imports (platforms/win32/src/win32/ucrt.cpp). Correct
+# rounding makes the results the same on every host and compiler, which
+# neither the host libm (glibc and Apple's differ) nor a port of the
+# UCRT's own (not correctly rounded) would give; see ARCHITECTURE.md,
+# "64-bit guests". Only the functions games import are built. On x86-64 a
+# few of them take intrinsic-based fast paths for bit operations and flag
+# handling; arm64 takes their portable branches, with the same results.
 
 FetchContent_Declare(coremath
   GIT_REPOSITORY https://gitlab.inria.fr/core-math/core-math.git

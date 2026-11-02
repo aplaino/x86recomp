@@ -18,7 +18,7 @@
 // setters (lifted too and called through the import), and mss32's pow for
 // the read-back. Every level field must match bit for bit, for both of the
 // CRTs' pow paths (x87 and SSE2). Addresses and offsets are documented in
-// docs/miles.md ("Miles 6.5e sample levels and Fast 2D"). The channel gains are native only (three double
+// platforms/win32/docs/miles.md ("Miles 6.5e sample levels and Fast 2D"). The channel gains are native only (three double
 // multiplications and a rounding, described there).
 
 #include <algorithm>
@@ -36,9 +36,9 @@
 #include <map>
 #include <string>
 
-#include "runtime/lifted.h"
 #include "runtime/log.h"
-#include "runtime/pe_image.h"
+#include "x86/lifted.h"
+#include "x86/pe_image.h"
 #endif
 
 namespace {
@@ -364,7 +364,7 @@ void RaiseDivideError(Ctx&, uint32_t va) {
 void Cpuid(Ctx&) { std::abort(); }
 uint64_t Rdtsc(Ctx&) { std::abort(); }
 void Probe(Ctx&, uint32_t, const char*) {}
-void FatalF(const char* fmt, ...) {  // runtime/sse.cpp's #XM
+void FatalF(const char* fmt, ...) {  // x86/sse.cpp's #XM
   va_list ap;
   va_start(ap, fmt);
   std::vprintf(fmt, ap);

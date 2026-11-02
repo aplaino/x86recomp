@@ -69,8 +69,8 @@ endif()
 # and the lifter.
 add_library(recomp_image SHARED
   src/runtime/guest_memory.cpp
-  src/runtime/pe_image.cpp
-  src/runtime/unwind.cpp)
+  src/x86/pe_image.cpp
+  src/x86/unwind.cpp)
 target_include_directories(recomp_image PUBLIC src)
 target_compile_features(recomp_image PUBLIC cxx_std_20)
 target_link_libraries(recomp_image PUBLIC recomp_log)
@@ -78,7 +78,7 @@ target_link_libraries(recomp_image PUBLIC recomp_log)
 # --- x87 and SSE models (SoftFloat 3e) ---------------------------------
 include(cmake/softfloat.cmake)  # defines target `softfloat`
 include(cmake/coremath.cmake)  # defines target `coremath`
-add_library(recomp_x87 SHARED src/runtime/x87.cpp src/runtime/sse.cpp)
+add_library(recomp_x87 SHARED src/x86/x87.cpp src/x86/sse.cpp)
 target_include_directories(recomp_x87 PUBLIC src)
 target_compile_features(recomp_x87 PUBLIC cxx_std_20)
 target_link_libraries(recomp_x87 PRIVATE softfloat recomp_image)
@@ -94,37 +94,38 @@ target_compile_options(softfloat PRIVATE -O2)
 # ----------------------------------------------------------------------
 
 # Lifter (build-time tool): x86-32 machine code -> C++.
-add_subdirectory(tools/lifter)
+add_subdirectory(tools/lifter_x86)
 
 # Runtime core and the Win32 HLE. HLE handlers register themselves from
 # static initialisers, which run when their library is loaded.
 add_library(recomp_runtime SHARED
-  src/runtime/dispatch.cpp
+  src/x86/dispatch.cpp
   src/runtime/pacing.cpp
   src/runtime/platform.cpp
-  src/runtime/process.cpp
-  src/runtime/watchdog.cpp
+  src/x86/process.cpp
+  src/x86/watchdog.cpp
   src/runtime/guest_alloc.cpp
   src/runtime/lazy_mem.cpp
-  src/runtime/hle/hle.cpp
-  src/runtime/hle/kernel32.cpp
-  src/runtime/hle/winmm_timer.cpp
-  src/runtime/hle/kernel32_file.cpp
-  src/runtime/hle/kernel32_sync.cpp
-  src/runtime/hle/kernel32_seh.cpp
-  src/runtime/hle/seh64.cpp
-  src/runtime/hle/kernel32_misc.cpp
-  src/runtime/hle/advapi32.cpp
-  src/runtime/hle/user32_input.cpp
-  src/runtime/hle/user32_window.cpp
-  src/runtime/hle/gdi32.cpp
-  src/runtime/hle/shell_net.cpp
-  src/runtime/hle/ws2_32.cpp
-  src/runtime/hle/com.cpp
-  src/runtime/hle/present.cpp)
+  src/x86/hle.cpp
+  platforms/win32/src/win32/kernel32.cpp
+  platforms/win32/src/win32/winmm_timer.cpp
+  platforms/win32/src/win32/kernel32_file.cpp
+  platforms/win32/src/win32/kernel32_sync.cpp
+  platforms/win32/src/win32/kernel32_seh.cpp
+  platforms/win32/src/win32/seh64.cpp
+  platforms/win32/src/win32/kernel32_misc.cpp
+  platforms/win32/src/win32/advapi32.cpp
+  platforms/win32/src/win32/user32_input.cpp
+  platforms/win32/src/win32/user32_window.cpp
+  platforms/win32/src/win32/gdi32.cpp
+  platforms/win32/src/win32/shell_net.cpp
+  platforms/win32/src/win32/ws2_32.cpp
+  platforms/win32/src/win32/com.cpp
+  src/x86/present.cpp)
+target_include_directories(recomp_runtime PUBLIC platforms/win32/src)
 target_link_libraries(recomp_runtime PUBLIC recomp_image recomp_x87
                       SDL3::SDL3 Threads::Threads
-                      PRIVATE recomp_gfx)  # presentation (hle/present.cpp)
+                      PRIVATE recomp_gfx)  # presentation (x86/present.cpp)
 # Nothing in a game refers to an HLE module's symbols: keep the linker
 # from dropping them where it links --as-needed (ld64 keeps every dylib).
 if(NOT APPLE)
@@ -133,15 +134,15 @@ endif()
 
 if(FFMPEG_FOUND)
   # Miles Sound System (mss32) on the software mixer.
-  add_library(recomp_mss32 SHARED src/runtime/hle/mss32.cpp)
+  add_library(recomp_mss32 SHARED platforms/win32/src/win32/mss32.cpp)
   target_link_libraries(recomp_mss32 PUBLIC recomp_runtime recomp_audio)
 
   # DirectSound 8 (dsound) on the same software mixer.
-  add_library(recomp_dsound SHARED src/runtime/hle/dsound.cpp)
+  add_library(recomp_dsound SHARED platforms/win32/src/win32/dsound.cpp)
   target_link_libraries(recomp_dsound PUBLIC recomp_runtime recomp_audio)
 
   # Bink video (binkw32) on ffmpeg; audio through the Miles mixer.
-  add_library(recomp_bink SHARED src/runtime/hle/binkw32.cpp)
+  add_library(recomp_bink SHARED platforms/win32/src/win32/binkw32.cpp)
   target_link_libraries(recomp_bink PUBLIC recomp_mss32)
 endif()
 
@@ -153,57 +154,60 @@ endif()
 
 # DirectDraw 7 / Direct3D 7 over gfx::Device.
 add_library(recomp_d3d7 SHARED
-  src/runtime/hle/ddraw.cpp
-  src/runtime/hle/d3d7.cpp)
+  platforms/win32/src/win32/ddraw.cpp
+  platforms/win32/src/win32/d3d7.cpp)
 target_link_libraries(recomp_d3d7 PUBLIC recomp_runtime recomp_gfx)
 
 # XInput 1.3 on SDL gamepads, and the WMI that tells games which
 # DirectInput game controllers are XInput pads.
-add_library(recomp_xinput SHARED src/runtime/hle/xinput.cpp src/runtime/hle/wbem.cpp)
+add_library(recomp_xinput SHARED platforms/win32/src/win32/xinput.cpp
+            platforms/win32/src/win32/wbem.cpp)
 target_link_libraries(recomp_xinput PUBLIC recomp_runtime)
 
 # DirectInput 8 (keyboard and mouse) on the event pump's raw input; it
 # lists the XInput pads as game controllers.
-add_library(recomp_dinput8 SHARED src/runtime/hle/dinput8.cpp)
+add_library(recomp_dinput8 SHARED platforms/win32/src/win32/dinput8.cpp)
 target_link_libraries(recomp_dinput8 PUBLIC recomp_runtime recomp_xinput)
 
 # Direct3D 9 and D3DX 9 over gfx::Device.
-add_library(recomp_d3d9 SHARED src/runtime/hle/d3d9.cpp src/runtime/hle/d3d9_draw.cpp
-  src/runtime/hle/d3d9_resource.cpp src/runtime/hle/d3dx9.cpp)
+add_library(recomp_d3d9 SHARED platforms/win32/src/win32/d3d9.cpp
+  platforms/win32/src/win32/d3d9_draw.cpp platforms/win32/src/win32/d3d9_resource.cpp
+  platforms/win32/src/win32/d3dx9.cpp)
 target_link_libraries(recomp_d3d9 PUBLIC recomp_runtime recomp_gfx recomp_hlsl)
 # D3DX's maths rounds like the original only without contraction into FMA.
-set_source_files_properties(src/runtime/hle/d3dx9.cpp TARGET_DIRECTORY recomp_d3d9
+set_source_files_properties(platforms/win32/src/win32/d3dx9.cpp TARGET_DIRECTORY recomp_d3d9
   PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 
 # OpenGL 1.x (opengl32, wgl, gdi32 pixel formats) over gfx::Device.
 add_library(recomp_opengl SHARED
   src/runtime/gl/context.cpp
-  src/runtime/hle/opengl32.cpp)
+  platforms/win32/src/win32/opengl32.cpp)
 target_link_libraries(recomp_opengl PUBLIC recomp_runtime recomp_gfx)
 
 # dbghelp (UnDecorateSymbolName) on LLVM's Microsoft demangler.
 # The x64 C and C++ runtime DLLs (UCRT, VCRUNTIME140, MSVCP140): x64 guests
 # import them, 32-bit ones link their CRT statically.
-add_library(recomp_ucrt SHARED src/runtime/hle/ucrt.cpp src/runtime/hle/ucrt_stdio.cpp
-            src/runtime/hle/ucrt_time.cpp
-            src/runtime/hle/vcruntime.cpp src/runtime/hle/vcruntime_eh.cpp
-            src/runtime/hle/msvcp140.cpp)
+add_library(recomp_ucrt SHARED platforms/win32/src/win32/ucrt.cpp
+            platforms/win32/src/win32/ucrt_stdio.cpp platforms/win32/src/win32/ucrt_time.cpp
+            platforms/win32/src/win32/vcruntime.cpp platforms/win32/src/win32/vcruntime_eh.cpp
+            platforms/win32/src/win32/msvcp140.cpp)
 target_link_libraries(recomp_ucrt PUBLIC recomp_runtime PRIVATE coremath)
 
 # Store and online service SDKs (GOG Galaxy, ...), answering as offline.
-add_library(recomp_online SHARED src/runtime/hle/galaxy64.cpp)
+add_library(recomp_online SHARED platforms/win32/src/win32/galaxy64.cpp)
 target_link_libraries(recomp_online PUBLIC recomp_runtime)
 
 # SDL2.dll for x64 guests that link it themselves, on the host's SDL3.
-add_library(recomp_sdl2 SHARED src/runtime/hle/sdl2.cpp src/runtime/hle/sdl2_video.cpp)
+add_library(recomp_sdl2 SHARED platforms/win32/src/win32/sdl2.cpp
+            platforms/win32/src/win32/sdl2_video.cpp)
 target_link_libraries(recomp_sdl2 PUBLIC recomp_runtime SDL3::SDL3)
 
-add_library(recomp_dbghelp SHARED src/runtime/hle/dbghelp.cpp)
+add_library(recomp_dbghelp SHARED platforms/win32/src/win32/dbghelp.cpp)
 target_link_libraries(recomp_dbghelp PUBLIC recomp_runtime PRIVATE recomp_demangle)
 
 # recomp_add_lifted(<target> <dir>): an OBJECT library of the lifter's
 # output in <dir> (globbed, so re-run cmake after lifting), with the
-# registration of its function table (runtime/lifted_table.cpp). Defines
+# registration of its function table (x86/lifted_table.cpp). Defines
 # nothing when <dir> has no lifted code yet.
 function(recomp_add_lifted target dir)
   file(GLOB _gen CONFIGURE_DEPENDS "${dir}/*.cpp")
@@ -212,7 +216,7 @@ function(recomp_add_lifted target dir)
   endif()
   # Lifted code is always optimised: at -O0 it would be unusably slow and
   # debug info for 100+ MB of generated source is not useful.
-  add_library(${target} OBJECT ${_gen} "${RECOMP_ROOT}/src/runtime/lifted_table.cpp")
+  add_library(${target} OBJECT ${_gen} "${RECOMP_ROOT}/src/x86/lifted_table.cpp")
   target_include_directories(${target} PRIVATE "${RECOMP_ROOT}/src")
   target_compile_features(${target} PRIVATE cxx_std_20)
   # -fnon-call-exceptions: guest access violations are raised from the
@@ -225,7 +229,7 @@ endfunction()
 # recomp_add_lift_tests(EXE <exe> SYMBOLS <dir> MANIFEST <file> [X64]):
 # oracle tests that run every x87, integer and SSE instruction form found
 # in the EXE lifted and natively (x86-64 hosts only). X64: the EXE is an
-# x64 image; its integer and SSE/AVX forms go to tests/lift_x64_test.cpp
+# x64 image; its integer and SSE/AVX forms go to tests/x86/lift_x64_test.cpp
 # (lift_int64, lift_sse64; the latter needs an AVX host).
 function(recomp_add_lift_tests)
   cmake_parse_arguments(A "X64" "EXE;SYMBOLS;MANIFEST" "" ${ARGN})
@@ -233,7 +237,7 @@ function(recomp_add_lift_tests)
      NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
     return()
   endif()
-  set(_tests "${RECOMP_ROOT}/tests")
+  set(_tests "${RECOMP_ROOT}/tests/x86")
   if(A_X64)
     foreach(_kind int sse)
       set(_forms "${CMAKE_CURRENT_BINARY_DIR}/lift_${_kind}64_forms.cpp")
@@ -285,7 +289,7 @@ function(recomp_add_digital_reverb_test)
   if(NOT EXISTS "${A_DLL}")
     return()
   endif()
-  # mss32.dll 6.5e (docs/miles.md).
+  # mss32.dll 6.5e (platforms/win32/docs/miles.md).
   set(_known 7855b8fbae917cb8449f2d4361ab61b5ecec4df0a11130d797cb0aa99b4260ea)
   file(SHA256 "${A_DLL}" _hash)
   if(NOT _hash STREQUAL _known)
@@ -328,7 +332,7 @@ function(recomp_add_fast2d_test)
   if(NOT EXISTS "${A_MSS32}" OR NOT EXISTS "${A_FAST2D}")
     return()
   endif()
-  # mss32.dll 6.5e and miles/msssoft.m3d (docs/miles.md).
+  # mss32.dll 6.5e and miles/msssoft.m3d (platforms/win32/docs/miles.md).
   set(_known_mss32 7855b8fbae917cb8449f2d4361ab61b5ecec4df0a11130d797cb0aa99b4260ea)
   set(_known_fast2d 62233bebccb6aeb97370a8499c577e2982f46924e3a1bc55c53fa1f8a2404252)
   foreach(_f MSS32 FAST2D)

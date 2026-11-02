@@ -112,7 +112,7 @@ are the exception: changing those still recompiles every game.
 - A library cannot refer to the executable's symbols (a dylib must not;
   `--no-undefined` holds Linux to the same), so the lifter's function
   table reaches the dispatcher through `RegisterLiftedFunctions`, called
-  before `main()` from runtime/lifted_table.cpp, which
+  before `main()` from x86/lifted_table.cpp, which
   `recomp_add_lifted()` compiles into the lifted code.
 - HLE modules are found by nothing but their registrars: the runtime
   makes its consumers link `--no-as-needed`, so a linker that drops
@@ -341,7 +341,7 @@ fyl2x, fyl2xp1, f2xm1 and fscale have our own extF80 implementations
 
 Fast paths are integer-only (no host FPU) and provably identical to the
 SoftFloat path they bypass, which stays the reference
-(tests/x87_fast_test compares them; x87_test and lift_x87_test compare
+(tests/x86/x87_fast_test compares them; x87_test and lift_x87_test compare
 against the hardware):
 - add/sub/mul/div of normal or zero operands: exact 128-bit result,
   rounded by the model's RoundPack;
@@ -508,7 +508,7 @@ std::fma is a single instruction on arm64. On x86-64 without -mfma it is
 glibc's fma, which is correctly rounded too.
 
 Tests and measurements:
-- tests/x87_fast_test fuzzes every function against the SoftFloat path
+- tests/x86/x87_fast_test fuzzes every function against the SoftFloat path
   at 0x027F. A function must succeed exactly when the exact result can
   be held, and then match value, flags and C1 bit for bit. The cases
   include range edges, ties, cancellation, signed zeros, results just
@@ -536,7 +536,7 @@ Apple Silicon included (it has no CPUID), and nothing is claimed that
 the lifter does not implement (no SSE3+). The XMM registers and MXCSR
 live in Ctx and are used in place (never cached in locals).
 - Float lanes go through SoftFloat with the SSE NaN rules applied in
-  runtime/sse.cpp (the shared SoftFloat build carries the x87 ones):
+  x86/sse.cpp (the shared SoftFloat build carries the x87 ones):
   one NaN operand is returned quieted, two give the first source, SNaN
   raises IE; invalid operations give the default NaN. Rounding control,
   every sticky flag (IE DE ZE OE UE PE) and precedence (a zero divisor
@@ -544,7 +544,7 @@ live in Ctx and are used in place (never cached in locals).
 - Not modelled, fatal if reached: unmasked SIMD exceptions (#XM), and
   FTZ/DAZ actually changing a result.
 - Integer and data-movement forms are plain portable C++.
-- tests/lift_sse_test runs every SSE form in a game EXE lifted and
+- tests/x86/lift_sse_test runs every SSE form in a game EXE lifted and
   natively from random states rich in special values (for a game whose
   EXE has 244 forms: 2.44M checks, all bit-exact).
 - In the native port these sites go away: CRT maths becomes the host
@@ -820,7 +820,7 @@ late-frame rule; on an idle host wake-ups land 15-30 us (Linux) or
   cleanly otherwise); oleaut32 BSTRs.
 - mss32 (Miles): our own mixer on an SDL3 audio stream (runtime/audio):
   resampling, loop counts, gain ramps, the "Miles Fast 2D Positional
-  Audio" model of the game's Miles version (6.1c or 6.5; docs/miles.md),
+  Audio" model of the game's Miles version (6.1c or 6.5; platforms/win32/docs/miles.md),
   MP3 through libavcodec. Miles' EAX providers (EAX 1.0, 2.0, 3.0, with
   Msseax.m3d's attribute names and struct layouts): voices pan like
   DirectSound3D hardware and get an LF level and a 5 kHz level
@@ -835,7 +835,7 @@ late-frame rule; on an idle host wake-ups land 15-30 us (Linux) or
   master reverb (room types, reverb time/predelay/damping, driver and
   sample/stream wet levels) is our Miles-compatible Schroeder reverb
   (runtime/audio/digital_reverb), written from a behavioural description
-  of mss32 6.5e's (docs/miles.md) and bit-exact with it:
+  of mss32 6.5e's (platforms/win32/docs/miles.md) and bit-exact with it:
   recomp_add_digital_reverb_test lifts the original routines from the
   user's installed DLL at build time (`recomp_lift --only`) and compares;
   tests/digital_reverb_test checks a hash of our output on every host.
@@ -1108,7 +1108,7 @@ with exact results (sqrt, floor, fmod, ldexp...) are the host's.
 AVX: games test CPUID and XGETBV and take AVX paths when they are
 offered, and console targets on x86-64 are AVX CPUs, so VEX code is
 lifted, not avoided:
-- VEX-encoded 128-bit forms and 256-bit AVX lift onto runtime/sse lanes
+- VEX-encoded 128-bit forms and 256-bit AVX lift onto x86/sse lanes
   (SoftFloat with the SSE NaN rules, exact MXCSR flags). A VEX.128 write
   zeroes bits 255:128 of the destination; legacy SSE leaves them alone.
 - The YMM upper halves live in Ctx::ymm_hi; VEX instructions are lifted
@@ -1124,7 +1124,7 @@ lifted, not avoided:
   its forms hold. Games read CPUID themselves (MSVC's CRT fills
   __isa_available from it), so which paths they take follows from this
   table.
-- Oracle tests (tests/lift_x64_test.cpp) run every integer and SSE/AVX
+- Oracle tests (tests/x86/lift_x64_test.cpp) run every integer and SSE/AVX
   form found in an x64 image natively and lifted from random states:
   all 16 general registers, the full YMM registers, flags, MXCSR and a
   memory buffer. The native stub keeps its state pointer in a
