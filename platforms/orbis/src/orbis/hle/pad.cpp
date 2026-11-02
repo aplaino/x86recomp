@@ -1,16 +1,19 @@
 // libScePad HLE: the user's controller from the host's first SDL gamepad,
 // else the keyboard (arrows, Z/X/A/S for cross/circle/square/triangle,
 // Q/W L1/R1, 1/2 L2/R2, Enter options). It is always connected, as a
-// DualShock 4 is to its user; <ID>_BACKGROUND=1 runs see it at rest. The
-// motion sensors report the controller lying still. ScePadData's layout,
+// DualShock 4 is to its user; <ID>_BACKGROUND=1 runs see it at rest, or
+// pressed as <ID>_TEST_PAD's file says (Script below). The motion sensors report the controller lying still. ScePadData's layout,
 // the argument checks and codes are libScePad 11.00's; one state is read
 // per call (the newest).
 
 #include <SDL3/SDL.h>
 
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <vector>
 
 #include "orbis/hle.h"
 #include "orbis/host.h"
@@ -52,10 +55,63 @@ struct State {
   uint8_t trigger[2] = {0, 0};
 };
 
+// <ID>_TEST_PAD=<file>: background runs' presses, one per line:
+// "<seconds> <button>...", each held 0.2 s from that many seconds after
+// scePadInit; buttons cross, circle, square, triangle, up, down, left,
+// right, l1, r1, options, touchpad; '#' starts a comment.
+struct Press {
+  double t;
+  uint32_t buttons;
+};
+
+std::vector<Press> LoadScript() {
+  std::vector<Press> v;
+  const char* path = recomp::Env("TEST_PAD");
+  if (!path) return v;
+  FILE* f = std::fopen(path, "r");
+  if (!f) recomp::FatalF("TEST_PAD: cannot open %s", path);
+  static const struct {
+    const char* name;
+    uint32_t bit;
+  } kNames[] = {
+      {"cross", kCross}, {"circle", kCircle}, {"square", kSquare}, {"triangle", kTriangle},
+      {"up", kUp},       {"down", kDown},     {"left", kLeft},     {"right", kRight},
+      {"l1", kL1},       {"r1", kR1},         {"options", kOptions}, {"touchpad", kTouchPad},
+  };
+  char line[256];
+  while (std::fgets(line, sizeof line, f)) {
+    if (char* h = std::strchr(line, '#')) *h = 0;
+    char* save = nullptr;
+    char* tok = strtok_r(line, " \t\r\n", &save);
+    if (!tok) continue;
+    Press p{std::atof(tok), 0};
+    while ((tok = strtok_r(nullptr, " \t\r\n", &save))) {
+      uint32_t bit = 0;
+      for (const auto& n : kNames)
+        if (!std::strcmp(tok, n.name)) bit = n.bit;
+      if (!bit) recomp::FatalF("TEST_PAD: unknown button %s", tok);
+      p.buttons |= bit;
+    }
+    v.push_back(p);
+  }
+  std::fclose(f);
+  return v;
+}
+
+State Script() {
+  static const std::vector<Press> presses = LoadScript();
+  static const auto t0 = std::chrono::steady_clock::now();
+  const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  State s;
+  for (const Press& p : presses)
+    if (t >= p.t && t < p.t + 0.2) s.buttons |= p.buttons;
+  return s;
+}
+
 // The controller now (host thread).
 State Poll() {
   State s;
-  if (recomp::Background()) return s;
+  if (recomp::Background()) return Script();
   if (g_pad) {
     static const struct {
       SDL_GamepadButton b;
@@ -141,6 +197,7 @@ ORBIS_HLE("libScePad", scePadInit, 0) {
     }
   });
   recomp::orbis::AddHostEventSink(Sink);
+  if (recomp::Background()) recomp::orbis::RunOnHost([] { Script(); });  // starts its clock
   return 0;
 }
 

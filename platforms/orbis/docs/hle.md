@@ -176,8 +176,9 @@ library.
   (weight, slant), vertical layout and system fonts are not implemented,
   and FreeType's allocations through the game's memory are not made.
 - recomp_orbis_pad: libScePad, the user's controller from the first SDL
-  gamepad or the keyboard, always connected; at rest in background
-  runs; one state per read; the motion sensors report it lying still.
+  gamepad or the keyboard, always connected; in background runs at rest
+  or pressed as <ID>_TEST_PAD's file says (timed presses, for tests);
+  one state per read; the motion sensors report it lying still.
 - libSceNpTrophy (recomp_orbis_np): contexts and handles from 1,
   unlocks kept below DataDir()/trophies; what needs the trophy pack
   (outside the game's files) is not implemented.
