@@ -26,6 +26,7 @@
 #include "orbis/hle.h"
 #include "orbis/hle/kernel.h"
 #include "runtime/log.h"
+#include "runtime/write_watch.h"
 #include "x86/runtime.h"
 
 namespace recomp::orbis::kernel {
@@ -239,6 +240,7 @@ int64_t Getdents(int fd, gaddr buf, uint64_t n, gaddr pos) {
 // read/write/pread/pwrite through a host buffer.
 int64_t Read(int fd, gaddr buf, uint64_t n, int64_t off) {
   if (!Owned(fd)) return -kEBADF;
+  recomp::watch::Release(buf, n);  // the kernel does not fault on watched pages
   const ssize_t r = off < 0 ? ::read(fd, GPtr(buf), n) : ::pread(fd, GPtr(buf), n, off);
   return r < 0 ? -FromHost(errno) : r;
 }

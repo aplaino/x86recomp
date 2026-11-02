@@ -47,11 +47,22 @@ set_tests_properties(pacing PROPERTIES RUN_SERIAL TRUE)
 add_executable(lazy_mem_test lazy_mem_test.cpp
                ${PROJECT_SOURCE_DIR}/src/runtime/lazy_mem.cpp
                ${PROJECT_SOURCE_DIR}/src/runtime/guest_memory.cpp
+               ${PROJECT_SOURCE_DIR}/src/runtime/write_watch.cpp
                ${PROJECT_SOURCE_DIR}/src/runtime/guest_alloc.cpp)
 target_include_directories(lazy_mem_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_compile_features(lazy_mem_test PRIVATE cxx_std_20)
 target_link_libraries(lazy_mem_test PRIVATE Threads::Threads)
 add_test(NAME lazy_mem COMMAND lazy_mem_test)
+
+# write_watch_test: write watches through real page faults; portable.
+add_executable(write_watch_test write_watch_test.cpp
+               ${PROJECT_SOURCE_DIR}/src/runtime/write_watch.cpp
+               ${PROJECT_SOURCE_DIR}/src/runtime/guest_memory.cpp
+               ${PROJECT_SOURCE_DIR}/src/runtime/guest_alloc.cpp)
+target_include_directories(write_watch_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_features(write_watch_test PRIVATE cxx_std_20)
+target_link_libraries(write_watch_test PRIVATE Threads::Threads)
+add_test(NAME write_watch COMMAND write_watch_test)
 
 # HLSL translator: each shader in hlsl/ through recomp_hlslc, then
 # glslangValidator (the GLSL must compile for Vulkan), with the reflection

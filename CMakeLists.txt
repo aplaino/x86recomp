@@ -165,7 +165,8 @@ add_library(recomp_base SHARED
   src/runtime/guest_alloc.cpp
   src/runtime/lazy_mem.cpp
   src/runtime/platform.cpp
-  src/runtime/pacing.cpp)
+  src/runtime/pacing.cpp
+  src/runtime/write_watch.cpp)
 target_include_directories(recomp_base PUBLIC src)
 target_compile_features(recomp_base PUBLIC cxx_std_20)
 target_link_libraries(recomp_base PUBLIC recomp_log Threads::Threads)

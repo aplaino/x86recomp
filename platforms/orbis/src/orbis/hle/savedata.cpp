@@ -20,6 +20,7 @@
 #include "orbis/hle.h"
 #include "orbis/hle/kernel.h"
 #include "runtime/log.h"
+#include "runtime/write_watch.h"
 #include "x86/runtime.h"
 
 namespace {
@@ -377,10 +378,12 @@ static uint64_t SaveDataMemory(recomp::Ctx& c, bool write) {
   if (!fs::exists(path) || off + size > fs::file_size(path)) return kErrParameter;
   std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
   f.seekg(std::streamoff(off));
-  if (write)
+  if (write) {
     f.write(reinterpret_cast<const char*>(recomp::GPtr(buf)), std::streamsize(size));
-  else
+  } else {
+    recomp::watch::Release(buf, size);  // the kernel does not fault on watched pages
     f.read(reinterpret_cast<char*>(recomp::GPtr(buf)), std::streamsize(size));
+  }
   return 0;
 }
 ORBIS_HLE("libSceSaveData", sceSaveDataGetSaveDataMemory, 4) { return SaveDataMemory(c, false); }

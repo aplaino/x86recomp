@@ -24,6 +24,7 @@
 #include "runtime/lazy_mem.h"
 #include "runtime/log.h"
 #include "runtime/platform.h"
+#include "runtime/write_watch.h"
 #include "x86/hle.h"
 #include "x86/lifted.h"
 #include "x86/runtime.h"
@@ -168,12 +169,13 @@ const bool kFatalReportSet = (g_fatal_report = FatalReport, true);
 
 
 // Host faults (SIGSEGV/SIGBUS) in guest memory are first offered to the
-// lazy regions (lazy_mem.h), whose pages fault by design, on any thread
-// and from host code too. Others are guest access violations: they go to
-// the platform's exception dispatch (Process::guest_fault; Win32 games
-// may demand-page data from an exception filter). Anything unhandled, or
-// a fault outside the arena (a runtime bug), is reported with the host
-// call chain (lifted functions are named f_<guest va>) and exits.
+// write watches (write_watch.h) and the lazy regions (lazy_mem.h), whose
+// pages fault by design, on any thread and from host code too. Others are
+// guest access violations: they go to the platform's exception dispatch
+// (Process::guest_fault; Win32 games may demand-page data from an
+// exception filter). Anything unhandled, or a fault outside the arena (a
+// runtime bug), is reported with the host call chain (lifted functions
+// are named f_<guest va>) and exits.
 
 namespace {
 // Faults can nest: an exception filter may itself touch a not-yet-paged
@@ -200,6 +202,8 @@ void FaultHandler(int sig, siginfo_t* si, void* uc) {
   // x64 guests: no guest exception dispatch yet (ARCHITECTURE.md, "64-bit
   // guests"), so their faults are reported below.
   const bool guest32 = a - base < (1ull << 32) && g_proc && !g_proc->x64;
+  if (g_proc && a - base < g_proc->mem.size() && watch::HandleFault(a - base))
+    return;  // a watched page, writable now: retry the write
   if (guest32 && lazy::HandleFault(uint32_t(a - base)))
     return;  // filled: retry the faulting instruction
   platform::FaultContext fc = platform::ReadFaultContext(uc);

@@ -151,8 +151,9 @@ Win32 memory semantics (4 KiB commit granularity, 64 KiB allocation
 granularity, page protections, VirtualQuery) are tracked in a per-guest-
 page table. Host protection is only "accessible or not" at host page
 granularity (4 KiB on x86 Linux, 16 KiB on Apple Silicon and Asahi), so
-nothing depends on host page faults for guest behaviour, with two
-exceptions: lazy regions (below, Lazy guest memory), and games that demand-page reserved memory from an exception
+nothing depends on host page faults for guest behaviour, with three
+exceptions: lazy regions (below, Lazy guest memory), write watches
+(below, Write watches), and games that demand-page reserved memory from an exception
 filter (commit and fill one page per access violation). On a host with
 larger pages, committing one guest page makes its whole host page
 accessible, and the other guest pages in it would never fault. So after a
@@ -743,6 +744,33 @@ ddraw.cpp):
 - A fault on a lazy page while that thread holds the region lock (a
   runtime bug) is not handled but reported like any other fault.
 
+### Write watches (GPU copies of guest memory)
+Console GPUs read textures and vertex buffers straight from memory the
+CPU writes; the host GPU needs copies. Comparing every source with its
+copy for each submission (a hash of each, once per submission) cost
+gigabytes a second of hashing, nearly all of it on memory that never
+changed. A write watch (src/runtime/write_watch.{h,cpp}) answers "was
+this range written since" without reading it:
+- Arming a watch makes the host pages of its range read-only. The first
+  write to one of them, from any thread, lifted or host code, faults; the
+  fault handler offers it to the watches before anything else, which
+  disarm every watch on that page and make their pages writable again,
+  and the write is retried. Watches overlapping a disarmed one (sharing a
+  page with it) are disarmed with it, so read-only pages are always
+  exactly the armed watches' pages.
+- Guest protection is bookkeeping, so watches never conflict with it;
+  GuestMemory releases the watches on a range before changing its host
+  protection (Commit, Decommit), and HLE handlers that pass a guest
+  buffer to the kernel to fill (read(2)) release it first: the kernel
+  fails with EFAULT on a read-only page instead of faulting.
+- A user arms a watch before reading the range it guards (hashing,
+  uploading), so a write after the read disarms it, and only once the
+  range has been found unchanged a few times: memory rewritten every
+  frame would cost a fault and an mprotect per frame for nothing.
+- Faults on a watched page while that thread holds the registry lock (a
+  runtime bug: nothing writes guest memory with it held) are reported
+  like any other fault.
+
 ### Display modes, fullscreen and presentation
 Display modes are virtual: the host's mode never changes behind the
 game's back. What games see and what the host shows:
@@ -828,7 +856,7 @@ late-frame rule; on an idle host wake-ups land 15-30 us (Linux) or
 - mss32 (Miles): our own mixer on an SDL3 audio stream (runtime/audio):
   resampling, loop counts, gain ramps, the "Miles Fast 2D Positional
   Audio" model of the game's Miles version (6.1c or 6.5;
-  platforms/win32/platforms/win32/platforms/win32/platforms/win32/docs/miles.md), MP3 through libavcodec. Miles' EAX
+  platforms/win32/platforms/win32/platforms/win32/platforms/win32/platforms/win32/docs/miles.md), MP3 through libavcodec. Miles' EAX
   providers (EAX 1.0, 2.0, 3.0, with
   Msseax.m3d's attribute names and struct layouts): voices pan like
   DirectSound3D hardware and get an LF level and a 5 kHz level
@@ -843,7 +871,7 @@ late-frame rule; on an idle host wake-ups land 15-30 us (Linux) or
   master reverb (room types, reverb time/predelay/damping, driver and
   sample/stream wet levels) is our Miles-compatible Schroeder reverb
   (runtime/audio/digital_reverb), written from a behavioural description
-  of mss32 6.5e's (platforms/win32/platforms/win32/platforms/win32/platforms/win32/docs/miles.md) and bit-exact with it:
+  of mss32 6.5e's (platforms/win32/platforms/win32/platforms/win32/platforms/win32/platforms/win32/docs/miles.md) and bit-exact with it:
   recomp_add_digital_reverb_test lifts the original routines from the
   user's installed DLL at build time (`recomp_lift --only`) and compares;
   tests/digital_reverb_test checks a hash of our output on every host.
