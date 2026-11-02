@@ -12,6 +12,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <unordered_map>
 
 #include "orbis/gpu/gcn.h"
 #include "x86/runtime.h"
@@ -38,6 +39,8 @@ struct Code {
     std::vector<uint32_t> words;
   };
   std::vector<Run> runs;
+  // The words of `at` in order, as a number (CodeId; 0: not yet).
+  mutable uint32_t id = 0;
 };
 
 constexpr uint32_t kMaxInstructions = 1 << 16;
@@ -1756,25 +1759,36 @@ std::string Hex(const void* p, size_t n) {
   return s;
 }
 
+// A number for the code's words: equal words, equal numbers.
+uint32_t CodeId(const Code& c) {
+  if (c.id) return c.id;
+  static auto* ids = new std::unordered_map<std::string, uint32_t>;  // as WalkCache
+  std::string w;
+  w.reserve(12 * c.at.size());
+  for (auto& [pc, in] : c.at) {
+    const uint32_t words[3] = {in.w0, in.w1, in.literal};
+    w += Hex(words, sizeof words);
+  }
+  c.id = ids->try_emplace(std::move(w), uint32_t(ids->size() + 1)).first->second;
+  return c.id;
+}
+
 }  // namespace
 
 Resolved Resolve(const StageState& st) {
   Resolver rv(st);
   if (!rv.Run()) return rv.r;
   // The key: the stage, its registers that shape the code, the code's
-  // words, each memory instruction's binding and the formats it reads or writes.
+  // words (CodeId), each memory instruction's binding and the formats it reads or writes.
   std::string& k = rv.r.key;
   const uint32_t head[] = {uint32_t(st.stage), st.rsrc1, st.rsrc2, st.ps_input_addr,
                            st.col_format, st.z_format, st.col_swap, st.threads[0], st.threads[1],
                            st.threads[2]};
   k = Hex(head, sizeof head);
   if (st.stage == Stage::Pixel) k += Hex(st.ps_input_cntl, sizeof st.ps_input_cntl);
-  for (auto& [pc, in] : rv.code().at) {
-    const uint32_t words[3] = {in.w0, in.w1, in.literal};
-    k += Hex(words, sizeof words);
-    auto it = rv.sites.find(pc);
-    if (it == rv.sites.end()) continue;
-    const Site& s = it->second;
+  const uint32_t id = CodeId(rv.code());
+  k += Hex(&id, sizeof id);
+  for (auto& [pc, s] : rv.sites) {
     const uint32_t site[4] = {uint32_t(s.buffer), uint32_t(s.image), s.vsharp[3], s.vsharp[1] >> 31};
     k += Hex(site, sizeof site);
     if (s.image >= 0) {

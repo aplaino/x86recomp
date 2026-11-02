@@ -354,6 +354,25 @@ struct ProgramSamplerKey {
   }
 };
 
+// A byte vector that grows without zeroing (AppendWords).
+template <typename T>
+struct NoZero : std::allocator<T> {
+  template <typename U>
+  struct rebind {
+    using other = NoZero<U>;
+  };
+  using std::allocator<T>::allocator;
+  template <typename U>
+  void construct(U* p) noexcept {
+    ::new (static_cast<void*>(p)) U;
+  }
+  template <typename U, typename... A>
+  void construct(U* p, A&&... a) {
+    ::new (static_cast<void*>(p)) U(std::forward<A>(a)...);
+  }
+};
+using Arena = std::vector<uint8_t, NoZero<uint8_t>>;
+
 class GpuDevice final : public Device {
  public:
   explicit GpuDevice(SDL_Window* w) : window_(w) {}
@@ -1712,9 +1731,14 @@ void r_color0(inout vec4 c) {
     } else if (d.indices) {
       c.indexed = true;
       c.first = uint32_t(indices_.size());
-      for (uint32_t i = 0; i < d.vertex_count; i++)
-        indices_.push_back(d.index_size == 4 ? static_cast<const uint32_t*>(d.indices)[i]
-                                             : static_cast<const uint16_t*>(d.indices)[i]);
+      indices_.resize(indices_.size() + d.vertex_count);
+      uint32_t* to = indices_.data() + c.first;
+      if (d.index_size == 4) {
+        std::memcpy(to, d.indices, size_t(d.vertex_count) * 4);
+      } else {
+        const auto* from = static_cast<const uint16_t*>(d.indices);
+        for (uint32_t i = 0; i < d.vertex_count; i++) to[i] = from[i];
+      }
       c.base = d.base_vertex;
     } else {
       c.first = uint32_t(d.base_vertex);
@@ -1747,7 +1771,7 @@ void r_color0(inout vec4 c) {
     // The read-only and read-write buffers, each in its own arena, and
     // their places in the uniform block. GPU buffers are copied into the
     // arenas, and read-write ones' results back out, on the GPU.
-    std::vector<uint8_t> ro, rw;
+    Arena ro, rw;
     std::vector<uint32_t> table(4 * size_t(st.buffers + st.rw_buffers), 0);
     std::vector<BufferCopy> ro_in, rw_in, rw_out;
     bool host_rw = false;
@@ -1755,7 +1779,10 @@ void r_color0(inout vec4 c) {
       const BufferData& bd = d.cs.buffers[b];
       table[4 * b] = uint32_t(ro.size() / 4);
       table[4 * b + 1] = bd.size;
-      if (bd.buffer) ro_in.push_back(GpuBufferCopy(bd.buffer, ro.size(), bd.size, bd.offset));
+      if (bd.buffer) {
+        ro_in.push_back(GpuBufferCopy(bd.buffer, ro.size(), bd.size, bd.offset));
+        ro_in.back().held = (bd.size + 3) & ~3u;
+      }
       AppendWords(ro, bd.buffer ? nullptr : bd.data, bd.size);
     }
     std::vector<uint32_t> rw_at(st.rw_buffers);
@@ -1765,7 +1792,8 @@ void r_color0(inout vec4 c) {
       table[4 * (st.buffers + b)] = uint32_t(rw.size() / 4);
       table[4 * (st.buffers + b) + 1] = bd.size;
       if (bd.buffer) {
-        const BufferCopy c = GpuBufferCopy(bd.buffer, rw.size(), bd.size);
+        BufferCopy c = GpuBufferCopy(bd.buffer, rw.size(), bd.size);
+        c.held = (bd.size + 3) & ~3u;
         if (!bd.data) rw_in.push_back(c);
         rw_out.push_back(c);
       } else {
@@ -1773,32 +1801,38 @@ void r_color0(inout vec4 c) {
       }
       AppendWords(rw, bd.data, bd.size);
     }
-    if (st.buffers && ro.empty()) ro.resize(4);
-    if (st.rw_buffers && rw.empty()) rw.resize(4);
+    if (st.buffers && ro.empty()) ro.resize(4, 0);
+    if (st.rw_buffers && rw.empty()) rw.resize(4, 0);
 
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(dev_);
     if (!cmd) FatalF("gfx: SDL_AcquireGPUCommandBuffer: %s", SDL_GetError());
     if (!ro.empty() || !rw.empty()) {
       auto* p = MapUpload(ro.size() + rw.size());
       SDL_GPUTransferBuffer* tb = upload_tb_;
-      if (!ro.empty()) std::memcpy(p, ro.data(), ro.size());
-      if (!rw.empty()) std::memcpy(p + ro.size(), rw.data(), rw.size());
+      HostSpans(ro_in, ro.size(), [&](size_t at, size_t n) { std::memcpy(p + at, ro.data() + at, n); });
+      HostSpans(rw_in, rw.size(), [&](size_t at, size_t n) { std::memcpy(p + ro.size() + at, rw.data() + at, n); });
       SDL_UnmapGPUTransferBuffer(dev_, tb);
       SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
       if (!ro.empty()) {
         EnsureBuffer(cro_, cro_cap_, ro.size(), SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ);
-        SDL_GPUTransferBufferLocation src{tb, 0};
-        SDL_GPUBufferRegion dst{cro_, 0, Uint32(ro.size())};
-        SDL_UploadToGPUBuffer(cp, &src, &dst, true);
+        bool cycle = true;
+        HostSpans(ro_in, ro.size(), [&](size_t at, size_t n) {
+          SDL_GPUTransferBufferLocation src{tb, Uint32(at)};
+          SDL_GPUBufferRegion dst{cro_, Uint32(at), Uint32(n)};
+          SDL_UploadToGPUBuffer(cp, &src, &dst, cycle);
+          cycle = false;
+        });
         CopyBuffers(cp, ro_in, cro_, true);
       }
       if (!rw.empty()) {
         EnsureBuffer(crw_, crw_cap_, rw.size(),
                      SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ |
                          SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE);
-        SDL_GPUTransferBufferLocation src{tb, Uint32(ro.size())};
-        SDL_GPUBufferRegion dst{crw_, 0, Uint32(rw.size())};
-        SDL_UploadToGPUBuffer(cp, &src, &dst, false);
+        HostSpans(rw_in, rw.size(), [&](size_t at, size_t n) {
+          SDL_GPUTransferBufferLocation src{tb, Uint32(ro.size() + at)};
+          SDL_GPUBufferRegion dst{crw_, Uint32(at), Uint32(n)};
+          SDL_UploadToGPUBuffer(cp, &src, &dst, false);
+        });
         CopyBuffers(cp, rw_in, crw_, true);
       }
       SDL_EndGPUCopyPass(cp);
@@ -2292,7 +2326,7 @@ void r_color0(inout vec4 c) {
       if (!upload_bytes_.empty()) std::memcpy(p, upload_bytes_.data(), upload_bytes_.size());
       if (vbytes) std::memcpy(p + ubytes, verts_.data(), vbytes);
       if (ibytes) std::memcpy(p + ubytes + vbytes, indices_.data(), ibytes);
-      HostSpans([&](size_t at, size_t n) {
+      HostSpans(draw_copies_, pbytes, [&](size_t at, size_t n) {
         std::memcpy(p + ubytes + vbytes + ibytes + at, pmem_.data() + at, n);
       });
       SDL_UnmapGPUTransferBuffer(dev_, upload_tb_);
@@ -2330,7 +2364,7 @@ void r_color0(inout vec4 c) {
       if (pbytes) {
         EnsureBuffer(pbuf_, pbuf_cap_, pbytes, SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
         bool cycle = true;
-        HostSpans([&](size_t at, size_t n) {
+        HostSpans(draw_copies_, pbytes, [&](size_t at, size_t n) {
           SDL_GPUTransferBufferLocation src{upload_tb_, Uint32(ubytes + vbytes + ibytes + at)};
           SDL_GPUBufferRegion dst{pbuf_, Uint32(at), Uint32(n)};
           SDL_UploadToGPUBuffer(cp, &src, &dst, cycle);
@@ -3336,10 +3370,16 @@ void r_color0(inout vec4 c) {
     }
   }
 
-  static void AppendWords(std::vector<uint8_t>& v, const void* data, uint32_t size) {
-    const size_t at = v.size();
-    v.resize(at + ((size_t(size) + 3) & ~size_t(3)), 0);
-    if (data && size) std::memcpy(v.data() + at, data, size);
+  // Appends size bytes of data, padded to words with zeros; without data,
+  // zeros (an Arena: room left as it is, for a GPU buffer's copy).
+  template <typename V>
+  static void AppendWords(V& v, const void* data, uint32_t size) {
+    const size_t at = v.size(), n = (size_t(size) + 3) & ~size_t(3);
+    v.resize(at + n);
+    if (data && size) {
+      std::memcpy(v.data() + at, data, size);
+      std::memset(v.data() + at + size, 0, n - size);
+    }
   }
 
   // A stage's textures (or depth targets), and for a draw its buffers
@@ -3413,20 +3453,21 @@ void r_color0(inout vec4 c) {
     }
     const size_t at = pmem_.size();
     AppendWords(pmem_, bd.data, bd.size);
+    if (!p) std::memset(pmem_.data() + at, 0, pmem_.size() - at);
     if (p && bd.size) draw_spans_.push_back({p, at, bd.size});
     return at;
   }
 
-  // The parts of pmem_ that come from the host: all but the places of
-  // the GPU buffers copied into it (draw_copies_, in arena order).
+  // The parts of an arena of `size` bytes that come from the host: all
+  // but the places of the GPU buffers copied into it (in arena order).
   template <typename F>
-  void HostSpans(F f) const {
+  static void HostSpans(const std::vector<BufferCopy>& copies, size_t size, F f) {
     size_t at = 0;
-    for (const BufferCopy& c : draw_copies_) {
+    for (const BufferCopy& c : copies) {
       if (c.at > at) f(at, c.at - at);
       at = std::max(at, size_t(c.at) + c.held);
     }
-    if (at < pmem_.size()) f(at, pmem_.size() - at);
+    if (at < size) f(at, size - at);
   }
 
   void AppendUniform(ProgramStageCmd& sc, const void* data, uint32_t len) {
@@ -3713,7 +3754,7 @@ void r_color0(inout vec4 c) {
   std::unordered_map<ProgramKey, SDL_GPUGraphicsPipeline*, BytesHash<ProgramKey>> program_pipelines_;
   std::map<ProgramSamplerKey, SDL_GPUSampler*> program_samplers_;
   std::vector<ProgramCmd> program_cmds_;
-  std::vector<uint8_t> pmem_;
+  Arena pmem_;
   struct DrawSpan {
     const uint8_t* p;  // guest memory copied
     size_t at;         // its offset in pmem_
