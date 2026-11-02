@@ -19,6 +19,7 @@
 #include "orbis/gpu/shader.h"
 #include "orbis/gpu/tiling.h"
 #include "runtime/log.h"
+#include "runtime/write_watch.h"
 #include "x86/runtime.h"
 
 namespace recomp::orbis::gpu {
@@ -193,18 +194,24 @@ struct DepthTarget {
   uint32_t htile_buf_size = 0;
   bool htile_gpu = false, htile_verify = false;
 };
-struct Texture {
-  gfx::TextureId tex = 0;
+// Guest memory a GPU copy is made from, compared once a submission
+// (Changed).
+struct Compared {
   uint64_t hash = 0;
   uint64_t checked = ~0ull;  // the submission it was last compared in
+  uint32_t same = 0;         // comparisons in a row that found it unchanged
+  watch::Watch watch;
+};
+struct Texture {
+  gfx::TextureId tex = 0;
+  Compared cmp;
 };
 // A run of guest memory that stages read, kept in a GPU buffer.
 struct KeptRange {
   gfx::BufferId buffer = 0;
   uint32_t size = 0;
-  uint64_t hash = 0;
-  uint64_t checked = ~0ull;  // the submission it was last compared in
-  uint64_t used = 0;         // the submission it was last read in
+  Compared cmp;
+  uint64_t used = 0;  // the submission it was last read in
 };
 struct Program {
   gfx::ProgramId id = 0;
@@ -295,6 +302,31 @@ uint64_t ContentHash(const uint8_t* p, size_t n) {
   for (int l = 0; l < 4; l++) h = (rotl(h, 27) ^ lane[l]) * k1;
   for (; i < n; i++) h = (h ^ p[i]) * 0x100000001B3ull;
   return h;
+}
+
+// Whether n bytes at base changed since c's last comparison (true the
+// first time); compared at most once a submission. Memory found unchanged
+// twice in a row is watched from then on (write_watch.h), armed before it
+// is hashed so that a write after the hash disarms it, and not hashed
+// while no write has disarmed it.
+bool Changed(State& s, Compared& c, gaddr base, uint64_t n) {
+  if (c.checked == s.submission) return false;
+  const bool first = c.checked == ~0ull && !c.same;
+  c.checked = s.submission;
+  if (c.watch.clean()) return false;
+  if (c.same >= 2) c.watch.Arm(g_proc->vm.mem(), base, n);
+  const uint64_t hash = ContentHash(GPtr(base), size_t(n));
+  const bool changed = first || hash != c.hash;
+  c.hash = hash;
+  c.same = changed ? 0 : c.same + 1;
+  return changed;
+}
+
+// The comparison of c is due again: something other than the guest's
+// stores may have changed its memory.
+void Recompare(Compared& c) {
+  c.checked = ~0ull;
+  c.watch.Disarm();
 }
 
 // A T#'s base address: 38 bits of 256-byte units (word 1's bits 6-7 are
@@ -707,11 +739,8 @@ gfx::TextureId TextureFor(State& s, const ImageRef& ref) {
   char k[96];
   std::snprintf(k, sizeof k, "%llx:%u:%u:%u:%u", (unsigned long long)addr, w, h, unsigned(fmt), pitch);
   Texture& e = s.textures[k];
-  if (e.tex && e.checked == s.submission) return e.tex;
+  if (!Changed(s, e.cmp, addr, bytes) && e.tex) return e.tex;
   const uint8_t* p = GPtr(addr);
-  const uint64_t hash = ContentHash(p, size_t(bytes));
-  e.checked = s.submission;
-  if (e.tex && e.hash == hash) return e.tex;
   if (!e.tex) {
     gfx::ImageDesc d;
     d.w = int(w);
@@ -719,7 +748,6 @@ gfx::TextureId TextureFor(State& s, const ImageRef& ref) {
     d.fmt = fmt;
     e.tex = s.dev->CreateImage(d);
   }
-  e.hash = hash;
   if (!e.tex) return 0;
   std::vector<uint8_t> lin(uint64_t(wel) * bpe * hel);
   Detile(tiling, p, lin.data(), wel, hel, pel, bpe, wel * bpe);
@@ -766,21 +794,13 @@ KeptRange* Kept(State& s, gaddr base, uint32_t size, gaddr* at) {
     if (hi - lo > (64u << 20) || !Readable(lo, hi - lo)) return nullptr;
     for (auto e = first; e != it; ++e) s.retired.push_back(e->second.buffer);
     s.kept.erase(first, it);
-    KeptRange& k = s.kept.emplace(lo, KeptRange{}).first->second;
+    KeptRange& k = s.kept.try_emplace(lo).first->second;
     k.size = uint32_t(hi - lo);
     k.buffer = s.dev->CreateBuffer(k.size);
-    k.hash = ContentHash(GPtr(lo), k.size);
-    k.checked = s.submission;
-    s.dev->UpdateBuffer(k.buffer, 0, GPtr(lo), k.size);
     first = s.kept.find(lo);
   }
   KeptRange& k = first->second;
-  if (k.checked != s.submission) {
-    const uint64_t hash = ContentHash(GPtr(lo), k.size);
-    if (hash != k.hash) s.dev->UpdateBuffer(k.buffer, 0, GPtr(lo), k.size);
-    k.hash = hash;
-    k.checked = s.submission;
-  }
+  if (Changed(s, k.cmp, lo, k.size)) s.dev->UpdateBuffer(k.buffer, 0, GPtr(lo), k.size);
   k.used = s.submission;
   *at = lo;
   return &k;
@@ -791,7 +811,7 @@ void KeptWritten(State& s, gaddr base, uint64_t size) {
   auto it = s.kept.upper_bound(base);
   if (it != s.kept.begin()) --it;
   for (; it != s.kept.end() && it->first < base + size; ++it)
-    if (it->first + it->second.size > base) it->second.checked = ~0ull;
+    if (it->first + it->second.size > base) Recompare(it->second.cmp);
 }
 
 // The device's view of a stage's resolved resources: its buffers, its
