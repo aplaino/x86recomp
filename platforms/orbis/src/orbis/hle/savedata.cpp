@@ -286,7 +286,7 @@ ORBIS_HLE("libSceSaveData", sceSaveDataDirNameSearch, 2) {
   const gaddr pat = recomp::Rd64(cond + 16);
   const std::string pattern = pat ? recomp::GStr(pat) : "%";
   // '%' matches any run of characters.
-  auto match = [](const std::string& p, const std::string& s) {
+  auto match = [](const std::string& p, const std::string& s) -> bool {
     std::vector<std::vector<bool>> t(p.size() + 1, std::vector<bool>(s.size() + 1));
     t[0][0] = true;
     for (size_t i = 1; i <= p.size(); i++)
