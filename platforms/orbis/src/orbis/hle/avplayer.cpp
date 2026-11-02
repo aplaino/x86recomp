@@ -528,7 +528,8 @@ ORBIS_HLE("libSceAvPlayer", sceAvPlayerEnableStream, 2) {
 
 // Stops the player, waits for its decoder and gives its memory back.
 ORBIS_HLE("libSceAvPlayer", sceAvPlayerClose, 1) {
-  Player* p = Find(Arg(c, 0));
+  const gaddr h = Arg(c, 0);  // before the calls into the game below
+  Player* p = Find(h);
   if (!p) return kErrInvalidParams;
   {
     std::unique_lock<std::mutex> l(p->mu);
@@ -536,11 +537,10 @@ ORBIS_HLE("libSceAvPlayer", sceAvPlayerClose, 1) {
     p->cv.notify_all();
     if (p->thread) p->cv.wait(l, [&] { return p->done; });
   }
-  const InitData& in = p->init;
+  const InitData in = p->init;  // p goes with g_players' entry
   for (gaddr t : p->textures) recomp::CallGuest(c, in.deallocate_texture, {in.mem_obj, t});
   for (gaddr b : p->audio_buffers) recomp::CallGuest(c, in.deallocate, {in.mem_obj, b});
   if (p->bounce) recomp::CallGuest(c, in.deallocate, {in.mem_obj, p->bounce});
-  const gaddr h = Arg(c, 0);
   {
     std::lock_guard<std::mutex> l(g_mu);
     g_players.erase(h);
