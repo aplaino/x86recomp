@@ -476,9 +476,9 @@ class MetalDevice final : public Device {
       // Constant buffers' offset alignment: 256 bytes on Mac GPUs, less on
       // Apple's.
       uniform_align_ = [dev_ supportsFamily:MTLGPUFamilyApple1] ? 16 : 256;
-#if TARGET_OS_IOS
-      if (@available(iOS 16.4, *))
-        if (!dev_.supportsBCTextureCompression) WarnF("gfx: this GPU cannot sample DXT (BC)\n");
+#if TARGET_OS_IOS || TARGET_OS_TV
+      if (@available(iOS 16.4, tvOS 16.4, *)) bc_ = dev_.supportsBCTextureCompression;
+      if (!bc_) WarnF("gfx: no BC sampling on this GPU: DXT decoded on upload\n");
 #endif
       // RECOMP_DISPLAY_LINK=1 (macOS 14+); off by default: with variable
       // refresh, frames presented as soon as they are done (nextDrawable)
@@ -805,7 +805,7 @@ class MetalDevice final : public Device {
     t.opaque = !rt && fmt == Format::X8R8G8B8;
     int rw = w, rh = h;
     t.scaled = rt && ScaledSize(w, h, &rw, &rh, &t.scene);
-    t.tex = NewTexture(MTLTextureType2D, PixelFormat(fmt), rw, rh, levels, rt, t.opaque);
+    t.tex = NewTexture(MTLTextureType2D, TexFormat(fmt), rw, rh, levels, rt, t.opaque);
     if (perf_) pc_.textures++;
     if (!t.tex) {
       WarnF("gfx: CreateTexture %dx%d x%d fmt %u failed\n", w, h, levels, unsigned(fmt));
@@ -868,7 +868,7 @@ class MetalDevice final : public Device {
     t.fmt = fmt;
     t.cube = true;
     t.opaque = fmt == Format::X8R8G8B8;
-    t.tex = NewTexture(MTLTextureTypeCube, PixelFormat(fmt), size, size, levels, false, t.opaque);
+    t.tex = NewTexture(MTLTextureTypeCube, TexFormat(fmt), size, size, levels, false, t.opaque);
     if (perf_) pc_.textures++;
     if (!t.tex) {
       WarnF("gfx: CreateCubeTexture %d x%d fmt %u failed\n", size, levels, unsigned(fmt));
@@ -2757,6 +2757,17 @@ void main() {
   }
 
   // `opaque`: alpha read as 1 (X8 formats uploaded as they are).
+  // DXT is stored as B8G8R8A8 (decoded on upload) where BC cannot be sampled.
+  MTLPixelFormat TexFormat(Format f) const {
+    return IsCompressed(f) && !bc_ ? MTLPixelFormatBGRA8Unorm : PixelFormat(f);
+  }
+
+  void DecodeDxtOnUpload() override {
+    if (!textures_.empty()) return;  // those already made keep their format
+    bc_ = false;
+    WarnF("gfx: DXT decoded on upload\n");
+  }
+
   id<MTLTexture> NewTexture(MTLTextureType type, MTLPixelFormat pf, int w, int h, int levels,
                             bool rt, bool opaque = false, MTLTextureUsage extra_usage = 0) {
     MTLTextureDescriptor* td = [MTLTextureDescriptor new];
@@ -3705,7 +3716,8 @@ void main() {
       if (perf_) (in_order ? pc_.uploads_in_order : pc_.uploads_ahead)++;
       // Data in shared memory, in the texture's own layout: copied by the
       // GPU from there (the front end keeps it until this frame is done).
-      const bool raw = IsCompressed(fmt) || IsFloat(fmt) || fmt == Format::A8R8G8B8 ||
+      const bool decode = IsCompressed(fmt) && !bc_;
+      const bool raw = (IsCompressed(fmt) && !decode) || IsFloat(fmt) || fmt == Format::A8R8G8B8 ||
                        (fmt == Format::X8R8G8B8 && t.opaque);
       const uint32_t unit = IsCompressed(fmt) ? RowPitch(fmt, 4) : BitsPerPixel(fmt) / 8;
       if (raw && shared_buf_ && s >= shared_lo_ && unit && size_t(s - shared_lo_) % unit == 0 &&
@@ -3744,7 +3756,7 @@ void main() {
         }
       }
       uint32_t row, rows;
-      if (IsCompressed(fmt) || IsFloat(fmt)) {  // as the GPU format stores it
+      if ((IsCompressed(fmt) && !decode) || IsFloat(fmt)) {  // as the GPU format stores it
         row = RowPitch(fmt, uint32_t(w));
         rows = RowCount(fmt, uint32_t(h));
       } else {
@@ -3754,7 +3766,9 @@ void main() {
       Slice dst = Alloc(size_t(row) * rows, 16);
       frame_upload_bytes_ += size_t(row) * rows;
       if (perf_ && in_order) pc_.in_order_bytes += size_t(row) * rows;
-      if (IsCompressed(fmt) || IsFloat(fmt)) {
+      if (decode) {
+        DecodeDxt(s, pitch, fmt, w, h, reinterpret_cast<uint32_t*>(dst.cpu));
+      } else if (IsCompressed(fmt) || IsFloat(fmt)) {
         for (uint32_t y = 0; y < rows; y++)
           std::memcpy(dst.cpu + size_t(y) * row, s + size_t(y) * pitch, row);
       } else {
@@ -3972,6 +3986,7 @@ void main() {
   id<MTLCommandQueue> queue_ = nil;
   CAMetalLayer* layer_ = nil;
   size_t uniform_align_ = 256;
+  bool bc_ = true;  // the GPU samples BC1-3 (else DXT is decoded on upload)
 
   // The encoding thread, its queue of recorded batches and the batch being
   // recorded.
