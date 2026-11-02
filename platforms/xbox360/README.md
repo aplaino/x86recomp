@@ -1,10 +1,10 @@
 # The Xbox 360 platform module
 
 Static recompilation of Xbox 360 titles into native 64-bit programs, on
-x86recomp's shared core: a title's PowerPC machine code is lifted ahead
-of time to C++ (`recomp_lift_ppc`, the PowerPC core in `tools/lifter_ppc`
-and `src/ppc`) and linked against a runtime that reimplements the
-console's kernel, system library and GPU. Built only with
+SwARc's PowerPC core: a title's machine code is lifted ahead of time to
+C++ (`recomp_lift_ppc`, the core in `tools/lifter_ppc` and `src/ppc`)
+and linked against a runtime that reimplements the console's kernel,
+system library and GPU. Built only with
 `RECOMP_PLATFORM_XBOX360`; the x86 core (`RECOMP_X86`) can be off.
 
 Status: milestones 1-3 of [ARCHITECTURE.md](ARCHITECTURE.md), and the
@@ -33,11 +33,11 @@ out/build/xbox360/bin/recomp_lift_ppc --image default_plain.xex --out generated
 ```
 
 ```cmake
-set(X86RECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../x86recomp" CACHE PATH "")
+set(SWARC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../SwARc" CACHE PATH "")
 set(RECOMP_X86 OFF CACHE BOOL "")
 set(RECOMP_PLATFORM_WIN32 OFF CACHE BOOL "")
 set(RECOMP_PLATFORM_XBOX360 ON CACHE BOOL "")
-add_subdirectory("${X86RECOMP_DIR}" x86recomp)
+add_subdirectory("${SWARC_DIR}" swarc)
 
 # The lifted title is a library of its own, next to the program.
 recomp_add_lifted_ppc(mygame_lifted "${CMAKE_CURRENT_SOURCE_DIR}/generated" LINK recomp_xbox360)

@@ -7,7 +7,7 @@ library (xam) and the GPU (Xenos) it calls. Nothing here is specific to
 one game: game projects hold that (manifest, symbols, game hooks) and use
 this tree as a library.
 
-It is a console platform on x86recomp's PowerPC core (the top-level
+It is a console platform on SwARc's PowerPC core (the top-level
 ARCHITECTURE.md, "Layout: base, CPU cores, platform modules"), built
 only with `RECOMP_PLATFORM_XBOX360`:
 - Core, shared by every PowerPC guest: the lifter `recomp_lift_ppc`
