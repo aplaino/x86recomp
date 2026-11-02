@@ -1,11 +1,11 @@
 #pragma once
 // PowerPC decoder for the lifter: the 64-bit PowerPC user instruction set
-// the Xbox 360's Xenon runs (Power ISA 2.02 Book I/II), decoded from the
-// instruction encodings in IBM's Power ISA. So far the fixed-point,
-// branch, condition register, storage control, special purpose register,
-// floating-point and VMX instructions, and the Xenon's: the LVLX family
-// and VMX128 (as the VMX operations they are, on 128 vector registers,
-// with VMX128's own beside them).
+// (Power ISA 2.02 Book I/II), decoded from the instruction encodings in
+// IBM's Power ISA. So far the fixed-point, branch, condition register,
+// storage control, special purpose register, floating-point and VMX
+// instructions, and per CPU (Cpu) its extensions: the Xenon's DCBZ128, LVLX
+// family and VMX128 (as the VMX operations they are, on 128 vector
+// registers, with VMX128's own beside them).
 
 #include <cstdint>
 #include <string>
@@ -135,7 +135,14 @@ struct Insn {
   bool byterev = false;// LHBRX LWBRX LDBRX STHBRX STWBRX STDBRX
 };
 
-Insn Decode(uint64_t va, uint32_t raw);
+// The CPU a module's code is for: the extensions of the ISA the decoder
+// accepts. Other CPUs' encodings decode as invalid.
+enum class Cpu : uint8_t {
+  kGeneric,  // the user instruction set with VMX (the oracle's 970)
+  kXenon,    // the Xbox 360's: also DCBZ128, the LVLX family and VMX128
+};
+
+Insn Decode(uint64_t va, uint32_t raw, Cpu cpu);
 
 // True for VMX128 encodings (decoded or not).
 bool IsVmx128(uint32_t raw);

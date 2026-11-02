@@ -42,7 +42,9 @@ platform module too.
   before and after.
 - Nothing in src/ppc, tools/lifter_ppc or tests/ppc knows a console:
   executable formats come through the lifter's ImageReader (ELF is its
-  own), the system through Import/Sc/Trap/TimeBase.
+  own), the system through Import/Sc/Trap/TimeBase. A CPU's extensions
+  of the ISA decode only under its Cpu (tools/lifter_ppc/ppc.h); the
+  generic one is the user instruction set with floating point and VMX.
 - QEMU and emulators are references and test oracles only, never
   linked, never shipped. GPL sources are never copied, only cited for
   behaviour (binutils' PowerPC disassembler among them); BSD sources may

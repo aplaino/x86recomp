@@ -50,6 +50,18 @@ negative value by -1 is 0 (CR0 of the record form from that 0), and
 MULHW(U)'s and DIVW(U)'s high words are 0. These wait for a check on a
 console. DCBZ zeroes 32 bytes and the Xenon's DCBZ128 128.
 
+### CPUs
+The decoder reads the Power ISA's user instruction set with floating
+point and VMX, as the oracle's 970 has them (`Cpu::kGeneric`,
+tools/lifter_ppc/ppc.h), and a CPU's own extensions only in code for
+that CPU: for the Xenon (`Cpu::kXenon`) DCBZ128, the LVLX family and
+VMX128. The image reader says which CPU a module's code is for (ELF:
+generic; a XEX: the Xenon) and `recomp_lift_ppc --cpu` overrides it.
+Another CPU's encodings decode as invalid, so data that happens to look
+like them is never lifted as code. The context and ppc/lifted.h are the
+same for every CPU; where an extension is absent its state (the vector
+registers above 31) is unused.
+
 ### Floating point
 The FPU (src/ppc/fp.cpp) is exact: Berkeley SoftFloat under FPSCR[RN] with
 tininess detected before rounding, and the PowerPC's own rules on top:
@@ -131,7 +143,8 @@ encodings the decoder rejects (a VPKD3D128 size of 0, type 7, VRLIMI128's
 mask bit 4, an unused immediate).
 
 ## Lifter
-`recomp_lift_ppc --image <module> --out <dir>` (tools/lifter_ppc):
+`recomp_lift_ppc --image <module> --out <dir> [--cpu generic|xenon]`
+(tools/lifter_ppc):
 - Function starts: those the image reader gives (ELF: the entry point and
   the sized function symbols; a XEX: the entry point, `.pdata` with each
   entry's length, code exports and import thunks), and every `bl` and
@@ -197,8 +210,9 @@ left in memory; any other interrupt fails the run.
 - The fixture (tests/ppc/fixture): hand-written forms of every decoded
   instruction (ops.S), the compiler's two jump table shapes (tables.S) and
   integer C, built with clang and LLD for big-endian PowerPC64 and lifted
-  from that ELF. Run bare metal on the oracle and lifted
-  (`ppc_lift_fixture`), it must print the same.
+  from that ELF for the Xenon (ops.S has its extensions' forms). Run bare
+  metal on the oracle and lifted (`ppc_lift_fixture`), it must print the
+  same.
 - The form test: `recomp_lift_ppc --forms` writes each distinct
   instruction form as a lifted function and as the original instruction
   in a stub; the oracle runs every stub from random states (edge values,

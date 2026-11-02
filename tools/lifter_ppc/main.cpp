@@ -1,14 +1,16 @@
 // recomp_lift_ppc: PowerPC -> C++ lifter (build-time only, never linked into a game).
 //   recomp_lift_ppc --image <module> --out <dir> [--files N] [--forms <dir>]
+//                   [--cpu generic|xenon]
 // The module's format is whichever registered image reader (program.h)
 // claims it: ELF is built in (elf_reader.cpp), a platform module adds
-// its own (the Xbox 360: XEX).
+// its own (the Xbox 360: XEX). The reader also says which CPU the code is
+// for (ppc.h, Cpu; ELF's is generic), which --cpu overrides.
 // Writes <dir>/funcs_000.cpp .. funcs_<N-1>.cpp (N fixed, default 16, so a
 // build knows its outputs in advance) and <dir>/table.cpp. --forms writes
 // forms.cpp there (one lifted function per distinct instruction form, for
-// the differential test in tests/ppc), and forms_native.S
-// with forms_native.c: each form's original instruction in a stub, and
-// the table the PowerPC oracle program runs them from (bare metal under
+// the differential test in tests/ppc), and forms_native.S with
+// forms_native.c: each form's original instruction in a stub, and the
+// table the PowerPC oracle program runs them from (bare metal under
 // qemu-system-ppc64).
 
 #include <cstdio>
@@ -227,7 +229,7 @@ bool WriteForms(const lifter::ppc::Program& p, const std::string& dir) {
       if (lifter::ppc::IsVmx128(i.raw)) {
         key = i.raw;
         for (int b = 0; b < 26; b++) {
-          Insn f = lifter::ppc::Decode(i.va, i.raw ^ (1u << b));
+          Insn f = lifter::ppc::Decode(i.va, i.raw ^ (1u << b), p.cpu());
           if (f.op == i.op && f.opc == i.opc && f.imm == i.imm && f.rc == i.rc && f.size == i.size)
             key &= ~(1u << b);
         }
@@ -297,7 +299,7 @@ bool WriteForms(const lifter::ppc::Program& p, const std::string& dir) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  std::string image, out, forms;
+  std::string image, out, forms, cpu;
   int files = 16;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -306,14 +308,16 @@ int main(int argc, char** argv) {
     else if (a == "--out") out = val();
     else if (a == "--files") files = std::stoi(val());
     else if (a == "--forms") forms = val();
+    else if (a == "--cpu") cpu = val();
     else {
       std::fprintf(stderr, "recomp_lift_ppc: unknown argument %s\n", a.c_str());
       return 2;
     }
   }
-  if (image.empty() || out.empty() || files < 1) {
+  if (image.empty() || out.empty() || files < 1 || (!cpu.empty() && cpu != "generic" && cpu != "xenon")) {
     std::fprintf(stderr,
-                 "usage: recomp_lift_ppc --image module --out dir [--files N] [--forms dir]\n");
+                 "usage: recomp_lift_ppc --image module --out dir [--files N] [--forms dir]\n"
+                 "                       [--cpu generic|xenon]\n");
     return 2;
   }
   lifter::ppc::Program p;
@@ -322,6 +326,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "recomp_lift_ppc: %s\n", err.c_str());
     return 1;
   }
+  if (!cpu.empty()) p.set_cpu(cpu == "xenon" ? lifter::ppc::Cpu::kXenon : lifter::ppc::Cpu::kGeneric);
   p.Discover();
 
   // Contiguous runs of functions, balanced by instruction count.

@@ -3,7 +3,9 @@
 // run on registers below 32).
 // - Decoding: words with high registers, as Xenia's (BSD) opcode table and
 //   instruction fields encode them, against the operation and operands
-//   each one's definition gives (the multiply-adds and VSEL128 read vD).
+//   each one's definition gives (the multiply-adds and VSEL128 read vD),
+//   and that only the Xenon's profile (Cpu) decodes VMX128 and the Xenon's
+//   other extensions.
 // - The operations of VMX128's own without a VMX twin, the dot products
 //   and the D3D formats, against vectors from Xenia's tests
 //   (src/xenia/cpu/testing/pack_test.cc, unpack_test.cc and
@@ -87,6 +89,9 @@ const DecodeCase kDecode[] = {
 // No operation: a size of 0, type 7, VRLIMI128's mask bit 4, an unpack's
 // vA other than 0 or 0x60, an estimate's unused immediate.
 const uint32_t kInvalid[] = {0x18201610, 0x183D1610, 0x183C17F0, 0x183F1710, 0x18211380, 0x18211630};
+// The Xenon's extensions outside VMX128: LVLX v1, r2, r3; STVRXL v1, r2, r3;
+// DCBZ128 r2, r3.
+const uint32_t kXenonOnly[] = {0x7C221C0E, 0x7C221F4E, 0x7C221FEC};
 
 Vec V(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
   Vec v;
@@ -128,7 +133,7 @@ Vec Dot(bool four, const Vec& a, const Vec& b, bool nj = true) {
 
 int main() {
   for (const DecodeCase& t : kDecode) {
-    Insn i = lifter::ppc::Decode(0x82000000, t.raw);
+    Insn i = lifter::ppc::Decode(0x82000000, t.raw, lifter::ppc::Cpu::kXenon);
     Check(lifter::ppc::IsVmx128(t.raw), "not VMX128", t.raw);
     bool ok = i.op == t.op && i.opc == t.opc && i.rd == t.rd && i.ra == t.ra && i.rb == t.rb && i.rc == t.rc;
     if (t.op == Op::kVmx || t.op == Op::kVcmp) ok = ok && i.rc_reg == t.rc_reg && i.imm == t.imm;
@@ -136,8 +141,17 @@ int main() {
       std::printf("     decoded op %d opc %u vD %d vA %d vB %d vC %d imm %lld rc %d\n", int(i.op), unsigned(i.opc), i.rd,
                   i.ra, i.rb, i.rc_reg, static_cast<long long>(i.imm), int(i.rc));
     Check(ok, t.text, t.raw);
+    Check(lifter::ppc::Decode(0x82000000, t.raw, lifter::ppc::Cpu::kGeneric).op == Op::kInvalid,
+          "decodes on a generic CPU", t.raw);
   }
-  for (uint32_t raw : kInvalid) Check(lifter::ppc::Decode(0x82000000, raw).op == Op::kInvalid, "decodes", raw);
+  for (uint32_t raw : kInvalid)
+    Check(lifter::ppc::Decode(0x82000000, raw, lifter::ppc::Cpu::kXenon).op == Op::kInvalid, "decodes", raw);
+  for (uint32_t raw : kXenonOnly) {
+    Check(lifter::ppc::Decode(0x82000000, raw, lifter::ppc::Cpu::kXenon).op != Op::kInvalid, "invalid on the Xenon",
+          raw);
+    Check(lifter::ppc::Decode(0x82000000, raw, lifter::ppc::Cpu::kGeneric).op == Op::kInvalid,
+          "decodes on a generic CPU", raw);
+  }
 
   const Vec cd = V(0xCDCDCDCD, 0xCDCDCDCD, 0xCDCDCDCD, 0xCDCDCDCD);
   const Vec bytes = V(0x40400001, 0x40400002, 0x40400003, 0x40400004);

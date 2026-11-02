@@ -34,6 +34,7 @@ struct Image {
   std::map<uint64_t, uint64_t> starts;
   std::map<uint64_t, std::string> names;
   std::map<uint64_t, ImportRef> imports;  // thunk VA -> export it calls
+  Cpu cpu = Cpu::kGeneric;  // the CPU its code is for
 
   // A start given more than once keeps the first size that is not 0.
   void AddStart(uint64_t va, uint64_t size = 0) {
@@ -74,6 +75,9 @@ class Program {
   const std::string* NameOf(uint64_t va) const;
 
   uint64_t base() const { return img_.base; }
+  Cpu cpu() const { return img_.cpu; }
+  // Overrides the CPU the image reader gave (before Discover).
+  void set_cpu(Cpu cpu) { img_.cpu = cpu; }
   // TextHash() of the code ranges in address order, for the runtime's check.
   uint64_t text_hash() const;
   const std::map<uint64_t, Function>& functions() const { return funcs_; }

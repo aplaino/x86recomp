@@ -52,6 +52,7 @@ add_custom_command(OUTPUT "${_bin}/fixture.elf"
   COMMENT "Linking the PowerPC fixture")
 
 # --- lifting it --------------------------------------------------------------
+# As the Xenon's code (--cpu xenon): ops.S has its extensions' forms.
 set(_gen "${CMAKE_CURRENT_BINARY_DIR}/fixture_generated")
 set(_funcs)
 foreach(_k 000 001 002 003)
@@ -61,6 +62,7 @@ add_custom_command(OUTPUT ${_funcs} "${_gen}/table.cpp" "${_gen}/forms.cpp" "${_
          "${_gen}/forms_native.c"
   COMMAND "${CMAKE_COMMAND}" -E make_directory "${_gen}"
   COMMAND recomp_lift_ppc --image "${_bin}/fixture.elf" --out "${_gen}" --files 4 --forms "${_gen}"
+          --cpu xenon
   DEPENDS recomp_lift_ppc "${_bin}/fixture.elf"
   COMMENT "Lifting the PowerPC fixture")
 
@@ -147,7 +149,8 @@ set_tests_properties(ppc_lift_fixture PROPERTIES FIXTURES_REQUIRED ppc_fixture_o
 # lifter's count shows it.
 set(_relift "${CMAKE_CURRENT_BINARY_DIR}/fixture_relift")
 file(MAKE_DIRECTORY "${_relift}")
-add_test(NAME ppc_lift_fixture_tables COMMAND recomp_lift_ppc --image "${_bin}/fixture.elf" --out "${_relift}" --files 1)
+add_test(NAME ppc_lift_fixture_tables COMMAND recomp_lift_ppc --image "${_bin}/fixture.elf" --out "${_relift}"
+         --files 1 --cpu xenon)
 set_tests_properties(ppc_lift_fixture_tables PROPERTIES PASS_REGULAR_EXPRESSION " 7 jump tables,")
 
 add_test(NAME ppc_oracle_forms COMMAND ${_run} --program "${_bin}/forms_oracle.elf" --out "${_records}")

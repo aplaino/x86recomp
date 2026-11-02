@@ -39,7 +39,7 @@ void MemX(Insn& i, Op op, int size, bool update, bool sign = false, bool byterev
 uint8_t MdSh(uint32_t raw) { return uint8_t(F(raw, 16, 5) | F(raw, 30, 1) << 5); }
 uint8_t MdMb(uint32_t raw) { return uint8_t(F(raw, 21, 5) | F(raw, 26, 1) << 5); }
 
-void Primary31(Insn& i) {
+void Primary31(Insn& i, Cpu cpu) {
   const uint32_t xo = F(i.raw, 21, 10);
   // XO form arithmetic: a 9-bit extended opcode and OE.
   const uint32_t xo9 = F(i.raw, 22, 9);
@@ -158,7 +158,7 @@ void Primary31(Insn& i) {
       return;
     case 1014:
       // DCBZ, and the Xenon's DCBZ128 (the L bit, bit 10, set).
-      if (i.rd > 1) return;
+      if (i.rd > (cpu == Cpu::kXenon ? 1 : 0)) return;
       i.op = Op::kDcbz;
       i.size = i.rd ? 128 : 32;
       return;
@@ -198,7 +198,7 @@ void Primary31(Insn& i) {
     case 727: MemX(i, Op::kFpStore, 8, false); return;
     case 759: MemX(i, Op::kFpStore, 8, true); return;
     case 983: MemX(i, Op::kFpStore, 4, false); i.opc = 1; return;
-    // VMX loads and stores (and the Xenon's LVLX family).
+    // VMX loads and stores.
     case 103: case 359: MemX(i, Op::kVload, 16, false); i.opc = kVecQuad; return;
     case 231: case 487: MemX(i, Op::kVstore, 16, false); i.opc = kVecQuad; return;
     case 7: MemX(i, Op::kVload, 1, false); i.opc = kVecElement; return;
@@ -209,10 +209,14 @@ void Primary31(Insn& i) {
     case 199: MemX(i, Op::kVstore, 4, false); i.opc = kVecElement; return;
     case 6: MemX(i, Op::kVload, 0, false); i.opc = kVecShiftLeft; return;
     case 38: MemX(i, Op::kVload, 0, false); i.opc = kVecShiftRight; return;
-    case 519: case 775: MemX(i, Op::kVload, 16, false); i.opc = kVecLeft; return;
-    case 551: case 807: MemX(i, Op::kVload, 16, false); i.opc = kVecRight; return;
-    case 647: case 903: MemX(i, Op::kVstore, 16, false); i.opc = kVecLeft; return;
-    case 679: case 935: MemX(i, Op::kVstore, 16, false); i.opc = kVecRight; return;
+    // The Xenon's LVLX family (their LRU forms 256 higher): loads and
+    // stores (128) of the part of a quadword left or right (32) of the
+    // address.
+    case 519: case 551: case 647: case 679: case 775: case 807: case 903: case 935:
+      if (cpu != Cpu::kXenon) return;
+      MemX(i, xo & 128 ? Op::kVstore : Op::kVload, 16, false);
+      i.opc = xo & 32 ? kVecRight : kVecLeft;
+      return;
     // DST DSTST DSS: data stream hints.
     case 342: case 374: case 822: i.op = Op::kCacheHint; return;
     default: return;
@@ -602,11 +606,12 @@ void Primary6(Insn& i) {
 
 }  // namespace
 
-Insn Decode(uint64_t va, uint32_t raw) {
+Insn Decode(uint64_t va, uint32_t raw, Cpu cpu) {
   Insn i;
   i.va = va;
   i.raw = raw;
   Regs(i);
+  if (cpu != Cpu::kXenon && IsVmx128(raw)) return i;
   const uint32_t simm = raw & 0xFFFF;
   switch (raw >> 26) {
     case 2: case 3:
@@ -679,7 +684,7 @@ Insn Decode(uint64_t va, uint32_t raw) {
       }
       break;
     case 31:
-      Primary31(i);
+      Primary31(i, cpu);
       if (i.rc && NoRecordForm(i.op)) i.op = Op::kInvalid;
       break;
     case 32: Mem(i, Op::kLoad, 4, false); break;

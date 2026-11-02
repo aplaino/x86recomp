@@ -112,7 +112,7 @@ bool Program::ConstOf(uint64_t va, uint64_t lo, int reg, uint64_t& out, int dept
   if (depth > 4) return false;
   for (uint64_t p = va; p > lo && va - p < 16 * 4;) {
     p -= 4;
-    Insn i = ppc::Decode(p, Word(p));
+    Insn i = ppc::Decode(p, Word(p), img_.cpu);
     if (!WritesReg(i, reg)) continue;
     uint64_t v;
     if (i.op == Op::kAddi) {
@@ -146,7 +146,7 @@ bool Program::JumpTable(const Function& f, uint64_t bcctr_va, std::vector<uint64
   auto writer = [&](uint64_t from, auto pred, Insn& out) {
     for (uint64_t p = from; p > f.va && from - p < 24 * 4;) {
       p -= 4;
-      Insn i = ppc::Decode(p, Word(p));
+      Insn i = ppc::Decode(p, Word(p), img_.cpu);
       if (pred(i)) {
         out = i;
         return true;
@@ -235,7 +235,7 @@ bool Program::JumpTable(const Function& f, uint64_t bcctr_va, std::vector<uint64
   auto from_slot = [&](uint64_t cmp, int r, const Slot& w) {
     for (uint64_t p = cmp; p > f.va && cmp - p < 8 * 4;) {
       p -= 4;
-      Insn i = ppc::Decode(p, Word(p));
+      Insn i = ppc::Decode(p, Word(p), img_.cpu);
       if (slot_load(i, r)) return i.ra == w.base && i.imm == w.disp;
       if (WritesReg(i, r) || slot_hazard(i, w)) return false;
     }
@@ -249,7 +249,7 @@ bool Program::JumpTable(const Function& f, uint64_t bcctr_va, std::vector<uint64
   // The bound, or none (count 0) when the code above has none.
   for (uint64_t p = from; p > f.va && from - p < 24 * 4;) {
     p -= 4;
-    Insn i = ppc::Decode(p, Word(p));
+    Insn i = ppc::Decode(p, Word(p), img_.cpu);
     // bgt crN (BO 12, BI 4N+1) or bge crN (BO 4, BI 4N+0) to the default,
     // or the same conditions on a return (bgtlr, bgelr: no default case).
     if ((i.op == Op::kBc || i.op == Op::kBclr) && !i.lk && crf < 0) {
@@ -326,7 +326,7 @@ Function Program::Build(uint64_t start, uint64_t end, std::set<uint64_t>& found)
     uint64_t va = work.front();
     work.pop_front();
     if (va < start || va >= end || f.insns.count(va)) continue;
-    const Insn& i = f.insns[va] = ppc::Decode(va, Word(va));
+    const Insn& i = f.insns[va] = ppc::Decode(va, Word(va), img_.cpu);
     switch (i.op) {
       case Op::kB:
         if (i.lk) {
@@ -380,7 +380,7 @@ std::set<uint64_t> Program::PointerStarts(const std::set<uint64_t>& starts) cons
   std::set<uint64_t> out;
   for (uint64_t t : consts) {
     if (t % 4 || !InText(t) || starts.count(t) || !Word(t) ||
-        ppc::Decode(t, Word(t)).op == Op::kInvalid)
+        ppc::Decode(t, Word(t), img_.cpu).op == Op::kInvalid)
       continue;
     auto it = funcs_.upper_bound(t);
     if (it != funcs_.begin()) {
