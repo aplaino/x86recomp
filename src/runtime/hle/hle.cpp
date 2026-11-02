@@ -1,4 +1,5 @@
 #include "runtime/hle/hle.h"
+#include "runtime/platform.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -63,7 +64,8 @@ const std::vector<std::string>& KnownDlls() {
       "kernel32.dll", "user32.dll",  "gdi32.dll",    "advapi32.dll",
       "ole32.dll",    "version.dll", "winmm.dll",    "wsock32.dll",
       "ddraw.dll",    "mss32.dll",   "binkw32.dll",  "dbghelp.dll",
-      "imm32.dll",    "shfolder.dll", "ntdll.dll",   "opengl32.dll"};
+      "imm32.dll",    "shfolder.dll", "ntdll.dll",   "opengl32.dll",
+      "d3d9.dll",     "xinput1_3.dll"};
   return dlls;
 }
 
@@ -168,7 +170,7 @@ void CallThunk(Ctx& c, gaddr thunk) {
       char buf[160];
       if (o)
         std::snprintf(buf, sizeof buf, "; this %08X: a live %s, refs %u, vtable %08X", p,
-                      typeid(*o).name(), o->refs, Rd32(p));
+                      typeid(*o).name(), o->refs.load(), Rd32(p));
       else
         std::snprintf(buf, sizeof buf, "; this %08X: no live HLE object (vtable %08X)", p,
                       g_proc->mem.IsCommitted(p) ? Rd32(p) : 0u);
@@ -213,13 +215,28 @@ void CallThunk(Ctx& c, gaddr thunk) {
       t_wd_hle_ret = saved_ret;
     }
   };
+  // <ID>_HLE_SLOW=ms: calls that took longer are logged, with the time
+  // spent waiting for the graphics lock.
+  static const double slow_ms = [] {
+    const char* e = Env("HLE_SLOW");
+    return e ? std::atof(e) : 0.0;
+  }();
+  uint64_t t0 = slow_ms > 0 ? platform::MonotonicNs() : 0, t_locked = t0;
   uint64_t r;
   {
     Inside inside(s->name.c_str(), ret);
     static std::recursive_mutex graphics_mu;
     std::unique_lock<std::recursive_mutex> gl;
     if (s->graphics) gl = std::unique_lock<std::recursive_mutex>(graphics_mu);
+    if (t0) t_locked = platform::MonotonicNs();
     r = d.fn(c);
+  }
+  if (t0) {
+    const uint64_t t1 = platform::MonotonicNs();
+    if (double(t1 - t0) / 1e6 > slow_ms)
+      std::fprintf(stderr, "slow: thread %04X %s %.1f ms (graphics lock wait %.1f ms) from %08llX\n",
+                   CurrentThread()->tid, s->name.c_str(), double(t1 - t0) / 1e6,
+                   double(t_locked - t0) / 1e6, ret);
   }
   if (trace) TraceF("[%04X]   -> %llX\n", CurrentThread()->tid, (unsigned long long)r);
   if (x64) {

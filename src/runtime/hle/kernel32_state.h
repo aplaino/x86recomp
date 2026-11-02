@@ -50,6 +50,19 @@ std::vector<std::string> EnvironmentVars();
 void WriteSystemTime(uint32_t st, const std::tm& t, int ms);
 
 gaddr HeapAllocProcess(uint64_t size, bool zero);
+
+// <ID>_WAIT_LOG=ms: a guest wait (an HLE call's lifetime) longer than that
+// is logged with the thread, what it waited on and the guest caller (the
+// return address on the stack at entry).
+struct WaitLog {
+  const char* what;
+  uint64_t object;
+  uint32_t caller;
+  uint32_t esp;  // for the callers further up
+  uint64_t t0;
+  WaitLog(const Ctx& c, const char* what, uint64_t object);
+  ~WaitLog();
+};
 void HeapFreeProcess(gaddr p);
 // HeapReAlloc on the process heap (0 if p is not a live block or the
 // size cannot be had); HeapSize, UINT64_MAX if p is not a live block.
@@ -111,6 +124,14 @@ struct Thread;
 // SetEvent (or PulseEvent) on an event handle from host code (WinMM
 // timers). False if `h` is not an event.
 bool SignalEventHandle(uint32_t h, bool pulse);
+// A wait for any of several objects takes, among such events set at once,
+// the one set first (Windows: the lowest index). For DirectSound position
+// notifications.
+bool MarkEventOrdered(uint32_t h);
+// A new unnamed event (CreateEvent from host code: xlive notifications).
+uint32_t NewEventHandle(bool manual_reset, bool initial);
+// ResetEvent from host code. False if `h` is not an event.
+bool ResetEventHandle(uint32_t h);
 
 // Runs guest function entry(param) on a new detached host thread bound to
 // guest thread t.

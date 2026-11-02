@@ -277,7 +277,7 @@ int main(int argc, char** argv) {
       uint32_t lf = c.eflags;
       if ((lf ^ uint32_t(hw.flags)) & defined) why += " flags";
       for (int i = 0; i < 8; i++)
-        if (std::memcmp(c.xmm[i].b, hw.xmm[i], 16)) why += " xmm" + std::to_string(i);
+        if (std::memcmp(c.xmm[i].data(), hw.xmm[i], 16)) why += " xmm" + std::to_string(i);
       if (c.mxcsr != hw.mxcsr) why += " mxcsr";
       if (std::memcmp(native_buf, mem.ptr(kBuf), kBufSize)) why += " mem";
       if (why.empty()) continue;
@@ -288,9 +288,9 @@ int main(int argc, char** argv) {
         std::printf("   hw   mxcsr=%04X fl=%03X\n", hw.mxcsr, uint32_t(hw.flags) & 0x8D5);
         std::printf("   lift mxcsr=%04X fl=%03X\n", c.mxcsr, lf & 0x8D5);
         for (int i = 0; i < 8; i++)
-          if (std::memcmp(c.xmm[i].b, hw.xmm[i], 16) || std::memcmp(in.xmm[i], hw.xmm[i], 16))
+          if (std::memcmp(c.xmm[i].data(), hw.xmm[i], 16) || std::memcmp(in.xmm[i], hw.xmm[i], 16))
             std::printf("   xmm%d in %s hw %s lift %s\n", i, Hex16(in.xmm[i]).c_str(),
-                        Hex16(hw.xmm[i]).c_str(), Hex16(c.xmm[i].b).c_str());
+                        Hex16(hw.xmm[i]).c_str(), Hex16(c.xmm[i].data()).c_str());
         if (f.base >= 0)
           std::printf("   mem  in %s\n", Hex16(&init[0x1000]).c_str());
       }

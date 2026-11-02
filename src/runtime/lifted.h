@@ -58,6 +58,10 @@ void Resume(Ctx& c, GuestResume r);
 void Trap(Ctx& c, uint32_t va);                // int3 / int n
 void RaiseDivideError(Ctx& c, uint32_t va);    // #DE from div/idiv
 void Probe(Ctx& c, uint32_t va, const char* name);  // manifest probes
+// recomp_lift --flags-check: the instruction at va read flags `missing`
+// that the optimised build would not have spilled for it (logged once per
+// site and flags; execution goes on with the right values).
+void FlagCheckFail(Ctx& c, uint32_t va, uint32_t missing);
 #else
 void Dispatch(Ctx& c, uint64_t target, uint64_t va);
 [[noreturn]] void Unimplemented(Ctx& c, uint64_t va, const char* what);
@@ -74,14 +78,51 @@ uint64_t Rdtsc(Ctx& c);
 namespace lift {
 
 // ---- memory -----------------------------------------------------------
+// RECOMP_TSO (a game's opt-in, for its lifted code): x86's memory order
+// between threads (TSO) on a weakly ordered host: aligned loads acquire
+// and aligned stores release, so another thread sees stores in program
+// order, as games written for x86 assume of their lock-free code.
+#ifdef RECOMP_TSO
+template <size_t N> struct TsoWord;
+template <> struct TsoWord<1> { using T = uint8_t; };
+template <> struct TsoWord<2> { using T = uint16_t; };
+template <> struct TsoWord<4> { using T = uint32_t; };
+template <> struct TsoWord<8> { using T = uint64_t; };
+template <typename T>
+inline bool TsoAligned(const uint8_t* p) {
+  return (sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8) &&
+         (reinterpret_cast<uintptr_t>(p) & (sizeof(T) - 1)) == 0;
+}
+#endif
 template <typename T>
 inline T Rd(const uint8_t* b, uint32_t a) {
   T v;
+#ifdef RECOMP_TSO
+  if constexpr (sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8) {
+    if (TsoAligned<T>(b + a)) {
+      using W = typename TsoWord<sizeof(T)>::T;
+      const W w = __atomic_load_n(reinterpret_cast<const W*>(b + a), __ATOMIC_ACQUIRE);
+      std::memcpy(&v, &w, sizeof(T));
+      return v;
+    }
+  }
+#endif
   std::memcpy(&v, b + a, sizeof(T));
   return v;
 }
 template <typename T>
 inline void Wr(uint8_t* b, uint32_t a, T v) {
+#ifdef RECOMP_TSO
+  if constexpr (sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8) {
+    if (TsoAligned<T>(b + a)) {
+      using W = typename TsoWord<sizeof(T)>::T;
+      W w;
+      std::memcpy(&w, &v, sizeof(T));
+      __atomic_store_n(reinterpret_cast<W*>(b + a), w, __ATOMIC_RELEASE);
+      return;
+    }
+  }
+#endif
   std::memcpy(b + a, &v, sizeof(T));
 }
 // x64 guests: 64-bit addresses (ARCHITECTURE.md, "64-bit guests").
@@ -578,6 +619,16 @@ inline uint64_t SetLo16(uint64_t r, uint64_t v) {
   return uint32_t(PackEFlags(f) & 0xD5u) | 0x02u;
 }
 
+// ---- EFLAGS in Ctx (32-bit guests) ---------------------------------------
+// 32-bit lifted code keeps DF, AC and ID in c.eflags only (cld/std and
+// popfd write them there) and the arithmetic flags in F. The EFLAGS word:
+// DF/AC/ID from `old`, of the arithmetic flags those in `live` from F
+// (the rest read as clear: nobody reads them, see tools/lifter/flags.h).
+[[gnu::always_inline]] inline uint32_t MergeEFlags(uint32_t old, const Flags& f,
+                                                   uint32_t live) {
+  return (old & 0x240400u) | 0x202u | (PackEFlags(f) & live & 0x8D5u);
+}
+
 // ---- atomics for lock-prefixed instructions -----------------------------
 template <typename T>
 inline T* AtomicPtr(uint8_t* b, uint64_t a) {
@@ -589,15 +640,49 @@ inline T* AtomicPtr(uint8_t* b, uint64_t a) {
 
 // Register/flag caching. Lifted functions keep guest registers in locals
 // (which nothing can alias) and write them back before anything that may
-// observe or change them. Files lifted from x64 images define
-// RECOMP_LIFT_X64 before including this header.
+// observe or change them. MU: whether MXCSR is as usual, for the SSE fast
+// paths (sse.h), read again wherever MXCSR may have changed. Files lifted
+// from x64 images define RECOMP_LIFT_X64 before including this header.
 #ifndef RECOMP_LIFT_X64
+// The XMM registers a 32-bit function uses (kLiftXmm, a bit each, from the
+// lifter) live in locals X0..X7: kept in host registers across guest
+// stores, which the compiler must otherwise assume may write c.xmm.
+#define LIFT_XMM_RELOAD                                                  \
+  if (kLiftXmm & 0x01u) X0 = c.xmm[0];                                    \
+  if (kLiftXmm & 0x02u) X1 = c.xmm[1];                                    \
+  if (kLiftXmm & 0x04u) X2 = c.xmm[2];                                    \
+  if (kLiftXmm & 0x08u) X3 = c.xmm[3];                                    \
+  if (kLiftXmm & 0x10u) X4 = c.xmm[4];                                    \
+  if (kLiftXmm & 0x20u) X5 = c.xmm[5];                                    \
+  if (kLiftXmm & 0x40u) X6 = c.xmm[6];                                    \
+  if (kLiftXmm & 0x80u) X7 = c.xmm[7];
+#define LIFT_XMM_SPILL                                                   \
+  if (kLiftXmm & 0x01u) c.xmm[0] = X0;                                    \
+  if (kLiftXmm & 0x02u) c.xmm[1] = X1;                                    \
+  if (kLiftXmm & 0x04u) c.xmm[2] = X2;                                    \
+  if (kLiftXmm & 0x08u) c.xmm[3] = X3;                                    \
+  if (kLiftXmm & 0x10u) c.xmm[4] = X4;                                    \
+  if (kLiftXmm & 0x20u) c.xmm[5] = X5;                                    \
+  if (kLiftXmm & 0x40u) c.xmm[6] = X6;                                    \
+  if (kLiftXmm & 0x80u) c.xmm[7] = X7;
+#ifdef RECOMP_LIFT_FLAGS_CHECK
+#define LIFT_FV_ENTER uint32_t FV = c.flags_valid;
+#define LIFT_FV_RELOAD FV = c.flags_valid;
+#else
+#define LIFT_FV_ENTER
+#define LIFT_FV_RELOAD
+#endif
+#define LIFT_XMM_ENTER                                                   \
+  [[maybe_unused]] ::recomp::Xmm X0, X1, X2, X3, X4, X5, X6, X7;          \
+  LIFT_XMM_RELOAD
 #define LIFT_ENTER                                                       \
   uint8_t* const B = ::recomp::g_guest_base;                                \
   uint32_t eax = c.eax, ecx = c.ecx, edx = c.edx, ebx = c.ebx,           \
            esp = c.esp, ebp = c.ebp, esi = c.esi, edi = c.edi;           \
   ::recomp::Flags F;                                                        \
   ::recomp::UnpackEFlags(F, c.eflags);                                   \
+  bool MU = ::recomp::sse::fast::UsualMxcsr(c.mxcsr);                    \
+  LIFT_FV_ENTER                                                          \
   const uint32_t FS = c.fs_base;                                         \
   (void)FS;
 #else
@@ -609,6 +694,7 @@ inline T* AtomicPtr(uint8_t* b, uint64_t a) {
            r13 = c.r13, r14 = c.r14, r15 = c.r15;                        \
   ::recomp::Flags F;                                                        \
   ::recomp::UnpackEFlags(F, c.eflags);                                   \
+  bool MU = ::recomp::sse::fast::UsualMxcsr(c.mxcsr);                    \
   const uint64_t GS = c.gs_base;                                         \
   (void)GS;
 #endif
@@ -624,15 +710,44 @@ inline T* AtomicPtr(uint8_t* b, uint64_t a) {
 #endif
 
 #ifndef RECOMP_LIFT_X64
-#define LIFT_SPILL                                                       \
+// LIFT_SPILL keeps every flag; LIFT_SPILL_F(live) only the arithmetic
+// flags in `live`, and LIFT_SPILL_NF none (where the lifter has proved
+// nothing on the other side reads the others: tools/lifter/flags.h).
+//
+// recomp_lift --flags-check (RECOMP_LIFT_FLAGS_CHECK) checks that proof
+// as the game runs: every spill keeps all flags, as before the analysis,
+// and records in c.flags_valid which ones the optimised spill would have
+// kept; the function's local FV follows that through its body (each
+// instruction adds the flags it writes), and an instruction reading a
+// flag outside FV is reported (FlagCheckFail).
+#define LIFT_SPILL_REGS                                                  \
   c.eax = eax; c.ecx = ecx; c.edx = edx; c.ebx = ebx;                    \
-  c.esp = esp; c.ebp = ebp; c.esi = esi; c.edi = edi;                    \
-  c.eflags = ::recomp::PackEFlags(F);
+  c.esp = esp; c.ebp = ebp; c.esi = esi; c.edi = edi;
+#ifdef RECOMP_LIFT_FLAGS_CHECK
+#define LIFT_SPILL_F(live)                                               \
+  LIFT_SPILL_REGS                                                        \
+  c.eflags = ::recomp::lift::MergeEFlags(c.eflags, F, 0x8D5u);           \
+  c.flags_valid = FV & (live);                                           \
+  LIFT_XMM_SPILL
+#define LIFT_SPILL_NF LIFT_SPILL_F(0u)
+#else
+#define LIFT_SPILL_F(live)                                               \
+  LIFT_SPILL_REGS                                                        \
+  c.eflags = ::recomp::lift::MergeEFlags(c.eflags, F, live);             \
+  LIFT_XMM_SPILL
+#define LIFT_SPILL_NF                                                    \
+  LIFT_SPILL_REGS                                                        \
+  LIFT_XMM_SPILL
+#endif
+#define LIFT_SPILL LIFT_SPILL_F(0x8D5u)
 
 #define LIFT_RELOAD                                                      \
   eax = c.eax; ecx = c.ecx; edx = c.edx; ebx = c.ebx;                    \
   esp = c.esp; ebp = c.ebp; esi = c.esi; edi = c.edi;                    \
-  ::recomp::UnpackEFlags(F, c.eflags);
+  ::recomp::UnpackEFlags(F, c.eflags);                                   \
+  MU = ::recomp::sse::fast::UsualMxcsr(c.mxcsr);                         \
+  LIFT_FV_RELOAD                                                         \
+  LIFT_XMM_RELOAD
 #else
 #define LIFT_SPILL                                                       \
   c.rax = rax; c.rcx = rcx; c.rdx = rdx; c.rbx = rbx;                    \
@@ -646,5 +761,6 @@ inline T* AtomicPtr(uint8_t* b, uint64_t a) {
   rsp = c.rsp; rbp = c.rbp; rsi = c.rsi; rdi = c.rdi;                    \
   r8 = c.r8; r9 = c.r9; r10 = c.r10; r11 = c.r11;                        \
   r12 = c.r12; r13 = c.r13; r14 = c.r14; r15 = c.r15;                    \
-  ::recomp::UnpackEFlags(F, c.eflags);
+  ::recomp::UnpackEFlags(F, c.eflags);                                   \
+  MU = ::recomp::sse::fast::UsualMxcsr(c.mxcsr);
 #endif

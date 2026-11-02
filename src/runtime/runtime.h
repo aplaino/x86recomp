@@ -12,6 +12,7 @@
 #include "runtime/guest_alloc.h"
 #include "runtime/guest_memory.h"
 #include "runtime/pe_image.h"
+#include "runtime/platform.h"
 
 namespace recomp {
 
@@ -60,6 +61,11 @@ struct GameConfig {
     Exclusive,  // fullscreen in the host display mode closest to the game's
   };
   Fullscreen fullscreen = Fullscreen::Desktop;
+  // macOS: fullscreen as a Space of its own (entered by animation), as
+  // the green button does: what Game Mode needs. Otherwise a borderless
+  // window over the whole display, at once (a window just being shown or
+  // resized can miss the animation and stay a window).
+  bool mac_fullscreen_space = false;
 
   // Post-process anti-aliasing (SMAA 1x) of the presented frame (SDL_GPU
   // backend); <ID>_AA=0|1 overrides.
@@ -67,6 +73,38 @@ struct GameConfig {
   // Anisotropic filtering at least this (2..16) for the game's mipmapped
   // textures; 0 keeps the game's own. <ID>_ANISO overrides.
   int anisotropy = 0;
+
+  // Physical memory a 32-bit guest is told the machine has
+  // (GlobalMemoryStatus[Ex]), in MiB; available is three quarters of it.
+  // Games check a minimum (GTA IV wants 1.5 GiB) or size caches from it.
+  uint32_t total_phys_mb = 1024;
+
+  // Called on ExitProcess, which ends the process at once (_Exit): what
+  // must still happen, such as an instrumented build writing its profile
+  // (RECOMP_PGO=generate).
+  void (*before_exit)() = nullptr;
+
+  // Optional: the host scheduling class of a guest thread, chosen by what
+  // it runs rather than by its Windows priority (games give their busiest
+  // threads any priority, and on Apple silicon the class decides between
+  // performance and efficiency cores). Called on the thread as it starts,
+  // with its start routine and argument (0 for the process's main thread);
+  // a game that starts its threads through a wrapper of its own looks
+  // through it. False for a thread it does not know: that one keeps the
+  // class mapped from its priority (platform::SetThreadPriorityClass). A
+  // thread given a class here keeps it; SetThreadPriority leaves it be.
+  bool (*thread_qos)(gaddr entry, uint64_t param, platform::ThreadQos* out) = nullptr;
+
+  // A window of another process the game sends messages to (its launcher,
+  // say), answered by the port: called for every SendMessage first; true
+  // if handled, with the result in *result.
+  bool (*send_message)(uint32_t hwnd, uint32_t msg, uint32_t wparam, uint32_t lparam,
+                       uint32_t* result) = nullptr;
+
+  // The graphics adapter Direct3D reports (GetAdapterIdentifier). Games
+  // pick shader sets and workarounds by vendor; 0 is none known.
+  uint32_t gpu_vendor_id = 0, gpu_device_id = 0;
+  std::string gpu_description;  // empty: the runtime's own name
 
   // Install files the game reads, with text appended: the game's own
   // config extended by the port (extra key bindings, say). Written into
@@ -162,12 +200,21 @@ extern Process* g_proc;
 struct Thread {
   Ctx ctx;
   uint32_t tid = 0;
+  // SetThreadPriority before the thread started; applied on its host thread
+  // when it starts (platform::SetThreadPriorityClass).
+  int priority = 0;
+  // Its host class came from GameConfig::thread_qos: priorities no longer
+  // change it.
+  bool qos_fixed = false;
   gaddr teb = 0;
   gaddr stack_lo = 0, stack_hi = 0;
 };
 
 // Per-host-thread pointer to the guest thread running on it.
 Thread* CurrentThread();
+// Calls fn for every guest thread created so far (finished ones too),
+// holding the thread list's lock.
+void ForEachThread(const std::function<void(Thread&)>& fn);
 
 // Guest memory helpers for HLE code.
 inline uint8_t* GPtr(gaddr va) { return g_proc->mem.ptr(va); }
@@ -236,5 +283,10 @@ std::string ReportPath(const char* kind);
 // Runs host function fn on a new detached host thread bound to guest thread
 // t (from CreateGuestThread), so fn may CallGuest(t->ctx, ...).
 void StartServiceThread(Thread* t, std::function<void()> fn);
+namespace hle {
+// A game's say over Sleep/SleepEx: the milliseconds the guest asked for in,
+// those to sleep out (e.g. none while a loading screen is up).
+void SetSleepFilter(uint32_t (*filter)(uint32_t ms));
+}  // namespace hle
 
 }  // namespace recomp

@@ -19,9 +19,16 @@ struct Flags {
 
 struct Thread;
 
-// An SSE register: 16 bytes, lanes little-endian (as in guest memory).
+// An SSE register: 16 bytes, lanes little-endian (as in guest memory). A
+// vector, not a byte array: lifted functions keep the registers they use
+// in locals (X0..X7), and the compiler keeps a vector in one host SIMD
+// register where it would cut an array into bytes (or leave it in
+// memory). b[i] is byte i; data() its bytes in memory.
 struct Xmm {
-  uint8_t b[16];
+  using Bytes = uint8_t __attribute__((vector_size(16)));
+  Bytes b;
+  uint8_t* data() { return reinterpret_cast<uint8_t*>(&b); }
+  const uint8_t* data() const { return reinterpret_cast<const uint8_t*>(&b); }
 };
 
 struct Ctx {
@@ -53,6 +60,9 @@ struct Ctx {
   Xmm xmm[16];
   Xmm ymm_hi[16];
   uint32_t mxcsr;
+  // recomp_lift --flags-check builds only: the arithmetic flags in eflags
+  // that the last spill really meant to keep (lifted.h).
+  uint32_t flags_valid = 0x8D5u;
   Thread* thread;    // runtime-owned per-thread data
 };
 

@@ -1033,6 +1033,8 @@ struct Stored {
 // FIST: `lo` is also the integer indefinite.
 Stored StoreIntValue(uint32_t cw, F80 v, int64_t lo, int64_t hi) {
   const uint64_t indefinite = uint64_t(lo);
+  if (run::SV f; !g_softfloat_only && run::StoreIntCore(cw, run::ToV(v), uint64_t(hi) + 1, &f))
+    return {f.bits, uint16_t(run::Flags(f)), run::Up(f)};
   if (IsUnsupported(v) || ExpOf(v) == 0x7FFF) return {indefinite, kIE, false};
   int rc = RcOf(cw);
   extFloat80_t x = ToSf(Canonical(v));
@@ -2529,7 +2531,44 @@ RV ArithI16(uint32_t cw, Op op, V sv, int16_t v) {
 RV ArithI32(uint32_t cw, Op op, V sv, int32_t v) {
   return Pack(DoOp(cw, op, ToF80(sv), ::recomp::x87::FromInt(v), false));
 }
-RV Sqrt(uint32_t cw, V v) { return Pack(SqrtOf(cw, ToF80(v))); }
+// fsqrt under RC=nearest at PC=24 or PC=53 (main's 0x007F is PC=24) of a
+// positive value that ToD takes exactly: the host's sqrt, correctly rounded
+// to 53 bits, with the error term fma(-s, s, x) giving PE and C1. At PC=24
+// s is rounded again to 24 bits; that is the exact result rounded once to
+// 24 bits unless s is a 24-bit midpoint (the exact root and s are on the
+// same side of every 24-bit midpoint, which are 53-bit values, so only s
+// on one can round differently): those go the exact way.
+bool SqrtD(uint32_t cw, V v, RV* out) {
+  const uint32_t pc = (cw >> 8) & 3;
+  double x;
+  if (!g_doubles || (cw & 0x0C00u) || (pc != 0 && pc != 2) || !ToD(v, &x) || !(x > 0))
+    return false;
+  const double s = std::sqrt(x);
+  const double e = std::fma(-s, s, x);  // exact - s, in sign
+  double r = s;
+  bool inexact = e != 0, up = e < 0;
+  if (pc == 0) {
+    constexpr uint64_t kLow = (1ull << 29) - 1, kHalf = 1ull << 28;
+    const uint64_t b = std::bit_cast<uint64_t>(s), low = b & kLow;
+    if (low == kHalf) return false;
+    if (low) {
+      const uint64_t rb = (b & ~kLow) + (low > kHalf ? kLow + 1 : 0);
+      r = std::bit_cast<double>(rb);
+      inexact = true;
+      up = rb > b;
+    }
+  }
+  if (!InRange(r)) return false;
+  const V rv = FromD(r);
+  *out = {rv.sig, rv.se | uint64_t(inexact ? 0x20u : 0u) << 16 | uint64_t(up) << 32};
+  return true;
+}
+
+RV Sqrt(uint32_t cw, V v) {
+  RV r;
+  if (SqrtD(cw, v, &r)) return r;
+  return Pack(SqrtOf(cw, ToF80(v)));
+}
 
 RV LoadF32(uint32_t bits) {
   bool den;

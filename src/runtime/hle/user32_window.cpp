@@ -450,11 +450,14 @@ void HandleSdlEvent(const SDL_Event& e) {
   switch (e.type) {
     case SDL_EVENT_QUIT: {
       std::lock_guard<std::recursive_mutex> l(g_mu);
+      std::fprintf(stderr, "user32: host quit request: WM_CLOSE to the game's windows\n");
       for (auto& [h, w] : g_windows)
         if (w.sdl && !w.destroyed) Post(h, WM_CLOSE, 0, 0);
       break;
     }
     case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+      std::fprintf(stderr, "user32: host window %u asked to close: WM_CLOSE\n",
+                   unsigned(e.window.windowID));
       if (uint32_t h = HwndForSdl(e.window.windowID)) Post(h, WM_CLOSE, 0, 0);
       break;
     case SDL_EVENT_WINDOW_FOCUS_GAINED:
@@ -814,10 +817,12 @@ void EnsureSdlVideo() {
   // Leave SIGINT/SIGTERM alone: SDL would turn them into quit events the
   // game may ignore, making the process hard to stop.
   SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
-  // macOS: fullscreen as a borderless window over the whole display, at
-  // once, not a Space of its own entered by animation (which a window
-  // just being shown or resized can miss, leaving it a window).
-  SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, "0");
+  // A game that destroys its only window and makes another (GTA IV probes
+  // Direct3D with a temporary one) must not get a quit request for it;
+  // closing a window still asks through SDL_EVENT_WINDOW_CLOSE_REQUESTED.
+  SDL_SetHint(SDL_HINT_QUIT_ON_LAST_WINDOW_CLOSE, "0");
+  // macOS: GameConfig::mac_fullscreen_space.
+  SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, Game().mac_fullscreen_space ? "1" : "0");
   if (!SDL_Init(SDL_INIT_VIDEO)) FatalF("SDL_Init: %s", SDL_GetError());
   g_sdl_up = true;
   if (const SDL_DisplayMode* m = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay())) {
@@ -1281,8 +1286,10 @@ using namespace win32;
 // ---- classes ---------------------------------------------------------------
 
 // g_classes key of a class name argument: an atom (MAKEINTATOM) or a name.
-std::string ClassKey(uint32_t name) {
-  return name < 0x10000 ? "#" + std::to_string(name) : Lower(GStr(name));
+// A class name or atom; `wide` for the W functions (names are kept narrow).
+std::string ClassKey(uint32_t name, bool wide = false) {
+  if (name < 0x10000) return "#" + std::to_string(name);
+  return Lower(wide ? win32::Narrow(GWStr(name)) : GStr(name));
 }
 
 // The system control classes every process has (see "built-in control
@@ -1302,12 +1309,12 @@ void EnsureSystemClasses() {
 
 // WNDCLASSA at wc, or the same fields 4 bytes on in WNDCLASSEXA (after
 // cbSize).
-uint32_t RegisterWndClass(uint32_t wc) {
+uint32_t RegisterWndClass(uint32_t wc, bool wide = false) {
   WndClass k;
   k.style = Rd32(wc + 0);
   k.wndproc = Rd32(wc + 4);
   k.wnd_extra = Rd32(wc + 12);
-  k.name = ClassKey(Rd32(wc + 36));
+  k.name = ClassKey(Rd32(wc + 36), wide);
   std::lock_guard<std::recursive_mutex> l(g_mu);
   if (g_classes.count(k.name)) {
     SetLastError(kErrorClassAlreadyExists);
@@ -1319,6 +1326,7 @@ uint32_t RegisterWndClass(uint32_t wc) {
 }
 
 HLE("user32.dll", RegisterClassA, 1) { return RegisterWndClass(Arg(c, 0)); }
+HLE("user32.dll", RegisterClassW, 1) { return RegisterWndClass(Arg(c, 0), true); }
 
 HLE("user32.dll", RegisterClassExA, 1) {
   uint32_t wc = Arg(c, 0);
@@ -1342,13 +1350,15 @@ HLE("user32.dll", SetClassLongA, 3) {
 
 // ---- windows ---------------------------------------------------------------
 
-HLE("user32.dll", CreateWindowExA, 12) {
+// CreateWindowExA/W. Window titles and class names are kept narrow; the
+// CREATESTRUCT passes the caller's own strings.
+uint32_t CreateWindowEx(Ctx& c, bool wide) {
   uint32_t exstyle = Arg(c, 0), cls_va = Arg(c, 1), title_va = Arg(c, 2),
            style = Arg(c, 3), parent = Arg(c, 8), menu = Arg(c, 9),
            hinst = Arg(c, 10), param = Arg(c, 11);
   int32_t x = int32_t(Arg(c, 4)), y = int32_t(Arg(c, 5)), w = int32_t(Arg(c, 6)),
           h = int32_t(Arg(c, 7));
-  std::string cls = ClassKey(cls_va);
+  std::string cls = ClassKey(cls_va, wide);
   EnsureSystemClasses();
   Window win;
   {
@@ -1381,7 +1391,7 @@ HLE("user32.dll", CreateWindowExA, 12) {
   win.y = y;
   win.w = w;
   win.h = h;
-  win.title = title_va ? GStr(title_va) : "";
+  win.title = !title_va ? "" : wide ? win32::Narrow(GWStr(title_va)) : GStr(title_va);
   win.tid = CurrentThread()->tid;
   if (!(style & WS_CHILD)) {
     EnsureSdlVideo();
@@ -1393,12 +1403,13 @@ HLE("user32.dll", CreateWindowExA, 12) {
     if (!win.sdl) FatalF("SDL_CreateWindow: %s", SDL_GetError());
   }
   uint32_t hwnd = win.hwnd;
+  const std::string title = win.title;
   {
     std::lock_guard<std::recursive_mutex> l(g_mu);
     g_windows[hwnd] = std::move(win);
   }
-  RECOMP_TRACE("  CreateWindowExA(%s, \"%s\", style %08X, %d,%d %dx%d) -> %X\n",
-            cls.c_str(), GStr(title_va).c_str(), style, x, y, w, h, hwnd);
+  RECOMP_TRACE("  CreateWindowEx(%s, \"%s\", style %08X, %d,%d %dx%d) -> %X\n",
+            cls.c_str(), title.c_str(), style, x, y, w, h, hwnd);
 
   // CREATESTRUCTA in a process-heap block.
   uint32_t cs = HeapAllocProcess(48, true);
@@ -1437,6 +1448,9 @@ HLE("user32.dll", CreateWindowExA, 12) {
   }
   return hwnd;
 }
+
+HLE("user32.dll", CreateWindowExA, 12) { return CreateWindowEx(c, false); }
+HLE("user32.dll", CreateWindowExW, 12) { return CreateWindowEx(c, true); }
 
 HLE("user32.dll", DestroyWindow, 1) {
   uint32_t hwnd = Arg(c, 0);
@@ -1716,6 +1730,72 @@ HLE("user32.dll", GetWindow, 2) {
 
 HLE("user32.dll", GetLastActivePopup, 1) { return Arg(c, 0); }
 
+// The top-level window list is not ordered: the first live window stands
+// for the top of the Z order (the game's own window).
+HLE("user32.dll", GetTopWindow, 1) {
+  std::lock_guard<std::recursive_mutex> l(g_mu);
+  const uint32_t parent = Arg(c, 0) == 0x00010000 ? 0 : uint32_t(Arg(c, 0));
+  for (const auto& [h, w] : g_windows)
+    if (!w.destroyed && w.parent == parent) return h;
+  return 0;
+}
+
+HLE("user32.dll", IsWindowUnicode, 1) { return 0; }
+
+// WINDOWINFO: cbSize, rcWindow, rcClient (screen coordinates), dwStyle,
+// dwExStyle, dwWindowStatus, cxWindowBorders, cyWindowBorders, atomWindowType,
+// wCreatorVersion.
+HLE("user32.dll", GetWindowInfo, 2) {
+  std::lock_guard<std::recursive_mutex> l(g_mu);
+  Window* w = Win(Arg(c, 0));
+  const uint32_t wi = Arg(c, 1);
+  if (!w || !wi) return 0;
+  int cw, ch;
+  ClientSize(*w, &cw, &ch);
+  const int bx = (w->w - cw) / 2, by = w->h - ch - bx;
+  std::memset(GPtr(wi + 4), 0, 56);
+  const int32_t r[8] = {w->x, w->y, w->x + w->w, w->y + w->h,
+                        w->x + bx, w->y + by, w->x + bx + cw, w->y + by + ch};
+  for (int i = 0; i < 8; i++) Wr32(wi + 4 + 4 * i, uint32_t(r[i]));
+  Wr32(wi + 36, w->style);
+  Wr32(wi + 40, w->exstyle);
+  Wr32(wi + 44, w->hwnd == g_active ? 1 : 0);  // WS_ACTIVECAPTION
+  Wr32(wi + 48, uint32_t(bx));
+  Wr32(wi + 52, uint32_t(bx));
+  Wr16(wi + 58, 0x0500);
+  return 1;
+}
+
+// TITLEBARINFO: cbSize, rcTitleBar, rgstate[6]. No title bar is reported
+// (STATE_SYSTEM_INVISIBLE), as for a borderless fullscreen window.
+HLE("user32.dll", GetTitleBarInfo, 2) {
+  const uint32_t ti = Arg(c, 1);
+  if (!ti) return 0;
+  std::memset(GPtr(ti + 4), 0, 40);
+  for (int i = 0; i < 6; i++) Wr32(ti + 20 + 4 * i, 0x8000);
+  return 1;
+}
+
+// DISPLAY_DEVICEA: cb, DeviceName[32], DeviceString[128], StateFlags,
+// DeviceID[128], DeviceKey[128]. One adapter with one monitor.
+HLE("user32.dll", EnumDisplayDevicesA, 4) {
+  const uint32_t dev = Arg(c, 0), index = Arg(c, 1), dd = Arg(c, 2);
+  if (!dd || index != 0) return 0;
+  std::memset(GPtr(dd + 4), 0, 420);
+  if (dev) {  // the monitor of an adapter
+    PutStr(dd + 4, "\\\\.\\DISPLAY1\\Monitor0");
+    PutStr(dd + 36, "Generic PnP Monitor");
+    Wr32(dd + 164, 0x3);  // ACTIVE | ATTACHED
+    PutStr(dd + 168, "MONITOR\\Default_Monitor");
+    return 1;
+  }
+  PutStr(dd + 4, "\\\\.\\DISPLAY1");
+  PutStr(dd + 36, "Generic Graphics Adapter");
+  Wr32(dd + 164, 0x5);  // ATTACHED_TO_DESKTOP | PRIMARY_DEVICE
+  PutStr(dd + 168, "PCI\\VEN_10DE&DEV_0000");
+  return 1;
+}
+
 HLE("user32.dll", FindWindowA, 2) {
   std::string cls = Arg(c, 0) ? Lower(GStr(Arg(c, 0))) : "";
   std::string title = Arg(c, 1) ? GStr(Arg(c, 1)) : "";
@@ -1897,6 +1977,9 @@ HLE("user32.dll", PostQuitMessage, 1) {
 }
 
 HLE("user32.dll", SendMessageA, 4) {
+  uint32_t r;
+  if (Game().send_message && Game().send_message(Arg(c, 0), Arg(c, 1), Arg(c, 2), Arg(c, 3), &r))
+    return r;
   return Send(Arg(c, 0), Arg(c, 1), Arg(c, 2), Arg(c, 3));
 }
 
@@ -2017,7 +2100,7 @@ HLE("user32.dll", CallWindowProcA, 5) {
   return CallGuest(c, Arg(c, 0), {Arg(c, 1), Arg(c, 2), Arg(c, 3), Arg(c, 4)});
 }
 
-HLE("user32.dll", DefWindowProcA, 4) {
+uint32_t DefWindowProc(Ctx& c) {
   uint32_t hwnd = Arg(c, 0), msg = Arg(c, 1), wp = Arg(c, 2);
   switch (msg) {
     case WM_NCCREATE: return 1;
@@ -2043,6 +2126,9 @@ HLE("user32.dll", DefWindowProcA, 4) {
       return 0;
   }
 }
+
+HLE("user32.dll", DefWindowProcA, 4) { return DefWindowProc(c); }
+HLE("user32.dll", DefWindowProcW, 4) { return DefWindowProc(c); }
 
 // ---- built-in control classes ------------------------------------------------------
 //
@@ -2361,6 +2447,11 @@ HLE("user32.dll", ReleaseCapture, 0) {
   std::lock_guard<std::recursive_mutex> l(g_mu);
   g_capture = 0;
   return 1;
+}
+
+HLE("user32.dll", GetCapture, 0) {
+  std::lock_guard<std::recursive_mutex> l(g_mu);
+  return g_capture;
 }
 
 // ---- display modes -------------------------------------------------------------------

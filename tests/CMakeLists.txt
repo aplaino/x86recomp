@@ -18,6 +18,15 @@ target_compile_options(x87_fast_test PRIVATE -O2 ${RECOMP_X87_FP_FLAGS})
 add_test(NAME x87_fast COMMAND x87_fast_test)
 set_tests_properties(x87_fast PROPERTIES TIMEOUT 300)
 
+# sse_host_test: the RECOMP_SSE_HOST forms in sse.h against the SSE
+# model, on edge values and random bits; portable.
+add_executable(sse_host_test sse_host_test.cpp)
+target_link_libraries(sse_host_test PRIVATE recomp_x87)
+target_compile_definitions(sse_host_test PRIVATE RECOMP_SSE_HOST)
+target_compile_options(sse_host_test PRIVATE -O2 ${RECOMP_X87_FP_FLAGS})
+add_test(NAME sse_host COMMAND sse_host_test)
+set_tests_properties(sse_host PROPERTIES TIMEOUT 300)
+
 # sse_rsqrt_test: RSQRTPS is the correctly rounded 1/sqrt(x), checked
 # exhaustively with exact arithmetic (the host oracle cannot: CPUs differ);
 # portable.
@@ -26,6 +35,13 @@ target_link_libraries(sse_rsqrt_test PRIVATE recomp_x87)
 target_compile_options(sse_rsqrt_test PRIVATE -O2)
 add_test(NAME sse_rsqrt COMMAND sse_rsqrt_test)
 set_tests_properties(sse_rsqrt PROPERTIES TIMEOUT 300)
+
+# sse_rcp_test: RCPPS is the correctly rounded 1/x, checked exhaustively
+# over one binade, by scaling over the rest, and on special operands.
+add_executable(sse_rcp_test sse_rcp_test.cpp)
+target_link_libraries(sse_rcp_test PRIVATE recomp_x87)
+target_compile_options(sse_rcp_test PRIVATE -O2)
+add_test(NAME sse_rcp COMMAND sse_rcp_test)
 
 # digital_reverb_test: the Miles-compatible digital reverb against a hash
 # of its own output recorded when it matched the original
@@ -46,6 +62,16 @@ target_include_directories(fast2d_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_compile_features(fast2d_test PRIVATE cxx_std_20)
 target_compile_options(fast2d_test PRIVATE -O2 -ffp-contract=off)
 add_test(NAME fast2d COMMAND fast2d_test)
+
+# mixer_ring_test: the lock-free ring between the mixer thread and the
+# device callback (runtime/audio/ring.h): capacity, the slot wrap, and one
+# thread writing while another reads; portable.
+add_executable(mixer_ring_test mixer_ring_test.cpp)
+target_include_directories(mixer_ring_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_features(mixer_ring_test PRIVATE cxx_std_20)
+target_compile_options(mixer_ring_test PRIVATE -O2)
+target_link_libraries(mixer_ring_test PRIVATE Threads::Threads)
+add_test(NAME mixer_ring COMMAND mixer_ring_test)
 
 # gl_draw_test: the GL context's vertex arrays and immediate mode against
 # a reference model of GL's conversions, through a recording device;
@@ -126,3 +152,21 @@ add_executable(hlsl_bytecode_test hlsl_bytecode_test.cpp)
 target_link_libraries(hlsl_bytecode_test PRIVATE recomp_hlsl)
 add_test(NAME hlsl_bytecode COMMAND hlsl_bytecode_test ${RECOMP_GLSLANG}
          ${CMAKE_CURRENT_SOURCE_DIR}/hlsl/prelude.glsl ${CMAKE_CURRENT_BINARY_DIR})
+
+# lift_flags_test: programs whose flags cross calls, returns, tail calls
+# and indirect calls, lifted with the lifter's flag analysis and with
+# every flag spilled (recomp_lift --flags-test), must behave the same;
+# portable.
+if(NOT RECOMP_IOS)
+  set(_flags_forms "${CMAKE_CURRENT_BINARY_DIR}/lift_flags_forms.cpp")
+  add_custom_command(OUTPUT "${_flags_forms}"
+    COMMAND recomp_lift --flags-test "${_flags_forms}"
+    DEPENDS recomp_lift
+    COMMENT "Lifting the flag analysis test programs")
+  add_executable(lift_flags_test lift_flags_test.cpp "${_flags_forms}")
+  target_include_directories(lift_flags_test PRIVATE ${PROJECT_SOURCE_DIR}/src
+                             ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(lift_flags_test PRIVATE recomp_x87 recomp_image)
+  target_compile_options(lift_flags_test PRIVATE -O1 -fno-strict-aliasing)
+  add_test(NAME lift_flags COMMAND lift_flags_test)
+endif()

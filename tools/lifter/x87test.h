@@ -1,6 +1,6 @@
 #pragma once
-// Generators for tests/lift_{x87,int,sse}_test.cpp; see
-// x87test.cpp.
+// Generators for tests/lift_{x87,int,sse}_test.cpp (see x87test.cpp)
+// and tests/lift_flags_test.cpp (flagstest.cpp).
 
 #include <string>
 
@@ -14,4 +14,5 @@ int WriteIntTest(const Program& p, const Decoder& dec, const std::string& out,
                  const char* prologue);
 int WriteSseTest(const Program& p, const Decoder& dec, const std::string& out,
                  const char* prologue);
+int WriteFlagsTest(const Decoder& dec, const std::string& out, const char* prologue);
 }  // namespace lifter

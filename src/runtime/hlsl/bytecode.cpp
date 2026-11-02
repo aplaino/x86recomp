@@ -213,7 +213,10 @@ class Translator {
   void Declare() {
     for (const Ins& in : ins_) {
       if (in.op == DEF) {
-        defs_[ConstIndex(in.dst)] = {in.raw[0], in.raw[1], in.raw[2], in.raw[3]};
+        // NaNs read as 0, as in the registers the application sets
+        // (SetVertexShaderConstantF / SetPixelShaderConstantF).
+        auto f = [](uint32_t b) { return (b & 0x7FFFFFFFu) > 0x7F800000u ? 0u : b; };
+        defs_[ConstIndex(in.dst)] = {f(in.raw[0]), f(in.raw[1]), f(in.raw[2]), f(in.raw[3])};
       } else if (in.op == DEFI) {
         defi_[in.dst.num] = {in.raw[0], in.raw[1], in.raw[2], in.raw[3]};
       } else if (in.op == DEFB) {
@@ -409,33 +412,50 @@ class Translator {
       case MOVA: need(1); return S(s[0]);
       case ADD: need(2); return "(" + S(s[0]) + " + " + S(s[1]) + ")";
       case SUB: need(2); return "(" + S(s[0]) + " - " + S(s[1]) + ")";
-      case MUL: need(2); return "(" + S(s[0]) + " * " + S(s[1]) + ")";
-      case MAD: need(3); return "(" + S(s[0]) + " * " + S(s[1]) + " + " + S(s[2]) + ")";
+      case MUL:
+        need(2);
+        if (LegacyMul()) return Mulz(S(s[0]), S(s[1]));
+        return "(" + S(s[0]) + " * " + S(s[1]) + ")";
+      case MAD:
+        need(3);
+        if (LegacyMul()) return "(" + Mulz(S(s[0]), S(s[1])) + " + " + S(s[2]) + ")";
+        return "(" + S(s[0]) + " * " + S(s[1]) + " + " + S(s[2]) + ")";
       case MIN: need(2); return "min(" + S(s[0]) + ", " + S(s[1]) + ")";
       case MAX: need(2); return "max(" + S(s[0]) + ", " + S(s[1]) + ")";
       case SLT: need(2); return "vec4(lessThan(" + S(s[0]) + ", " + S(s[1]) + "))";
       case SGE: need(2); return "vec4(greaterThanEqual(" + S(s[0]) + ", " + S(s[1]) + "))";
-      case RCP: need(1); return "vec4(1.0 / " + S1(s[0]) + ")";
-      case RSQ: need(1); return "vec4(inversesqrt(abs(" + S1(s[0]) + ")))";
-      case EXP: need(1); return "vec4(exp2(" + S1(s[0]) + "))";
-      case LOG: need(1); return "vec4(log2(abs(" + S1(s[0]) + ")))";
+      // RCP, RSQ, LOG, LOGP, POW and NRM of 0 and EXP, EXPP of 128 and up
+      // give infinities in D3D9 too, but D3D9 multiplies them by 0 to 0,
+      // IEEE to NaN (black lighting): their inputs are kept off 0 and
+      // below 128 (inputs: Metal's fast math may drop a clamp of a result)
+      // so the results stay finite (huge), and 0 times them is 0 again.
+      case RCP: need(1); return "vec4(1.0 / r_off0(" + S1(s[0]) + "))";
+      case RSQ: need(1); return "vec4(inversesqrt(max(abs(" + S1(s[0]) + "), 1e-37)))";
+      case EXP: need(1); return "vec4(exp2(min(" + S1(s[0]) + ", 127.99)))";
+      case LOG: need(1); return "vec4(log2(max(abs(" + S1(s[0]) + "), 1e-37)))";
       case EXPP:
         need(1);
         if (!pixel_ && major_ == 1) {
           helpers_.insert("expp");
           return "r_expp1(" + S1(s[0]) + ")";
         }
-        return "vec4(exp2(" + S1(s[0]) + "))";
+        return "vec4(exp2(min(" + S1(s[0]) + ", 127.99)))";
       case LOGP:
         need(1);
         if (!pixel_ && major_ == 1) {
           helpers_.insert("logp");
           return "r_logp1(" + S1(s[0]) + ")";
         }
-        return "vec4(log2(abs(" + S1(s[0]) + ")))";
-      case POW: need(2); return "vec4(pow(abs(" + S1(s[0]) + "), " + S1(s[1]) + "))";
-      case DP3: need(2); return "vec4(dot((" + S(s[0]) + ").xyz, (" + S(s[1]) + ").xyz))";
-      case DP4: need(2); return "vec4(dot(" + S(s[0]) + ", " + S(s[1]) + "))";
+        return "vec4(log2(max(abs(" + S1(s[0]) + "), 1e-37)))";
+      case POW: need(2); return "vec4(pow(max(abs(" + S1(s[0]) + "), 1e-37), " + S1(s[1]) + "))";
+      case DP3:
+        need(2);
+        if (LegacyMul()) return "vec4(dot(" + Mulz(S(s[0]), S(s[1])) + ".xyz, vec3(1.0)))";
+        return "vec4(dot((" + S(s[0]) + ").xyz, (" + S(s[1]) + ").xyz))";
+      case DP4:
+        need(2);
+        if (LegacyMul()) return "vec4(dot(" + Mulz(S(s[0]), S(s[1])) + ", vec4(1.0)))";
+        return "vec4(dot(" + S(s[0]) + ", " + S(s[1]) + "))";
       case DP2ADD:
         need(3);
         return "vec4(dot((" + S(s[0]) + ").xy, (" + S(s[1]) + ").xy) + " + S1(s[2]) + ")";
@@ -444,12 +464,18 @@ class Translator {
         need(2);
         return "vec4(1.0, (" + S(s[0]) + ").y * (" + S(s[1]) + ").y, (" + S(s[0]) + ").z, (" +
                S(s[1]) + ").w)";
-      case LRP: need(3); return "mix(" + S(s[2]) + ", " + S(s[1]) + ", " + S(s[0]) + ")";
+      case LRP:
+        need(3);
+        if (LegacyMul())
+          return "(" + Mulz(S(s[0]), S(s[1])) + " + " + Mulz("(vec4(1.0) - " + S(s[0]) + ")", S(s[2])) + ")";
+        return "mix(" + S(s[2]) + ", " + S(s[1]) + ", " + S(s[0]) + ")";
       case FRC: need(1); return "fract(" + S(s[0]) + ")";
       case ABS: need(1); return "abs(" + S(s[0]) + ")";
       case SGN: need(1); return "sign(" + S(s[0]) + ")";
       case CRS: need(2); return "vec4(cross((" + S(s[0]) + ").xyz, (" + S(s[1]) + ").xyz), 0.0)";
-      case NRM: need(1); return "(" + S(s[0]) + " * inversesqrt(dot((" + S(s[0]) + ").xyz, (" + S(s[0]) + ").xyz)))";
+      case NRM:
+        need(1);
+        return "(" + S(s[0]) + " * inversesqrt(max(dot((" + S(s[0]) + ").xyz, (" + S(s[0]) + ").xyz), 1e-37)))";
       case SINCOS: need(1); return "vec4(cos(" + S1(s[0]) + "), sin(" + S1(s[0]) + "), 0.0, 0.0)";
       case CMP:
         need(3);
@@ -806,9 +832,10 @@ class Translator {
       }
       if (major_ >= 3) {
         g += "vec4 r_o[12];\n";
-        pre += "  for (int i = 0; i < 12; i++) r_o[i] = vec4(0.0, 0.0, 0.0, 1.0);\n";
         for (const auto& [reg, s] : vs3_outputs_) {
           std::string v = "r_o[" + std::to_string(reg) + "]";
+          // Components its writes leave are UnwrittenVarying's.
+          pre += "  " + v + " = " + UnwrittenVarying(s) + ";\n";
           if (s.usage == kPosition && s.index == 0) {
             post += "  gl_Position = r_position(" + v + ");\n";
           } else if (s.usage == kPSize) {
@@ -822,9 +849,10 @@ class Translator {
         }
       } else {
         g += "vec4 r_opos, r_ofog, r_opts;\nvec4 r_od[2];\nvec4 r_ot[8];\n";
-        pre += "  r_opos = vec4(0.0); r_ofog = vec4(0.0); r_opts = vec4(1.0);\n";
-        pre += "  for (int i = 0; i < 2; i++) r_od[i] = vec4(0.0, 0.0, 0.0, 1.0);\n";
-        pre += "  for (int i = 0; i < 8; i++) r_ot[i] = vec4(0.0, 0.0, 0.0, 1.0);\n";
+        // Components an output's writes leave are UnwrittenVarying's.
+        pre += "  r_opos = vec4(0.0); r_ofog = vec4(1.0); r_opts = vec4(1.0);\n";
+        pre += "  r_od[0] = vec4(1.0); r_od[1] = vec4(0.0, 0.0, 0.0, 1.0);\n";
+        pre += "  for (int i = 0; i < 8; i++) r_ot[i] = vec4(0.0);\n";
         post += "  gl_Position = r_position(r_opos);\n";
         for (const auto& [type, num] : written_) {
           if (type == RASTOUT && num == 1) {
@@ -893,16 +921,25 @@ class Translator {
         help += "  if (i == " + std::to_string(k) + ") return r_dc" + std::to_string(k) + ";\n";
       help += "  return i >= 0 && i < " + std::to_string(max_c_) + " ? c[i] : vec4(0.0);\n}\n";
     }
+    help += "float r_off0(float x) { return abs(x) < 1e-37 ? 1e-37 : x; }\n";
+    if (helpers_.count("mulz"))
+      help += "// D3D9's multiply: 0 times anything (infinity, NaN) is 0.\n"
+              "vec4 r_mulz(vec4 a, vec4 b) {\n"
+              "  bvec4 z = bvec4(vec4(equal(a, vec4(0.0))) + vec4(equal(b, vec4(0.0))));\n"
+              "  return mix(a * b, vec4(0.0), z);\n"
+              "}\n";
     if (helpers_.count("lit"))
       help += "vec4 r_lit(vec4 s) {\n"
               "  float p = clamp(s.w, -128.0, 128.0);\n"
               "  return vec4(1.0, max(s.x, 0.0), s.x > 0.0 ? pow(max(s.y, 0.0), p) : 0.0, 1.0);\n"
               "}\n";
     if (helpers_.count("expp"))
-      help += "vec4 r_expp1(float s) { return vec4(exp2(floor(s)), fract(s), exp2(s), 1.0); }\n";
+      help += "vec4 r_expp1(float s) {\n"
+              "  return vec4(exp2(min(floor(s), 127.0)), fract(s), exp2(min(s, 127.99)), 1.0);\n"
+              "}\n";
     if (helpers_.count("logp"))
       help += "vec4 r_logp1(float s) {\n"
-              "  float a = abs(s), e = floor(log2(a));\n"
+              "  float a = max(abs(s), 1e-37), e = floor(log2(a));\n"
               "  return vec4(e, a / exp2(e), log2(a), 1.0);\n"
               "}\n";
     std::string protos;
@@ -932,6 +969,22 @@ class Translator {
   std::map<uint32_t, ParamType> sampler_type_;
   std::set<uint32_t> used_samplers_;
   std::set<std::string> helpers_;
+
+  // RECOMP_D3D9_LEGACY_MUL=1: every multiply (MUL, MAD, DP3, DP4, LRP)
+  // as D3D9 hardware does it, 0 times anything giving 0. Costly where
+  // shading is heavy (GPU time up to three times in places); the finite
+  // RCP/RSQ/LOG/POW/NRM above cover what games need.
+  static bool LegacyMul() {
+    static const bool on = [] {
+      const char* e = std::getenv("RECOMP_D3D9_LEGACY_MUL");
+      return e && *e == '1';
+    }();
+    return on;
+  }
+  std::string Mulz(const std::string& a, const std::string& b) {
+    helpers_.insert("mulz");
+    return "r_mulz(vec4(" + a + "), vec4(" + b + "))";
+  }
 
   std::string main_, io_;
   std::map<int, std::string> funcs_;

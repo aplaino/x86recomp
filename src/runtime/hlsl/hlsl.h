@@ -119,6 +119,55 @@ bool Compile(std::string_view source, const std::vector<Define>& defines,
 // the bytecode reads. On failure returns false with a message in *errors.
 bool TranslateBytecode(const uint32_t* tokens, size_t count, Program* out, std::string* errors);
 
+// A compiled shader function's tokens, version to END included, token i
+// being read(i): D3D9 is given no length, only where the function starts.
+// Instructions are stepped over by their length (shader model 2 and up:
+// the count in the instruction token; 1.x: def's fixed five tokens, else
+// the parameter tokens, which have bit 31 set), so operands such as def's
+// floats cannot pass for END or a comment. Empty if no END within
+// `limit` tokens.
+template <class Read>
+std::vector<uint32_t> ReadBytecode(Read read, size_t limit) {
+  std::vector<uint32_t> t{read(0)};
+  const bool sm1 = ((t[0] >> 8) & 0xFF) < 2;
+  for (size_t i = 1; i < limit;) {
+    uint32_t tok = read(i), op = tok & 0xFFFF;
+    size_t n;  // tokens after the instruction token
+    if (op == 0xFFFF) {  // END
+      t.push_back(tok);
+      return t;
+    } else if (op == 0xFFFE) {  // comment
+      n = (tok >> 16) & 0x7FFF;
+    } else if (!sm1) {
+      n = (tok >> 24) & 0xF;
+    } else if (op == 81) {  // def
+      n = 5;
+    } else {
+      n = 0;
+      while (i + 1 + n < limit && (read(i + 1 + n) & 0x80000000u)) n++;
+    }
+    if (i + 1 + n > limit) break;
+    for (size_t k = 0; k <= n; k++) t.push_back(read(i + k));
+    i += 1 + n;
+  }
+  return {};
+}
+
+// The value of an output no shader instruction writes, as the D3D9
+// runtimes on other APIs (DXVK, wined3d) set it: COLOR0 (1, 1, 1, 1),
+// other colours (0, 0, 0, 1), FOG 1, the rest 0 (a GLSL vec4).
+const char* UnwrittenVarying(Semantic s);
+
+// The varying locations a shader writes (vertex) or reads (pixel), one
+// bit per VaryingLocation.
+uint32_t VaryingMask(const Program& p);
+
+// A pixel shader's GLSL for a vertex shader that writes only the varying
+// locations in `written`: inputs it reads from other locations become
+// constants (UnwrittenVarying), as Metal rejects a pipeline whose
+// fragment inputs the vertex function lacks while D3D9 allows it.
+std::string GlslWithDefaultInputs(const Program& ps, uint32_t written);
+
 // A Program as bytes and back (shader containers).
 std::vector<uint8_t> Serialize(const Program& p);
 bool Deserialize(const uint8_t* data, size_t size, Program* p);

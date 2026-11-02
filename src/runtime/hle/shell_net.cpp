@@ -59,7 +59,55 @@ HLE_NAMED("shell32.dll", "SHGetFolderPathA", Shell32GetFolderPathA, 5) {
   return GetFolderPathA(c);
 }
 
-HLE("shfolder.dll", SHGetFolderPathW, 5) {
+uint32_t GetFolderPathW(Ctx& c);
+HLE_NAMED("shell32.dll", "SHGetFolderPathW", Shell32GetFolderPathW, 5) {
+  return GetFolderPathW(c);
+}
+
+// ShellExecute (opening a web page or a document): nothing is started.
+HLE("shell32.dll", ShellExecuteA, 6) { return 2; }  // SE_ERR_FILENOTFOUND
+HLE("shell32.dll", ShellExecuteExA, 1) {
+  SetLastError(2);
+  return 0;
+}
+
+// ---- shlwapi path helpers -------------------------------------------------------
+
+// PathAppend(path, more): path + "\\" + more, without a doubled separator.
+std::string AppendPath(std::string a, std::string b) {
+  while (!b.empty() && b.front() == '\\') b.erase(0, 1);
+  if (!a.empty() && a.back() != '\\' && !b.empty()) a += '\\';
+  return a + b;
+}
+HLE("shlwapi.dll", PathAppendA, 2) {
+  PutStr(Arg(c, 0), AppendPath(GStr(Arg(c, 0)), GStr(Arg(c, 1))).substr(0, 259));
+  return 1;
+}
+HLE("shlwapi.dll", PathAppendW, 2) {
+  const std::string r = AppendPath(win32::Narrow(GWStr(Arg(c, 0))), win32::Narrow(GWStr(Arg(c, 1))));
+  const std::u16string w = win32::Widen(r.substr(0, 259));
+  for (size_t i = 0; i < w.size(); i++) Wr16(Arg(c, 0) + 2 * gaddr(i), w[i]);
+  Wr16(Arg(c, 0) + 2 * gaddr(w.size()), 0);
+  return 1;
+}
+HLE("shlwapi.dll", PathFileExistsA, 1) {
+  struct stat st;
+  return stat(HostPath(GStr(Arg(c, 0))).c_str(), &st) == 0 ? 1 : 0;
+}
+// PathStripPathW(path): the file name part, in place.
+HLE("shlwapi.dll", PathStripPathW, 1) {
+  const gaddr p = Arg(c, 0);
+  std::u16string w = GWStr(p);
+  const size_t k = w.find_last_of(u"\\/:");
+  if (k == std::u16string::npos) return 0;
+  w = w.substr(k + 1);
+  for (size_t i = 0; i < w.size(); i++) Wr16(p + 2 * gaddr(i), w[i]);
+  Wr16(p + 2 * gaddr(w.size()), 0);
+  return 0;
+}
+
+HLE("shfolder.dll", SHGetFolderPathW, 5) { return GetFolderPathW(c); }
+uint32_t GetFolderPathW(Ctx& c) {
   uint32_t csidl = Arg(c, 1), out = Arg(c, 4);
   std::string p = FolderFor(csidl);
   if (p.empty()) {
@@ -180,5 +228,37 @@ HLE64("shell32.dll", CommandLineToArgvW, 2) {
   Wr32(Arg(c, 1), uint32_t(args.size()));
   return block;
 }
+
+// ---- wininet: offline -------------------------------------------------------------
+// No connection: the state query says offline, opening a session or a
+// request fails with ERROR_INTERNET_CANNOT_CONNECT.
+
+namespace {
+constexpr uint32_t kErrorInternetCannotConnect = 12029;
+uint32_t Offline() {
+  SetLastError(kErrorInternetCannotConnect);
+  return 0;
+}
+}  // namespace
+
+HLE("wininet.dll", InternetGetConnectedState, 2) {
+  if (Arg(c, 0)) Wr32(Arg(c, 0), 0x20);  // INTERNET_CONNECTION_OFFLINE
+  return 0;
+}
+HLE("wininet.dll", InternetCheckConnectionA, 3) { return Offline(); }
+HLE("wininet.dll", InternetOpenA, 5) { return Offline(); }
+HLE("wininet.dll", InternetConnectA, 8) { return Offline(); }
+HLE("wininet.dll", HttpOpenRequestA, 8) { return Offline(); }
+HLE("wininet.dll", HttpAddRequestHeadersA, 4) { return Offline(); }
+HLE("wininet.dll", HttpSendRequestA, 5) { return Offline(); }
+HLE("wininet.dll", HttpSendRequestExA, 5) { return Offline(); }
+HLE("wininet.dll", HttpEndRequestA, 4) { return Offline(); }
+HLE("wininet.dll", InternetCrackUrlA, 4) { return Offline(); }
+HLE("wininet.dll", InternetQueryDataAvailable, 4) { return Offline(); }
+HLE("wininet.dll", InternetQueryOptionA, 4) { return Offline(); }
+HLE("wininet.dll", InternetReadFile, 4) { return Offline(); }
+HLE("wininet.dll", InternetWriteFile, 4) { return Offline(); }
+HLE("wininet.dll", InternetSetOptionA, 4) { return 1; }  // global options: accepted
+HLE("wininet.dll", InternetCloseHandle, 1) { return 1; }
 
 }  // namespace recomp::hle

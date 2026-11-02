@@ -15,6 +15,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <type_traits>
 #include <vector>
 
 #include "runtime/display.h"
@@ -24,6 +25,8 @@
 #include "runtime/hle/present.h"
 #include "runtime/hle/user32_window.h"
 #include "runtime/log.h"
+#include "runtime/perf.h"
+#include "runtime/platform.h"
 #include "runtime/x87.h"
 
 namespace recomp::d3d9 {
@@ -47,6 +50,7 @@ gfx::Format FormatFromD3D(uint32_t f) {
     case D3DFMT_D16: case D3DFMT_D16_LOCKABLE: return F::D16;
     case D3DFMT_D24X8: return F::D24X8;
     case D3DFMT_D24S8: return F::D24S8;
+    case D3DFMT_INTZ: return F::D24S8;
     case D3DFMT_D32: return F::D32;
     case D3DFMT_D15S1: return F::D15S1;
     case D3DFMT_DXT1: return F::DXT1;
@@ -247,7 +251,7 @@ Device* Dev(Ctx& c) { return DeviceOf(hle::Arg(c, 0)); }
 
 // Default render, sampler and texture stage states (D3D9 docs).
 void InitDefaults(Device& d) {
-  auto rs = [&](uint32_t s, uint32_t v) { d.rs[s] = v; };
+  auto rs = [&](uint32_t s, uint32_t v) { d.rs.Set(s, v); };
   rs(7, d.pp.EnableAutoDepthStencil ? 1 : 0);  // ZENABLE
   rs(8, 3);            // FILLMODE solid
   rs(9, 2);            // SHADEMODE gouraud
@@ -303,6 +307,7 @@ void InitDefaults(Device& d) {
     s[7] = 0;                // MIPFILTER none
     s[10] = 1;               // MAXANISOTROPY
   }
+  d.SamplerStatesChanged();
   for (int s = 0; s < 8; s++) {
     d.tss[s][1] = s == 0 ? 4 : 1;  // COLOROP modulate / disable
     d.tss[s][2] = 2;               // COLORARG1 texture
@@ -349,8 +354,8 @@ void SetUpSwapChain(Device& d, uint32_t self) {
     SetExclusiveMode(d.hwnd, 0, 0);
   }
   d.gfx->ResetSwapChain(int(p.BackBufferWidth), int(p.BackBufferHeight), Vsync(p));
-  for (uint32_t& rt : d.render_targets) Bind(&rt, 0);
-  Bind(&d.depth_stencil, 0);
+  for (auto& rt : d.render_targets) Bind(rt, 0);
+  Bind(d.depth_stencil, 0);
   if (d.backbuffer) com::Release(d.backbuffer->guest);
   if (d.auto_depth) com::Release(d.auto_depth->guest);
   d.backbuffer.reset();
@@ -358,12 +363,12 @@ void SetUpSwapChain(Device& d, uint32_t self) {
   NewSurface(d, self, Surface::Kind::BackBuffer, p.BackBufferWidth,
              p.BackBufferHeight, p.BackBufferFormat, D3DUSAGE_RENDERTARGET,
              D3DPOOL_DEFAULT, &d.backbuffer);
-  Bind(&d.render_targets[0], d.backbuffer->guest);
+  Bind(d.render_targets[0], d.backbuffer->guest);
   if (p.EnableAutoDepthStencil) {
     NewSurface(d, self, Surface::Kind::DepthStencil, p.BackBufferWidth,
                p.BackBufferHeight, p.AutoDepthStencilFormat,
                D3DUSAGE_DEPTHSTENCIL, D3DPOOL_DEFAULT, &d.auto_depth);
-    Bind(&d.depth_stencil, d.auto_depth->guest);
+    Bind(d.depth_stencil, d.auto_depth->guest);
   }
   d.viewport = {0, 0, p.BackBufferWidth, p.BackBufferHeight, 0.0f, 1.0f};
   d.scissor = {0, 0, LONG(p.BackBufferWidth), LONG(p.BackBufferHeight)};
@@ -371,15 +376,15 @@ void SetUpSwapChain(Device& d, uint32_t self) {
 
 // Releases everything bound to the device (Reset, last Release).
 void UnbindAll(Device& d) {
-  for (uint32_t& t : d.textures) Bind(&t, 0);
+  for (auto& t : d.textures) Bind(t, 0);
   for (Device::Stream& st : d.streams) {
-    Bind(&st.buffer, 0);
+    Bind(st.buffer, 0);
     st = {};
   }
-  Bind(&d.indices, 0);
-  Bind(&d.decl, 0);
-  Bind(&d.vs, 0);
-  Bind(&d.ps, 0);
+  Bind(d.indices, 0);
+  Bind(d.decl, 0);
+  Bind(d.vs, 0);
+  Bind(d.ps, 0);
 }
 
 int g_perf_level = 0;
@@ -396,6 +401,8 @@ uint32_t QueryInterfaceFor(Ctx& c, const guest::GUID& iid) {
   return com::kE_NOINTERFACE;
 }
 
+PerfCounts g_perf;
+
 Device* DeviceOf(uint32_t self) {
   Device* d = com::As<Device>(self);
   if (!d) FatalF("IDirect3DDevice9 call on unknown object %08X", self);
@@ -408,11 +415,33 @@ int SamplerIndex(uint32_t s) {
   return -1;
 }
 
+void CountBind(bool same) {
+  if (!perf::On()) return;
+  g_perf.binds.fetch_add(1, std::memory_order_relaxed);
+  if (same) g_perf.rebinds.fetch_add(1, std::memory_order_relaxed);
+}
+
 // A bound texture level holds its texture, as the level's own references do.
-void Bind(uint32_t* slot, uint32_t obj) {
+void BindByGuest(uint32_t old_guest, uint32_t obj) {
   if (obj) com::AddRef(SurfaceRefTarget(obj));
-  if (*slot) com::Release(SurfaceRefTarget(*slot));
-  *slot = obj;
+  if (old_guest) com::Release(SurfaceRefTarget(old_guest));
+}
+
+void CheckBindings(const Device& d) {
+  auto check = [&](const auto& slot, const char* what, int i) {
+    using T = std::remove_pointer_t<decltype(slot.obj)>;
+    if (slot.obj != com::As<T>(slot.guest))
+      FatalF("d3d9: bound %s %d (%08X) is host object %p, the table says %p", what, i, slot.guest,
+             static_cast<const void*>(slot.obj), static_cast<const void*>(com::As<T>(slot.guest)));
+  };
+  for (int i = 0; i < 4; i++) check(d.render_targets[i], "render target", i);
+  check(d.depth_stencil, "depth stencil", 0);
+  for (int i = 0; i < 20; i++) check(d.textures[i], "texture", i);
+  for (int i = 0; i < 16; i++) check(d.streams[i].buffer, "stream", i);
+  check(d.indices, "index buffer", 0);
+  check(d.decl, "vertex declaration", 0);
+  check(d.vs, "vertex shader", 0);
+  check(d.ps, "pixel shader", 0);
 }
 
 }  // namespace recomp::d3d9
@@ -435,6 +464,11 @@ HLE("d3d9.dll", D3DPERF_EndEvent, 0) {
   if (g_perf_level > 0) g_perf_level--;
   return uint32_t(g_perf_level);
 }
+HLE("d3d9.dll", D3DPERF_SetMarker, 2) { return 0; }
+HLE("d3d9.dll", D3DPERF_SetRegion, 2) { return 0; }
+HLE("d3d9.dll", D3DPERF_QueryRepeatFrame, 0) { return 0; }
+HLE("d3d9.dll", D3DPERF_SetOptions, 1) { return 0; }
+HLE("d3d9.dll", D3DPERF_GetStatus, 0) { return 0; }  // no profiler attached
 
 // ---- IDirect3D9 ------------------------------------------------------------------
 
@@ -450,9 +484,15 @@ HLE_NAMED("d3d9.dll", "IDirect3D9::GetAdapterIdentifier", D3D9_GetAdapterIdentif
   D3DADAPTER_IDENTIFIER9* id = G<D3DADAPTER_IDENTIFIER9>(Arg(c, 3));
   std::memset(id, 0, sizeof *id);
   std::snprintf(id->Driver, sizeof id->Driver, "recomp_d3d9.dll");
-  std::snprintf(id->Description, sizeof id->Description,
-                "x86recomp Direct3D 9 (%s)",
-                GfxBackend() == gfx::Backend::Gpu ? "SDL_GPU" : "dxvk-native");
+  if (!Game().gpu_description.empty())
+    std::snprintf(id->Description, sizeof id->Description, "%s", Game().gpu_description.c_str());
+  else
+    std::snprintf(id->Description, sizeof id->Description, "x86recomp Direct3D 9 (%s)",
+                  GfxBackend() == gfx::Backend::Gpu     ? "SDL_GPU"
+                  : GfxBackend() == gfx::Backend::Metal ? "Metal"
+                                                        : "dxvk-native");
+  id->VendorId = Game().gpu_vendor_id;
+  id->DeviceId = Game().gpu_device_id;
   std::snprintf(id->DeviceName, sizeof id->DeviceName, "\\\\.\\DISPLAY1");
   // 9.18.13.0 (a driver version of the D3D9 era).
   id->DriverVersionHighPart = (9u << 16) | 18u;
@@ -507,7 +547,8 @@ HLE_NAMED("d3d9.dll", "IDirect3D9::CheckDeviceFormat", D3D9_CheckDeviceFormat, 7
   gfx::Format f = FormatFromD3D(fmt);
   bool ok = Arg(c, 1) == 0 && f != gfx::Format::Unknown && f != gfx::Format::P8;
   if (ok && IsDepthFormat(f))
-    ok = (usage & D3DUSAGE_DEPTHSTENCIL) && rtype == D3DRTYPE_SURFACE;
+    ok = (usage & D3DUSAGE_DEPTHSTENCIL) &&
+         (rtype == D3DRTYPE_SURFACE || (rtype == D3DRTYPE_TEXTURE && fmt == D3DFMT_INTZ));
   else if (ok && (usage & D3DUSAGE_DEPTHSTENCIL))
     ok = false;
   if (ok && (usage & D3DUSAGE_RENDERTARGET)) ok = IsRenderTargetFormat(fmt);
@@ -560,6 +601,7 @@ HLE_NAMED("d3d9.dll", "IDirect3D9::CreateDevice", D3D9_CreateDevice, 7) {
   SDL_Window* w = SdlWindowFor(d->hwnd);
   if (!w) FatalF("d3d9: CreateDevice: no SDL window for hwnd %08X", d->hwnd);
   d->gfx = CreateGfxDevice(w);
+  SetUpSharedBuffers(*d);
   uint32_t self = com::Publish(d, DeviceVtable());
   com::AddRef(d->d3d);
   SetUpSwapChain(*d, self);
@@ -601,8 +643,8 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::Release", D3DDev9_Release, 1) {
   // IDirect3D9 go with it.
   uint32_t d3d = d->d3d;
   UnbindAll(*d);
-  for (uint32_t& rt : d->render_targets) Bind(&rt, 0);
-  Bind(&d->depth_stencil, 0);
+  for (auto& rt : d->render_targets) Bind(rt, 0);
+  Bind(d->depth_stencil, 0);
   if (d->backbuffer) com::Release(d->backbuffer->guest);
   if (d->auto_depth) com::Release(d->auto_depth->guest);
   d->backbuffer.reset();
@@ -695,7 +737,7 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::Reset", D3DDev9_Reset, 2) {
   UnbindAll(*d);
   SetUpSwapChain(*d, Arg(c, 0));
   *G<D3DPRESENT_PARAMETERS>(Arg(c, 1)) = d->pp;
-  std::memset(d->rs, 0, sizeof d->rs);
+  d->rs.Clear();
   std::memset(d->ss, 0, sizeof d->ss);
   std::memset(d->tss, 0, sizeof d->tss);
   InitDefaults(*d);
@@ -705,22 +747,122 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::Reset", D3DDev9_Reset, 2) {
   return D3D_OK;
 }
 
+// Every 2 s (from either Present): the front end's counters (PerfCounts)
+// per frame.
+void ReportPerf() {
+  static uint64_t t0 = 0, frames = 0;
+  const uint64_t now = platform::MonotonicNs();
+  if (!t0) t0 = now;
+  frames++;
+  if (now - t0 < 2000000000u) return;
+  auto take = [&](std::atomic<uint64_t>& a) { return double(a.exchange(0, std::memory_order_relaxed)); };
+  const double f = double(frames), draws = take(g_perf.draws), ns = take(g_perf.draw_ns);
+  const double vs = take(g_perf.standin_vs), ps = take(g_perf.standin_ps);
+  const double binds = take(g_perf.binds), rebinds = take(g_perf.rebinds);
+  WarnF("d3d9: perf: per frame %.0f draws, %.2f ms in them (%.2f us each), stand-in vs %.1f ps %.1f, "
+        "%.0f Binds (%.0f of what was bound)\n",
+        draws / f, ns / f / 1e6, draws ? ns / draws / 1e3 : 0.0, vs / f, ps / f, binds / f, rebinds / f);
+  t0 = now;
+  frames = 0;
+}
+
 // (pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion)
 HLE_NAMED("d3d9.dll", "IDirect3DDevice9::Present", D3DDev9_Present, 5) {
   Device* d = Dev(c);
+  if (perf::On()) ReportPerf();
   PresentFrame(*d->gfx, int(d->pp.BackBufferWidth), int(d->pp.BackBufferHeight));
+  return D3D_OK;
+}
+
+uint32_t BackBufferOf(Device& d, uint32_t index, uint32_t type, uint32_t out) {
+  if (index != 0 || type != 0 || !d.backbuffer) {
+    Wr32(out, 0);
+    return D3DERR_INVALIDCALL;
+  }
+  com::AddRef(d.backbuffer->guest);
+  Wr32(out, d.backbuffer->guest);
   return D3D_OK;
 }
 
 // (iSwapChain, iBackBuffer, Type, ppBackBuffer)
 HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetBackBuffer", D3DDev9_GetBackBuffer, 5) {
-  Device* d = Dev(c);
-  if (Arg(c, 1) != 0 || Arg(c, 2) != 0 || !d->backbuffer) {
+  if (Arg(c, 1) != 0) {
     Wr32(Arg(c, 4), 0);
     return D3DERR_INVALIDCALL;
   }
-  com::AddRef(d->backbuffer->guest);
-  Wr32(Arg(c, 4), d->backbuffer->guest);
+  return BackBufferOf(*Dev(c), Arg(c, 2), Arg(c, 3), Arg(c, 4));
+}
+
+// ---- the implicit swap chain -----------------------------------------------
+
+uint32_t SwapChainVtable() {
+  return com::Vtable("d3d9.dll", "IDirect3DSwapChain9",
+                     {"QueryInterface", "AddRef", "Release", "Present",
+                      "GetFrontBufferData", "GetBackBuffer", "GetRasterStatus",
+                      "GetDisplayMode", "GetDevice", "GetPresentParameters"});
+}
+
+Device* SwapDev(Ctx& c) {
+  SwapChain* s = com::As<SwapChain>(Arg(c, 0));
+  if (!s) FatalF("IDirect3DSwapChain9 call on unknown object %08X", uint32_t(Arg(c, 0)));
+  return DeviceOf(s->device);
+}
+
+// (iSwapChain, ppSwapChain): one swap chain, kept by the device.
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetSwapChain", D3DDev9_GetSwapChain, 3) {
+  Device* d = Dev(c);
+  if (Arg(c, 1) != 0) {
+    Wr32(Arg(c, 2), 0);
+    return D3DERR_INVALIDCALL;
+  }
+  if (!d->swapchain) {
+    auto s = std::make_shared<SwapChain>();
+    s->device = uint32_t(Arg(c, 0));
+    d->swapchain = com::Publish(s, SwapChainVtable());  // the device's reference
+  }
+  com::AddRef(d->swapchain);
+  Wr32(Arg(c, 2), d->swapchain);
+  return D3D_OK;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DSwapChain9::AddRef", D3DSwap9_AddRef, 1) { return com::AddRef(Arg(c, 0)); }
+HLE_NAMED("d3d9.dll", "IDirect3DSwapChain9::Release", D3DSwap9_Release, 1) { return com::Release(Arg(c, 0)); }
+
+// (pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion, dwFlags)
+HLE_NAMED("d3d9.dll", "IDirect3DSwapChain9::Present", D3DSwap9_Present, 6) {
+  Device* d = SwapDev(c);
+  if (perf::On()) ReportPerf();
+  PresentFrame(*d->gfx, int(d->pp.BackBufferWidth), int(d->pp.BackBufferHeight));
+  return D3D_OK;
+}
+
+// (iBackBuffer, Type, ppBackBuffer)
+HLE_NAMED("d3d9.dll", "IDirect3DSwapChain9::GetBackBuffer", D3DSwap9_GetBackBuffer, 4) {
+  return BackBufferOf(*SwapDev(c), Arg(c, 1), Arg(c, 2), Arg(c, 3));
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DSwapChain9::GetRasterStatus", D3DSwap9_GetRasterStatus, 2) {
+  *G<D3DRASTER_STATUS>(Arg(c, 1)) = {0, 0};
+  return D3D_OK;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DSwapChain9::GetDisplayMode", D3DSwap9_GetDisplayMode, 2) {
+  Device* d = SwapDev(c);
+  int w = int(d->pp.BackBufferWidth), h = int(d->pp.BackBufferHeight);
+  if (d->pp.Windowed) DesktopSize(&w, &h);
+  FillMode(G<D3DDISPLAYMODE>(Arg(c, 1)), w, h, D3DFMT_X8R8G8B8);
+  return D3D_OK;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DSwapChain9::GetDevice", D3DSwap9_GetDevice, 2) {
+  SwapChain* s = com::As<SwapChain>(Arg(c, 0));
+  com::AddRef(s->device);
+  Wr32(Arg(c, 1), s->device);
+  return D3D_OK;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DSwapChain9::GetPresentParameters", D3DSwap9_GetPresentParameters, 2) {
+  *G<D3DPRESENT_PARAMETERS>(Arg(c, 1)) = SwapDev(c)->pp;
   return D3D_OK;
 }
 
@@ -733,23 +875,23 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetRasterStatus", D3DDev9_GetRasterStat
 HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetRenderTarget", D3DDev9_GetRenderTarget, 3) {
   Device* d = Dev(c);
   uint32_t i = Arg(c, 1);
-  if (i >= 4 || !d->render_targets[i]) {
+  if (i >= 4 || !d->render_targets[i].guest) {
     Wr32(Arg(c, 2), 0);
     return i < 4 ? D3DERR_NOTFOUND : D3DERR_INVALIDCALL;
   }
-  com::AddRef(SurfaceRefTarget(d->render_targets[i]));
-  Wr32(Arg(c, 2), d->render_targets[i]);
+  com::AddRef(SurfaceRefTarget(d->render_targets[i].guest));
+  Wr32(Arg(c, 2), d->render_targets[i].guest);
   return D3D_OK;
 }
 
 HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetDepthStencilSurface", D3DDev9_GetDepthStencilSurface, 2) {
   Device* d = Dev(c);
-  if (!d->depth_stencil) {
+  if (!d->depth_stencil.guest) {
     Wr32(Arg(c, 1), 0);
     return D3DERR_NOTFOUND;
   }
-  com::AddRef(SurfaceRefTarget(d->depth_stencil));
-  Wr32(Arg(c, 1), d->depth_stencil);
+  com::AddRef(SurfaceRefTarget(d->depth_stencil.guest));
+  Wr32(Arg(c, 1), d->depth_stencil.guest);
   return D3D_OK;
 }
 
@@ -780,7 +922,6 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::Clear", D3DDev9_Clear, 7) {
     r.push_back({dr.x1, dr.y1, dr.x2, dr.y2});
   }
   SyncState(*d);
-  BindTargets(*d);
   d->gfx->Clear(uint32_t(r.size()), r.empty() ? nullptr : r.data(), Arg(c, 3),
                 Arg(c, 4), z, Arg(c, 6));
   return D3D_OK;
@@ -791,6 +932,25 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::SetTransform", D3DDev9_SetTransform, 3)
   std::array<float, 16> m;
   std::memcpy(m.data(), GPtr(Arg(c, 2)), sizeof m);
   Dev(c)->transforms[Arg(c, 1)] = m;
+  return D3D_OK;
+}
+
+// (Index, pPlane): user clip plane in world space (clip space with a
+// vertex shader), enabled by D3DRS_CLIPPLANEENABLE.
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::SetClipPlane", D3DDev9_SetClipPlane, 3) {
+  Device* d = Dev(c);
+  const uint32_t i = Arg(c, 1);
+  if (i >= 6 || !Arg(c, 2)) return D3DERR_INVALIDCALL;
+  std::memcpy(d->clip_planes[i], GPtr(Arg(c, 2)), sizeof d->clip_planes[i]);
+  d->gfx->SetClipPlane(i, d->clip_planes[i]);
+  return D3D_OK;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetClipPlane", D3DDev9_GetClipPlane, 3) {
+  Device* d = Dev(c);
+  const uint32_t i = Arg(c, 1);
+  if (i >= 6 || !Arg(c, 2)) return D3DERR_INVALIDCALL;
+  std::memcpy(GPtr(Arg(c, 2)), d->clip_planes[i], sizeof d->clip_planes[i]);
   return D3D_OK;
 }
 
@@ -819,7 +979,7 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetViewport", D3DDev9_GetViewport, 2) {
 HLE_NAMED("d3d9.dll", "IDirect3DDevice9::SetRenderState", D3DDev9_SetRenderState, 3) {
   uint32_t s = Arg(c, 1);
   if (s >= 256) return D3DERR_INVALIDCALL;
-  Dev(c)->rs[s] = Arg(c, 2);
+  Dev(c)->rs.Set(s, Arg(c, 2));
   return D3D_OK;
 }
 
@@ -834,7 +994,7 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::SetSamplerState", D3DDev9_SetSamplerSta
   int s = SamplerIndex(Arg(c, 1));
   uint32_t t = Arg(c, 2);
   if (s < 0 || t >= 14) return D3DERR_INVALIDCALL;
-  Dev(c)->ss[s][t] = Arg(c, 3);
+  Dev(c)->SetSamplerState(uint32_t(s), t, Arg(c, 3));
   return D3D_OK;
 }
 
@@ -880,7 +1040,7 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetSoftwareVertexProcessing", D3DDev9_G
 }
 
 HLE_NAMED("d3d9.dll", "IDirect3DDevice9::SetFVF", D3DDev9_SetFVF, 2) {
-  Bind(&Dev(c)->decl, 0);
+  Bind(Dev(c)->decl, 0);
   Dev(c)->fvf = Arg(c, 1);
   return D3D_OK;
 }

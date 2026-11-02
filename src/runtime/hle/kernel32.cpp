@@ -18,6 +18,8 @@
 
 #include "runtime/hle/hle.h"
 #include "runtime/hle/kernel32_state.h"
+#include "runtime/perf.h"
+#include "runtime/platform.h"
 #include "runtime/hle/win32.h"
 #include "runtime/log.h"
 
@@ -263,6 +265,29 @@ gaddr ModuleHandleOf(gaddr name, bool wide) {
 HLE64("kernel32.dll", GetModuleHandleA, 1) { return ModuleHandleOf(Arg(c, 0), false); }
 HLE64("kernel32.dll", GetModuleHandleW, 1) { return ModuleHandleOf(Arg(c, 0), true); }
 
+// GetModuleFileNameW: as GetModuleFileNameA, in WCHARs.
+HLE64("kernel32.dll", GetModuleFileNameW, 3) {
+  gaddr mod = Arg(c, 0), buf = Arg(c, 1);
+  uint32_t size = uint32_t(Arg(c, 2));
+  std::string path;
+  if (mod && mod != g_proc->img.image_base) {
+    std::lock_guard<std::recursive_mutex> l(g_loader_mu);
+    Module* m = LoadedDllAt(mod);
+    if (!m) {
+      SetLastError(kErrorModNotFound);
+      return 0;
+    }
+    path = GuestGameDir() + "\\" + Game().lifted_dlls[size_t(m - g_proc->modules.data())].name;
+  } else {
+    path = GuestExePath();
+  }
+  if (!size) return 0;
+  const std::u16string w = Widen(path.substr(0, size - 1));
+  for (size_t i = 0; i < w.size(); i++) Wr16(buf + 2 * gaddr(i), w[i]);
+  Wr16(buf + 2 * gaddr(w.size()), 0);
+  return uint32_t(w.size());
+}
+
 HLE64("kernel32.dll", GetModuleFileNameA, 3) {
   gaddr mod = Arg(c, 0), buf = Arg(c, 1);
   uint32_t size = uint32_t(Arg(c, 2));
@@ -434,6 +459,88 @@ HLE("kernel32.dll", SetConsoleCtrlHandler, 2) { return 1; }
 HLE("kernel32.dll", GetSystemDirectoryA, 2) {
   return CopyOut(Arg(c, 0), Arg(c, 1), "C:\\WINDOWS\\system32");
 }
+HLE("kernel32.dll", GetWindowsDirectoryA, 2) {
+  return CopyOut(Arg(c, 0), Arg(c, 1), "C:\\WINDOWS");
+}
+
+// There is no console: the mode queries fail (as for a GUI process whose
+// standard handles are files or pipes), writes go to stdout.
+HLE("kernel32.dll", GetConsoleCP, 0) { return 437; }
+HLE("kernel32.dll", GetConsoleOutputCP, 0) { return 437; }
+HLE("kernel32.dll", GetConsoleMode, 2) {
+  SetLastError(kErrorInvalidHandle);
+  return 0;
+}
+HLE("kernel32.dll", WriteConsoleA, 5) {
+  const uint32_t n = Arg(c, 2);
+  std::fwrite(GPtr(Arg(c, 1)), 1, n, stdout);
+  if (Arg(c, 3)) Wr32(Arg(c, 3), n);
+  return 1;
+}
+HLE("kernel32.dll", WriteConsoleW, 5) {
+  const uint32_t n = Arg(c, 2);
+  std::u16string w(n, u'\0');
+  for (uint32_t i = 0; i < n; i++) w[i] = Rd16(Arg(c, 1) + 2 * i);
+  std::fputs(AnsiToUtf8(Narrow(w)).c_str(), stdout);
+  if (Arg(c, 3)) Wr32(Arg(c, 3), n);
+  return 1;
+}
+
+HLE("kernel32.dll", GetProcessId, 1) {
+  const uint32_t h = Arg(c, 0);
+  if (h == 0xFFFFFFFF) return kGuestPid;
+  SetLastError(kErrorInvalidHandle);
+  return 0;
+}
+
+// GetSystemTimes(idle, kernel, user): FILETIME totals over all processors.
+// Idle grows with wall time, so CPU load computed from them reads as low.
+HLE("kernel32.dll", GetSystemTimes, 3) {
+  const uint64_t t = PerfCounter() * GuestProcessorCount();  // 100 ns units
+  if (Arg(c, 0)) Wr64(Arg(c, 0), t);
+  if (Arg(c, 1)) Wr64(Arg(c, 1), t);
+  if (Arg(c, 2)) Wr64(Arg(c, 2), 0);
+  return 1;
+}
+
+HLE("kernel32.dll", HeapSetInformation, 4) { return 1; }
+
+// IsWow64Process(process, &wow64): a 32-bit Windows, as the guest sees it.
+HLE("kernel32.dll", IsWow64Process, 2) {
+  if (Arg(c, 1)) Wr32(Arg(c, 1), 0);
+  return 1;
+}
+
+// CallNtPowerInformation(level, in, in_size, out, out_size): only
+// ProcessorInformation (11), PROCESSOR_POWER_INFORMATION { Number, MaxMhz,
+// CurrentMhz, MhzLimit, MaxIdleState, CurrentIdleState } per processor.
+HLE("powrprof.dll", CallNtPowerInformation, 5) {
+  const uint32_t level = Arg(c, 0), out = Arg(c, 3), size = Arg(c, 4);
+  if (level != 11) {
+    WarnF("CallNtPowerInformation(%u): not supported\n", level);
+    return 0xC0000002;  // STATUS_NOT_IMPLEMENTED
+  }
+  const uint32_t n = GuestProcessorCount();
+  if (size < 24 * n) return 0xC0000023;  // STATUS_BUFFER_TOO_SMALL
+  for (uint32_t i = 0; i < n; i++) {
+    const gaddr p = out + 24 * i;
+    const uint32_t v[6] = {i, 3000, 3000, 3000, 0, 0};
+    for (int k = 0; k < 6; k++) Wr32(p + 4 * k, v[k]);
+  }
+  return 0;
+}
+
+// Pointer encoding (the CRT's function-pointer hardening): the identity.
+HLE("kernel32.dll", EncodePointer, 1) { return Arg(c, 0); }
+HLE("kernel32.dll", DecodePointer, 1) { return Arg(c, 0); }
+
+// NtQueryPerformanceCounter(counter, frequency): QueryPerformanceCounter's
+// clock; STATUS_SUCCESS.
+HLE("ntdll.dll", NtQueryPerformanceCounter, 2) {
+  Wr64(Arg(c, 0), PerfCounter());
+  if (Arg(c, 1)) Wr64(Arg(c, 1), 10000000);
+  return 0;
+}
 
 HLE64("kernel32.dll", GetCurrentProcess, 0) { return HandleRet(0xFFFFFFFF); }
 HLE64("kernel32.dll", GetCurrentProcessId, 0) { return kGuestPid; }
@@ -442,6 +549,7 @@ HLE64("kernel32.dll", GetCurrentThreadId, 0) { return CurrentThread()->tid; }
 
 HLE64("kernel32.dll", ExitProcess, 1) {
   uint32_t code = uint32_t(Arg(c, 0));
+  if (Game().before_exit) Game().before_exit();
   std::fflush(stdout);
   std::fprintf(stderr, "ExitProcess(%u)\n", code);
   std::fflush(stderr);
@@ -532,10 +640,14 @@ HLE("kernel32.dll", GlobalMemoryStatus, 1) {
   uint32_t ms = Arg(c, 0);
   Wr32(ms + 0, 32);
   Wr32(ms + 4, 30);           // memory load %
-  Wr32(ms + 8, 0x40000000);   // total phys
-  Wr32(ms + 12, 0x30000000);  // avail phys
-  Wr32(ms + 16, 0x60000000);  // total page file
-  Wr32(ms + 20, 0x50000000);  // avail page file
+  // SIZE_T fields: capped at 2 GiB - 1, as Windows does for a process that
+  // is not large address aware.
+  const uint64_t phys = uint64_t(Game().total_phys_mb) << 20;
+  auto cap = [](uint64_t v) { return uint32_t(std::min<uint64_t>(v, 0x7FFFFFFF)); };
+  Wr32(ms + 8, cap(phys));                // total phys
+  Wr32(ms + 12, cap(phys / 4 * 3));       // avail phys
+  Wr32(ms + 16, cap(phys + 0x20000000));  // total page file
+  Wr32(ms + 20, cap(phys));               // avail page file
   Wr32(ms + 24, 0x7FFE0000);  // total virtual
   Wr32(ms + 28, 0x70000000);  // avail virtual
   return 0;
@@ -561,11 +673,12 @@ HLE64("kernel32.dll", GlobalMemoryStatusEx, 1) {
     Wr64(ms + 56, 0);
     return 1;
   }
+  const uint64_t phys = uint64_t(Game().total_phys_mb) << 20;
   Wr32(ms + 4, 30);
-  Wr64(ms + 8, 0x40000000);
-  Wr64(ms + 16, 0x30000000);
-  Wr64(ms + 24, 0x60000000);
-  Wr64(ms + 32, 0x50000000);
+  Wr64(ms + 8, phys);                // total phys
+  Wr64(ms + 16, phys / 4 * 3);       // avail phys
+  Wr64(ms + 24, phys + 0x20000000);  // total page file (commit limit)
+  Wr64(ms + 32, phys);               // avail page file
   Wr64(ms + 40, 0x7FFE0000);
   Wr64(ms + 48, 0x70000000);
   Wr64(ms + 56, 0);  // ullAvailExtendedVirtual: reserved
@@ -659,6 +772,11 @@ HLE("kernel32.dll", GlobalUnlock, 1) { return 1; }
 HLE("kernel32.dll", GlobalFree, 1) {
   g_process_heap->Free(Arg(c, 0));
   return 0;
+}
+
+HLE("kernel32.dll", LocalAlloc, 2) {
+  // LMEM_MOVEABLE handles are plain pointers, as GlobalAlloc's.
+  return HeapAllocProcess(Arg(c, 1), Arg(c, 0) & 0x40);
 }
 
 HLE64("kernel32.dll", LocalFree, 1) {
@@ -851,6 +969,38 @@ HLE64("kernel32.dll", TlsFree, 1) {
   return 1;
 }
 
+// Fiber-local storage: there are no fibers, so FLS is TLS (the CRT uses it
+// through GetProcAddress when present). FlsAlloc's destructor callback is
+// not run at thread exit.
+HLE("kernel32.dll", FlsAlloc, 1) {
+  GuestSyncPoint sync;
+  std::lock_guard<std::mutex> l(g_tls_mu);
+  for (uint32_t i = 0; i < 64; i++)
+    if (!(g_tls_used & (1ull << i))) {
+      g_tls_used |= 1ull << i;
+      return i;
+    }
+  return 0xFFFFFFFF;
+}
+HLE("kernel32.dll", FlsFree, 1) {
+  GuestSyncPoint sync;
+  std::lock_guard<std::mutex> l(g_tls_mu);
+  g_tls_used &= ~(1ull << (Arg(c, 0) & 63));
+  return 1;
+}
+HLE("kernel32.dll", FlsGetValue, 1) {
+  uint32_t i = uint32_t(Arg(c, 0));
+  if (i >= 64) return 0;
+  SetLastError(0);
+  return RdPtr(TlsSlot(i));
+}
+HLE("kernel32.dll", FlsSetValue, 2) {
+  uint32_t i = uint32_t(Arg(c, 0));
+  if (i >= 64) return 0;
+  WrPtr(TlsSlot(i), Arg(c, 1));
+  return 1;
+}
+
 HLE64("kernel32.dll", TlsGetValue, 1) {
   uint32_t i = uint32_t(Arg(c, 0));
   if (i >= 64) return 0;
@@ -912,8 +1062,12 @@ uint32_t* CsField(gaddr cs, uint32_t off) {
   return reinterpret_cast<uint32_t*>(GPtr(cs + off));
 }
 
+// DebugInfo is -1, as Windows Vista and later leave it without debug
+// information: games test it to tell an initialised section (GTA IV's RAGE
+// takes its heap and other locks only when it is non-zero).
 void InitCs(gaddr cs, uint32_t spin) {
   std::memset(GPtr(cs), 0, Cs().size);
+  WrPtr(cs, g_proc->x64 ? ~gaddr(0) : 0xFFFFFFFF);  // DebugInfo
   Wr32(cs + Cs().lock_count, 0xFFFFFFFF);  // -1 = free
   Wr32(cs + Cs().spin, spin);              // no effect here
 }
@@ -976,13 +1130,15 @@ void LeaveCs(gaddr cs) {
   uint32_t* recursion = CsField(cs, Cs().recursion);
   uint32_t* owner = CsField(cs, Cs().owner);
   if (__atomic_load_n(owner, __ATOMIC_RELAXED) != CurrentThread()->tid) {
-    // Windows would corrupt the section (and usually hang the next
-    // Enter); leave it as it is.
-    static std::atomic<bool> warned{false};
-    if (!warned.exchange(true))
-      WarnF("LeaveCriticalSection(%08llX) by a thread that does not own it; "
-            "ignored\n", (unsigned long long)cs);
-    return;
+    // Released as Windows does, which does not check the owner: a game
+    // may hand a held section from one thread to another (GTA IV's job
+    // workers: one enters, another leaves). Ignoring it left the section
+    // held for good and the next Enter waiting forever.
+    static std::atomic<bool> noted{false};
+    if (!noted.exchange(true))
+      WarnF("LeaveCriticalSection(%08llX) by a thread that does not own it (thread %04X, owner %04X): "
+            "released, as Windows does\n",
+            (unsigned long long)cs, CurrentThread()->tid, __atomic_load_n(owner, __ATOMIC_RELAXED));
   }
   uint32_t rc = *recursion - 1;
   __atomic_store_n(recursion, rc, __ATOMIC_RELAXED);
@@ -1021,6 +1177,7 @@ HLE64("kernel32.dll", DeleteCriticalSection, 1) {
 }
 
 HLE64("kernel32.dll", EnterCriticalSection, 1) {
+  WaitLog log(c, "EnterCriticalSection", Arg(c, 0));
   EnterCs(Arg(c, 0));
   return 0;
 }
@@ -1058,6 +1215,69 @@ HLE("kernel32.dll", InterlockedExchange, 2) {
   GuestSyncPoint sync;
   return __atomic_exchange_n(reinterpret_cast<uint32_t*>(GPtr(Arg(c, 0))),
                              Arg(c, 1), __ATOMIC_SEQ_CST);
+}
+HLE("kernel32.dll", InterlockedExchangeAdd, 2) {
+  GuestSyncPoint sync;
+  return __atomic_fetch_add(reinterpret_cast<uint32_t*>(GPtr(Arg(c, 0))),
+                            uint32_t(Arg(c, 1)), __ATOMIC_SEQ_CST);
+}
+// InterlockedCompareExchange(dest, exchange, comparand): the old value.
+HLE("kernel32.dll", InterlockedCompareExchange, 3) {
+  GuestSyncPoint sync;
+  uint32_t expected = uint32_t(Arg(c, 2));
+  __atomic_compare_exchange_n(reinterpret_cast<uint32_t*>(GPtr(Arg(c, 0))), &expected,
+                              uint32_t(Arg(c, 1)), false, __ATOMIC_SEQ_CST,
+                              __ATOMIC_SEQ_CST);
+  return expected;
+}
+
+// 32-bit SLIST_HEADER: { Next (first entry), Depth (16), Sequence (16) },
+// updated as one 64-bit compare-exchange like the cmpxchg8b loops of
+// ntdll; an entry starts with its Next link.
+namespace {
+uint64_t* SListHeader(gaddr h) { return reinterpret_cast<uint64_t*>(GPtr(h)); }
+}  // namespace
+
+HLE("kernel32.dll", InterlockedPushEntrySList, 2) {
+  GuestSyncPoint sync;
+  const gaddr head = Arg(c, 0), entry = Arg(c, 1);
+  uint64_t old = __atomic_load_n(SListHeader(head), __ATOMIC_SEQ_CST), next;
+  do {
+    Wr32(entry, uint32_t(old));
+    const uint32_t depth_seq = uint32_t(old >> 32);
+    const uint32_t depth = (depth_seq & 0xFFFF) + 1, seq = ((depth_seq >> 16) + 1) & 0xFFFF;
+    next = uint64_t(seq << 16 | (depth & 0xFFFF)) << 32 | entry;
+  } while (!__atomic_compare_exchange_n(SListHeader(head), &old, next, false,
+                                        __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+  return uint32_t(old);  // the previous first entry
+}
+
+HLE("kernel32.dll", InterlockedPopEntrySList, 1) {
+  GuestSyncPoint sync;
+  const gaddr head = Arg(c, 0);
+  uint64_t old = __atomic_load_n(SListHeader(head), __ATOMIC_SEQ_CST), next;
+  do {
+    const uint32_t first = uint32_t(old);
+    if (!first) return 0;
+    const uint32_t depth_seq = uint32_t(old >> 32);
+    const uint32_t depth = ((depth_seq & 0xFFFF) - 1) & 0xFFFF,
+                   seq = ((depth_seq >> 16) + 1) & 0xFFFF;
+    next = uint64_t(seq << 16 | depth) << 32 | Rd32(first);
+  } while (!__atomic_compare_exchange_n(SListHeader(head), &old, next, false,
+                                        __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+  return uint32_t(old);
+}
+
+HLE("kernel32.dll", InterlockedFlushSList, 1) {
+  GuestSyncPoint sync;
+  const gaddr head = Arg(c, 0);
+  uint64_t old = __atomic_load_n(SListHeader(head), __ATOMIC_SEQ_CST), next;
+  do {
+    if (!uint32_t(old)) return 0;
+    next = uint64_t((((old >> 48) + 1) & 0xFFFF) << 16) << 32;  // depth 0, next NULL
+  } while (!__atomic_compare_exchange_n(SListHeader(head), &old, next, false,
+                                        __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+  return uint32_t(old);
 }
 
 // ---- time ----------------------------------------------------------------
@@ -1135,11 +1355,24 @@ HLE("winmm.dll", midiInStart, 1) { return 5; }  // MMSYSERR_INVALHANDLE
 HLE("winmm.dll", midiInStop, 1) { return 5; }
 HLE("winmm.dll", midiInClose, 1) { return 5; }
 
+uint32_t (*g_sleep_filter)(uint32_t) = nullptr;  // SetSleepFilter
+namespace {
+// Sleep(0) gives up the rest of the time slice, as on Windows.
+void GuestSleep(uint32_t ms) {
+  if (g_sleep_filter) ms = g_sleep_filter(ms);
+  if (ms == 0)
+    std::this_thread::yield();
+  else
+    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+}  // namespace
+
 // A kernel entry on Windows, so a barrier for guests that poll a flag
 // with Sleep in the loop.
 HLE("kernel32.dll", Sleep, 1) {
   GuestSyncPoint sync;
-  std::this_thread::sleep_for(std::chrono::milliseconds(Arg(c, 0)));
+  if (perf::On()) perf::CountPoll(Arg(c, 0) ? perf::Poll::kSleep : perf::Poll::kSleep0, Caller(c));
+  GuestSleep(Arg(c, 0));
   return 0;
 }
 
@@ -1149,7 +1382,7 @@ HLE("kernel32.dll", SleepEx, 2) {
   GuestSyncPoint sync;
   constexpr uint32_t kWaitIoCompletion = 0xC0;
   if (Arg(c, 1) && RunUserApcs(c)) return kWaitIoCompletion;
-  std::this_thread::sleep_for(std::chrono::milliseconds(Arg(c, 0)));
+  GuestSleep(Arg(c, 0));
   return 0;
 }
 
@@ -1284,6 +1517,59 @@ HLE("kernel32.dll", LCMapStringA, 6) {
   return uint32_t(n);
 }
 
+// CompareStringA/W(locale, flags, s1, n1, s2, n2): CSTR_LESS_THAN (1),
+// CSTR_EQUAL (2) or CSTR_GREATER_THAN (3), by code point after the case
+// mapping NORM_IGNORECASE (1) asks for; the other flags are ignored.
+uint32_t CompareStrings(std::u16string a, std::u16string b, uint32_t flags) {
+  if (flags & 1) {
+    for (auto& ch : a) ch = MapCase(ch, kLcmapLowercase);
+    for (auto& ch : b) ch = MapCase(ch, kLcmapLowercase);
+  }
+  const int r = a.compare(b);
+  return r < 0 ? 1 : r == 0 ? 2 : 3;
+}
+std::u16string CountedW(gaddr s, int32_t n) {
+  if (n < 0) return GWStr(s);
+  std::u16string w(size_t(n), u'\0');
+  for (int32_t i = 0; i < n; i++) w[size_t(i)] = Rd16(s + 2 * uint32_t(i));
+  return w;
+}
+std::u16string CountedA(gaddr s, int32_t n) {
+  std::string a = n < 0 ? GStr(s) : std::string(g_proc->mem.ptr<const char>(s), size_t(n));
+  return Widen(a);
+}
+HLE("kernel32.dll", CompareStringW, 6) {
+  return CompareStrings(CountedW(Arg(c, 2), int32_t(Arg(c, 3))),
+                        CountedW(Arg(c, 4), int32_t(Arg(c, 5))), Arg(c, 1));
+}
+HLE("kernel32.dll", CompareStringA, 6) {
+  return CompareStrings(CountedA(Arg(c, 2), int32_t(Arg(c, 3))),
+                        CountedA(Arg(c, 4), int32_t(Arg(c, 5))), Arg(c, 1));
+}
+
+// FoldStringW(flags, src, n, dst, cap): Windows-1252 text has nothing to
+// fold, so a copy.
+HLE("kernel32.dll", FoldStringW, 5) {
+  const std::u16string w = CountedW(Arg(c, 1), int32_t(Arg(c, 2)));
+  const uint32_t n = uint32_t(w.size()) + (int32_t(Arg(c, 2)) < 0 ? 1 : 0);
+  const uint32_t cap = Arg(c, 4);
+  if (!cap) return n;
+  if (n > cap) {
+    SetLastError(kErrorInsufficientBuffer);
+    return 0;
+  }
+  for (uint32_t i = 0; i < n; i++) Wr16(Arg(c, 3) + 2 * i, i < w.size() ? w[i] : 0);
+  return n;
+}
+
+HLE("kernel32.dll", lstrcmpiA, 2) {
+  const int r = CompareStrings(Widen(GStr(Arg(c, 0))), Widen(GStr(Arg(c, 1))), 1);
+  return uint32_t(r - 2);  // -1, 0, 1
+}
+HLE("kernel32.dll", lstrlenW, 1) {
+  return Arg(c, 0) ? uint32_t(GWStr(Arg(c, 0)).size()) : 0;
+}
+
 HLE("kernel32.dll", GetUserDefaultLCID, 0) { return 0x0409; }
 HLE("kernel32.dll", GetUserDefaultLangID, 0) { return 0x0409; }
 HLE("kernel32.dll", GetUserDefaultUILanguage, 0) { return 0x0409; }
@@ -1350,4 +1636,42 @@ HLE("kernel32.dll", GetLocaleInfoW, 4) { return LocaleInfo(c, true); }
 
 }  // namespace
 }  // namespace hle
+}  // namespace recomp
+
+namespace recomp {
+
+static double WaitLogMs() {
+  static const double ms = [] {
+    const char* e = Env("WAIT_LOG");
+    return e ? std::atof(e) : 0.0;
+  }();
+  return ms;
+}
+
+WaitLog::WaitLog(const Ctx& c, const char* w, uint64_t o)
+    : what(w), object(o), caller(WaitLogMs() > 0 ? Rd32(c.esp) : 0), esp(c.esp),
+      t0(WaitLogMs() > 0 ? platform::MonotonicNs() : 0) {}
+
+WaitLog::~WaitLog() {
+  if (!t0) return;
+  const double ms = double(platform::MonotonicNs() - t0) / 1e6;
+  if (ms <= WaitLogMs()) return;
+  // Callers further up, guessed: stack words that point into the image.
+  char up[64] = "";
+  const PeImage& img = g_proc->img;
+  for (uint32_t a = esp + 4, n = 0, len = 0; a < esp + 256 && n < 4; a += 4) {
+    const uint32_t v = Rd32(a);
+    if (v > img.image_base && v < img.image_base + img.image_size) {
+      len += uint32_t(std::snprintf(up + len, sizeof up - len, " %08X", v));
+      n++;
+    }
+  }
+  std::fprintf(stderr, "wait: thread %04X %s(%08llX) %.1f ms from %08X (stack:%s)\n",
+               CurrentThread()->tid, what, (unsigned long long)object, ms, caller, up);
+}
+
+namespace hle {
+void SetSleepFilter(uint32_t (*filter)(uint32_t)) { g_sleep_filter = filter; }
+}  // namespace hle
+
 }  // namespace recomp

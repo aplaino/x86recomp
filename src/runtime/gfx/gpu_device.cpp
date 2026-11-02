@@ -532,6 +532,10 @@ class GpuDevice final : public Device {
     if (current_color_ == id) current_color_ = 0, current_level_ = 0;
     for (ColorTarget& e : current_extra_)
       if (e.tex == id) e = {}, bound = true;
+    if (const DepthId z = it->second.depth) {  // a depth texture: its depth entry too
+      if (current_depth_ == z) current_depth_ = 0, bound = true;
+      depths_.erase(z);
+    }
     if (bound) BindTarget();
     SDL_ReleaseGPUTexture(dev_, it->second.tex);
     textures_.erase(it);
@@ -654,6 +658,42 @@ class GpuDevice final : public Device {
     }
     DepthId id = next_id_++;
     depths_[id] = d;
+    return id;
+  }
+
+  TextureId CreateDepthTexture(int w, int h, DepthId* depth) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    *depth = 0;
+    Depth d;
+    d.w = w;
+    d.h = h;
+    d.fmt = Format::D24S8;
+    d.gpu_format = depth24s8_;
+    d.stencil = true;
+    if (d.gpu_format == SDL_GPU_TEXTUREFORMAT_D24_UNORM_S8_UINT) d.bias_scale = 16777215.0f;
+    SDL_GPUTextureCreateInfo ti{};
+    ti.type = SDL_GPU_TEXTURETYPE_2D;
+    ti.format = d.gpu_format;
+    ti.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    ti.width = Uint32(w);
+    ti.height = Uint32(h);
+    ti.layer_count_or_depth = 1;
+    ti.num_levels = 1;
+    d.tex = SDL_CreateGPUTexture(dev_, &ti);
+    if (!d.tex) {
+      WarnF("gfx: CreateDepthTexture %dx%d failed: %s\n", w, h, SDL_GetError());
+      return 0;
+    }
+    Tex t;
+    t.tex = d.tex;
+    t.w = w;
+    t.h = h;
+    t.fmt = Format::D24S8;
+    t.depth = next_id_++;
+    depths_[t.depth] = d;
+    TextureId id = next_id_++;
+    textures_[id] = t;
+    *depth = t.depth;
     return id;
   }
 
@@ -1196,6 +1236,7 @@ void r_color0(inout vec4 c) {
 
   void DrawShader(const ShaderDraw& d) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
+    ApplyDrawState(*this, d);
     auto vit = shaders_.find(d.vs), pit = shaders_.find(d.ps);
     if (vit == shaders_.end() || pit == shaders_.end()) return;
     const Shader& vs = vit->second;
@@ -1388,6 +1429,7 @@ void r_color0(inout vec4 c) {
     Format fmt = Format::Unknown;
     bool rt = false;
     bool cube = false;
+    DepthId depth = 0;  // CreateDepthTexture: the depth buffer sharing `tex`
   };
   struct Depth {
     SDL_GPUTexture* tex = nullptr;

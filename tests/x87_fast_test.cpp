@@ -1,10 +1,13 @@
 // Checks the x87 model's integer fast paths (add/sub/mul/div of normal
-// operands, fst m32/m64, fsin/fcos/fsincos) against the SoftFloat paths
-// they bypass (x87::g_softfloat_only), then the inline forms lifted runs
-// call (x87::run::*Fast: arithmetic with register, m32 and m64 operands,
-// m32/m64 loads and stores, compares) against the out-of-line run
-// functions on the SoftFloat path, and last the host-double forms
-// (x87::run::*D, control word 0x027F) the same way.
+// operands, fst m32/m64, fist m16/m32/m64, fsin/fcos/fsincos) against the
+// SoftFloat paths they bypass (x87::g_softfloat_only), then the inline
+// forms lifted runs call (x87::run::*Fast: arithmetic with register, m32
+// and m64 operands, m32/m64 loads and stores, integer stores, compares)
+// against the out-of-line run functions on the SoftFloat path, and last
+// the host-double forms (x87::run::*D, control word 0x027F) the same way.
+// Integer stores also go through a fixed list of edge values (zeros,
+// denormals, infinities, NaNs, the format limits, ties) under every
+// rounding mode.
 // Portable, so it also runs on arm64. Every case runs one
 // instruction on identical states both ways and compares the registers,
 // the status word (flags, C1) and the tag word bit for bit. The SoftFloat
@@ -14,9 +17,11 @@
 
 #include <bit>
 #include <cinttypes>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <random>
+#include <vector>
 
 #include "runtime/platform.h"
 #include "runtime/x87.h"
@@ -89,13 +94,33 @@ F80 Value(int near) {
   return v;
 }
 
+// A value for an integer store: within or around the range of a 16-,
+// 32- or 64-bit integer, often a tie or close to one, or below one.
+F80 IntValue() {
+  static const int kBits[] = {15, 31, 63};
+  int top = kBits[Rand() % 3];
+  int e = Rand() % 4 == 0 ? int(Rand() % 70) - 4 : top - 2 + int(Rand() % 4);  // 2^e
+  uint64_t sig = Sig();
+  int frac = 63 - e;  // fraction bits of the significand
+  if (frac > 0 && frac < 64 && Rand() % 3 == 0) {
+    // x.5 exactly, or one ulp around it.
+    sig = (sig & ~((1ull << frac) - 1)) | (1ull << (frac - 1));
+    sig += uint64_t(int64_t(Rand() % 3) - 1);
+    sig |= 1ull << 63;
+  }
+  if (Rand() % 8 == 0) sig = 1ull << 63;  // a power of two: the limits
+  F80 v{sig, uint16_t(0x3FFF + e)};
+  if (Rand() & 1) v.se |= 0x8000;
+  return v;
+}
+
 struct Snap {
   F80 r[8];
   uint16_t sw, tw;
 };
 
 // k < 6: arithmetic; 6: fst m32; 7: fst m64 (result in r[0].sig);
-// 8: fsin, 9: fcos, 10: fsincos.
+// 8: fsin, 9: fcos, 10: fsincos; 11-13: fist m16/m32/m64.
 Snap Run(bool softfloat_only, uint16_t cw, F80 a, F80 b, int k, bool st0_first) {
   static const Op kOps[] = {Op::Add, Op::Mul, Op::Sub, Op::SubR, Op::Div, Op::DivR};
   recomp::x87::g_softfloat_only = softfloat_only;
@@ -115,6 +140,12 @@ Snap Run(bool softfloat_only, uint16_t cw, F80 a, F80 b, int k, bool st0_first) 
     recomp::x87::Cos(s);
   else if (k == 10)
     recomp::x87::SinCos(s);
+  else if (k == 11)
+    stored = uint16_t(recomp::x87::StoreI16(s));
+  else if (k == 12)
+    stored = uint32_t(recomp::x87::StoreI32(s));
+  else if (k == 13)
+    stored = uint64_t(recomp::x87::StoreI64(s));
   else if (st0_first)
     recomp::x87::ArithSt0Sti(s, kOps[k], 1);
   else
@@ -254,6 +285,10 @@ long RunForms(long n) {
   arith("LoadF64Fast", run::LoadF64Fast(m64), [&] { return run::LoadF64(m64); });
   store("StoreF32Fast", run::StoreF32Fast(cw, a), [&] { return run::StoreF32(cw, a); });
   store("StoreF64Fast", run::StoreF64Fast(cw, a), [&] { return run::StoreF64(cw, a); });
+  run::V iv = Rand() % 4 ? run::ToV(IntValue()) : a;
+  store("StoreI16Fast", run::StoreI16Fast(cw, iv), [&] { return run::StoreI16(cw, iv); });
+  store("StoreI32Fast", run::StoreI32Fast(cw, iv), [&] { return run::StoreI32(cw, iv); });
+  store("StoreI64Fast", run::StoreI64Fast(cw, iv), [&] { return run::StoreI64(cw, iv); });
   bool quiet = Rand() & 1;
   cmp("CompareFast", run::CompareFast(a, b, quiet), run::Compare(a, b, quiet));
   cmp("CompareF32Fast", run::CompareF32Fast(a, m32), run::CompareF32(a, m32));
@@ -376,6 +411,107 @@ long CheckD(const char* what, run::RV ref, F&& fn, double a, double b) {
   return 1;
 }
 
+// FIST m16/m32/m64 of a double held in a run against the exact store.
+long StoreIntD(double x) {
+  long fails = 0;
+  auto one = [&](const char* what, run::SV d, run::SV ref) {
+    if (SameSV(d, ref)) return;
+    std::printf("FAIL %s %a: %016" PRIX64 " %" PRIX64 " soft %016" PRIX64 " %" PRIX64 "\n",
+                what, x, d.bits, d.meta, ref.bits, ref.meta);
+    ++fails;
+  };
+  bool soft = recomp::x87::g_softfloat_only;
+  recomp::x87::g_softfloat_only = true;
+  one("StoreI16D", run::StoreI16D(kCw, x), run::StoreI16(kCw, run::FromD(x)));
+  one("StoreI32D", run::StoreI32D(kCw, x), run::StoreI32(kCw, run::FromD(x)));
+  one("StoreI64D", run::StoreI64D(kCw, x), run::StoreI64(kCw, run::FromD(x)));
+  recomp::x87::g_softfloat_only = soft;
+  return fails;
+}
+
+// Integer stores of fixed edge values under every control word games use
+// and every rounding mode: the model's fast path, the run forms and (for
+// doubles in range, at 0x027F) the double forms. The mismatches.
+long IntEdges() {
+  std::vector<F80> vals;
+  const uint64_t kJ = 1ull << 63;
+  for (uint16_t sign : {uint16_t(0), uint16_t(0x8000)}) {
+    vals.push_back({0, sign});                                   // zero
+    vals.push_back({1, sign});                                   // denormal
+    vals.push_back({kJ | 1, sign});                              // pseudo-denormal
+    vals.push_back({kJ, uint16_t(sign | 0x7FFF)});               // inf
+    vals.push_back({kJ | (1ull << 62), uint16_t(sign | 0x7FFF)});  // QNaN
+    vals.push_back({kJ | 1, uint16_t(sign | 0x7FFF)});           // SNaN
+    vals.push_back({1ull << 62, uint16_t(sign | 0x3FFF)});       // unnormal
+    vals.push_back({kJ, uint16_t(sign | 1)});                    // smallest normal
+    for (int top : {15, 31, 63}) {
+      // 2^top and its neighbours, 2^top - 0.5 and around it.
+      for (int de = -1; de <= 1; de++) {
+        uint16_t e = uint16_t(0x3FFF + top + de);
+        vals.push_back({kJ, uint16_t(sign | e)});
+        vals.push_back({~0ull, uint16_t(sign | e)});
+        vals.push_back({kJ | 1, uint16_t(sign | e)});
+      }
+    }
+    // Small values and ties: k + f for f in 0, .25, .5, .75 and one ulp
+    // around .5, at 64- and 24-bit precision.
+    for (int k = 0; k < 6; k++)
+      for (int q = 0; q < 4; q++)
+        for (int ulp = -1; ulp <= 1; ulp++)
+          for (int drop : {0, 40}) {
+            // (4k + q) / 4 with the significand at bit 63.
+            uint64_t n = uint64_t(4 * k + q);
+            if (!n) continue;
+            int lz = __builtin_clzll(n);
+            uint64_t sig = n << lz;
+            uint16_t e = uint16_t(0x3FFF + (63 - lz) - 2);
+            if (q == 2) sig += uint64_t(int64_t(ulp)) << drop;
+            vals.push_back({sig | kJ, uint16_t(sign | e)});
+          }
+    for (int e = -70; e <= 0; e += 7) vals.push_back({0xC000000000000000ull, uint16_t(sign | (0x3FFF + e))});
+  }
+  long fails = 0;
+  auto report = [&](const char* what, uint16_t cw, F80 v, uint64_t f, uint64_t r) {
+    if (++fails <= 20)
+      std::printf("FAIL %s cw=%04X v=%04X:%016" PRIX64 ": %016" PRIX64 " soft %016" PRIX64 "\n",
+                  what, cw, v.se, v.sig, f, r);
+  };
+  for (uint16_t pc : {0x0000, 0x0200, 0x0300})
+    for (int rc = 0; rc < 4; rc++) {
+      const uint16_t cw = uint16_t(0x007F | pc | rc << 10);
+      for (const F80& v : vals) {
+        for (int k = 11; k <= 13; k++) {
+          Snap fast = Run(false, cw, v, F80{0, 0}, k, true);
+          Snap ref = Run(true, cw, v, F80{0, 0}, k, true);
+          if (!Same(fast, ref)) report("fist (model)", cw, v, fast.r[0].sig ^ fast.sw, ref.r[0].sig ^ ref.sw);
+        }
+        run::V rv = run::ToV(v);
+        auto store = [&](const char* what, run::SV fast, auto&& ref) {
+          recomp::x87::g_softfloat_only = true;
+          run::SV soft = ref();
+          recomp::x87::g_softfloat_only = false;
+          if (!SameSV(fast, soft)) report(what, cw, v, fast.bits ^ fast.meta, soft.bits ^ soft.meta);
+        };
+        store("StoreI16Fast", run::StoreI16Fast(cw, rv), [&] { return run::StoreI16(cw, rv); });
+        store("StoreI32Fast", run::StoreI32Fast(cw, rv), [&] { return run::StoreI32(cw, rv); });
+        store("StoreI64Fast", run::StoreI64Fast(cw, rv), [&] { return run::StoreI64(cw, rv); });
+        double x;
+        if (cw == kCw && run::ToD(rv, &x)) fails += StoreIntD(x);
+      }
+    }
+  // Doubles: every integer and tie near the limits and near zero.
+  for (double base : {0.0, 0x1p15, 0x1p31, 0x1p63, 0x1p53, 0x1p52})
+    for (double sgn : {1.0, -1.0})
+      for (int k = -4; k <= 4; k++)
+        for (double f : {0.0, 0.25, 0.5, 0.75}) {
+          double x = sgn * (base + k + f);
+          fails += StoreIntD(x);
+          fails += StoreIntD(std::nextafter(x, 0.0));
+          fails += StoreIntD(std::nextafter(x, 1e300));
+        }
+  return fails;
+}
+
 long DoubleForms() {
   static const Op kOps[] = {Op::Add, Op::Mul, Op::Sub, Op::SubR, Op::Div, Op::DivR};
   static const char* kOpNames[] = {"ArithD add", "ArithD mul", "ArithD sub",
@@ -472,6 +608,16 @@ long DoubleForms() {
     std::printf("FAIL StoreF64D %a\n", x);
     ++fails;
   }
+  // Integer stores of a held value: around the formats' limits, ties.
+  double xi = a;
+  if (Rand() % 4) {
+    static const int kTop[] = {15, 31, 63};
+    int top = kTop[Rand() % 3];
+    xi = Make(Rand() % 4 ? top - 2 + int(Rand() % 4) : int(Rand() % 70) - 4, Frac(),
+              Rand() & 1);
+    if (Rand() % 3 == 0) xi = double(int64_t(xi) & ~1ll) + (xi < 0 ? -0.5 : 0.5);
+  }
+  fails += StoreIntD(xi);
   // Compares, fchs and fabs.
   uint32_t c = run::Compare(run::FromD(a), run::FromD(b), Rand() & 1);
   if (run::CompareD(a, b) != c) {
@@ -494,8 +640,9 @@ long DoubleForms() {
 int main(int argc, char** argv) {
   long cases = argc > 1 ? std::atol(argv[1]) : 2000000;
   g_rng.seed(argc > 2 ? std::strtoull(argv[2], nullptr, 0) : 1);
-  static const char* kNames[] = {"add", "mul", "sub", "subr", "div", "divr",
-                                 "fst m32", "fst m64", "fsin", "fcos", "fsincos"};
+  static const char* kNames[] = {"add",  "mul",     "sub",      "subr",     "div",
+                                 "divr", "fst m32", "fst m64",  "fsin",     "fcos",
+                                 "fsincos", "fist m16", "fist m32", "fist m64"};
   static const uint16_t kPc[] = {0x0000, 0x0200, 0x0300};
   long fails = 0;
   for (long n = 0; n < cases; n++) {
@@ -513,15 +660,16 @@ int main(int argc, char** argv) {
       if (!(a.se & 0x7FFF)) a.se |= 0x3FFF;
       if (!(b.se & 0x7FFF)) b.se |= 0x3FFF;
     }
-    int k = int(Rand() % 11);
-    if (k >= 8) a = Angle();
+    int k = int(Rand() % 14);
+    if (k >= 8 && k <= 10) a = Angle();
+    if (k >= 11 && Rand() % 4) a = IntValue();
     bool st0_first = Rand() & 1;
     Snap fast = Run(false, cw, a, b, k, st0_first);
     Snap ref = Run(true, cw, a, b, k, st0_first);
     if (Same(fast, ref)) continue;
     if (++fails <= 20) {
       int dst = st0_first ? 0 : 1;  // physical reg after the two pushes
-      int p = k == 6 || k == 7 ? 0 : k >= 8 ? 6 : (6 + dst) & 7;
+      int p = k == 6 || k == 7 || k >= 11 ? 0 : k >= 8 ? 6 : (6 + dst) & 7;
       std::printf("FAIL %s%s cw=%04X a=%04X:%016" PRIX64 " b=%04X:%016" PRIX64
                   "\n  fast %04X:%016" PRIX64 " sw=%04X\n  soft %04X:%016" PRIX64
                   " sw=%04X\n",
@@ -542,6 +690,34 @@ int main(int argc, char** argv) {
   long dbl_fails = 0;
   for (long n = 0; n < cases && dbl_fails < 20; n++) dbl_fails += DoubleForms();
   std::printf("%ld cases of the host-double forms, %ld mismatches\n", cases, dbl_fails);
+  // fsqrt's host path (run::Sqrt with g_doubles) against the exact one,
+  // with squares of 24-bit midpoints (an exact root on a midpoint).
+  long sqrt_fails = 0;
+  for (long n = 0; n < cases && sqrt_fails < 20; n++) {
+    static const uint16_t kCws[] = {0x007F, 0x027F, 0x037F, 0x047F, 0x0C7F};
+    const uint16_t cw = kCws[Rand() % 5];
+    run::V v = RunValue(0x3FFF + int(Rand() % 64) - 32);
+    if (Rand() % 4 == 0) {
+      const double m = double((Rand() & ((1ull << 24) - 1)) | 1ull << 24) + 0.5;
+      v = run::ToV(F80{std::bit_cast<uint64_t>(m * m) << 11 | 1ull << 63,
+                       uint16_t((std::bit_cast<uint64_t>(m * m) >> 52) - 1023 + 0x3FFF)});
+    }
+    run::g_doubles = false;
+    const run::RV soft = run::Sqrt(cw, v);
+    run::g_doubles = true;
+    const run::RV fast = run::Sqrt(cw, v);
+    if (!SameRV(fast, soft)) {
+      if (++sqrt_fails <= 10)
+        std::printf("FAIL Sqrt cw=%04X v=%04X:%016" PRIX64 " fast %016" PRIX64 ":%" PRIX64
+                    " soft %016" PRIX64 ":%" PRIX64 "\n",
+                    cw, unsigned(v.se), v.sig, fast.sig, fast.meta, soft.sig, soft.meta);
+    }
+  }
+  std::printf("%ld cases of the host square root, %ld mismatches\n", cases, sqrt_fails);
+  dbl_fails += sqrt_fails;
+  long edge_fails = IntEdges();
+  std::printf("integer stores of edge values: %ld mismatches\n", edge_fails);
+  dbl_fails += edge_fails;
   for (uint16_t cw : {0x027F, 0x067F, 0x0A7F, 0x0E7F, 0x007F, 0x037F, 0x127F})
     if (run::DoubleMode(cw) != (cw == 0x027F || cw == 0x127F)) {
       std::printf("FAIL DoubleMode %04X\n", cw);

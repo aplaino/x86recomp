@@ -325,5 +325,55 @@ HLE_NAMED("oleaut32.dll", "#6", SysFreeString, 1) {
   return 0;
 }
 
+// ---- wintrust / crypt32 --------------------------------------------------------
+// Authenticode: every file is trusted (the user's own install), and no
+// signer certificate is ever found, so callers that read the signer's
+// name stop at CryptQueryObject.
+
+HLE("wintrust.dll", WinVerifyTrust, 3) { return 0; }  // ERROR_SUCCESS: trusted
+
+constexpr uint32_t kCryptENoMatch = 0x80092009;
+HLE("crypt32.dll", CryptQueryObject, 11) {
+  SetLastError(kCryptENoMatch);
+  return 0;
+}
+HLE("crypt32.dll", CryptMsgGetParam, 5) {
+  SetLastError(kCryptENoMatch);
+  return 0;
+}
+HLE("crypt32.dll", CryptMsgClose, 1) { return 1; }
+HLE("crypt32.dll", CertFindCertificateInStore, 6) {
+  SetLastError(kCryptENoMatch);
+  return 0;
+}
+HLE("crypt32.dll", CertGetNameStringA, 6) {
+  if (Arg(c, 4) && Arg(c, 5)) Wr8(Arg(c, 4), 0);
+  return 1;  // the empty string with its NUL
+}
+HLE("crypt32.dll", CertFreeCertificateContext, 1) { return 1; }
+HLE("crypt32.dll", CertCloseStore, 2) { return 1; }
+
+// CryptProtectData / CryptUnprotectData(in, desc, entropy, reserved,
+// prompt, flags, out): DATA_BLOB { cbData; pbData } copied as is into a
+// LocalAlloc block (data protection is per user on Windows; here the data
+// stays in the user's own data directory anyway).
+uint32_t CopyBlob(gaddr in, gaddr out) {
+  if (!in || !out) {
+    SetLastError(kErrorInvalidParameter);
+    return 0;
+  }
+  const uint32_t n = Rd32(in);
+  const gaddr p = HeapAllocProcess(n ? n : 1, false);
+  if (n) std::memcpy(GPtr(p), GPtr(Rd32(in + 4)), n);
+  Wr32(out, n);
+  Wr32(out + 4, p);
+  return 1;
+}
+HLE("crypt32.dll", CryptProtectData, 7) { return CopyBlob(Arg(c, 0), Arg(c, 6)); }
+HLE("crypt32.dll", CryptUnprotectData, 7) {
+  if (Arg(c, 1)) Wr32(Arg(c, 1), 0);  // no description
+  return CopyBlob(Arg(c, 0), Arg(c, 6));
+}
+
 }  // namespace
 }  // namespace recomp::hle

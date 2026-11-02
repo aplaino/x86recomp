@@ -17,6 +17,8 @@
 
 namespace lifter {
 
+class FlagLiveness;
+
 struct Module {
   std::string name;  // file name without extension, e.g. "game"
   recomp::PeImage img;
@@ -44,6 +46,9 @@ struct Program {
   std::set<uint64_t> noreturn;                // functions that never return
   std::map<uint64_t, std::vector<uint64_t>> jumptables;  // jmp va -> targets
   std::set<uint64_t> noreturn_iat;            // IAT slots of ExitProcess etc.
+  std::set<uint64_t> iat;                     // every import's IAT slot
+  std::set<uint64_t> flags_iat;               // imports whose handlers read
+                                              // the guest's flags (flags.h)
   std::map<uint64_t, std::string> probes;     // manifest: probe on entry
   std::set<uint64_t> replaced;                // manifest: the game project
                                               // defines f_X; the lifted body
@@ -65,6 +70,10 @@ struct Program {
     uint8_t frame_reg, frame_off;
   };
   std::map<uint64_t, EhFrame> eh_frames;      // by function entry
+  // Flags live across calls and returns (flags.h); null: spill them all.
+  const FlagLiveness* flags = nullptr;
+  // --flags-check: check the analysis as the game runs (lifted.h).
+  bool flags_check = false;
 
   // Maps an image (at `base`, 0 for its preferred base) and reads its
   // symbols. The first one is the EXE.

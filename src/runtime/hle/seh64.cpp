@@ -78,7 +78,7 @@ unwind::Regs AtReturn(const Ctx& c) {
   for (int i = 0; i < 16; i++) r.gpr[i] = *regs[i];
   r.rip = Rd64(c.rsp);
   r.gpr[kRsp] = c.rsp + 8;
-  for (int i = 0; i < 16; i++) std::memcpy(r.xmm[i], c.xmm[i].b, 16);
+  for (int i = 0; i < 16; i++) std::memcpy(r.xmm[i], c.xmm[i].data(), 16);
   return r;
 }
 
@@ -193,7 +193,7 @@ void ContinueAt(Ctx& c, const unwind::Regs& s, gaddr target_frame, gaddr target_
   uint64_t* regs[16] = {&c.rax, &c.rcx, &c.rdx, &c.rbx, &c.rsp, &c.rbp, &c.rsi, &c.rdi,
                         &c.r8,  &c.r9,  &c.r10, &c.r11, &c.r12, &c.r13, &c.r14, &c.r15};
   for (int i = 0; i < 16; i++) *regs[i] = s.gpr[i];
-  for (int i = 0; i < 16; i++) std::memcpy(c.xmm[i].b, s.xmm[i], 16);
+  for (int i = 0; i < 16; i++) std::memcpy(c.xmm[i].data(), s.xmm[i], 16);
   c.rax = value;
   RECOMP_TRACE("  x64 unwind: continuing at %08llX (frame %08llX)\n",
                (unsigned long long)target_ip, (unsigned long long)target_frame);

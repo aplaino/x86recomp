@@ -41,6 +41,10 @@ constexpr GUID kGUID_SysKeyboard = {0x6F1D2B61, 0xD5A0, 0x11CF, {0xBF, 0xC7, 0x4
 constexpr GUID kIID_IUnknown = {0x00000000, 0x0000, 0x0000, {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
 constexpr GUID kIID_IDirectInput8A = {0xBF798030, 0x483A, 0x4DA2, {0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00}};
 constexpr GUID kIID_IDirectInputDevice8A = {0x54D41080, 0xDC15, 0x4833, {0xA4, 0x1B, 0x74, 0x8F, 0x73, 0xA3, 0x81, 0x79}};
+// The Unicode interfaces: the same methods; those with names in their
+// structures (DIDEVICEINSTANCEW, DIDEVICEOBJECTINSTANCEW) have W handlers.
+constexpr GUID kIID_IDirectInput8W = {0xBF798031, 0x483A, 0x4DA2, {0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00}};
+constexpr GUID kIID_IDirectInputDevice8W = {0x54D41081, 0xDC15, 0x4833, {0xA4, 0x1B, 0x74, 0x8F, 0x73, 0xA3, 0x81, 0x79}};
 
 constexpr uint32_t DI_OK = 0;
 constexpr uint32_t DI_BUFFEROVERFLOW = 1;
@@ -117,7 +121,9 @@ struct DIDEVICEOBJECTDATA {
   uint32_t dwOfs, dwData, dwTimeStamp, dwSequence, uAppData;
 };
 
-struct Direct8 : com::Object {};
+struct Direct8 : com::Object {
+  bool wide = false;  // IDirectInput8W: its devices are IDirectInputDevice8W
+};
 
 // A pad axis' reporting (DIPROP_RANGE, _DEADZONE, _SATURATION).
 struct AxisProps {
@@ -136,6 +142,7 @@ struct Effect : com::Object {
 
 struct InputDevice : com::Object {
   bool keyboard = false;
+  bool wide = false;  // IDirectInputDevice8W
   uint32_t data_size = 0;  // the data format's state size; 0 = not set
   uint32_t coop = 0;
   uint32_t hwnd = 0;
@@ -224,17 +231,17 @@ void Unacquire(InputDevice& d) {
 
 InputDevice::~InputDevice() { Unacquire(*this); }
 
-uint32_t DirectInputVtable() {
-  return com::Vtable("dinput8.dll", "IDirectInput8A",
+uint32_t DirectInputVtable(bool wide = false) {
+  return com::Vtable("dinput8.dll", wide ? "IDirectInput8W" : "IDirectInput8A",
                      {"QueryInterface", "AddRef", "Release", "CreateDevice",
                       "EnumDevices", "GetDeviceStatus", "RunControlPanel",
                       "Initialize", "FindDevice", "EnumDevicesBySemantics",
                       "ConfigureDevices"});
 }
 
-uint32_t DeviceVtable() {
+uint32_t DeviceVtable(bool wide = false) {
   return com::Vtable(
-      "dinput8.dll", "IDirectInputDevice8A",
+      "dinput8.dll", wide ? "IDirectInputDevice8W" : "IDirectInputDevice8A",
       {"QueryInterface", "AddRef", "Release", "GetCapabilities", "EnumObjects",
        "GetProperty", "SetProperty", "Acquire", "Unacquire", "GetDeviceState",
        "GetDeviceData", "SetDataFormat", "SetEventNotification",
@@ -273,6 +280,26 @@ void FillPadInstance(DIDEVICEINSTANCEA* di, const XInputPad& pad) {
   std::snprintf(di->tszProductName, sizeof di->tszProductName, "%s", pad.name.c_str());
   di->wUsagePage = 1;  // generic desktop
   di->wUsage = 5;      // game pad
+}
+
+// DIDEVICEINSTANCEA (580 bytes) as A or W (1100: the two names are
+// WCHAR[260]) at guest `dst`.
+constexpr uint32_t kInstanceSizeW = 1100;
+static_assert(sizeof(DIDEVICEINSTANCEA) == 580);
+void PutInstance(gaddr dst, const DIDEVICEINSTANCEA& a, bool wide) {
+  if (!wide) {
+    std::memcpy(GPtr(dst), &a, sizeof a);
+    return;
+  }
+  const uint8_t* b = reinterpret_cast<const uint8_t*>(&a);
+  std::memset(GPtr(dst), 0, kInstanceSizeW);
+  std::memcpy(GPtr(dst), b, 40);  // dwSize .. dwDevType
+  Wr32(dst, kInstanceSizeW);
+  for (int i = 0; i < 259 && a.tszInstanceName[i]; i++)
+    Wr16(dst + 40 + 2 * i, uint8_t(a.tszInstanceName[i]));
+  for (int i = 0; i < 259 && a.tszProductName[i]; i++)
+    Wr16(dst + 560 + 2 * i, uint8_t(a.tszProductName[i]));
+  std::memcpy(GPtr(dst + 1080), b + 560, 20);  // guidFFDriver, wUsagePage, wUsage
 }
 
 // ---- pads
@@ -353,6 +380,21 @@ int PadAxisFor(uint32_t obj, uint32_t how) {
 constexpr uint32_t kObjectInstanceSize = 316;
 constexpr int kPadObjects = kPadAxes + 1 + kPadButtonCount;
 
+// DIDEVICEOBJECTINSTANCEA (316 bytes) as W (576: tszName is WCHAR[260])
+// into `w`.
+constexpr uint32_t kObjectInstanceSizeW = 576;
+void WidenObject(const uint8_t* a, uint8_t* w) {
+  std::memset(w, 0, kObjectInstanceSizeW);
+  std::memcpy(w, a, 32);  // dwSize .. dwFlags
+  const uint32_t size = kObjectInstanceSizeW;
+  std::memcpy(w, &size, 4);
+  for (int i = 0; i < 259 && a[32 + i]; i++) {
+    const uint16_t ch = a[32 + i];
+    std::memcpy(w + 32 + 2 * i, &ch, 2);
+  }
+  std::memcpy(w + 552, a + 292, 24);  // dwFFMaxForce .. wReportId
+}
+
 void FillPadObject(uint8_t* o, int i) {
   static const char* kAxisNames[kPadAxes] = {"X Axis", "Y Axis", "Z Axis",
                                              "X Rotation", "Y Rotation", "Z Rotation"};
@@ -421,12 +463,15 @@ uint32_t QueryInterfaceFor(Ctx& c, const GUID& iid) {
 // (hinst, dwVersion, riidltf, ppvOut, punkOuter)
 HLE("dinput8.dll", DirectInput8Create, 5) {
   uint32_t out = Arg(c, 3);
-  if (!com::GuidEq(Arg(c, 2), kIID_IDirectInput8A)) {
+  const bool wide = com::GuidEq(Arg(c, 2), kIID_IDirectInput8W);
+  if (!wide && !com::GuidEq(Arg(c, 2), kIID_IDirectInput8A)) {
     Wr32(out, 0);
     return DIERR_NOINTERFACE;
   }
-  RECOMP_TRACE("  DirectInput8Create version %X\n", uint32_t(Arg(c, 1)));
-  Wr32(out, com::Publish(std::make_shared<Direct8>(), DirectInputVtable()));
+  RECOMP_TRACE("  DirectInput8Create version %X%s\n", uint32_t(Arg(c, 1)), wide ? " (W)" : "");
+  auto di = std::make_shared<Direct8>();
+  di->wide = wide;
+  Wr32(out, com::Publish(di, DirectInputVtable(wide)));
   return DI_OK;
 }
 
@@ -434,6 +479,9 @@ HLE("dinput8.dll", DirectInput8Create, 5) {
 
 HLE_NAMED("dinput8.dll", "IDirectInput8A::QueryInterface", DI8_QueryInterface, 3) {
   return QueryInterfaceFor(c, kIID_IDirectInput8A);
+}
+HLE_NAMED("dinput8.dll", "IDirectInput8W::QueryInterface", DI8W_QueryInterface, 3) {
+  return QueryInterfaceFor(c, kIID_IDirectInput8W);
 }
 HLE_NAMED("dinput8.dll", "IDirectInput8A::AddRef", DI8_AddRef, 1) { return com::AddRef(Arg(c, 0)); }
 HLE_NAMED("dinput8.dll", "IDirectInput8A::Release", DI8_Release, 1) { return com::Release(Arg(c, 0)); }
@@ -450,14 +498,16 @@ HLE_NAMED("dinput8.dll", "IDirectInput8A::CreateDevice", DI8_CreateDevice, 4) {
   auto d = std::make_shared<InputDevice>();
   d->keyboard = keyboard;
   d->pad = pad;
-  Wr32(out, com::Publish(d, DeviceVtable()));
+  const Direct8* di = com::As<Direct8>(Arg(c, 0));
+  d->wide = di && di->wide;
+  Wr32(out, com::Publish(d, DeviceVtable(d->wide)));
   SetRawInputSink(&OnRawInput);
   return DI_OK;
 }
 
 // (dwDevType, lpCallback, pvRef, dwFlags): the keyboard, the mouse and the
 // XInput pads.
-HLE_NAMED("dinput8.dll", "IDirectInput8A::EnumDevices", DI8_EnumDevices, 5) {
+uint32_t EnumDevices(Ctx& c, bool wide) {
   uint32_t type = Arg(c, 1), cb = Arg(c, 2), ref = Arg(c, 3);
   uint32_t cls = type & 0xFF;
   bool mouse = cls == DI8DEVCLASS_ALL || cls == DI8DEVCLASS_POINTER || cls == DI8DEVTYPE_MOUSE;
@@ -466,12 +516,14 @@ HLE_NAMED("dinput8.dll", "IDirectInput8A::EnumDevices", DI8_EnumDevices, 5) {
   if (cls != DI8DEVCLASS_ALL && cls != DI8DEVCLASS_DEVICE && cls != DI8DEVCLASS_POINTER &&
       cls != DI8DEVCLASS_KEYBOARD && cls != DI8DEVCLASS_GAMECTRL && cls < 0x11)
     return DIERR_INVALIDPARAM;
-  uint32_t inst = HeapAllocProcess(sizeof(DIDEVICEINSTANCEA), true);
-  auto* di = reinterpret_cast<DIDEVICEINSTANCEA*>(GPtr(inst));
+  uint32_t inst = HeapAllocProcess(wide ? kInstanceSizeW : sizeof(DIDEVICEINSTANCEA), true);
+  DIDEVICEINSTANCEA a;
+  auto* di = &a;
   bool more = true;
   for (bool kb : {true, false}) {
     if (!more || (kb ? !keyboard : !mouse)) continue;
     FillInstance(di, kb);
+    PutInstance(inst, a, wide);
     more = CallGuest(c, cb, {inst, ref});  // 0 = DIENUM_STOP
   }
   if (pads) {
@@ -484,12 +536,15 @@ HLE_NAMED("dinput8.dll", "IDirectInput8A::EnumDevices", DI8_EnumDevices, 5) {
       if (!more) break;
       std::fprintf(stderr, "dinput8: game controller %u: %s\n", pad.index, pad.name.c_str());
       FillPadInstance(di, pad);
+      PutInstance(inst, a, wide);
       more = CallGuest(c, cb, {inst, ref});
     }
   }
   HeapFreeProcess(inst);
   return DI_OK;
 }
+HLE_NAMED("dinput8.dll", "IDirectInput8A::EnumDevices", DI8_EnumDevices, 5) { return EnumDevices(c, false); }
+HLE_NAMED("dinput8.dll", "IDirectInput8W::EnumDevices", DI8W_EnumDevices, 5) { return EnumDevices(c, true); }
 
 HLE_NAMED("dinput8.dll", "IDirectInput8A::GetDeviceStatus", DI8_GetDeviceStatus, 2) {
   int pad;
@@ -503,6 +558,9 @@ HLE_NAMED("dinput8.dll", "IDirectInput8A::GetDeviceStatus", DI8_GetDeviceStatus,
 
 HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::QueryInterface", DID8_QueryInterface, 3) {
   return QueryInterfaceFor(c, kIID_IDirectInputDevice8A);
+}
+HLE_NAMED("dinput8.dll", "IDirectInputDevice8W::QueryInterface", DID8W_QueryInterface, 3) {
+  return QueryInterfaceFor(c, kIID_IDirectInputDevice8W);
 }
 HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::AddRef", DID8_AddRef, 1) { return com::AddRef(Arg(c, 0)); }
 HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::Release", DID8_Release, 1) { return com::Release(Arg(c, 0)); }
@@ -528,23 +586,27 @@ HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::GetCapabilities", DID8_GetCapabi
   return DI_OK;
 }
 
-HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::GetDeviceInfo", DID8_GetDeviceInfo, 2) {
+uint32_t GetDeviceInfo(Ctx& c, bool wide) {
   InputDevice* d = Dev(c);
-  DIDEVICEINSTANCEA* di = reinterpret_cast<DIDEVICEINSTANCEA*>(GPtr(Arg(c, 1)));
-  if (di->dwSize != sizeof(DIDEVICEINSTANCEA)) return DIERR_INVALIDPARAM;
+  const gaddr out = Arg(c, 1);
+  if (Rd32(out) != (wide ? kInstanceSizeW : sizeof(DIDEVICEINSTANCEA))) return DIERR_INVALIDPARAM;
+  DIDEVICEINSTANCEA a;
   if (d->pad >= 0) {
-    std::string name = "Controller";
+    bool found = false;
     for (const XInputPad& p : XInputPads())
       if (int(p.index) == d->pad) {
-        FillPadInstance(di, p);
-        return DI_OK;
+        FillPadInstance(&a, p);
+        found = true;
       }
-    FillPadInstance(di, {uint32_t(d->pad), 0, 0, name});
-    return DI_OK;
+    if (!found) FillPadInstance(&a, {uint32_t(d->pad), 0, 0, "Controller"});
+  } else {
+    FillInstance(&a, d->keyboard);
   }
-  FillInstance(di, d->keyboard);
+  PutInstance(out, a, wide);
   return DI_OK;
 }
+HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::GetDeviceInfo", DID8_GetDeviceInfo, 2) { return GetDeviceInfo(c, false); }
+HLE_NAMED("dinput8.dll", "IDirectInputDevice8W::GetDeviceInfo", DID8W_GetDeviceInfo, 2) { return GetDeviceInfo(c, true); }
 
 // (lpdf): the formats are recognised by their state size: c_dfDIKeyboard
 // (256), c_dfDIMouse (16) and c_dfDIMouse2 (20).
@@ -721,22 +783,29 @@ HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::GetDeviceData", DID8_GetDeviceDa
 
 // (lpCallback, pvRef, dwFlags): a pad's objects of the DIDFT_ kinds in
 // dwFlags; the mouse and keyboard list none.
-HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::EnumObjects", DID8_EnumObjects, 4) {
+uint32_t EnumObjects(Ctx& c, bool wide) {
   InputDevice* d = Dev(c);
   uint32_t cb = Arg(c, 1), ref = Arg(c, 2), flags = Arg(c, 3);
   if (d->pad < 0) return DI_OK;
-  uint32_t inst = HeapAllocProcess(kObjectInstanceSize, true);
+  uint32_t inst = HeapAllocProcess(wide ? kObjectInstanceSizeW : kObjectInstanceSize, true);
+  uint8_t o[kObjectInstanceSize];
   for (int i = 0; i < kPadObjects; i++) {
     if (!PadObjectMatches(i, flags)) continue;
-    FillPadObject(GPtr(inst), i);
+    FillPadObject(o, i);
+    if (wide)
+      WidenObject(o, GPtr(inst));
+    else
+      std::memcpy(GPtr(inst), o, kObjectInstanceSize);
     if (!CallGuest(c, cb, {inst, ref})) break;  // DIENUM_STOP
   }
   HeapFreeProcess(inst);
   return DI_OK;
 }
+HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::EnumObjects", DID8_EnumObjects, 4) { return EnumObjects(c, false); }
+HLE_NAMED("dinput8.dll", "IDirectInputDevice8W::EnumObjects", DID8W_EnumObjects, 4) { return EnumObjects(c, true); }
 
 // (pdidoi, dwObj, dwHow)
-HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::GetObjectInfo", DID8_GetObjectInfo, 4) {
+uint32_t GetObjectInfo(Ctx& c, bool wide) {
   InputDevice* d = Dev(c);
   uint32_t out = Arg(c, 1), obj = Arg(c, 2), how = Arg(c, 3);
   if (d->pad < 0) return DIERR_NOTFOUND;
@@ -747,13 +816,18 @@ HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::GetObjectInfo", DID8_GetObjectIn
     std::memcpy(&ofs, o + 0x14, 4);
     std::memcpy(&type, o + 0x18, 4);
     if ((how == DIPH_BYOFFSET && ofs == obj) || (how == DIPH_BYID && (type & 0xFFFFFF) == (obj & 0xFFFFFF))) {
-      const uint32_t size = std::min<uint32_t>(Rd32(out), kObjectInstanceSize);
-      std::memcpy(GPtr(out + 4), o + 4, size - 4);
+      uint8_t w[kObjectInstanceSizeW];
+      if (wide) WidenObject(o, w);
+      const uint32_t size =
+          std::min<uint32_t>(Rd32(out), wide ? kObjectInstanceSizeW : kObjectInstanceSize);
+      std::memcpy(GPtr(out + 4), (wide ? w : o) + 4, size - 4);
       return DI_OK;
     }
   }
   return DIERR_NOTFOUND;
 }
+HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::GetObjectInfo", DID8_GetObjectInfo, 4) { return GetObjectInfo(c, false); }
+HLE_NAMED("dinput8.dll", "IDirectInputDevice8W::GetObjectInfo", DID8W_GetObjectInfo, 4) { return GetObjectInfo(c, true); }
 
 uint32_t EffectVtable() {
   return com::Vtable("dinput8.dll", "IDirectInputEffect",
@@ -863,6 +937,27 @@ HLE_NAMED("dinput8.dll", "IDirectInputEffect::GetEffectStatus", DIE_GetEffectSta
 }
 HLE_NAMED("dinput8.dll", "IDirectInputEffect::Download", DIE_Download, 1) { return DI_OK; }
 HLE_NAMED("dinput8.dll", "IDirectInputEffect::Unload", DIE_Unload, 1) { return DI_OK; }
+
+// The W interfaces' methods without names in their structures: the A
+// handlers.
+static Registrar w_DI8_AddRef{"dinput8.dll", "IDirectInput8W::AddRef", 1, &hle_DI8_AddRef};
+static Registrar w_DI8_Release{"dinput8.dll", "IDirectInput8W::Release", 1, &hle_DI8_Release};
+static Registrar w_DI8_CreateDevice{"dinput8.dll", "IDirectInput8W::CreateDevice", 4, &hle_DI8_CreateDevice};
+static Registrar w_DI8_GetDeviceStatus{"dinput8.dll", "IDirectInput8W::GetDeviceStatus", 2, &hle_DI8_GetDeviceStatus};
+static Registrar w_DID8_AddRef{"dinput8.dll", "IDirectInputDevice8W::AddRef", 1, &hle_DID8_AddRef};
+static Registrar w_DID8_Release{"dinput8.dll", "IDirectInputDevice8W::Release", 1, &hle_DID8_Release};
+static Registrar w_DID8_GetCapabilities{"dinput8.dll", "IDirectInputDevice8W::GetCapabilities", 2, &hle_DID8_GetCapabilities};
+static Registrar w_DID8_SetDataFormat{"dinput8.dll", "IDirectInputDevice8W::SetDataFormat", 2, &hle_DID8_SetDataFormat};
+static Registrar w_DID8_SetCooperativeLevel{"dinput8.dll", "IDirectInputDevice8W::SetCooperativeLevel", 3, &hle_DID8_SetCooperativeLevel};
+static Registrar w_DID8_SetProperty{"dinput8.dll", "IDirectInputDevice8W::SetProperty", 3, &hle_DID8_SetProperty};
+static Registrar w_DID8_GetProperty{"dinput8.dll", "IDirectInputDevice8W::GetProperty", 3, &hle_DID8_GetProperty};
+static Registrar w_DID8_Acquire{"dinput8.dll", "IDirectInputDevice8W::Acquire", 1, &hle_DID8_Acquire};
+static Registrar w_DID8_Unacquire{"dinput8.dll", "IDirectInputDevice8W::Unacquire", 1, &hle_DID8_Unacquire};
+static Registrar w_DID8_Poll{"dinput8.dll", "IDirectInputDevice8W::Poll", 1, &hle_DID8_Poll};
+static Registrar w_DID8_GetDeviceState{"dinput8.dll", "IDirectInputDevice8W::GetDeviceState", 3, &hle_DID8_GetDeviceState};
+static Registrar w_DID8_GetDeviceData{"dinput8.dll", "IDirectInputDevice8W::GetDeviceData", 5, &hle_DID8_GetDeviceData};
+static Registrar w_DID8_CreateEffect{"dinput8.dll", "IDirectInputDevice8W::CreateEffect", 5, &hle_DID8_CreateEffect};
+static Registrar w_DID8_SendFFCommand{"dinput8.dll", "IDirectInputDevice8W::SendForceFeedbackCommand", 2, &hle_DID8_SendFFCommand};
 
 }  // namespace
 }  // namespace recomp::hle

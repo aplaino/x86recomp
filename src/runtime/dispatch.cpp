@@ -18,6 +18,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <mutex>
+#include <set>
 #include <vector>
 
 #include "runtime/hle/hle.h"
@@ -397,6 +399,15 @@ void BadJump(Ctx& c, uint32_t va, uint32_t target) {
 void Unreachable(Ctx& c, uint32_t va) {
   (void)c;
   FatalF("returned from a no-return call at %08X", va);
+}
+
+void FlagCheckFail(Ctx& c, uint32_t va, uint32_t missing) {
+  (void)c;
+  static std::mutex mu;
+  static std::set<uint64_t> seen;
+  std::lock_guard<std::mutex> lock(mu);
+  if (seen.insert(uint64_t(va) << 32 | missing).second)
+    WarnF("flags-check: %08X reads flags %03X that were not spilled for it\n", va, missing);
 }
 
 void Trap(Ctx& c, uint32_t va) {

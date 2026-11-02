@@ -22,11 +22,14 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <thread>
 #include <vector>
 
 #include "runtime/hle/hle.h"
 #include "runtime/hle/kernel32_state.h"
 #include "runtime/hle/win32.h"
+#include "runtime/perf.h"
+#include "runtime/platform.h"
 #include "runtime/log.h"
 
 namespace recomp {
@@ -34,10 +37,19 @@ namespace recomp {
 namespace {
 
 std::mutex g_wait_mu;
-std::condition_variable g_wait_cv;
+
+// A thread blocked in WaitObjects: woken through its own condition
+// variable by the objects it waits on (not every waiting thread by every
+// signal: games keep dozens of threads waiting on their own events).
+struct Sleeper {
+  std::condition_variable cv;
+};
+thread_local Sleeper t_sleeper;
 
 struct Waitable : KObject {
   using KObject::KObject;
+  // Under g_wait_mu: the threads blocked on it.
+  std::vector<Sleeper*> sleepers;
   // Under g_wait_mu: is the object signalled for thread `tid`?
   virtual bool Signalled(uint32_t tid) const = 0;
   // Under g_wait_mu: a wait on it was satisfied; consume (auto-reset,
@@ -75,7 +87,13 @@ struct EventObject : Waitable {
   bool manual_reset;
   bool signalled;
   std::set<uint32_t> waiters, pulsed;  // threads waiting; those a pulse released
+  // MarkEventOrdered: when a wait-any finds several such events set, it
+  // takes the one set first (see WaitObjects).
+  bool ordered = false;
+  uint64_t set_seq = 0;  // when it was last set
 };
+
+uint64_t g_set_seq = 0;  // under g_wait_mu
 
 struct MutexObject : Waitable {
   MutexObject() : Waitable(Type::Mutex) {}
@@ -133,14 +151,22 @@ uint32_t WaitObjects(const std::vector<std::shared_ptr<Waitable>>& objs,
                   std::chrono::milliseconds(timeout_ms);
   std::unique_lock<std::mutex> l(g_wait_mu);
   // Registered as a waiter for the whole wait (PulseEvent), under the lock.
+  Sleeper* me = &t_sleeper;
   struct Registration {
     const std::vector<std::shared_ptr<Waitable>>& objs;
     uint32_t tid;
+    Sleeper* me;
     ~Registration() {
-      for (const auto& o : objs) o->Waiting(tid, false);
+      for (const auto& o : objs) {
+        o->Waiting(tid, false);
+        std::erase(o->sleepers, me);
+      }
     }
-  } reg{objs, tid};
-  for (const auto& o : objs) o->Waiting(tid, true);
+  } reg{objs, tid, me};
+  for (const auto& o : objs) {
+    o->Waiting(tid, true);
+    o->sleepers.push_back(me);
+  }
   for (;;) {
     if (wait_all) {
       bool all = true;
@@ -152,20 +178,39 @@ uint32_t WaitObjects(const std::vector<std::shared_ptr<Waitable>>& objs,
     } else {
       for (size_t i = 0; i < objs.size(); i++)
         if (objs[i]->Signalled(tid)) {
+          // Windows takes the lowest index. Ordered events (DirectSound
+          // position notifications) set together are taken in the order
+          // they were set instead: on Windows they come one at a time, as
+          // the play cursor passes each, and a game refills the part of
+          // its ring each one names in the order it gets them; lowest
+          // index first, a ring's wrap (the last and the first set at
+          // once) had it write its parts out of order (heard as clicks).
+          if (const auto* e = dynamic_cast<const EventObject*>(objs[i].get()); e && e->ordered) {
+            for (size_t j = i + 1; j < objs.size(); j++) {
+              const auto* f = dynamic_cast<const EventObject*>(objs[j].get());
+              if (f && f->ordered && f->Signalled(tid) &&
+                  f->set_seq < static_cast<const EventObject*>(objs[i].get())->set_seq)
+                i = j;
+            }
+          }
           objs[i]->Acquire(tid);
           return kWaitObject0 + uint32_t(i);
         }
     }
     if (timeout_ms == 0) return kWaitTimeout;
     if (timeout_ms == kInfinite) {
-      g_wait_cv.wait(l);
-    } else if (g_wait_cv.wait_until(l, deadline) == std::cv_status::timeout) {
+      me->cv.wait(l);
+    } else if (me->cv.wait_until(l, deadline) == std::cv_status::timeout) {
       return kWaitTimeout;  // deadline passed: no re-check
     }
   }
 }
 
-void SignalChanged() { g_wait_cv.notify_all(); }
+// Under g_wait_mu: `o` may have become signalled; wakes the threads
+// blocked on it.
+void SignalChanged(const Waitable& o) {
+  for (Sleeper* s : o.sleepers) s->cv.notify_one();
+}
 
 }  // namespace
 
@@ -174,12 +219,34 @@ bool SignalEventHandle(uint32_t h, bool pulse) {
   if (!e) return false;
   {
     std::lock_guard<std::mutex> l(g_wait_mu);
-    if (pulse)
+    if (pulse) {
       e->Pulse();
-    else
+    } else {
+      if (!e->signalled) e->set_seq = ++g_set_seq;
       e->signalled = true;
+    }
+    SignalChanged(*e);
   }
-  SignalChanged();
+  return true;
+}
+
+bool MarkEventOrdered(uint32_t h) {
+  auto e = std::dynamic_pointer_cast<EventObject>(GetHandle(h));
+  if (!e) return false;
+  std::lock_guard<std::mutex> l(g_wait_mu);
+  e->ordered = true;
+  return true;
+}
+
+uint32_t NewEventHandle(bool manual_reset, bool initial) {
+  return NewHandle(std::make_shared<EventObject>(manual_reset, initial));
+}
+
+bool ResetEventHandle(uint32_t h) {
+  auto e = std::dynamic_pointer_cast<EventObject>(GetHandle(h));
+  if (!e) return false;
+  std::lock_guard<std::mutex> l(g_wait_mu);
+  e->signalled = false;
   return true;
 }
 
@@ -269,8 +336,8 @@ HLE("kernel32.dll", CreateMutexA, 3) {
 
 // OpenMutexA/OpenFileMappingA(access, inherit, name): a new handle to an
 // existing named object of that type.
-uint32_t OpenNamed(gaddr name_va, KObject::Type type) {
-  std::string name = NameOf(name_va);
+uint32_t OpenNamed(gaddr name_va, KObject::Type type, bool wide = false) {
+  std::string name = NameOf(name_va, wide);
   std::lock_guard<std::mutex> l(g_wait_mu);
   auto it = g_named.find(name);
   if (it == g_named.end() || it->second->type != type) {
@@ -281,6 +348,7 @@ uint32_t OpenNamed(gaddr name_va, KObject::Type type) {
 }
 
 HLE("kernel32.dll", OpenMutexA, 3) { return OpenNamed(Arg(c, 2), KObject::Type::Mutex); }
+HLE("kernel32.dll", OpenEventA, 3) { return OpenNamed(Arg(c, 2), KObject::Type::Event); }
 
 HLE("kernel32.dll", ReleaseMutex, 1) {
   GuestSyncPoint sync;
@@ -290,8 +358,8 @@ HLE("kernel32.dll", ReleaseMutex, 1) {
     std::lock_guard<std::mutex> l(g_wait_mu);
     if (m->owner != CurrentThread()->tid) return 0;
     if (--m->count == 0) m->owner = 0;
+    if (!m->count) SignalChanged(*m);
   }
-  SignalChanged();
   return 1;
 }
 
@@ -326,8 +394,8 @@ HLE64("kernel32.dll", ReleaseSemaphore, 3) {
     }
     if (gaddr prev = Arg(c, 2)) Wr32(prev, uint32_t(s->count));
     s->count += n;
+    SignalChanged(*s);
   }
-  SignalChanged();
   return 1;
 }
 
@@ -336,6 +404,8 @@ HLE64("kernel32.dll", ReleaseSemaphore, 3) {
 
 uint64_t WaitOne(const Ctx& c) {
   GuestSyncPoint sync;
+  WaitLog log(c, "WaitForSingleObject", Arg(c, 0));
+  if (perf::On() && Arg(c, 1) == 0) perf::CountPoll(perf::Poll::kZeroWait, Caller(c));
   auto w = AsWaitable(uint32_t(Arg(c, 0)));
   if (!w) {
     SetLastError(kErrorInvalidHandle);
@@ -348,6 +418,8 @@ HLE64("kernel32.dll", WaitForSingleObjectEx, 3) { return WaitOne(c); }
 
 HLE64("kernel32.dll", WaitForMultipleObjects, 4) {
   GuestSyncPoint sync;
+  WaitLog log(c, "WaitForMultipleObjects", Arg(c, 1));
+  if (perf::On() && Arg(c, 3) == 0) perf::CountPoll(perf::Poll::kZeroWait, Caller(c));
   uint32_t n = uint32_t(Arg(c, 0));
   gaddr arr = Arg(c, 1);
   const uint32_t ptr = g_proc->x64 ? 8 : 4;  // HANDLE[]
@@ -571,10 +643,70 @@ HLE("kernel32.dll", ExitThread, 1) {
   throw GuestThreadExit{uint32_t(Arg(c, 0))};
 }
 
-// Thread priorities are not applied: host threads keep the default
-// scheduling, and every guest thread reports THREAD_PRIORITY_NORMAL.
-HLE("kernel32.dll", GetThreadPriority, 1) { return 0; }
-HLE("kernel32.dll", SetThreadPriority, 2) { return 1; }
+HLE("kernel32.dll", GetThreadPriority, 1) {
+  const uint32_t h = Arg(c, 0);
+  if (h == 0xFFFFFFFE) return uint32_t(CurrentThread()->priority);
+  auto to = std::dynamic_pointer_cast<ThreadObject>(GetHandle(h));
+  return to ? uint32_t(to->thread->priority) : 0x7FFFFFFF;  // THREAD_PRIORITY_ERROR_RETURN
+}
+// SetThreadPriority(thread, priority): applied as the host scheduling class
+// (platform::SetThreadPriorityClass) on the thread itself, at once for the
+// caller, at its start for one not started yet (games set it between
+// CreateThread(CREATE_SUSPENDED) and ResumeThread). A running thread other
+// than the caller keeps its class, and so does one whose class the game
+// chose (GameConfig::thread_qos).
+void ApplyOwnPriority(Thread* t, int p) {
+  if (!t->qos_fixed) platform::SetThreadPriorityClass(p);
+  if (perf::On()) perf::NoteThread(t->tid, p, "SetThreadPriority");
+}
+HLE("kernel32.dll", SetThreadPriority, 2) {
+  const uint32_t h = Arg(c, 0);
+  const int p = int32_t(Arg(c, 1));
+  if (h == 0xFFFFFFFE) {  // GetCurrentThread()
+    CurrentThread()->priority = p;
+    ApplyOwnPriority(CurrentThread(), p);
+    return 1;
+  }
+  auto to = std::dynamic_pointer_cast<ThreadObject>(GetHandle(h));
+  if (!to) {
+    SetLastError(kErrorInvalidHandle);
+    return 0;
+  }
+  to->thread->priority = p;
+  if (to->thread == CurrentThread()) ApplyOwnPriority(CurrentThread(), p);
+  return 1;
+}
+HLE("kernel32.dll", SetThreadPriorityBoost, 2) { return 1; }
+
+HLE("kernel32.dll", SwitchToThread, 0) {
+  if (perf::On()) perf::CountPoll(perf::Poll::kSwitchToThread, Caller(c));
+  std::this_thread::yield();
+  return 1;
+}
+
+// STILL_ACTIVE (259) until the thread has finished.
+HLE("kernel32.dll", GetExitCodeThread, 2) {
+  GuestSyncPoint sync;
+  auto to = std::dynamic_pointer_cast<ThreadObject>(GetHandle(Arg(c, 0)));
+  if (!to) {
+    SetLastError(kErrorInvalidHandle);
+    return 0;
+  }
+  std::lock_guard<std::mutex> l(g_wait_mu);
+  Wr32(Arg(c, 1), to->finished ? to->exit_code : 259);
+  return 1;
+}
+
+// OpenThread(access, inherit, tid): a new handle to a thread of this process.
+HLE("kernel32.dll", OpenThread, 3) {
+  std::lock_guard<std::mutex> l(g_wait_mu);
+  auto it = g_thread_objs.find(uint32_t(Arg(c, 2)));
+  if (it == g_thread_objs.end()) {
+    SetLastError(kErrorInvalidParameter);
+    return 0;
+  }
+  return NewHandle(it->second);
+}
 HLE("kernel32.dll", GetPriorityClass, 1) { return 0x20; }  // NORMAL
 HLE("kernel32.dll", SetPriorityClass, 2) { return 1; }
 
@@ -634,6 +766,8 @@ HLE("kernel32.dll", CreateToolhelp32Snapshot, 2) {
 }
 HLE("kernel32.dll", Thread32First, 2) { return 0; }
 HLE("kernel32.dll", Thread32Next, 2) { return 0; }
+HLE("kernel32.dll", Process32First, 2) { return 0; }
+HLE("kernel32.dll", Process32Next, 2) { return 0; }
 
 // ---- file mappings ------------------------------------------------------------
 // Views are mapped straight into the guest arena with mmap(MAP_FIXED), so a
@@ -682,6 +816,10 @@ HLE("kernel32.dll", CreateFileMappingA, 6) {
     m->anon_base = base;
   }
   return CreateNamed(NameOf(name), [&] { return m; });
+}
+
+HLE("kernel32.dll", OpenFileMappingW, 3) {
+  return OpenNamed(Arg(c, 2), KObject::Type::Mapping, true);
 }
 
 HLE("kernel32.dll", OpenFileMappingA, 3) {
@@ -756,9 +894,9 @@ void OnGuestThreadFinished(uint32_t tid, uint32_t exit_code) {
     if (it != g_thread_objs.end()) {
       it->second->exit_code = exit_code;
       it->second->finished = true;
+      SignalChanged(*it->second);
     }
   }
-  SignalChanged();
 }
 
 }  // namespace recomp

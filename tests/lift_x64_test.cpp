@@ -404,10 +404,10 @@ int main(int argc, char** argv) {
         why += b;
       }
       for (int i = 0; i < 16; i++)
-        if (std::memcmp(c.xmm[i].b, hw.xmm[i], 16)) why += " xmm" + std::to_string(i);
+        if (std::memcmp(c.xmm[i].data(), hw.xmm[i], 16)) why += " xmm" + std::to_string(i);
 #ifdef LIFT_X64_SSE
       for (int i = 0; i < 16; i++)
-        if (std::memcmp(c.ymm_hi[i].b, hw.ymm_hi[i], 16)) why += " ymm_hi" + std::to_string(i);
+        if (std::memcmp(c.ymm_hi[i].data(), hw.ymm_hi[i], 16)) why += " ymm_hi" + std::to_string(i);
 #endif
       if (c.mxcsr != hw.mxcsr) why += " mxcsr";
       if (std::memcmp(native_buf, mem.ptr(kBuf), kBufSize)) why += " mem";
@@ -424,15 +424,15 @@ int main(int argc, char** argv) {
                     uint32_t(in.flags) & 0xDD5, uint32_t(hw.flags) & 0xDD5, lf & 0xDD5,
                     in.mxcsr, hw.mxcsr, c.mxcsr);
         for (int i = 0; i < 16; i++)
-          if (std::memcmp(c.xmm[i].b, hw.xmm[i], 16) || std::memcmp(in.xmm[i], hw.xmm[i], 16))
+          if (std::memcmp(c.xmm[i].data(), hw.xmm[i], 16) || std::memcmp(in.xmm[i], hw.xmm[i], 16))
             std::printf("   xmm%-2d in %s hw %s lift %s\n", i, Hex16(in.xmm[i]).c_str(),
-                        Hex16(hw.xmm[i]).c_str(), Hex16(c.xmm[i].b).c_str());
+                        Hex16(hw.xmm[i]).c_str(), Hex16(c.xmm[i].data()).c_str());
 #ifdef LIFT_X64_SSE
         for (int i = 0; i < 16; i++)
-          if (std::memcmp(c.ymm_hi[i].b, hw.ymm_hi[i], 16) ||
+          if (std::memcmp(c.ymm_hi[i].data(), hw.ymm_hi[i], 16) ||
               std::memcmp(in.ymm_hi[i], hw.ymm_hi[i], 16))
             std::printf("   ymm%-2d hi in %s hw %s lift %s\n", i, Hex16(in.ymm_hi[i]).c_str(),
-                        Hex16(hw.ymm_hi[i]).c_str(), Hex16(c.ymm_hi[i].b).c_str());
+                        Hex16(hw.ymm_hi[i]).c_str(), Hex16(c.ymm_hi[i].data()).c_str());
 #endif
         if (f.base >= 0) std::printf("   mem in %s\n", Hex16(&init[0x1000]).c_str());
       }

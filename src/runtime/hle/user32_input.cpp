@@ -160,8 +160,7 @@ namespace {
 
 using namespace win32;
 
-HLE("user32.dll", MapVirtualKeyA, 2) {
-  uint32_t code = Arg(c, 0), type = Arg(c, 1);
+uint32_t MapVirtualKey(uint32_t code, uint32_t type) {
   switch (type) {
     case 0: {  // MAPVK_VK_TO_VSC
       bool ext;
@@ -190,6 +189,10 @@ HLE("user32.dll", MapVirtualKeyA, 2) {
   return 0;
 }
 
+HLE("user32.dll", MapVirtualKeyA, 2) { return MapVirtualKey(Arg(c, 0), Arg(c, 1)); }
+// The layout handle is ignored: there is one (US English) layout.
+HLE("user32.dll", MapVirtualKeyExA, 3) { return MapVirtualKey(Arg(c, 0), Arg(c, 1)); }
+
 HLE("user32.dll", VkKeyScanA, 1) {
   char ch = char(Arg(c, 0));
   for (const auto& k : kKeys) {
@@ -210,6 +213,21 @@ HLE("user32.dll", GetKeyNameTextA, 3) {
 }
 
 HLE("user32.dll", GetKeyboardLayout, 1) { return 0x04090409; }
+HLE("user32.dll", GetKeyboardLayoutNameA, 1) {
+  PutStr(Arg(c, 0), "00000409");
+  return 1;
+}
+HLE("user32.dll", LoadKeyboardLayoutA, 2) { return 0x04090409; }
+// nTypeFlag 0: keyboard type (4 = enhanced 101/102 key), 1: subtype,
+// 2: function keys.
+HLE("user32.dll", GetKeyboardType, 1) {
+  switch (Arg(c, 0)) {
+    case 0: return 4;
+    case 1: return 0;
+    case 2: return 12;
+  }
+  return 0;
+}
 
 // Key state: bit 15 = down; GetKeyState bit 0 = toggled. GetAsyncKeyState
 // bit 0 = "pressed since last call" (still honoured by Windows XP).
@@ -224,6 +242,66 @@ HLE("user32.dll", GetAsyncKeyState, 1) {
   uint32_t r = (g_key_down[vk] ? 0x8000u : 0) |
                (g_key_pressed_since[vk].exchange(0) ? 1u : 0);
   return r;
+}
+
+// 256 key states: bit 7 = down, bit 0 = toggled.
+HLE("user32.dll", GetKeyboardState, 1) {
+  const gaddr out = Arg(c, 0);
+  for (int vk = 0; vk < 256; vk++)
+    Wr8(out + vk, uint8_t((g_key_down[vk] ? 0x80 : 0) | (g_key_toggled[vk] ? 1 : 0)));
+  return 1;
+}
+
+// The character a key makes with the given key state (US layout); 0 if
+// none. Control combinations make no character.
+char KeyChar(uint32_t vk, gaddr state) {
+  const bool shift = Rd8(state + 0x10) & 0x80, caps = Rd8(state + 0x14) & 1;
+  if (Rd8(state + 0x11) & 0x80) return 0;
+  if (vk >= 'A' && vk <= 'Z') return char((shift != caps) ? vk : vk + 32);
+  for (const auto& n : kNumpadVk)
+    if (n.vk == vk) return vk == 0x6E ? '.' : char('0' + (vk - 0x60));
+  const KeyDef* k = ByVk(uint8_t(vk));
+  if (!k) return 0;
+  return shift && k->shifted ? k->shifted : k->ch;
+}
+
+// ToAsciiEx(vk, scan, state, LPWORD out, flags, hkl): characters written.
+HLE("user32.dll", ToAsciiEx, 6) {
+  if (Arg(c, 1) & 0x8000) return 0;  // key up
+  const char ch = KeyChar(Arg(c, 0), Arg(c, 2));
+  if (!ch) return 0;
+  Wr16(Arg(c, 3), uint8_t(ch));
+  return 1;
+}
+
+// ToUnicodeEx(vk, scan, state, LPWSTR out, cch, flags, hkl).
+HLE("user32.dll", ToUnicodeEx, 7) {
+  if (Arg(c, 1) & 0x8000 || Arg(c, 4) < 1) return 0;
+  const char ch = KeyChar(Arg(c, 0), Arg(c, 2));
+  if (!ch) return 0;
+  Wr16(Arg(c, 3), Cp1252ToUnicode(uint8_t(ch)));
+  return 1;
+}
+
+// Synthesized input is not fed back into the host queue: report it sent.
+HLE("user32.dll", SendInput, 3) { return Arg(c, 0); }
+HLE("user32.dll", GetMessageExtraInfo, 0) { return 0; }
+
+HLE("user32.dll", CharLowerBuffA, 2) {
+  const gaddr s = Arg(c, 0);
+  const uint32_t n = Arg(c, 1);
+  for (uint32_t i = 0; i < n; i++) {
+    bool ok;
+    Wr8(s + i, UnicodeToCp1252(MapCase(Cp1252ToUnicode(Rd8(s + i)), kLcmapLowercase), &ok));
+  }
+  return n;
+}
+
+HLE("user32.dll", SetRect, 5) {
+  const gaddr r = Arg(c, 0);
+  if (!r) return 0;
+  for (int i = 0; i < 4; i++) Wr32(r + 4 * i, uint32_t(Arg(c, 1 + i)));
+  return 1;
 }
 
 // ---- system metrics and parameters -------------------------------------------

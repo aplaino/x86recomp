@@ -5,7 +5,9 @@
 //   - d3d9 via dxvk-native (gfx/d3d9_device.cpp): Linux bring-up and the
 //     reference image;
 //   - SDL_GPU with fixed-function uber-shaders (gfx/gpu_device.cpp):
-//     Metal on macOS; Vulkan on Linux once its shaders exist.
+//     Metal on macOS; Vulkan on Linux once its shaders exist;
+//   - Metal directly (gfx/metal_device.mm, Apple platforms): Direct3D 9's
+//     programmable pipeline only (HasFixedFunction false).
 // Numeric enums (render states, texture stage states, transform types,
 // primitive types, FVF codes) are D3D7's; render states D3D7 lacks use
 // D3D9's numbers (COLORWRITEENABLE 168, SCISSORTESTENABLE 174,
@@ -22,6 +24,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 
 #include "runtime/hlsl/hlsl.h"
 
@@ -128,15 +131,74 @@ struct ShaderDraw {
   const float (*ps_float)[4] = nullptr;
   const int32_t (*ps_int)[4] = nullptr;
   const uint32_t* ps_bool = nullptr;
+  // Change counters of vs_float and ps_float (0: unknown): a backend need
+  // not compare registers whose counter has not moved.
+  uint64_t vs_float_version = 0, ps_float_version = 0;
+  // The same for the int and bool registers together.
+  uint64_t vs_ib_version = 0, ps_ib_version = 0;
   // Samplers 0-15, then the vertex samplers 0-3: texture (0: none) and
   // D3DSAMPLERSTATETYPE values (index 1-13).
   TextureId textures[20] = {};
   const uint32_t (*sampler_states)[14] = nullptr;
+  // Change counters of the sampler_states rows (0: unknown): a backend
+  // need not convert a row whose counter has not moved.
+  const uint64_t* sampler_versions = nullptr;
+  // State changed since the last draw, applied first as SetRenderState,
+  // SetViewport and SetScissor would (one call and one lock per draw):
+  // `state_count` (state, value) pairs, and the viewport and scissor
+  // rectangle where not null.
+  const uint32_t (*states)[2] = nullptr;
+  uint32_t state_count = 0;
+  const Viewport* viewport = nullptr;
+  const Rect* scissor = nullptr;
 };
 
 class Device {
  public:
   virtual ~Device() = default;
+
+  // Whether Draw / MapDraw (the fixed-function pipeline) and the 2D blits
+  // work. Without them, front ends draw fixed-function state with shaders
+  // of their own.
+  virtual bool HasFixedFunction() const { return true; }
+
+  // ---- memory the CPU and the GPU share (Apple's unified memory)
+  // Whether the device can read host memory in place (MapSharedMemory).
+  virtual bool SharesMemory() const { return false; }
+  // Lets the device read [host, host + size) in place: draws whose vertex
+  // and index data lie there do not copy it. Page-aligned; the memory must
+  // stay mapped for the device's lifetime. False if it cannot.
+  virtual bool MapSharedMemory(void* host, size_t size) {
+    (void)host, (void)size;
+    return false;
+  }
+  // Frames, for memory read in place: what draws recorded now belong to,
+  // and the last one the GPU has finished (everything up to it). Data a
+  // draw reads in place must not change until its frame has finished.
+  virtual uint64_t FrameSerial() const { return 0; }
+  virtual uint64_t CompletedSerial() const { return 0; }
+
+  // GPU time per presented frame, in ms, averaged over the frames the GPU
+  // finished since the last call; negative if the backend cannot tell.
+  virtual double TakeGpuFrameMs() { return -1; }
+  // Intervals between frames as the display showed them, in ms, since the
+  // last call: median, 99th percentile and maximum; false if the backend
+  // cannot tell.
+  // Milliseconds from Present to the display, since the last call: median
+  // and 99th percentile; false if the backend cannot tell.
+  virtual bool TakePresentLatency(double* median, double* p99) {
+    (void)median, (void)p99;
+    return false;
+  }
+  virtual bool TakeShownIntervals(double* median, double* p99, double* max) {
+    (void)median, (void)p99, (void)max;
+    return false;
+  }
+  // Counters for tuning (the runtime's <ID>_PERF): kept once enabled;
+  // TakePerfStats says what they show since the last call, per presented
+  // frame ("" from a backend without them).
+  virtual void EnablePerfStats() {}
+  virtual std::string TakePerfStats() { return {}; }
 
   // (Re)creates the swap chain: a w x h back buffer presented to the
   // window. Called on SetDisplayMode / device creation.
@@ -158,6 +220,14 @@ class Device {
   virtual void UpdateCubeTexture(TextureId t, int face, int level, const Rect& r,
                                  const void* src, uint32_t pitch) = 0;
   virtual DepthId CreateDepth(int w, int h, Format fmt) = 0;
+  // A depth-stencil buffer (D24S8) that shaders can also sample, Direct3D 9's
+  // INTZ: the TextureId SetTexture binds (depth in every channel read) and,
+  // in *depth, the DepthId render targets use. DestroyTexture releases it.
+  virtual TextureId CreateDepthTexture(int w, int h, DepthId* depth) {
+    *depth = 0;
+    (void)w, (void)h;
+    return 0;
+  }
   virtual void DestroyDepth(DepthId d) = 0;
 
   // ---- render target (color 0 = back buffer; Present copies it to the
@@ -259,6 +329,14 @@ class Device {
   virtual void DrawShader(const ShaderDraw& d) = 0;
 };
 
+// A ShaderDraw's state changes through the setters, for backends that
+// take them no faster way.
+inline void ApplyDrawState(Device& dev, const ShaderDraw& d) {
+  for (uint32_t i = 0; i < d.state_count; i++) dev.SetRenderState(d.states[i][0], d.states[i][1]);
+  if (d.viewport) dev.SetViewport(*d.viewport);
+  if (d.scissor) dev.SetScissor(*d.scissor);
+}
+
 // Where a src_w x src_h frame is shown in a dst_w x dst_h output: scaled
 // to fit with its aspect kept and centred, black around it (letterbox or
 // pillarbox). Backends present the front buffer through it; the window
@@ -282,11 +360,13 @@ uint32_t PrimitiveCountFromVertices(uint32_t prim_type, uint32_t verts);
 enum class Backend {
   D3D9,  // dxvk-native; only in builds with RECOMP_HAVE_D3D9
   Gpu,   // SDL_GPU
+  Metal,  // Metal directly; only on Apple platforms
 };
 // Null if `b` is not in this build or cannot start on this host.
 std::unique_ptr<Device> CreateDevice(Backend b, SDL_Window* window);
 
 std::unique_ptr<Device> CreateD3D9Device(SDL_Window* window);
 std::unique_ptr<Device> CreateGpuDevice(SDL_Window* window);
+std::unique_ptr<Device> CreateMetalDevice(SDL_Window* window);
 
 }  // namespace recomp::gfx

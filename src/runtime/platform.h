@@ -70,6 +70,45 @@ uint64_t MonotonicNs();
 // clock_nanosleep with the thread's timer slack at 1 us; macOS:
 // mach_wait_until with the thread real-time while it waits).
 void SleepUntilNs(uint64_t t);
+// The same absolute deadline, but without changing this thread's
+// scheduling class: for a thread that called SetThreadRealTime, whose own
+// policy a temporary one would overwrite.
+void WaitUntilNs(uint64_t t);
+
+// ---- threads
+// Gives the calling thread the host scheduling class for a Windows thread
+// priority (THREAD_PRIORITY_*: -15 idle .. 15 time critical). macOS: QoS
+// classes, user-interactive for highest and time critical (an audio
+// engine's thread), utility below normal. Linux: lower priorities only
+// (a nicer nice value; raising needs privileges).
+void SetThreadPriorityClass(int win_priority);
+// A host scheduling class chosen for what a thread does (GameConfig::
+// thread_qos). On Apple silicon the QoS class is the only say a process
+// has in where a thread runs: user-interactive and user-initiated prefer
+// performance cores, utility prefers efficiency cores. `relative` (-15..0)
+// ranks a thread below others of its class (a frame's job workers below
+// the threads that wait for them). Linux: utility is a nicer nice value;
+// the others leave the thread as it is (raising needs privileges).
+struct ThreadQos {
+  enum Class : uint8_t { kUtility, kUserInitiated, kUserInteractive };
+  Class cls = kUserInitiated;
+  int relative = 0;
+};
+// Gives the calling thread class q.
+void SetThreadQos(ThreadQos q);
+// The calling thread's host scheduling class, for logs ("user-interactive",
+// "utility -5", ...; "n/a" where there are none). Valid until the thread
+// calls it again.
+const char* ThreadQosName();
+// Names the calling thread where the host has names (a debugger, Instruments,
+// the stack and fault reports); at most 15 bytes are kept.
+void SetThreadName(const char* name);
+// Makes the calling thread real-time, as an audio render thread is: it is
+// woken every period_ns and may compute for computation_ns of it, done by
+// constraint_ns (macOS: a Mach time-constraint policy, preemptible; the
+// values are clamped to computation <= constraint <= period). Linux: not
+// attempted without privileges, false. True if the host granted it.
+bool SetThreadRealTime(uint64_t period_ns, uint64_t computation_ns, uint64_t constraint_ns);
 
 // ---- stacks
 // Runs fn() on [stack, stack + size) on the calling thread and returns

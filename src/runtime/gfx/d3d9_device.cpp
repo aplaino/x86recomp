@@ -310,7 +310,8 @@ class D3D9Device final : public Device {
     FatalF("gfx: translated shaders need the SDL_GPU backend (<ID>_GFX=gpu)");
   }
   void DestroyShader(ShaderId) override {}
-  void DrawShader(const ShaderDraw&) override {
+  void DrawShader(const ShaderDraw& d) override {
+    ApplyDrawState(*this, d);
     FatalF("gfx: translated shaders need the SDL_GPU backend (<ID>_GFX=gpu)");
   }
 

@@ -22,6 +22,7 @@
 #include "runtime/hle/kernel32_state.h"
 #include "runtime/lifted.h"
 #include "runtime/log.h"
+#include "runtime/perf.h"
 #include "runtime/platform.h"
 #include "runtime/runtime.h"
 #include "runtime/sse.h"
@@ -51,6 +52,11 @@ constexpr uint32_t kTlsArraySlots = 64;
 }  // namespace
 
 Thread* CurrentThread() { return t_current; }
+
+void ForEachThread(const std::function<void(Thread&)>& fn) {
+  std::lock_guard<std::mutex> l(g_threads_mu);
+  for (auto& [tid, t] : g_threads) fn(*t);
+}
 
 uint32_t GuestProcessorCount() {
   unsigned n = std::thread::hardware_concurrency();
@@ -268,6 +274,19 @@ static uint32_t RunGuestThread(Thread* t, gaddr entry,
   CheckHostFp();
   InstallSignalStack();
   RegisterGuestHostThread("guest", t->tid);
+  platform::ThreadQos qos;
+  if (g_proc->game.thread_qos && g_proc->game.thread_qos(entry, param ? *param : 0, &qos)) {
+    platform::SetThreadQos(qos);
+    t->qos_fixed = true;
+  } else if (t->priority) {
+    platform::SetThreadPriorityClass(t->priority);
+  }
+  if (perf::On()) {
+    char what[64];
+    std::snprintf(what, sizeof what, "starts at %08llX (param %08llX)", (unsigned long long)entry,
+                  (unsigned long long)(param ? *param : 0));
+    perf::NoteThread(t->tid, t->priority, what);
+  }
   uint32_t r;
   try {
     if (process_start) hle::AttachExeImports(t->ctx);
@@ -428,6 +447,7 @@ int RunProcess(const GameConfig& game, const std::string& exe_path,
     std::fclose(out);
   }
   StartWatchdog();
+  perf::Start();
   p.x64 = PeImage::IsX64File(exe_path);
   if (!p.mem.Reserve(p.x64 ? kArenaBits64 : 32)) FatalF("cannot reserve the guest arena");
   g_guest_base = p.mem.base();

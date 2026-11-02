@@ -18,6 +18,8 @@
 // Only the forms the supported games use are implemented; the lifter
 // reports the rest as unimplemented.
 
+#include <bit>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -32,90 +34,460 @@ inline constexpr uint32_t kMxcsrDefault = 0x1F80;  // all masked, RN
 template <typename T>
 inline T Lane(const Xmm& x, int i) {
   T v;
-  std::memcpy(&v, x.b + i * sizeof(T), sizeof(T));
+  std::memcpy(&v, x.data() + i * sizeof(T), sizeof(T));
   return v;
 }
 template <typename T>
 inline void SetLane(Xmm& x, int i, T v) {
-  std::memcpy(x.b + i * sizeof(T), &v, sizeof(T));
+  std::memcpy(x.data() + i * sizeof(T), &v, sizeof(T));
 }
 
 // `bytes` of guest memory at a, zero-extended to a register.
 inline Xmm Ld(const uint8_t* B, uint64_t a, int bytes) {
   Xmm x{};
-  std::memcpy(x.b, B + a, bytes);
+  std::memcpy(x.data(), B + a, bytes);
   return x;
 }
 inline void St(uint8_t* B, uint64_t a, const Xmm& x, int bytes) {
-  std::memcpy(B + a, x.b, bytes);
+  std::memcpy(B + a, x.data(), bytes);
 }
 // Legacy-SSE m128 operands other than movups/movupd/movdqu must be 16-byte
 // aligned (#GP otherwise): fatal, naming the instruction.
-void CheckAligned(Ctx& c, uint64_t a, uint64_t va);
+[[noreturn]] void Misaligned(uint64_t a, uint64_t va, unsigned align);
+inline void CheckAligned(Ctx& c, uint64_t a, uint64_t va) {
+  (void)c;
+  if (a & 15) Misaligned(a, va, 16);
+}
 // The same for VEX moves that require `align` (16 or 32) bytes.
-void CheckAligned(Ctx& c, uint64_t a, uint64_t va, unsigned align);
+inline void CheckAligned(Ctx& c, uint64_t a, uint64_t va, unsigned align) {
+  (void)c;
+  if (a & (align - 1)) Misaligned(a, va, align);
+}
 
 // ---- floating point ---------------------------------------------------
 enum Op : uint8_t { kAdd, kSub, kMul, kDiv };
 
+// Fast paths, inline in lifted code. Every SSE instruction of a game runs
+// through these, and nearly all see MXCSR as usual (exceptions masked,
+// round to nearest, no FTZ or DAZ, the precision flag already raised) and
+// operands and results that are normal or zero: then the host's IEEE
+// arithmetic gives the same bits and no new flag, and the work is a few
+// instructions at the call site (whose operation, precision and lane
+// count are constants there). Anything else goes to the full model in
+// sse.cpp (ArithModel, ComiModel).
+//
+// Whether MXCSR is as usual (`usual` below) is the lifted function's local
+// MU (lifted.h: LIFT_ENTER, LIFT_RELOAD), not a load of c.mxcsr at every
+// instruction: inside a function only LDMXCSR changes MXCSR's control bits
+// (the lifter recomputes MU after it), and the models only raise sticky
+// flags, which cannot make a usual MXCSR unusual. A stale false only
+// sends lanes to the exact model.
+//
+// The models are out of line, cold, and take and return registers by
+// value: a reference would take the address of the function's XMM locals
+// (X0..X7), which then live in memory at every instruction instead of in
+// host registers.
+namespace fast {
+
+template <bool D>
+struct Bits;
+template <>
+struct Bits<false> {
+  using U = uint32_t;
+  using F = float;
+  static constexpr U kExp = 0x7F800000u, kFrac = 0x007FFFFFu;
+};
+template <>
+struct Bits<true> {
+  using U = uint64_t;
+  using F = double;
+  static constexpr U kExp = 0x7FF0000000000000ull, kFrac = 0x000FFFFFFFFFFFFFull;
+};
+
+[[gnu::always_inline]] inline bool UsualMxcsr(uint32_t mxcsr) {
+  return (mxcsr & 0xFFE0u) == 0x1FA0u;
+}
+
+template <bool D>
+inline bool NormalOrZero(typename Bits<D>::U v) {
+  const typename Bits<D>::U e = v & Bits<D>::kExp;
+  return e != Bits<D>::kExp && (e || !(v & Bits<D>::kFrac));
+}
+
+// One lane of d op s, if the fast path covers it.
+template <bool D>
+inline bool ArithLane(Op op, typename Bits<D>::U a, typename Bits<D>::U b,
+                      typename Bits<D>::U* out) {
+  using U = typename Bits<D>::U;
+  using F = typename Bits<D>::F;
+  constexpr U kSign = U(1) << (sizeof(U) * 8 - 1);
+  if (!NormalOrZero<D>(a) || !NormalOrZero<D>(b)) return false;
+  const F x = std::bit_cast<F>(a), y = std::bit_cast<F>(b);
+  F r;
+  switch (op) {
+    case kAdd: r = x + y; break;
+    case kSub: r = x - y; break;
+    case kMul: r = x * y; break;
+    default: r = x / y; break;
+  }
+  const U v = std::bit_cast<U>(r);
+  const U e = v & Bits<D>::kExp;
+  if (e == Bits<D>::kExp) return false;  // overflow, a quotient by zero
+  if (!e) {
+    if (v & Bits<D>::kFrac) return false;  // denormal: underflow
+    // A zero product or quotient of non-zero operands underflowed.
+    if ((op == kMul || op == kDiv) && (a & ~kSign) && (b & ~kSign)) return false;
+  }
+  *out = v;
+  return true;
+}
+
+// RECOMP_SSE_HOST (a game's opt-in, for its lifted code): lanes computed
+// by the host without the checks. The same bits for every operand that is
+// not a NaN, denormals and infinities included (host FPCR: no flush to
+// zero, no default NaN); what differs is the sign and payload of the NaN
+// an invalid operation makes (x86 0xFFC00000, the host 0x7FC00000) and
+// MXCSR's exception flags, which nothing reads then. Requires MXCSR as
+// usual, as the checked path does.
+template <bool D>
+inline void HostArith(Op op, int lanes, Xmm& d, const Xmm& s) {
+  using F = typename Bits<D>::F;
+  Xmm r = d;
+  for (int i = 0; i < lanes; i++) {
+    const F x = Lane<F>(d, i), y = Lane<F>(s, i);
+    F v;
+    switch (op) {
+      case kAdd: v = x + y; break;
+      case kSub: v = x - y; break;
+      case kMul: v = x * y; break;
+      default: v = x / y; break;
+    }
+    SetLane<F>(r, i, v);
+  }
+  d = r;
+}
+
+// RECOMP_SSE_HOST: CMPPS/PD/SS/SD by the host's compares (pred < 8).
+template <bool D>
+inline void HostCmp(int lanes, Xmm& d, const Xmm& s, uint8_t pred) {
+  using U = typename Bits<D>::U;
+  using F = typename Bits<D>::F;
+  Xmm r = d;
+  for (int i = 0; i < lanes; i++) {
+    const F x = Lane<F>(d, i), y = Lane<F>(s, i);
+    bool v;
+    switch (pred) {
+      case 0: v = x == y; break;
+      case 1: v = x < y; break;
+      case 2: v = x <= y; break;
+      case 3: v = __builtin_isunordered(x, y); break;
+      case 4: v = !(x == y); break;
+      case 5: v = !(x < y); break;
+      case 6: v = !(x <= y); break;
+      default: v = !__builtin_isunordered(x, y); break;
+    }
+    SetLane<U>(r, i, v ? U(~U(0)) : U(0));
+  }
+  d = r;
+}
+
+// RECOMP_SSE_HOST: MINxx/MAXxx, d op s ? d : s on the lanes' bits.
+template <bool D>
+inline void HostMinMax(bool max, int lanes, Xmm& d, const Xmm& s) {
+  using U = typename Bits<D>::U;
+  using F = typename Bits<D>::F;
+  Xmm r = d;
+  for (int i = 0; i < lanes; i++) {
+    const F x = Lane<F>(d, i), y = Lane<F>(s, i);
+    const bool pick_d = max ? x > y : x < y;
+    SetLane<U>(r, i, pick_d ? Lane<U>(d, i) : Lane<U>(s, i));
+  }
+  d = r;
+}
+
+// RECOMP_SSE_HOST: CVT(T)PS2DQ / CVT(T)PD2DQ (MXCSR as usual). A lane is
+// converted by the host when its integer fits in int32; otherwise (NaN,
+// out of range) it is the indefinite 0x80000000. True if any lane was
+// (IE).
+template <bool D>
+inline bool HostCvtToDq(bool truncate, Xmm& d, const Xmm& s) {
+  using F = typename Bits<D>::F;
+  constexpr int kLanes = D ? 2 : 4;
+  Xmm r{};
+  bool bad = false;
+  for (int i = 0; i < kLanes; i++) {
+    F x = Lane<F>(s, i);
+    bool ok;
+    if (truncate) {
+      // Truncation keeps values above -2^31 - 1 (only a double has one
+      // between that and -2^31).
+      ok = D ? x > F(-2147483649.0) : x >= F(-2147483648.0);
+      ok = ok && x < F(2147483648.0);
+    } else {
+      x = D ? F(__builtin_roundeven(double(x))) : F(__builtin_roundevenf(float(x)));
+      ok = x >= F(-2147483648.0) && x < F(2147483648.0);
+    }
+    const int32_t v = int32_t(ok ? x : F(0));
+    SetLane<int32_t>(r, i, ok ? v : INT32_MIN);
+    bad |= !ok;
+  }
+  d = r;
+  return bad;
+}
+
+template <bool D>
+inline bool Arith(Op op, int lanes, Xmm& d, const Xmm& s) {
+  using U = typename Bits<D>::U;
+  Xmm r = d;
+  for (int i = 0; i < lanes; i++) {
+    U v;
+    if (!ArithLane<D>(op, Lane<U>(d, i), Lane<U>(s, i), &v)) return false;
+    SetLane<U>(r, i, v);
+  }
+  d = r;
+  return true;
+}
+
+}  // namespace fast
+
 // d = d op s, lane-wise: `lanes` lanes of double (dbl) or float. Scalar
 // forms pass lanes = 1 and keep the upper lanes of d.
-void Arith(Ctx& c, Op op, bool dbl, int lanes, Xmm& d, const Xmm& s,
-           uint64_t va);
+[[gnu::cold]] Xmm ArithModel(Ctx& c, Op op, bool dbl, int lanes, Xmm d, Xmm s, uint64_t va);
+// Always inlined: op, dbl and lanes are constants at every call site, so
+// the host path folds to the one instruction (out of line, a call and a
+// switch per SSE instruction).
+[[gnu::always_inline]] inline void Arith(Ctx& c, bool usual, Op op, bool dbl, int lanes,
+                                         Xmm& d, const Xmm& s, uint64_t va) {
+#ifdef RECOMP_SSE_HOST
+  if (usual) [[likely]] {
+    if (dbl)
+      fast::HostArith<true>(op, lanes, d, s);
+    else
+      fast::HostArith<false>(op, lanes, d, s);
+    return;
+  }
+#endif
+  if (usual &&
+      (dbl ? fast::Arith<true>(op, lanes, d, s) : fast::Arith<false>(op, lanes, d, s)))
+    [[likely]] return;
+  d = ArithModel(c, op, dbl, lanes, d, s, va);
+}
 
 // CMPPS/PD/SS/SD: each lane of d becomes all ones if `d pred s` holds,
 // else zero. pred is the imm8 (0 EQ, 1 LT, 2 LE, 3 UNORD, 4 NEQ, 5 NLT,
 // 6 NLE, 7 ORD).
-void Cmp(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s, uint8_t pred,
-         uint64_t va);
+[[gnu::cold]] Xmm CmpModel(Ctx& c, bool dbl, int lanes, Xmm d, Xmm s, uint8_t pred,
+                           uint64_t va);
+[[gnu::always_inline]] inline void Cmp(Ctx& c, bool usual, bool dbl, int lanes, Xmm& d,
+                                       const Xmm& s, uint8_t pred, uint64_t va) {
+#ifdef RECOMP_SSE_HOST
+  // The host's compares give every predicate's result, NaNs, zeros of
+  // either sign and denormals included; what differs is only MXCSR's
+  // IE/DE (see HostArith).
+  if (usual && pred < 8) [[likely]] {
+    if (dbl)
+      fast::HostCmp<true>(lanes, d, s, pred);
+    else
+      fast::HostCmp<false>(lanes, d, s, pred);
+    return;
+  }
+#endif
+  d = CmpModel(c, dbl, lanes, d, s, pred, va);
+}
 
 // (U)COMISS/SD of the low lanes: 0 greater, 1 less, 2 equal, 3 unordered
 // (the caller sets ZF/PF/CF). `ordered` = COMIS (invalid on QNaN too).
-int Comi(Ctx& c, bool dbl, bool ordered, const Xmm& a, const Xmm& b,
-         uint64_t va);
+// Normal or zero operands raise nothing: compared in place.
+[[gnu::cold]] int ComiModel(Ctx& c, bool dbl, bool ordered, Xmm a, Xmm b, uint64_t va);
+// Whether the low lanes of a and b compare in place: then the host's
+// ordered compare of them is Comi's result and the instruction changes no
+// flag. Normal or zero operands; with RECOMP_SSE_HOST every operand but a
+// NaN (unordered, maybe invalid), denormals' DE not kept (see HostArith).
+// The lifter tests this before a jump on the flags of a (U)COMIS, then
+// branches on the compare itself.
+[[gnu::always_inline]] inline bool ComiDirect(bool dbl, const Xmm& a, const Xmm& b) {
+#ifdef RECOMP_SSE_HOST
+  if (dbl) return !__builtin_isunordered(Lane<double>(a, 0), Lane<double>(b, 0));
+  return !__builtin_isunordered(Lane<float>(a, 0), Lane<float>(b, 0));
+#else
+  if (dbl)
+    return fast::NormalOrZero<true>(Lane<uint64_t>(a, 0)) &&
+           fast::NormalOrZero<true>(Lane<uint64_t>(b, 0));
+  return fast::NormalOrZero<false>(Lane<uint32_t>(a, 0)) &&
+         fast::NormalOrZero<false>(Lane<uint32_t>(b, 0));
+#endif
+}
+[[gnu::always_inline]] inline int Comi(Ctx& c, bool dbl, bool ordered, const Xmm& a,
+                                       const Xmm& b, uint64_t va) {
+  if (ComiDirect(dbl, a, b)) {
+    if (dbl) {
+      const double p = Lane<double>(a, 0), q = Lane<double>(b, 0);
+      return p > q ? 0 : p < q ? 1 : 2;
+    }
+    const float p = Lane<float>(a, 0), q = Lane<float>(b, 0);
+    return p > q ? 0 : p < q ? 1 : 2;
+  }
+  return ComiModel(c, dbl, ordered, a, b, va);
+}
 
 // SQRTSD/SQRTSS/SQRTPD/SQRTPS: d = sqrt(s), lane-wise; scalar forms keep
 // the upper lanes of d.
-void Sqrt(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s, uint64_t va);
+[[gnu::cold]] Xmm SqrtModel(Ctx& c, bool dbl, int lanes, Xmm d, Xmm s, uint64_t va);
+[[gnu::always_inline]] inline void Sqrt(Ctx& c, bool usual, bool dbl, int lanes, Xmm& d,
+                                        const Xmm& s, uint64_t va) {
+#ifdef RECOMP_SSE_HOST
+  // The host's square root is correctly rounded too: the same bits but for
+  // the NaN of a negative operand (see HostArith).
+  if (usual) [[likely]] {
+    Xmm r = d;
+    for (int i = 0; i < lanes; i++) {
+      if (dbl)
+        SetLane<double>(r, i, std::sqrt(Lane<double>(s, i)));
+      else
+        SetLane<float>(r, i, std::sqrt(Lane<float>(s, i)));
+    }
+    d = r;
+    return;
+  }
+#endif
+  d = SqrtModel(c, dbl, lanes, d, s, va);
+}
 
 // RSQRTPS: d = 1/sqrt(s) in all four float lanes (see above). No flags:
 // ±0 and denormals give ±inf, negative values the default NaN, +inf +0,
 // NaNs themselves quieted.
-void Rsqrt(Xmm& d, const Xmm& s);
 uint32_t RsqrtLane(uint32_t x);
+inline void Rsqrt(Xmm& d, const Xmm& s) {
+  Xmm r;
+  for (int i = 0; i < 4; i++) SetLane<uint32_t>(r, i, RsqrtLane(Lane<uint32_t>(s, i)));
+  d = r;
+}
 // RCPPS: d = 1/s in all four float lanes, by the same rule as RSQRTPS (no
 // architectural result): the correctly rounded quotient. No flags.
-void Rcp(Xmm& d, const Xmm& s);
 uint32_t RcpLane(uint32_t x);
+inline void Rcp(Xmm& d, const Xmm& s) {
+  Xmm r;
+  for (int i = 0; i < 4; i++) SetLane<uint32_t>(r, i, RcpLane(Lane<uint32_t>(s, i)));
+  d = r;
+}
 
 // CVTSI2SD: the low lane of d = (double)v (always exact).
-void Cvtsi2sd(Xmm& d, int32_t v);
+uint64_t Cvtsi2sdLane(int32_t v);
+inline void Cvtsi2sd(Xmm& d, int32_t v) { SetLane<uint64_t>(d, 0, Cvtsi2sdLane(v)); }
 
 // CVT(T)SS2SI / CVT(T)SD2SI of the low lane of s.
-uint32_t CvtToI32(Ctx& c, bool dbl, const Xmm& s, bool truncate, uint64_t va);
+[[gnu::cold]] uint32_t CvtToI32Model(Ctx& c, bool dbl, Xmm s, bool truncate, uint64_t va);
+[[gnu::always_inline]] inline uint32_t CvtToI32(Ctx& c, bool usual, bool dbl, const Xmm& s,
+                                                bool truncate, uint64_t va) {
+#ifdef RECOMP_SSE_HOST
+  // Truncated, or rounded to nearest even (MXCSR as usual); NaN and out
+  // of range give 0x80000000, as x86 does.
+  if (usual) [[likely]] {
+    double x = dbl ? Lane<double>(s, 0) : double(Lane<float>(s, 0));
+    if (truncate) {
+      if (x > -2147483649.0 && x < 2147483648.0) return uint32_t(int32_t(x));
+    } else {
+      x = std::nearbyint(x);
+      if (x >= -2147483648.0 && x < 2147483648.0) return uint32_t(int32_t(x));
+    }
+    return 0x80000000u;
+  }
+#endif
+  return CvtToI32Model(c, dbl, s, truncate, va);
+}
 
 // CVT(T)SS2SI / CVT(T)SD2SI to a 64-bit register.
-uint64_t CvtToI64(Ctx& c, bool dbl, const Xmm& s, bool truncate, uint64_t va);
+uint64_t CvtToI64(Ctx& c, bool dbl, Xmm s, bool truncate, uint64_t va);
 
 // MINSS/SD/PS/PD (max = false) and MAXSS/SD/PS/PD, lane-wise: d op s ? d : s.
 // A NaN in either operand (invalid, quiet ones too) or equal values,
 // zeros of either sign included, give s. Scalar forms keep d's upper lanes.
-void MinMax(Ctx& c, bool max, bool dbl, int lanes, Xmm& d, const Xmm& s,
-            uint64_t va);
+[[gnu::cold]] Xmm MinMaxModel(Ctx& c, bool max, bool dbl, int lanes, Xmm d, Xmm s,
+                              uint64_t va);
+[[gnu::always_inline]] inline void MinMax(Ctx& c, bool usual, bool max, bool dbl, int lanes,
+                                          Xmm& d, const Xmm& s, uint64_t va) {
+#ifdef RECOMP_SSE_HOST
+  // The same rule on the host's compare picks the same lane bits (a NaN
+  // or an equal pair fails it and gives s); only IE/DE differ (see
+  // HostArith).
+  if (usual) [[likely]] {
+    if (dbl)
+      fast::HostMinMax<true>(max, lanes, d, s);
+    else
+      fast::HostMinMax<false>(max, lanes, d, s);
+    return;
+  }
+#endif
+  d = MinMaxModel(c, max, dbl, lanes, d, s, va);
+}
 
 // CVTSS2SD / CVTPS2PD (to_dbl, 1 or 2 lanes) and CVTSD2SS / CVTPD2PS.
 // Scalar forms keep d's other lanes; CVTPD2PS zeroes its upper half.
-void CvtFloat(Ctx& c, bool to_dbl, int lanes, Xmm& d, const Xmm& s, uint64_t va);
+[[gnu::cold]] Xmm CvtFloatModel(Ctx& c, bool to_dbl, int lanes, Xmm d, Xmm s, uint64_t va);
+[[gnu::always_inline]] inline void CvtFloat(Ctx& c, bool usual, bool to_dbl, int lanes, Xmm& d,
+                                            const Xmm& s, uint64_t va) {
+#ifdef RECOMP_SSE_HOST
+  // Widening is exact; narrowing rounds to nearest even on both (MXCSR as
+  // usual); NaNs keep their payload, quieted, on both.
+  if (usual) [[likely]] {
+    Xmm r = d;
+    if (to_dbl) {
+      const float a = Lane<float>(s, 0), b = Lane<float>(s, 1);
+      SetLane<double>(r, 0, double(a));
+      if (lanes == 2) SetLane<double>(r, 1, double(b));
+    } else {
+      const double a = Lane<double>(s, 0), b = Lane<double>(s, 1);
+      SetLane<float>(r, 0, float(a));
+      if (lanes == 2) {
+        SetLane<float>(r, 1, float(b));
+        SetLane<uint64_t>(r, 1, 0);
+      }
+    }
+    d = r;
+    return;
+  }
+#endif
+  d = CvtFloatModel(c, to_dbl, lanes, d, s, va);
+}
 
 // CVTSI2SS / CVTSI2SD of a 32-bit or 64-bit (src64) integer into the low
 // lane, rounded by MXCSR (only int64 -> double and int -> float can be
 // inexact).
-void CvtIntToF(Ctx& c, bool dbl, bool src64, uint64_t v, Xmm& d, uint64_t va);
+[[gnu::cold]] Xmm CvtIntToFModel(Ctx& c, bool dbl, bool src64, uint64_t v, Xmm d, uint64_t va);
+[[gnu::always_inline]] inline void CvtIntToF(Ctx& c, bool usual, bool dbl, bool src64, uint64_t v,
+                                             Xmm& d, uint64_t va) {
+#ifdef RECOMP_SSE_HOST
+  if (usual) [[likely]] {  // round to nearest even on both
+    if (dbl)
+      SetLane<double>(d, 0, src64 ? double(int64_t(v)) : double(int32_t(v)));
+    else
+      SetLane<float>(d, 0, src64 ? float(int64_t(v)) : float(int32_t(v)));
+    return;
+  }
+#endif
+  d = CvtIntToFModel(c, dbl, src64, v, d, va);
+}
 
 // CVTTPS2DQ / CVTPS2DQ (truncate false) and CVTTPD2DQ / CVTPD2DQ (dbl,
 // two lanes into the low half, the upper one zeroed): float lanes to
 // int32, 0x80000000 for NaN and out of range (invalid).
-void CvtToDq(Ctx& c, bool dbl, bool truncate, Xmm& d, const Xmm& s, uint64_t va);
+[[gnu::cold]] Xmm CvtToDqModel(Ctx& c, bool dbl, bool truncate, Xmm s, uint64_t va);
+[[gnu::always_inline]] inline void CvtToDq(Ctx& c, bool usual, bool dbl, bool truncate, Xmm& d,
+                                           const Xmm& s, uint64_t va) {
+#ifdef RECOMP_SSE_HOST
+  // Exact, MXCSR included: the host converts in-range lanes (truncated,
+  // or rounded to nearest even: MXCSR as usual); the others are set to
+  // the indefinite here, since the host saturates (and gives 0 for NaN),
+  // and raise IE. PE is set already.
+  if (usual) [[likely]] {
+    const bool bad = dbl ? fast::HostCvtToDq<true>(truncate, d, s)
+                         : fast::HostCvtToDq<false>(truncate, d, s);
+    if (bad) c.mxcsr |= 1u;  // IE
+    return;
+  }
+#endif
+  d = CvtToDqModel(c, dbl, truncate, s, va);
+}
 
 // RCPSS: the low lane of d = 1/(the low lane of s), as RcpLane.
 inline void RcpSs(Xmm& d, const Xmm& s) {
@@ -127,7 +499,21 @@ inline void RsqrtSs(Xmm& d, const Xmm& s) {
 }
 
 // CVTDQ2PS: four int32 lanes to float, rounded by MXCSR.
-void Cvtdq2ps(Ctx& c, Xmm& d, const Xmm& s, uint64_t va);
+[[gnu::cold]] Xmm Cvtdq2psModel(Ctx& c, Xmm s, uint64_t va);
+[[gnu::always_inline]] inline void Cvtdq2ps(Ctx& c, bool usual, Xmm& d, const Xmm& s,
+                                            uint64_t va) {
+#ifdef RECOMP_SSE_HOST
+  // Exact, MXCSR included: rounded to nearest even on both, and PE (the
+  // only flag it can raise) is set already.
+  if (usual) [[likely]] {
+    Xmm r;
+    for (int i = 0; i < 4; i++) SetLane<float>(r, i, float(Lane<int32_t>(s, i)));
+    d = r;
+    return;
+  }
+#endif
+  d = Cvtdq2psModel(c, s, va);
+}
 
 // CVTDQ2PD: the two low int32 lanes of s as doubles (always exact).
 inline Xmm Cvtdq2pd(const Xmm& s) {
@@ -141,19 +527,22 @@ inline Xmm Cvtdq2pd(const Xmm& s) {
 
 // LDMXCSR: reserved bits set would #GP: fatal.
 void Ldmxcsr(Ctx& c, uint32_t v, uint64_t va);
+// Called with each value LDMXCSR loads and its guest address when set
+// (the runtime's <ID>_PERF counters).
+extern void (*g_ldmxcsr_note)(uint32_t v, uint64_t va);
 
 // ---- bitwise and integer ----------------------------------------------
 inline void And(Xmm& d, const Xmm& s) {
-  for (int i = 0; i < 16; i++) d.b[i] &= s.b[i];
+  d.b &= s.b;
 }
 inline void AndNot(Xmm& d, const Xmm& s) {
-  for (int i = 0; i < 16; i++) d.b[i] = uint8_t(~d.b[i] & s.b[i]);
+  d.b = ~d.b & s.b;
 }
 inline void Or(Xmm& d, const Xmm& s) {
-  for (int i = 0; i < 16; i++) d.b[i] |= s.b[i];
+  d.b |= s.b;
 }
 inline void Xor(Xmm& d, const Xmm& s) {
-  for (int i = 0; i < 16; i++) d.b[i] ^= s.b[i];
+  d.b ^= s.b;
 }
 
 // PCMPEQB/W/D: lanes of type T equal -> all ones.
@@ -288,8 +677,8 @@ inline void Extend(Xmm& d, const Xmm& s) {
 // PALIGNR (SSSE3): bytes n.. of the 32-byte d:s (d high), zero past it.
 inline void Alignr(Xmm& d, const Xmm& s, uint8_t n) {
   uint8_t t[32];
-  std::memcpy(t, s.b, 16);
-  std::memcpy(t + 16, d.b, 16);
+  std::memcpy(t, s.data(), 16);
+  std::memcpy(t + 16, d.data(), 16);
   Xmm r;
   for (int i = 0; i < 16; i++) r.b[i] = n + i < 32 ? t[n + i] : 0;
   d = r;

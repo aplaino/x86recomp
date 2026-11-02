@@ -234,4 +234,9 @@ std::vector<XInputPad> XInputPads() {
   return pads;
 }
 
+// The same handlers by name, for GetProcAddress(xinput1_3.dll, "XInputGetState").
+static Registrar name_XInputGetState{"xinput1_3.dll", "XInputGetState", 2, &hle_XInputGetState};
+static Registrar name_XInputSetState{"xinput1_3.dll", "XInputSetState", 2, &hle_XInputSetState};
+static Registrar name_XInputGetCapabilities{"xinput1_3.dll", "XInputGetCapabilities", 3, &hle_XInputGetCapabilities};
+
 }  // namespace recomp::hle

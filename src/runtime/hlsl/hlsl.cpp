@@ -51,6 +51,45 @@ int VaryingLocation(Semantic s) {
   }
 }
 
+const char* UnwrittenVarying(Semantic s) {
+  if (s.usage == kColor) return s.index == 0 ? "vec4(1.0)" : "vec4(0.0, 0.0, 0.0, 1.0)";
+  if (s.usage == kFog) return "vec4(1.0, 0.0, 0.0, 1.0)";
+  return "vec4(0.0)";
+}
+
+uint32_t VaryingMask(const Program& p) {
+  uint32_t m = 0;
+  for (const Semantic& s : p.varyings) {
+    int l = VaryingLocation(s);
+    if (l >= 0) m |= 1u << l;
+  }
+  return m;
+}
+
+// The translators declare each input on a line of its own:
+// "layout(location = L) [qualifier ]in vec4 NAME;".
+std::string GlslWithDefaultInputs(const Program& ps, uint32_t written) {
+  std::string g = ps.glsl;
+  for (const Semantic& s : ps.varyings) {
+    int l = VaryingLocation(s);
+    if (l < 0 || (written & (1u << l))) continue;
+    const std::string head = "layout(location = " + std::to_string(l) + ") ";
+    for (size_t at = 0; at < g.size();) {
+      size_t end = g.find('\n', at);
+      if (end == std::string::npos) end = g.size();
+      std::string_view line(g.data() + at, end - at);
+      size_t in = line.find(" in vec4 ");
+      if (line.compare(0, head.size(), head) == 0 && in != std::string_view::npos && line.back() == ';') {
+        std::string name(line.substr(in + 9, line.size() - in - 10));
+        g.replace(at, end - at, "const vec4 " + name + " = " + UnwrittenVarying(s) + ";");
+        break;
+      }
+      at = end + 1;
+    }
+  }
+  return g;
+}
+
 namespace {
 
 struct Limits {

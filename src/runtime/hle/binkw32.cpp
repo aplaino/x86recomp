@@ -10,6 +10,12 @@
 // audio tracks; by default the first one plays. Each track has its volume
 // (BinkSetVolume by track ID).
 //
+// Bink 1.9's frame buffers: a game that draws the planes itself (in a
+// shader) asks for their sizes (BinkGetFrameBuffersInfo), allocates them
+// and registers them (BinkRegisterFrameBuffers); each decoded frame then
+// goes into the next of its two plane sets as Y, cR (V), cB (U) and A
+// planes, FrameNum naming the set that holds it, instead of a BGRA copy.
+//
 // The BINK struct is a guest block: games read Width, Height, Frames
 // (+0x08), FrameNum (+0x0C) and, in 1.8, NumTracks (+0xD0) and the track
 // ID list (+0x250) directly.
@@ -81,6 +87,7 @@ struct Movie {
   bool started = false, paused = false;
   Clock::time_point start, paused_at;
   bool video_eof = false;
+  uint32_t frame_buffers = 0;  // BINKFRAMEBUFFERS registered by the game
 
   ~Movie() {
     {
@@ -189,6 +196,17 @@ void QueueAudio(Movie& m, Track& t, AVFrame* f) {
   if (out_ch != t.queue->channels()) return;
   std::vector<float> buf(size_t(f->nb_samples) * out_ch);
   audio::ConvertFrame(f, out_ch, buf.data());
+  // RECOMP_AUDIO_DUMP=dir: the decoded movie audio, raw float, to
+  // dir/bink_<rate>_<channels>.f32.
+  if (const char* dir = std::getenv("RECOMP_AUDIO_DUMP"); dir && *dir) {
+    static FILE* dump = nullptr;
+    if (!dump) {
+      char path[1024];
+      std::snprintf(path, sizeof path, "%s/bink_%d_%d.f32", dir, f->sample_rate, out_ch);
+      dump = std::fopen(path, "wb");
+    }
+    if (dump) std::fwrite(buf.data(), sizeof(float), buf.size(), dump);
+  }
   t.queue->Push(buf.data(), f->nb_samples);
 }
 
@@ -206,11 +224,44 @@ void ConvertVideo(Movie& m) {
 
 // Demuxes until the next video frame is decoded (queueing audio met on
 // the way). False at the end of the movie.
+// BINKFRAMEBUFFERS: TotalFrames, YABufferWidth, YABufferHeight,
+// cRcBBufferWidth, cRcBBufferHeight, FrameNum, then 2 sets of 4 BINKPLANEs
+// { Allocate, Buffer, BufferPitch } (Y, cR, cB, A).
+constexpr uint32_t kFbFrameNum = 20, kFbSets = 24, kFbSetSize = 48, kFbMaxSets = 2;
+
+void CopyPlane(const uint8_t* src, int src_pitch, int w, int h, uint32_t plane) {
+  const uint32_t dst = Rd32(plane + 4), pitch = Rd32(plane + 8);
+  if (!dst || !pitch) return;
+  for (int y = 0; y < h; y++)
+    std::memcpy(GPtr(dst + uint32_t(y) * pitch), src + size_t(y) * size_t(src_pitch),
+                std::min<uint32_t>(uint32_t(w), pitch));
+}
+
+// The decoded frame (YUV 4:2:0, with alpha in YUVA) into the next plane set.
+void FillFrameBuffers(Movie& m) {
+  const uint32_t fb = m.frame_buffers;
+  const uint32_t total = std::clamp<uint32_t>(Rd32(fb), 1, kFbMaxSets);
+  const uint32_t set_index = (Rd32(fb + kFbFrameNum) + 1) % total;
+  const uint32_t set = fb + kFbSets + set_index * kFbSetSize;
+  const AVFrame* f = m.frame;
+  const int cw = (f->width + 1) / 2, ch = (f->height + 1) / 2;
+  CopyPlane(f->data[0], f->linesize[0], f->width, f->height, set + 0);  // Y
+  CopyPlane(f->data[2], f->linesize[2], cw, ch, set + 12);              // cR = V
+  CopyPlane(f->data[1], f->linesize[1], cw, ch, set + 24);              // cB = U
+  if (f->format == AV_PIX_FMT_YUVA420P)
+    CopyPlane(f->data[3], f->linesize[3], f->width, f->height, set + 36);  // A
+  Wr32(fb + kFbFrameNum, set_index);
+}
+
 bool DecodeNextFrame(Movie& m) {
   for (;;) {
     int r = avcodec_receive_frame(m.vdec, m.frame);
     if (r == 0) {
-      ConvertVideo(m);
+      if (m.frame_buffers &&
+          (m.frame->format == AV_PIX_FMT_YUV420P || m.frame->format == AV_PIX_FMT_YUVA420P))
+        FillFrameBuffers(m);
+      else
+        ConvertVideo(m);
       av_frame_unref(m.frame);
       m.decoded++;
       return true;
@@ -614,6 +665,68 @@ HLE_NAMED("binkw32.dll", "_BinkGoto@12", BinkGoto, 3) {
   m->start = Clock::now() - std::chrono::duration_cast<Clock::duration>(
                                 std::chrono::duration<double>((target - 1) / m->fps));
   SyncGuest(*m);
+  return 0;
+}
+
+// BinkSetMemory(alloc, free): the decoder's own allocations are host ones.
+HLE_NAMED("binkw32.dll", "_BinkSetMemory@8", BinkSetMemory, 2) { return 0; }
+
+HLE_NAMED("binkw32.dll", "_BinkShouldSkip@4", BinkShouldSkip, 1) { return 0; }
+
+// BinkGetKeyFrame(HBINK, frame, flags): every frame is treated as a key
+// frame (seeking decodes from the stream's start anyway).
+HLE_NAMED("binkw32.dll", "_BinkGetKeyFrame@12", BinkGetKeyFrame, 3) { return Arg(c, 1); }
+
+// BinkGetFrameBuffersInfo(HBINK, BINKFRAMEBUFFERS*): two plane sets of the
+// movie's size (chroma at half), alpha only for movies that have it.
+HLE_NAMED("binkw32.dll", "_BinkGetFrameBuffersInfo@8", BinkGetFrameBuffersInfo, 2) {
+  std::lock_guard<std::mutex> l(g_mu);
+  Movie* m = Find(Arg(c, 0), "BinkGetFrameBuffersInfo");
+  const uint32_t fb = Arg(c, 1);
+  if (!m || !fb) return 0;
+  std::memset(GPtr(fb), 0, kFbSets + kFbMaxSets * kFbSetSize);
+  const bool alpha = m->vdec && m->vdec->pix_fmt == AV_PIX_FMT_YUVA420P;
+  Wr32(fb + 0, kFbMaxSets);
+  Wr32(fb + 4, uint32_t(m->w));
+  Wr32(fb + 8, uint32_t(m->h));
+  Wr32(fb + 12, uint32_t(m->w + 1) / 2);
+  Wr32(fb + 16, uint32_t(m->h + 1) / 2);
+  Wr32(fb + kFbFrameNum, kFbMaxSets - 1);  // the first frame goes into set 0
+  for (uint32_t i = 0; i < kFbMaxSets; i++) {
+    const uint32_t set = fb + kFbSets + i * kFbSetSize;
+    for (uint32_t p = 0; p < 3; p++) Wr32(set + 12 * p, 1);  // Allocate
+    Wr32(set + 36, alpha ? 1 : 0);
+  }
+  return 0;
+}
+
+// BinkRegisterFrameBuffers(HBINK, BINKFRAMEBUFFERS*): decode into them from
+// now on (the struct stays the game's; its pointers are read per frame).
+HLE_NAMED("binkw32.dll", "_BinkRegisterFrameBuffers@8", BinkRegisterFrameBuffers, 2) {
+  std::lock_guard<std::mutex> l(g_mu);
+  Movie* m = Find(Arg(c, 0), "BinkRegisterFrameBuffers");
+  if (m) m->frame_buffers = Arg(c, 1);
+  return 0;
+}
+
+// BinkGetSummary(HBINK, BINKSUMMARY*): size, frame rates and frame counts;
+// the timing statistics stay zero.
+HLE_NAMED("binkw32.dll", "_BinkGetSummary@8", BinkGetSummary, 2) {
+  std::lock_guard<std::mutex> l(g_mu);
+  Movie* m = Find(Arg(c, 0), "BinkGetSummary");
+  const uint32_t out = Arg(c, 1);
+  if (!m || !out) return 0;
+  std::memset(GPtr(out), 0, 0x68);
+  const uint32_t rate = Rd32(m->guest + kFrameRate), div = Rd32(m->guest + kFrameRateDiv);
+  Wr32(out + 0x00, uint32_t(m->w));
+  Wr32(out + 0x04, uint32_t(m->h));
+  Wr32(out + 0x08, uint32_t(m->frames * 1000.0 / m->fps));  // TotalTime (ms)
+  Wr32(out + 0x0C, rate);                                    // FileFrameRate
+  Wr32(out + 0x10, div);                                     // FileFrameRateDiv
+  Wr32(out + 0x14, rate);                                    // FrameRate
+  Wr32(out + 0x18, div);                                     // FrameRateDiv
+  Wr32(out + 0x20, m->frames);                               // TotalFrames
+  Wr32(out + 0x24, m->decoded);                              // TotalPlayedFrames
   return 0;
 }
 

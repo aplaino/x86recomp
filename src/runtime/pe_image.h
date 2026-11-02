@@ -77,6 +77,9 @@ struct PeImage {
   std::vector<PeImport> imports;
   std::vector<PeExport> exports;  // forwarded exports are left out
   std::vector<PeFunction> functions;  // x64 .pdata, in address order
+  // Every HIGHLOW/DIR64 base relocation site: each holds an absolute
+  // address (a pointer in data, or an address operand in code).
+  std::vector<gaddr> fixups;
   PeTls tls;
   bool has_tls = false;
 

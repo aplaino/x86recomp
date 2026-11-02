@@ -42,6 +42,12 @@ std::unique_ptr<Device> CreateDevice(Backend b, SDL_Window* window) {
 #endif
     case Backend::Gpu:
       return CreateGpuDevice(window);
+    case Backend::Metal:
+#if defined(__APPLE__)
+      return CreateMetalDevice(window);
+#else
+      return nullptr;
+#endif
   }
   return nullptr;
 }

@@ -24,7 +24,7 @@ void PresentFrame(gfx::Device& dev, int w, int h);
 // screenshot request; any thread).
 void RequestShot(const std::string& path);
 
-// The gfx::Device backend every graphics API uses: <ID>_GFX=d3d9 or gpu;
+// The gfx::Device backend every graphics API uses: <ID>_GFX=d3d9, gpu or metal;
 // by default d3d9 where the build has it, else SDL_GPU.
 gfx::Backend GfxBackend();
 // SDL_CreateWindow flags the backend needs on top-level windows.

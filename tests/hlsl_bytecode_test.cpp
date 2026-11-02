@@ -201,6 +201,61 @@ std::vector<Case> Cases() {
   return cs;
 }
 
+// ReadBytecode finds END by stepping over instructions: def values that
+// look like a comment (low half 0xFFFE) or END must not stop it.
+int ReadChecks() {
+  int failures = 0;
+  for (int major : {1, 3}) {
+    Asm a(true, major, major == 1 ? 1 : 0);
+    a.I(81, {Dst(C, 0), 0u, 0xBF7FFFFEu, 0x0000FFFFu, F(1)});  // def c0, 0, -0.99999988, ...
+    a.I(MOV, {Dst(major == 1 ? R : OC, 0), Src(C, 0)});
+    Tokens t = a.End();
+    t.push_back(0xDEADBEEF);  // past the end
+    Tokens r = recomp::hlsl::ReadBytecode([&](size_t i) { return t[i]; }, t.size());
+    if (r.size() != t.size() - 1) {
+      std::printf("FAIL read sm%d: %zu of %zu tokens\n", major, r.size(), t.size() - 1);
+      failures++;
+    } else {
+      std::printf("ok read sm%d\n", major);
+    }
+  }
+  Asm a(true, 3, 0);
+  a.I(MOV, {Dst(OC, 0), Src(C, 0)});
+  Tokens t = a.End();
+  t.pop_back();  // no END
+  if (!recomp::hlsl::ReadBytecode([&](size_t i) { return t[i]; }, t.size()).empty()) {
+    std::printf("FAIL read: a function without END\n");
+    failures++;
+  }
+  return failures;
+}
+
+// GlslWithDefaultInputs: unwritten inputs become constants, the rest stay.
+int DefaultInputChecks() {
+  Asm a(true, 3, 0);
+  a.Dcl(5, 0, Dst(V, 0));   // TEXCOORD0
+  a.Dcl(10, 0, Dst(V, 1));  // COLOR0
+  a.Dcl(5, 9, Dst(V, 2));   // TEXCOORD9
+  a.I(ADD, {Dst(R, 0), Src(V, 0), Src(V, 1)});
+  a.I(ADD, {Dst(OC, 0), Src(R, 0), Src(V, 2)});
+  Tokens t = a.End();
+  Program p;
+  std::string err;
+  if (!recomp::hlsl::TranslateBytecode(t.data(), t.size(), &p, &err)) {
+    std::printf("FAIL default inputs: %s\n", err.c_str());
+    return 1;
+  }
+  std::string g = recomp::hlsl::GlslWithDefaultInputs(p, recomp::hlsl::VaryingMask(p) & ~((1u << 16) | (1u << 9)));
+  bool ok = g.find("layout(location = 0) in vec4") != std::string::npos &&
+            g.find("const vec4 r_var16 = vec4(1.0);") != std::string::npos &&
+            g.find("const vec4 r_var9 = vec4(0.0);") != std::string::npos &&
+            g.find("layout(location = 9)") == std::string::npos &&
+            g.find("layout(location = 0) out vec4") != std::string::npos;
+  std::printf("%s default inputs\n", ok ? "ok" : "FAIL");
+  if (!ok) std::printf("%s\n", g.c_str());
+  return ok ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -239,5 +294,6 @@ int main(int argc, char** argv) {
     }
     std::printf("ok %s\n", c.name);
   }
+  failures += ReadChecks() + DefaultInputChecks();
   return failures ? 1 : 0;
 }

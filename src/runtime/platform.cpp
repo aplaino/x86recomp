@@ -11,16 +11,19 @@
 #include "runtime/platform.h"
 
 #include <errno.h>
+#include <pthread.h>
+#include <sys/resource.h>
 #include <signal.h>
 #include <time.h>
 #include <ucontext.h>
+
+#include <cstdio>
 
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <mach/thread_policy.h>
-#include <pthread.h>
 #else
 #include <sys/prctl.h>
 #endif
@@ -97,18 +100,23 @@ FaultContext ReadFaultContext(const void* uc) {
 }
 
 #if defined(__APPLE__)
-uint64_t MonotonicNs() { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
-
-void SleepUntilNs(uint64_t t) {
-  // CLOCK_UPTIME_RAW is mach_absolute_time in nanoseconds.
+namespace {
+// Mach counts durations and deadlines in absolute-time units, and
+// CLOCK_UPTIME_RAW is mach_absolute_time in nanoseconds.
+uint64_t MachTicks(uint64_t ns) {
   static const mach_timebase_info_data_t tb = [] {
     mach_timebase_info_data_t i;
     mach_timebase_info(&i);
     return i;
   }();
-  auto ticks = [](uint64_t ns) {
-    return uint64_t((unsigned __int128)ns * tb.denom / tb.numer);
-  };
+  return uint64_t((unsigned __int128)ns * tb.denom / tb.numer);
+}
+}  // namespace
+
+uint64_t MonotonicNs() { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+
+void SleepUntilNs(uint64_t t) {
+  auto ticks = MachTicks;
   // A timeshare thread's timer gets coalescing leeway: it woke 1-3.5 ms
   // late (no QoS class, latency tier or task role brought it under 1 ms).
   // A time-constraint (real-time) thread's timer has none and wakes
@@ -130,6 +138,17 @@ void SleepUntilNs(uint64_t t) {
   }
 }
 #else
+namespace {
+// The default slack (50 us) would delay every wake-up by about that.
+void LowTimerSlack() {
+  static thread_local bool set = false;
+  if (!set) {
+    prctl(PR_SET_TIMERSLACK, 1UL, 0UL, 0UL, 0UL);
+    set = true;
+  }
+}
+}  // namespace
+
 uint64_t MonotonicNs() {
   timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -137,12 +156,7 @@ uint64_t MonotonicNs() {
 }
 
 void SleepUntilNs(uint64_t t) {
-  // The default slack (50 us) would delay every wake-up by about that.
-  static thread_local bool slack_set = false;
-  if (!slack_set) {
-    prctl(PR_SET_TIMERSLACK, 1UL, 0UL, 0UL, 0UL);
-    slack_set = true;
-  }
+  LowTimerSlack();
   timespec ts;
   ts.tv_sec = time_t(t / 1000000000u);
   ts.tv_nsec = long(t % 1000000000u);
@@ -150,6 +164,104 @@ void SleepUntilNs(uint64_t t) {
   }
 }
 #endif
+
+void WaitUntilNs(uint64_t t) {
+#if defined(__APPLE__)
+  // The same absolute deadline as SleepUntilNs, without touching this
+  // thread's scheduling policy: a thread that made itself real-time
+  // (SetThreadRealTime) keeps that policy across the wait.
+  while (MonotonicNs() < t) mach_wait_until(MachTicks(t));
+#else
+  LowTimerSlack();
+  timespec ts;
+  ts.tv_sec = time_t(t / 1000000000u);
+  ts.tv_nsec = long(t % 1000000000u);
+  while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr) == EINTR) {
+  }
+#endif
+}
+
+bool SetThreadRealTime(uint64_t period_ns, uint64_t computation_ns, uint64_t constraint_ns) {
+#if defined(__APPLE__)
+  // What a Core Audio render thread runs under: a time-constraint policy,
+  // so the scheduler wakes it on its period whatever else the machine
+  // does (a timeshare thread the game's threads can starve).
+  const uint64_t constraint = constraint_ns < period_ns ? constraint_ns : period_ns;
+  const uint64_t computation = computation_ns < constraint ? computation_ns : constraint;
+  const thread_act_t self = pthread_mach_thread_np(pthread_self());
+  thread_time_constraint_policy_data_t rt = {};
+  rt.period = uint32_t(MachTicks(period_ns));
+  rt.constraint = uint32_t(MachTicks(constraint));
+  rt.computation = uint32_t(MachTicks(computation));
+  rt.preemptible = 1;
+  return thread_policy_set(self, THREAD_TIME_CONSTRAINT_POLICY,
+                           reinterpret_cast<thread_policy_t>(&rt),
+                           THREAD_TIME_CONSTRAINT_POLICY_COUNT) == KERN_SUCCESS;
+#else
+  // Linux wants CAP_SYS_NICE for SCHED_FIFO: the thread keeps whatever
+  // class it was given and the caller falls back to the plain wait.
+  (void)period_ns;
+  (void)computation_ns;
+  (void)constraint_ns;
+  return false;
+#endif
+}
+
+void SetThreadPriorityClass(int p) {
+#if defined(__APPLE__)
+  qos_class_t q = p >= 2 ? QOS_CLASS_USER_INTERACTIVE
+                  : p >= 0 ? QOS_CLASS_USER_INITIATED
+                           : QOS_CLASS_UTILITY;
+  pthread_set_qos_class_self_np(q, 0);
+#else
+  if (p < 0) setpriority(PRIO_PROCESS, 0, p <= -2 ? 10 : 5);  // this thread (Linux)
+#endif
+}
+
+void SetThreadName(const char* name) {
+#if defined(__APPLE__)
+  pthread_setname_np(name);
+#else
+  pthread_setname_np(pthread_self(), name);
+#endif
+}
+
+void SetThreadQos(ThreadQos q) {
+#if defined(__APPLE__)
+  const qos_class_t c = q.cls == ThreadQos::kUserInteractive ? QOS_CLASS_USER_INTERACTIVE
+                        : q.cls == ThreadQos::kUserInitiated ? QOS_CLASS_USER_INITIATED
+                                                             : QOS_CLASS_UTILITY;
+  const int rel = q.relative > 0 ? 0 : q.relative < QOS_MIN_RELATIVE_PRIORITY
+                                           ? QOS_MIN_RELATIVE_PRIORITY
+                                           : q.relative;
+  pthread_set_qos_class_self_np(c, rel);
+#else
+  if (q.cls == ThreadQos::kUtility) setpriority(PRIO_PROCESS, 0, 5);  // this thread (Linux)
+#endif
+}
+
+const char* ThreadQosName() {
+#if defined(__APPLE__)
+  qos_class_t c = QOS_CLASS_UNSPECIFIED;
+  int rel = 0;
+  pthread_get_qos_class_np(pthread_self(), &c, &rel);
+  const char* name;
+  switch (c) {
+    case QOS_CLASS_USER_INTERACTIVE: name = "user-interactive"; break;
+    case QOS_CLASS_USER_INITIATED: name = "user-initiated"; break;
+    case QOS_CLASS_DEFAULT: name = "default"; break;
+    case QOS_CLASS_UTILITY: name = "utility"; break;
+    case QOS_CLASS_BACKGROUND: name = "background"; break;
+    default: name = "unspecified"; break;
+  }
+  if (!rel) return name;
+  static thread_local char buf[32];
+  std::snprintf(buf, sizeof buf, "%s %d", name, rel);
+  return buf;
+#else
+  return "n/a";
+#endif
+}
 
 bool RedirectToCall(void* uc, void (*fn)()) {
 #if defined(__APPLE__) && defined(__aarch64__)

@@ -1,9 +1,12 @@
 #include "emit.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdarg>
 #include <cstdio>
 #include <functional>
+
+#include "flags.h"
 
 namespace lifter {
 
@@ -24,6 +27,18 @@ __attribute__((format(printf, 1, 2))) std::string Fmt(const char* f, ...) {
   std::vsnprintf(buf, sizeof buf, f, ap);
   va_end(ap);
   return buf;
+}
+
+// The spill where control leaves the function and `live` arithmetic flags
+// are read on the other side (flags.h): all of them without the analysis
+// (x64 images, --all-flags, test snippets).
+std::string Spill(const Program& p, uint32_t live) {
+  if (p.x64 || !p.flags || (live & kArithFlags) == kArithFlags) return "LIFT_SPILL";
+  if (!(live & kArithFlags)) return "LIFT_SPILL_NF";
+  return Fmt("LIFT_SPILL_F(0x%03Xu)", live & kArithFlags);
+}
+uint32_t ReadsOf(const Program& p, uint64_t t) {
+  return p.flags ? p.flags->Reads(t) : kArithFlags;
 }
 
 // printf's %llX for a VA (uint64_t is unsigned long on LP64 Linux).
@@ -96,6 +111,23 @@ const char* SegValue64(ZydisRegister r) {
     case ZYDIS_REGISTER_SS:
     case ZYDIS_REGISTER_GS: return "0x2Bu";
     case ZYDIS_REGISTER_FS: return "0x53u";
+    default: return nullptr;
+  }
+}
+
+// The jump of a jcc after a (U)COMIS whose operands p and q are ordered
+// (PF = 0, ZF = p == q, CF = p < q), as a compare of them; null for jumps
+// on other flags.
+const char* ComiJccExpr(ZydisMnemonic m) {
+  switch (m) {
+    case ZYDIS_MNEMONIC_JB: return "p < q";
+    case ZYDIS_MNEMONIC_JNB: return "p >= q";
+    case ZYDIS_MNEMONIC_JZ: return "p == q";
+    case ZYDIS_MNEMONIC_JNZ: return "p != q";
+    case ZYDIS_MNEMONIC_JBE: return "p <= q";
+    case ZYDIS_MNEMONIC_JNBE: return "p > q";
+    case ZYDIS_MNEMONIC_JP: return "false";
+    case ZYDIS_MNEMONIC_JNP: return "true";
     default: return nullptr;
   }
 }
@@ -373,8 +405,22 @@ class InsnEmitter {
   // cannot be done exactly in doubles; *can_fail is set if it was emitted.
   // False if the instruction has no double form.
   bool EmitInRunDouble(X87Sim& sim, const std::string& fail, bool* can_fail);
+  // A (U)COMIS fused with the conditional jump `jcc` laid out right after
+  // it (ComiJccExpr knows its condition): the flags as usual, and the jump
+  // on the compare itself while the operands compare in place
+  // (sse::ComiDirect), on the flags otherwise. The jump emits nothing then.
+  // Fused() tells, after Emit, whether it was (else the jump is emitted
+  // as usual).
+  void FuseJcc(InsnEmitter&& jcc) {
+    jcc_ = jcc.d_.mnemonic;
+    jcc_go_ = jcc.GotoOrTail(RelTarget(jcc.in_));
+  }
+  bool Fused() const { return fused_; }
 
  private:
+  ZydisMnemonic jcc_ = ZYDIS_MNEMONIC_INVALID;
+  std::string jcc_go_;
+  bool fused_ = false;
   bool EmitX87Fast(X87Sim& sim);
   bool EmitX87Double(X87Sim& sim, const std::string& fail, bool* can_fail);
 
@@ -588,7 +634,8 @@ class InsnEmitter {
   // ---- control flow -------------------------------------------------------
   std::string TailCall(uint64_t t) {
     refs_.insert(t);
-    return Fmt("{ LIFT_SPILL; %sreturn %s(c); }", TailAttr(), FnName(t).c_str());
+    return Fmt("{ %s; %sreturn %s(c); }", Spill(p_, ReadsOf(p_, t)).c_str(), TailAttr(),
+               FnName(t).c_str());
   }
   std::string GotoOrTail(uint64_t t) {
     if (IsOtherEntry(p_, f_, t)) return TailCall(t);
@@ -610,9 +657,10 @@ class InsnEmitter {
                                                                  : -1;
   }
   bool IsXmm(int i) const { return IsReg(i) && XmmIndex(Op(i).reg.value) >= 0; }
-  std::string XmmRef(int i) const {
-    return Fmt("c.xmm[%d]", XmmIndex(Op(i).reg.value));
-  }
+  // 32-bit guests: the XMM registers a function uses live in locals X0..X7
+  // (see LIFT_XMM_ENTER), spilled to c.xmm around calls like the GPRs.
+  std::string XmmName(int n) const { return p_.x64 ? Fmt("c.xmm[%d]", n) : Fmt("X%d", n); }
+  std::string XmmRef(int i) const { return XmmName(XmmIndex(Op(i).reg.value)); }
   // Operand i as an Xmm: the register itself, or its memory loaded into
   // s<i> (zero-extended). Legacy-SSE m128 operands must be aligned unless
   // the instruction is an unaligned move.
@@ -754,7 +802,8 @@ void InsnEmitter::EmitString() {
   if (X64()) return EmitString64(n, kind);
   const char* t = MemType(n);
   std::string acc = ReadReg(Acc(n));
-  std::string step = Fmt("const uint32_t d = F.df ? uint32_t(-%d) : %du;", n, n);
+  // DF lives in c.eflags only (flags.h).
+  std::string step = Fmt("const uint32_t d = (c.eflags & 0x400u) ? uint32_t(-%d) : %du;", n, n);
   std::string body;
   // esi is DS:esi, edi is ES:edi; both flat. An fs: override on the source
   // (never seen in this binary) is not supported.
@@ -959,6 +1008,17 @@ void InsnEmitter::EmitX87() {
       L(Fmt("::recomp::lift::Wr<uint%d_t>(B, m%d, uint%d_t(::recomp::x87::StoreI%d(c.fpu)));",
             b * 8, mem, b * 8, b * 8));
       if (m == ZYDIS_MNEMONIC_FISTP) pop();
+      return;
+    }
+    case ZYDIS_MNEMONIC_FISTTP: {
+      // SSE3: FISTP that always truncates; the control word is untouched.
+      int b = Bytes(mem);
+      L("{ const uint16_t cw = ::recomp::x87::ControlWord(c.fpu);");
+      L("  ::recomp::x87::SetControlWord(c.fpu, uint16_t(cw | 0x0C00));");
+      L(Fmt("  const uint%d_t v = uint%d_t(::recomp::x87::StoreI%d(c.fpu));", b * 8, b * 8, b * 8));
+      L("  ::recomp::x87::SetControlWord(c.fpu, cw);");
+      L(Fmt("  ::recomp::lift::Wr<uint%d_t>(B, m%d, v); }", b * 8, mem));
+      pop();
       return;
     }
     case ZYDIS_MNEMONIC_FXCH:
@@ -1210,7 +1270,7 @@ bool InsnEmitter::EmitX87Fast(X87Sim& sim) {
       int b = Bytes(mem);
       if (b != 2 && b != 4 && b != 8) return false;
       std::string x = sim.Read(0);
-      L(Fmt("const auto r = %s::StoreI%d(rcw, %s);", R, b * 8, x.c_str()));
+      L(Fmt("const auto r = %s::StoreI%dFast(rcw, %s);", R, b * 8, x.c_str()));
       L(Fmt("::recomp::lift::Wr<uint%d_t>(B, m%d, uint%d_t(r.bits));", b * 8, mem, b * 8));
       stored();
       if (m == ZYDIS_MNEMONIC_FISTP) sim.Pop();
@@ -1423,7 +1483,7 @@ bool InsnEmitter::EmitX87Double(X87Sim& sim, const std::string& fail, bool* can_
       int b = Bytes(mem);
       if (b != 2 && b != 4 && b != 8) return false;
       std::string x = sim.Read(0);
-      L(Fmt("const auto r = %s::StoreI%d(rcw, %s::FromD(%s));", R, b * 8, R, x.c_str()));
+      L(Fmt("const auto r = %s::StoreI%dD(rcw, %s);", R, b * 8, x.c_str()));
       L(Fmt("::recomp::lift::Wr<uint%d_t>(B, m%d, uint%d_t(r.bits));", b * 8, mem, b * 8));
       L(Fmt("rfl |= %s::Flags(r);", R));
       c1(Fmt("%s::Up(r)", R));
@@ -1554,7 +1614,7 @@ void InsnEmitter::EmitMmx() {
       L("::recomp::Xmm t{}, r{};");
       L(Fmt("::recomp::sse::SetLane<uint64_t>(t, 0, ::recomp::sse::Lane<uint64_t>(%s, 0));",
             s.c_str()));
-      L(Fmt("::recomp::sse::CvtToDq(c, false, %s, r, t, %s);", trunc ? "true" : "false",
+      L(Fmt("::recomp::sse::CvtToDq(c, MU, false, %s, r, t, %s);", trunc ? "true" : "false",
             va.c_str()));
       set("::recomp::sse::Lane<uint64_t>(r, 0)");
       return;
@@ -1565,7 +1625,7 @@ void InsnEmitter::EmitMmx() {
       if (!IsXmm(0)) return Unimpl();
       L("::recomp::Xmm t{}, r{};");
       L(Fmt("::recomp::sse::SetLane<uint64_t>(t, 0, %s);", src(1).c_str()));
-      L(Fmt("::recomp::sse::Cvtdq2ps(c, r, t, %s);", va.c_str()));
+      L(Fmt("::recomp::sse::Cvtdq2ps(c, MU, r, t, %s);", va.c_str()));
       L(Fmt("::recomp::sse::SetLane<uint64_t>(%s, 0, ::recomp::sse::Lane<uint64_t>(r, 0));",
             XmmRef(0).c_str()));
       return;
@@ -1685,7 +1745,7 @@ void InsnEmitter::EmitSse() {
     if (a.m == m) {
       if (!IsXmm(0)) return Unimpl();
       std::string s = src(1);
-      L(Fmt("::recomp::sse::Arith(c, ::recomp::sse::%s, %s, %d, %s, %s, %s);", a.op,
+      L(Fmt("::recomp::sse::Arith(c, MU, ::recomp::sse::%s, %s, %d, %s, %s, %s);", a.op,
             b(a.dbl), a.lanes, XmmRef(0).c_str(), s.c_str(), va.c_str()));
       return;
     }
@@ -1697,7 +1757,7 @@ void InsnEmitter::EmitSse() {
       bool dbl = m == ZYDIS_MNEMONIC_CMPPD || m == ZYDIS_MNEMONIC_CMPSD;
       int lanes = m == ZYDIS_MNEMONIC_CMPPS ? 4 : m == ZYDIS_MNEMONIC_CMPPD ? 2 : 1;
       std::string s = src(1);
-      L(Fmt("::recomp::sse::Cmp(c, %s, %d, %s, %s, %s, %s);", b(dbl), lanes,
+      L(Fmt("::recomp::sse::Cmp(c, MU, %s, %d, %s, %s, %s, %s);", b(dbl), lanes,
             XmmRef(0).c_str(), s.c_str(), imm8(2).c_str(), va.c_str()));
       return;
     }
@@ -1707,6 +1767,25 @@ void InsnEmitter::EmitSse() {
       bool dbl = m == ZYDIS_MNEMONIC_COMISD || m == ZYDIS_MNEMONIC_UCOMISD;
       bool ordered = m == ZYDIS_MNEMONIC_COMISS || m == ZYDIS_MNEMONIC_COMISD;
       std::string s = src(1);
+      if (const char* direct = ComiJccExpr(jcc_)) {
+        const char* t = dbl ? "double" : "float";
+        L(Fmt("if (::recomp::sse::ComiDirect(%s, %s, %s)) [[likely]] {", b(dbl),
+              XmmRef(0).c_str(), s.c_str()));
+        L(Fmt("  const %s p = ::recomp::sse::Lane<%s>(%s, 0), q = ::recomp::sse::Lane<%s>(%s, 0);",
+              t, t, XmmRef(0).c_str(), t, s.c_str()));
+        L("  F.zf = p == q; F.pf = false; F.cf = p < q;");
+        L("  F.of = false; F.sf = false; F.af = false;");
+        L(Fmt("  if (%s) %s", direct, jcc_go_.c_str()));
+        L("} else {");
+        L(Fmt("  const int r = ::recomp::sse::ComiModel(c, %s, %s, %s, %s, %s);", b(dbl),
+              b(ordered), XmmRef(0).c_str(), s.c_str(), va.c_str()));
+        L("  F.zf = r >= 2; F.pf = r == 3; F.cf = r == 1 || r == 3;");
+        L("  F.of = false; F.sf = false; F.af = false;");
+        L(Fmt("  if (%s) %s", CondExpr(jcc_), jcc_go_.c_str()));
+        L("}");
+        fused_ = true;
+        return;
+      }
       L(Fmt("const int r = ::recomp::sse::Comi(c, %s, %s, %s, %s, %s);", b(dbl),
             b(ordered), XmmRef(0).c_str(), s.c_str(), va.c_str()));
       L("F.zf = r >= 2; F.pf = r == 3; F.cf = r == 1 || r == 3;");
@@ -1733,6 +1812,8 @@ void InsnEmitter::EmitSse() {
     }
     case ZYDIS_MNEMONIC_MOVAPS: case ZYDIS_MNEMONIC_MOVAPD: case ZYDIS_MNEMONIC_MOVUPS:
     case ZYDIS_MNEMONIC_MOVUPD: case ZYDIS_MNEMONIC_MOVDQA: case ZYDIS_MNEMONIC_MOVDQU:
+    // Non-temporal stores: aligned stores (the cache hint has no effect).
+    case ZYDIS_MNEMONIC_MOVNTPS: case ZYDIS_MNEMONIC_MOVNTPD: case ZYDIS_MNEMONIC_MOVNTDQ:
       if (IsXmm(0)) {
         std::string s = src(1);
         L(XmmRef(0) + " = " + s + ";");
@@ -1796,19 +1877,20 @@ void InsnEmitter::EmitSse() {
       bool dbl = m == ZYDIS_MNEMONIC_CVTSD2SI || m == ZYDIS_MNEMONIC_CVTTSD2SI;
       bool trunc = m == ZYDIS_MNEMONIC_CVTTSS2SI || m == ZYDIS_MNEMONIC_CVTTSD2SI;
       std::string s = src(1);
-      L(Write(0, Fmt("::recomp::sse::CvtToI%d(c, %s, %s, %s, %s)", Bytes(0) == 8 ? 64 : 32,
-                     b(dbl), s.c_str(), b(trunc), va.c_str())));
+      const bool i64 = Bytes(0) == 8;
+      L(Write(0, Fmt("::recomp::sse::CvtToI%s(c, %s%s, %s, %s, %s)", i64 ? "64" : "32",
+                     i64 ? "" : "MU, ", b(dbl), s.c_str(), b(trunc), va.c_str())));
       return;
     }
     case ZYDIS_MNEMONIC_CVTSI2SS:
       if (!IsXmm(0) || IsXmm(1)) return Unimpl();
-      L(Fmt("::recomp::sse::CvtIntToF(c, false, %s, %s, %s, %s);", b(Bytes(1) == 8),
+      L(Fmt("::recomp::sse::CvtIntToF(c, MU, false, %s, %s, %s, %s);", b(Bytes(1) == 8),
             Read(1).c_str(), XmmRef(0).c_str(), va.c_str()));
       return;
     case ZYDIS_MNEMONIC_CVTDQ2PS: {
       if (!IsXmm(0)) return Unimpl();
       std::string s = src(1);
-      L(Fmt("::recomp::sse::Cvtdq2ps(c, %s, %s, %s);", XmmRef(0).c_str(), s.c_str(),
+      L(Fmt("::recomp::sse::Cvtdq2ps(c, MU, %s, %s, %s);", XmmRef(0).c_str(), s.c_str(),
             va.c_str()));
       return;
     }
@@ -1818,7 +1900,7 @@ void InsnEmitter::EmitSse() {
       bool to_dbl = m == ZYDIS_MNEMONIC_CVTSS2SD || m == ZYDIS_MNEMONIC_CVTPS2PD;
       int lanes = m == ZYDIS_MNEMONIC_CVTPS2PD || m == ZYDIS_MNEMONIC_CVTPD2PS ? 2 : 1;
       std::string s = src(1);
-      L(Fmt("::recomp::sse::CvtFloat(c, %s, %d, %s, %s, %s);", b(to_dbl), lanes,
+      L(Fmt("::recomp::sse::CvtFloat(c, MU, %s, %d, %s, %s, %s);", b(to_dbl), lanes,
             XmmRef(0).c_str(), s.c_str(), va.c_str()));
       return;
     }
@@ -1833,7 +1915,7 @@ void InsnEmitter::EmitSse() {
       bool packed = m == ZYDIS_MNEMONIC_MINPS || m == ZYDIS_MNEMONIC_MINPD ||
                     m == ZYDIS_MNEMONIC_MAXPS || m == ZYDIS_MNEMONIC_MAXPD;
       std::string s = src(1);
-      L(Fmt("::recomp::sse::MinMax(c, %s, %s, %d, %s, %s, %s);", b(max), b(dbl),
+      L(Fmt("::recomp::sse::MinMax(c, MU, %s, %s, %d, %s, %s, %s);", b(max), b(dbl),
             packed ? (dbl ? 2 : 4) : 1, XmmRef(0).c_str(), s.c_str(), va.c_str()));
       return;
     }
@@ -1851,7 +1933,7 @@ void InsnEmitter::EmitSse() {
     case ZYDIS_MNEMONIC_CVTSI2SD:
       if (!IsXmm(0) || IsXmm(1)) return Unimpl();
       if (Bytes(1) == 8) {  // int64 -> double can be inexact
-        L(Fmt("::recomp::sse::CvtIntToF(c, true, true, %s, %s, %s);", Read(1).c_str(),
+        L(Fmt("::recomp::sse::CvtIntToF(c, MU, true, true, %s, %s, %s);", Read(1).c_str(),
               XmmRef(0).c_str(), va.c_str()));
         return;
       }
@@ -1863,7 +1945,7 @@ void InsnEmitter::EmitSse() {
       bool dbl = m == ZYDIS_MNEMONIC_SQRTSD || m == ZYDIS_MNEMONIC_SQRTPD;
       int lanes = m == ZYDIS_MNEMONIC_SQRTPS ? 4 : m == ZYDIS_MNEMONIC_SQRTPD ? 2 : 1;
       std::string s = src(1);
-      L(Fmt("::recomp::sse::Sqrt(c, %s, %d, %s, %s, %s);", b(dbl), lanes, XmmRef(0).c_str(),
+      L(Fmt("::recomp::sse::Sqrt(c, MU, %s, %d, %s, %s, %s);", b(dbl), lanes, XmmRef(0).c_str(),
             s.c_str(), va.c_str()));
       return;
     }
@@ -2117,7 +2199,7 @@ void InsnEmitter::EmitSse() {
       bool dbl = m == ZYDIS_MNEMONIC_CVTTPD2DQ || m == ZYDIS_MNEMONIC_CVTPD2DQ;
       bool trunc = m == ZYDIS_MNEMONIC_CVTTPS2DQ || m == ZYDIS_MNEMONIC_CVTTPD2DQ;
       std::string s = src(1);
-      L(Fmt("::recomp::sse::CvtToDq(c, %s, %s, %s, %s, %s);", b(dbl), b(trunc),
+      L(Fmt("::recomp::sse::CvtToDq(c, MU, %s, %s, %s, %s, %s);", b(dbl), b(trunc),
             XmmRef(0).c_str(), s.c_str(), va.c_str()));
       return;
     }
@@ -2130,9 +2212,9 @@ void InsnEmitter::EmitSse() {
     case ZYDIS_MNEMONIC_BLENDVPS: case ZYDIS_MNEMONIC_BLENDVPD: {
       if (!IsXmm(0)) return Unimpl();
       std::string s = src(1);
-      L(Fmt("::recomp::sse::BlendV<%s>(%s, %s, c.xmm[0]);",
+      L(Fmt("::recomp::sse::BlendV<%s>(%s, %s, %s);",
             m == ZYDIS_MNEMONIC_BLENDVPS ? "uint32_t" : "uint64_t", XmmRef(0).c_str(),
-            s.c_str()));
+            s.c_str(), XmmName(0).c_str()));
       return;
     }
     case ZYDIS_MNEMONIC_STMXCSR:
@@ -2141,6 +2223,7 @@ void InsnEmitter::EmitSse() {
     case ZYDIS_MNEMONIC_LDMXCSR:
       L(Fmt("::recomp::sse::Ldmxcsr(c, ::recomp::lift::Rd<uint32_t>(B, m0), %s);",
             va.c_str()));
+      L("MU = ::recomp::sse::fast::UsualMxcsr(c.mxcsr);");
       return;
     case ZYDIS_MNEMONIC_PREFETCHNTA: case ZYDIS_MNEMONIC_PREFETCHT0:
     case ZYDIS_MNEMONIC_PREFETCHT1: case ZYDIS_MNEMONIC_PREFETCHT2:
@@ -2198,7 +2281,7 @@ void InsnEmitter::EmitAvx() {
     if (a.m == m) {
       int bytes = a.lanes == 1 ? (a.dbl ? 8 : 4) : 16;
       return binary([&](const std::string& t, const std::string& s2) {
-        return Fmt("::recomp::sse::Arith(c, ::recomp::sse::%s, %s, %d, %s, %s, %s);", a.op,
+        return Fmt("::recomp::sse::Arith(c, MU, ::recomp::sse::%s, %s, %d, %s, %s, %s);", a.op,
                    b(a.dbl), a.lanes, t.c_str(), s2.c_str(), va.c_str());
       }, bytes);
     }
@@ -2215,7 +2298,7 @@ void InsnEmitter::EmitAvx() {
                     m == ZYDIS_MNEMONIC_VMAXSS || m == ZYDIS_MNEMONIC_VMAXSD;
       int lanes = scalar ? 1 : dbl ? 2 : 4;
       return binary([&](const std::string& t, const std::string& s2) {
-        return Fmt("::recomp::sse::MinMax(c, %s, %s, %d, %s, %s, %s);", b(max), b(dbl), lanes,
+        return Fmt("::recomp::sse::MinMax(c, MU, %s, %s, %d, %s, %s, %s);", b(max), b(dbl), lanes,
                    t.c_str(), s2.c_str(), va.c_str());
       }, scalar ? (dbl ? 8 : 4) : 16);
     }
@@ -2360,7 +2443,7 @@ void InsnEmitter::EmitAvx() {
       if (!IsVec(0)) return Unimpl();
       for (int h = 0; h < halves; h++) {
         std::string s1 = HalfSrc(1, h);
-        L(Fmt("::recomp::sse::Cvtdq2ps(c, %s, %s, %s);", Half(0, h).c_str(), s1.c_str(),
+        L(Fmt("::recomp::sse::Cvtdq2ps(c, MU, %s, %s, %s);", Half(0, h).c_str(), s1.c_str(),
               va.c_str()));
       }
       if (halves == 1) ZeroUpper(0);
@@ -2371,7 +2454,7 @@ void InsnEmitter::EmitAvx() {
       const bool dbl = m == ZYDIS_MNEMONIC_VSQRTPD;
       for (int h = 0; h < halves; h++) {
         std::string s1 = HalfSrc(1, h);
-        L(Fmt("::recomp::sse::Sqrt(c, %s, %d, %s, %s, %s);", b(dbl), dbl ? 2 : 4,
+        L(Fmt("::recomp::sse::Sqrt(c, MU, %s, %d, %s, %s, %s);", b(dbl), dbl ? 2 : 4,
               Half(0, h).c_str(), s1.c_str(), va.c_str()));
       }
       if (halves == 1) ZeroUpper(0);
@@ -2786,12 +2869,14 @@ void InsnEmitter::Emit() {
           return;
         }
         refs_.insert(t);
-        L(Fmt("LIFT_SPILL; %s(c); LIFT_RELOAD;", FnName(t).c_str()));
+        L(Fmt("%s; %s(c); LIFT_RELOAD;", Spill(p_, ReadsOf(p_, t)).c_str(),
+              FnName(t).c_str()));
       } else {
         if (!PrepareMem()) return Unimpl();
         L("const uint32_t t = " + Read(0) + ";");
         Push32(Hex(next));
-        L(Fmt("LIFT_SPILL; ::recomp::Dispatch(c, t, %s); LIFT_RELOAD;",
+        L(Fmt("%s; ::recomp::Dispatch(c, t, %s); LIFT_RELOAD;",
+              p_.flags ? Spill(p_, p_.flags->CallSite(f_.entry, in_.va)).c_str() : "LIFT_SPILL",
               Hex(in_.va).c_str()));
       }
       uint64_t tt;
@@ -2815,14 +2900,25 @@ void InsnEmitter::Emit() {
               Hex(in_.va).c_str()));
         L("}");
       } else {
-        L(Fmt("LIFT_SPILL; ::recomp::Dispatch(c, t, %s); return;",
+        // jmp [slot] to an import: what returns through it (all if its
+        // handler reads the flags, flags.h); else any function.
+        const uint64_t slot = IsMem(0) && Op(0).mem.base == ZYDIS_REGISTER_NONE &&
+                                      Op(0).mem.index == ZYDIS_REGISTER_NONE
+                                  ? uint32_t(Op(0).mem.disp.value)
+                                  : 0;
+        std::string spill = "LIFT_SPILL";
+        if (p_.flags && !p_.flags_iat.count(slot))
+          spill = Spill(p_, p_.iat.count(slot) ? p_.flags->Ret(f_.entry)
+                                                 : p_.flags->IndirectTail(f_.entry));
+        L(Fmt("%s; ::recomp::Dispatch(c, t, %s); return;", spill.c_str(),
               Hex(in_.va).c_str()));
       }
       return;
     }
     case ZYDIS_MNEMONIC_RET: {
       uint32_t extra = Nvis() ? static_cast<uint32_t>(Op(0).imm.value.u) : 0;
-      L(Fmt("esp += %uu; LIFT_SPILL; return;", 4 + extra));
+      L(Fmt("esp += %uu; %s; return;", 4 + extra,
+            p_.flags ? Spill(p_, p_.flags->Ret(f_.entry)).c_str() : "LIFT_SPILL"));
       return;
     }
     case ZYDIS_MNEMONIC_JECXZ:
@@ -2871,6 +2967,20 @@ void InsnEmitter::Emit() {
   }
 
   if (!PrepareMem()) return Unimpl();
+  if (m == ZYDIS_MNEMONIC_CMPXCHG8B) {
+    // Locked or not, one atomic compare of edx:eax with m64: on a match
+    // ecx:ebx is stored and ZF set, otherwise edx:eax gets the old value.
+    L("uint64_t* p = ::recomp::lift::AtomicPtr<uint64_t>(B, m0);");
+    L(Fmt("uint64_t a = uint64_t(%s) << 32 | %s;", ReadReg(ZYDIS_REGISTER_EDX).c_str(),
+          ReadReg(ZYDIS_REGISTER_EAX).c_str()));
+    L(Fmt("const bool ok = __atomic_compare_exchange_n(p, &a, uint64_t(%s) << 32 | %s, false, "
+          "__ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);",
+          ReadReg(ZYDIS_REGISTER_ECX).c_str(), ReadReg(ZYDIS_REGISTER_EBX).c_str()));
+    L("F.zf = ok;");
+    L("if (!ok) { " + WriteReg(ZYDIS_REGISTER_EAX, "uint32_t(a)") + " " +
+      WriteReg(ZYDIS_REGISTER_EDX, "uint32_t(a >> 32)") + " }");
+    return;
+  }
   if (locked) return EmitLocked();
 
   switch (m) {
@@ -2939,11 +3049,13 @@ void InsnEmitter::Emit() {
       L("esp += 16;");
       return;
     }
+    // DF, AC and ID live in c.eflags only (flags.h), the others in F.
     case ZYDIS_MNEMONIC_PUSHFD:
-      Push32("::recomp::PackEFlags(F)");
+      Push32("::recomp::lift::MergeEFlags(c.eflags, F, 0x8D5u)");
       return;
     case ZYDIS_MNEMONIC_POPFD:
-      L("::recomp::UnpackEFlags(F, ::recomp::lift::Rd<uint32_t>(B, esp)); esp += 4;");
+      L("{ const uint32_t v = ::recomp::lift::Rd<uint32_t>(B, esp); esp += 4;");
+      L("  ::recomp::UnpackEFlags(F, v); c.eflags = (c.eflags & ~0x240400u) | (v & 0x240400u); }");
       return;
     case ZYDIS_MNEMONIC_XCHG:
       if (IsMem(0) || IsMem(1)) {
@@ -3043,8 +3155,8 @@ void InsnEmitter::Emit() {
       L(Fmt("ebp = esp; esp -= %uu;", size));
       return;
     }
-    case ZYDIS_MNEMONIC_CLD: L("F.df = false;"); return;
-    case ZYDIS_MNEMONIC_STD: L("F.df = true;"); return;
+    case ZYDIS_MNEMONIC_CLD: L("c.eflags &= ~0x400u;"); return;
+    case ZYDIS_MNEMONIC_STD: L("c.eflags |= 0x400u;"); return;
     case ZYDIS_MNEMONIC_CLC: L("F.cf = false;"); return;
     case ZYDIS_MNEMONIC_STC: L("F.cf = true;"); return;
     case ZYDIS_MNEMONIC_CMC: L("F.cf = !F.cf;"); return;
@@ -3130,6 +3242,7 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
   // reaches f_X, which the game project defines.
   o += "void " + FnName(f.entry) + (p_.replaced.count(f.entry) ? "_lifted" : "") +
        "(::recomp::Ctx& c) {\n  LIFT_ENTER\n";
+  const size_t xmm_at = o.size();  // LIFT_XMM_ENTER goes here (32-bit)
   // Functions that register an SEH frame (write fs:[0]) can be resumed into
   // by their __except blocks, and setjmp callers by longjmp; see
   // GuestResume.
@@ -3191,6 +3304,7 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
     r = cut ? runs.erase(r) : std::next(r);
   }
   uint64_t skip_until = 0;
+  uint64_t fused_jcc = 0;  // a jcc emitted with the (U)COMIS before it
 
   for (auto it = f.insns.begin(); it != f.insns.end(); ++it) {
     const Insn& in = it->second;
@@ -3211,19 +3325,56 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
                        : std::string("  EF = rsp;\n");
     }
     auto run = runs.find(in.va);
+    // --flags-check: what the instruction (or x87 run) reads must be valid
+    // (lifted.h), then what it writes is.
+    auto flags_check = [&](uint32_t use, uint32_t kill) {
+      if (!p_.flags_check) return;
+      if (use)
+        o += Fmt("  if (~FV & 0x%03Xu) ::recomp::FlagCheckFail(c, 0x%llXu, ~FV & 0x%03Xu);\n",
+                 use, U(in.va), use);
+      if (kill) o += Fmt("  FV |= 0x%03Xu;\n", kill);
+    };
     if (run != runs.end()) {
       auto last = f.insns.find(run->second);
+      uint32_t use = 0, kill = 0;
+      for (auto j = it;; ++j) {
+        const FlagEffect fe = InsnFlags(j->second);
+        use |= fe.use & ~kill;
+        kill |= fe.kill;
+        if (j == last) break;
+      }
+      flags_check(use, kill);
       EmitX87Run(f, it, last, &o, refs, stats);
       it = last;
     } else {
       stats->insns++;
+      if (in.ok && in.va != fused_jcc) {
+        const FlagEffect fe = InsnFlags(in);
+        flags_check(fe.use, fe.kill);
+      }
       o += Fmt("  { // %08llX %s\n", U(in.va), dec_.Format(in).c_str());
       if (!in.ok) {
         o += Fmt("    LIFT_SPILL; ::recomp::Unimplemented(c, 0x%llXu, \"undecodable\");\n",
                  U(in.va));
         stats->unimplemented["(undecodable)"]++;
+      } else if (in.va == fused_jcc) {
+        o += "    // with the compare above\n";
       } else {
-        InsnEmitter(p_, f, in, &o, refs, stats).Emit();
+        InsnEmitter e(p_, f, in, &o, refs, stats);
+        // A (U)COMIS whose flags the next instruction, a jcc, tests (not
+        // a jump target, nor the start of a hook or another function).
+        const auto m = in.d.mnemonic;
+        auto ni = std::next(it);
+        if ((m == ZYDIS_MNEMONIC_COMISS || m == ZYDIS_MNEMONIC_UCOMISS ||
+             m == ZYDIS_MNEMONIC_COMISD || m == ZYDIS_MNEMONIC_UCOMISD) &&
+            ni != f.insns.end() && ni->first == in.next() && ni->second.ok &&
+            ni->second.d.meta.category == ZYDIS_CATEGORY_COND_BR &&
+            ComiJccExpr(ni->second.d.mnemonic) && !labels.count(ni->first) &&
+            !hooks.count(ni->first) && !IsOtherEntry(p_, f, ni->first)) {
+          e.FuseJcc(InsnEmitter(p_, f, ni->second, &o, refs, stats));
+        }
+        e.Emit();
+        if (e.Fused()) fused_jcc = ni->first;
       }
       o += "  }\n";
     }
@@ -3237,8 +3388,8 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
       auto ni = std::next(it);
       if (IsOtherEntry(p_, f, nx)) {
         refs->insert(nx);
-        o += Fmt("  { LIFT_SPILL; %sreturn %s(c); }\n", TailAttr(),
-                 FnName(nx).c_str());
+        o += Fmt("  { %s; %sreturn %s(c); }\n", Spill(p_, ReadsOf(p_, nx)).c_str(),
+                 TailAttr(), FnName(nx).c_str());
       } else if (ni == f.insns.end() || ni->first != nx) {
         o += f.insns.count(nx)
                  ? Fmt("  goto L_%08llX;\n", U(nx))
@@ -3255,6 +3406,16 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
          "    return;\n"
          "  }\n";
   o += "}\n\n";
+  if (!p_.x64) {
+    // The XMM registers the body names: only those are loaded and spilled.
+    unsigned mask = 0;
+    for (size_t p = o.find('X', xmm_at); p != std::string::npos; p = o.find('X', p + 1))
+      if (p + 1 < o.size() && o[p + 1] >= '0' && o[p + 1] <= '7' &&
+          (p + 2 >= o.size() || !std::isalnum(uint8_t(o[p + 2])) ) &&
+          (p == 0 || !(std::isalnum(uint8_t(o[p - 1])) || o[p - 1] == '_')))
+        mask |= 1u << (o[p + 1] - '0');
+    o.insert(xmm_at, Fmt("  constexpr unsigned kLiftXmm = 0x%02Xu;\n  LIFT_XMM_ENTER\n", mask));
+  }
 }
 
 // Non-x87 instructions that may sit inside an x87 run: anything straight-

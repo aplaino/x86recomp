@@ -324,8 +324,21 @@ HLE("kernel32.dll", DuplicateHandle, 7) {
 }
 
 // CreateFile(path, access, share, security, disposition, flags, template).
+// Dev aid: <ID>_FILE_LOG=1 logs every CreateFile with the time since start
+// (without the cost of a full trace).
+bool FileLog() {
+  static const bool on = [] {
+    const char* e = Env("FILE_LOG");
+    return e && *e == '1';
+  }();
+  return on;
+}
+
 uint32_t CreateFile(Ctx& c, const std::string& gpath) {
   uint32_t access = uint32_t(Arg(c, 1)), disp = uint32_t(Arg(c, 4));
+  if (FileLog())
+    std::fprintf(stderr, "file: %8.2f %s%s\n", TickCount() / 1000.0, gpath.c_str(),
+                 (access & 0x40000000) ? " (write)" : "");
   std::string path = HostPath(gpath);
   bool write = access & 0x40000000;  // GENERIC_WRITE
   bool read = access & 0x80000000;   // GENERIC_READ
@@ -375,6 +388,33 @@ int FdOf(uint64_t h) {
   return o ? FileFd(o.get()) : -1;
 }
 
+// OVERLAPPED { Internal, InternalHigh, Offset, OffsetHigh, hEvent }:
+// ReadFile/WriteFile with one transfer at its offset at once and complete
+// synchronously (allowed for overlapped handles too): the status and count
+// go into the OVERLAPPED and its event is set. The file pointer ends after
+// the transfer, as for a handle opened without FILE_FLAG_OVERLAPPED.
+constexpr uint32_t kErrorHandleEof = 38, kStatusEndOfFile = 0xC0000011;
+uint64_t OverlappedTransfer(int fd, gaddr buf, uint32_t n, gaddr out, gaddr ovl, bool write) {
+  const off_t at = off_t(uint64_t(Rd32(ovl + 8)) | uint64_t(Rd32(ovl + 12)) << 32);
+  lazy::Touch(buf, n);
+  ssize_t r = n ? (write ? pwrite(fd, GPtr(buf), n, at) : pread(fd, GPtr(buf), n, at)) : 0;
+  if (r < 0) {
+    SetLastError(ErrnoToWin(errno));
+    return 0;
+  }
+  lseek(fd, at + r, SEEK_SET);
+  const bool eof = !write && n && r == 0;
+  Wr32(ovl + 0, eof ? kStatusEndOfFile : 0);
+  Wr32(ovl + 4, uint32_t(r));
+  if (out) Wr32(out, uint32_t(r));
+  if (uint32_t ev = Rd32(ovl + 16)) SignalEventHandle(ev, false);
+  if (eof) {
+    SetLastError(kErrorHandleEof);
+    return 0;
+  }
+  return 1;
+}
+
 HLE64("kernel32.dll", ReadFile, 5) {
   int fd = FdOf(Arg(c, 0));
   gaddr buf = Arg(c, 1), out = Arg(c, 3);
@@ -383,7 +423,10 @@ HLE64("kernel32.dll", ReadFile, 5) {
     SetLastError(kErrorInvalidHandle);
     return 0;
   }
-  if (Arg(c, 4)) FatalF("ReadFile with OVERLAPPED is not supported");
+  if (Arg(c, 4)) {
+    if (g_proc->x64) FatalF("ReadFile with OVERLAPPED is not supported in x64 guests");
+    return OverlappedTransfer(fd, buf, n, out, Arg(c, 4), false);
+  }
   lazy::Touch(buf, n);  // the kernel does not fault on lazy pages
   ssize_t r = n ? read(fd, GPtr(buf), n) : 0;
   if (r < 0) {
@@ -439,7 +482,6 @@ HLE("kernel32.dll", ReadFileEx, 5) {
     SetLastError(ErrnoToWin(errno));
     return 0;
   }
-  constexpr uint32_t kErrorHandleEof = 38, kStatusEndOfFile = 0xC0000011;
   uint32_t err = (n && r == 0) ? kErrorHandleEof : 0;
   Wr32(ovl + 0, err ? kStatusEndOfFile : 0);  // Internal: the status
   Wr32(ovl + 4, uint32_t(r));                 // InternalHigh: bytes
@@ -459,6 +501,10 @@ HLE64("kernel32.dll", WriteFile, 5) {
     SetLastError(kErrorInvalidHandle);
     return 0;
   }
+  if (Arg(c, 4)) {
+    if (g_proc->x64) FatalF("WriteFile with OVERLAPPED is not supported in x64 guests");
+    return OverlappedTransfer(fd, buf, n, out, Arg(c, 4), true);
+  }
   lazy::Touch(buf, n);
   ssize_t r = n ? write(fd, GPtr(buf), n) : 0;
   if (r < 0) {
@@ -466,6 +512,17 @@ HLE64("kernel32.dll", WriteFile, 5) {
     return 0;
   }
   if (out) Wr32(out, uint32_t(r));
+  return 1;
+}
+
+// GetOverlappedResult(file, ovl, &bytes, wait): transfers complete at once.
+HLE("kernel32.dll", GetOverlappedResult, 4) {
+  const gaddr ovl = Arg(c, 1);
+  if (Arg(c, 2)) Wr32(Arg(c, 2), Rd32(ovl + 4));
+  if (Rd32(ovl) == kStatusEndOfFile) {
+    SetLastError(kErrorHandleEof);
+    return 0;
+  }
   return 1;
 }
 
@@ -549,6 +606,15 @@ HLE("kernel32.dll", GetFileTime, 4) {
   return 1;
 }
 
+// File times are not changed (the overlay keeps host times); reported done.
+HLE("kernel32.dll", SetFileTime, 4) {
+  if (FdOf(Arg(c, 0)) < 0) {
+    SetLastError(kErrorInvalidHandle);
+    return 0;
+  }
+  return 1;
+}
+
 HLE64("kernel32.dll", FlushFileBuffers, 1) {
   int fd = FdOf(Arg(c, 0));
   if (fd >= 0) fsync(fd);
@@ -572,6 +638,25 @@ uint32_t GetFileAttributes(const std::string& g) {
   return StatGuest(g, &st, &a) ? a : 0xFFFFFFFF;
 }
 HLE64("kernel32.dll", GetFileAttributesA, 1) { return GetFileAttributes(GStr(Arg(c, 0))); }
+
+// OpenFile(name, OFSTRUCT*, style): only OF_EXIST (0x4000), the existence
+// test; OFSTRUCT { cBytes, fFixedDisk, nErrCode, reserved[4], szPathName[128] }.
+HLE("kernel32.dll", OpenFile, 3) {
+  const std::string name = GStr(Arg(c, 0));
+  const gaddr of = Arg(c, 1);
+  const uint32_t style = Arg(c, 2);
+  if (!(style & 0x4000)) FatalF("OpenFile(%s): style %X not supported", name.c_str(), style);
+  std::memset(GPtr(of), 0, 136);
+  Wr8(of, 136);
+  Wr8(of + 1, 1);
+  if (GetFileAttributes(name) == 0xFFFFFFFF) {
+    Wr16(of + 2, uint16_t(kErrorFileNotFound));
+    SetLastError(kErrorFileNotFound);
+    return 0xFFFFFFFF;  // HFILE_ERROR
+  }
+  PutStr(of + 8, AbsGuest(name).substr(0, 127));
+  return 1;
+}
 HLE64("kernel32.dll", GetFileAttributesW, 1) { return GetFileAttributes(WidePath(Arg(c, 0))); }
 
 // GetFileAttributesExW(path, GetFileExInfoStandard, WIN32_FILE_ATTRIBUTE_DATA*).
@@ -786,22 +871,30 @@ HLE("kernel32.dll", GetTempFileNameA, 4) {
 
 // ---- find ------------------------------------------------------------------
 
-void FillFindData(uint32_t fd, const std::string& host_dir, const std::string& name) {
+// WIN32_FIND_DATAA (320 bytes) or, `wide`, WIN32_FIND_DATAW (592 bytes):
+// the same fields up to cFileName at +44.
+void FillFindData(uint32_t fd, const std::string& host_dir, const std::string& name,
+                  bool wide = false) {
   struct stat st{};
   stat((host_dir + "/" + name).c_str(), &st);
-  std::memset(GPtr(fd), 0, 320);
+  std::memset(GPtr(fd), 0, wide ? 592 : 320);
   Wr32(fd + 0, AttributesOf(st, name));
   PutFileTime(fd + 4, platform::StatModifyTime(st));   // creation
   PutFileTime(fd + 12, platform::StatAccessTime(st));  // access
   PutFileTime(fd + 20, platform::StatModifyTime(st));  // write
   Wr32(fd + 28, uint32_t(uint64_t(st.st_size) >> 32));
   Wr32(fd + 32, uint32_t(st.st_size));
-  PutStr(fd + 44, name.substr(0, 259));  // cFileName
+  if (wide) {  // cFileName; the block is zeroed, so it stays NUL-terminated
+    const std::u16string w = win32::Widen(name.substr(0, 259));
+    for (size_t i = 0; i < w.size(); i++) Wr16(fd + 44 + 2 * uint32_t(i), w[i]);
+  } else {
+    PutStr(fd + 44, name.substr(0, 259));
+  }
   // cAlternateFileName (8.3) left empty.
 }
 
-HLE("kernel32.dll", FindFirstFileA, 2) {
-  std::string pattern = AbsGuest(GStr(Arg(c, 0)));
+uint32_t FindFirstFile(Ctx& c, const std::string& guest_pattern, bool wide) {
+  std::string pattern = AbsGuest(guest_pattern);
   size_t s = pattern.find_last_of('\\');
   std::string gdir = pattern.substr(0, s), mask = pattern.substr(s + 1);
   if (gdir.size() == 2) gdir += '\\';
@@ -823,12 +916,14 @@ HLE("kernel32.dll", FindFirstFileA, 2) {
     SetLastError(kErrorFileNotFound);
     return kInvalidHandle;
   }
-  FillFindData(Arg(c, 1), f->entries[0].first, f->entries[0].second);
+  FillFindData(Arg(c, 1), f->entries[0].first, f->entries[0].second, wide);
   f->next = 1;
   return NewHandle(f);
 }
+HLE("kernel32.dll", FindFirstFileA, 2) { return FindFirstFile(c, GStr(Arg(c, 0)), false); }
+HLE("kernel32.dll", FindFirstFileW, 2) { return FindFirstFile(c, WidePath(Arg(c, 0)), true); }
 
-HLE("kernel32.dll", FindNextFileA, 2) {
+uint32_t FindNextFile(Ctx& c, bool wide) {
   auto o = GetHandle(Arg(c, 0));
   if (!o || o->type != KObject::Type::Find) {
     SetLastError(kErrorInvalidHandle);
@@ -840,9 +935,11 @@ HLE("kernel32.dll", FindNextFileA, 2) {
     return 0;
   }
   const auto& [hdir, name] = f->entries[f->next++];
-  FillFindData(Arg(c, 1), hdir, name);
+  FillFindData(Arg(c, 1), hdir, name, wide);
   return 1;
 }
+HLE("kernel32.dll", FindNextFileA, 2) { return FindNextFile(c, false); }
+HLE("kernel32.dll", FindNextFileW, 2) { return FindNextFile(c, true); }
 
 HLE("kernel32.dll", FindClose, 1) {
   return CloseHandleValue(Arg(c, 0)) ? 1 : 0;

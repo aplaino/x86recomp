@@ -4,10 +4,14 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <string>
 
 #include "runtime/log.h"
+#include "runtime/platform.h"
 
 namespace recomp::audio {
 
@@ -106,8 +110,9 @@ Vec3 Normalize(const Vec3& v, const Vec3& fallback) {
 bool Fetch(Voice& v, float* dst) {
   int ch = v.src->channels();
   if (v.buf_head_ * ch >= v.buf_.size()) {
-    v.buf_.resize(size_t(kChunk) * ch);
-    int got = v.src->Read(v.buf_.data(), kChunk);
+    const int chunk = v.read_chunk > 0 ? std::min(v.read_chunk, kChunk) : kChunk;
+    v.buf_.resize(size_t(chunk) * ch);
+    int got = v.src->Read(v.buf_.data(), chunk);
     v.buf_.resize(size_t(std::max(got, 0)) * ch);
     v.buf_head_ = 0;
     if (got <= 0) return false;
@@ -139,16 +144,206 @@ bool Prime(Voice& v) {
   return true;
 }
 
+// RECOMP_AUDIO_DUMP=dir: what the device is given, as raw float stereo
+// at the mixer's rate, to dir/out.f32 (finding clicks).
+FILE* DumpFile(const char* name) {
+  const char* dir = std::getenv("RECOMP_AUDIO_DUMP");
+  if (!dir || !*dir) return nullptr;
+  return std::fopen((std::string(dir) + "/" + name).c_str(), "wb");
+}
+
+// The mixer thread's period: 10 ms, the length of DirectSound's fragment,
+// which games' rings and notifications are built around (Wine's
+// DS_TIME_DEL is the same 10 ms).
+constexpr double kPeriodMs = 10.0;
+
+uint64_t NowMs() {
+  return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now().time_since_epoch())
+                      .count());
+}
+
+// <ID>_AUDIO_LOG=1 for the device callback when the mixer thread mixes:
+// every 5 s, what the device asked for, the underruns (frames of silence
+// it played because the ring was short, heard as clicks), and the longest
+// gap between requests next to the longest copy.
+void LogDevice(int device_rate, int frames, double copy_ms, double gap_ms, int silent) {
+  struct Stats {
+    uint64_t calls = 0, frames = 0, min_frames = ~0ull, late = 0;
+    uint64_t underruns = 0, silent = 0, last_ms = 0;
+    double max_copy = 0, max_gap = 0;
+  };
+  static Stats s;
+  s.calls++;
+  s.frames += uint64_t(frames);
+  s.min_frames = std::min(s.min_frames, uint64_t(frames));
+  s.max_copy = std::max(s.max_copy, copy_ms);
+  s.max_gap = std::max(s.max_gap, gap_ms);
+  if (silent > 0) {
+    s.underruns++;
+    s.silent += uint64_t(silent);
+  }
+  if (device_rate && copy_ms > 1000.0 * frames / device_rate) s.late++;
+  const uint64_t now = NowMs();
+  if (now - s.last_ms < 5000) return;
+  if (s.last_ms)
+    std::fprintf(stderr,
+                 "audio: %llu device requests (%llu-%llu frames), %llu late, %llu underruns "
+                 "(%llu frames of silence); longest copy %.2f ms, longest gap between "
+                 "requests %.1f ms\n",
+                 (unsigned long long)s.calls, (unsigned long long)s.min_frames,
+                 (unsigned long long)(s.calls ? s.frames / s.calls : 0),
+                 (unsigned long long)s.late, (unsigned long long)s.underruns,
+                 (unsigned long long)s.silent, s.max_copy, s.max_gap);
+  s = Stats{};
+  s.last_ms = now;
+}
+
+// <ID>_AUDIO_LOG=1 for the mixer thread: every 5 s, its periods, how many
+// of them had nothing to mix (the device had taken nothing since the last
+// one), the longest wait for the mixer's lock and the longest mix, and
+// how far the ring's fill moved.
+void LogMixer(bool mixed, double wait_ms, double mix_ms, double period_ms, int fill,
+              int capacity) {
+  struct Stats {
+    uint64_t periods = 0, idle = 0, last_ms = 0;
+    double max_wait = 0, max_mix = 0, max_period = 0;
+    int fill_min = 1 << 30, fill_max = 0;
+  };
+  static Stats s;
+  s.periods++;
+  if (!mixed) s.idle++;
+  s.max_wait = std::max(s.max_wait, wait_ms);
+  s.max_mix = std::max(s.max_mix, mix_ms);
+  s.max_period = std::max(s.max_period, period_ms);
+  s.fill_min = std::min(s.fill_min, fill);
+  s.fill_max = std::max(s.fill_max, fill);
+  const uint64_t now = NowMs();
+  if (now - s.last_ms < 5000) return;
+  if (s.last_ms)
+    std::fprintf(stderr,
+                 "audio: mixer thread: %llu periods (%llu mixed nothing), ring %d-%d of %d "
+                 "frames; longest lock wait %.2f ms, longest mix %.2f ms, longest period "
+                 "%.1f ms\n",
+                 (unsigned long long)s.periods, (unsigned long long)s.idle, s.fill_min,
+                 s.fill_max, capacity, s.max_wait, s.max_mix, s.max_period);
+  s = Stats{};
+  s.last_ms = now;
+}
+
 void SDLCALL AudioCallback(void* ud, SDL_AudioStream* s, int additional, int) {
+  static FILE* dump = DumpFile("out.f32");
+  // RECOMP_AUDIO_MUTE=1: the device plays silence (tests on the real
+  // device path, quietly).
+  static const bool mute = [] {
+    const char* e = std::getenv("RECOMP_AUDIO_MUTE");
+    return e && *e == '1';
+  }();
+  // RECOMP_AUDIO_TONE=1: a 440 Hz tone instead of the mix (is the
+  // output path clean?).
+  static const bool tone = [] {
+    const char* e = std::getenv("RECOMP_AUDIO_TONE");
+    return e && *e == '1';
+  }();
+  static std::chrono::steady_clock::time_point prev;
   auto* m = static_cast<Mixer*>(ud);
   float buf[kChunk * 2];
-  int frames = additional / int(2 * sizeof(float));
-  while (frames > 0) {
-    int n = std::min(frames, kChunk);
+  const int total = additional / int(2 * sizeof(float));
+  using Clock = std::chrono::steady_clock;
+  const auto t0 = Clock::now();
+  const double gap = prev.time_since_epoch().count()
+                         ? std::chrono::duration<double, std::milli>(t0 - prev).count()
+                         : 0;
+  prev = t0;
+  double wait = 0;
+  // The n frames now in buf as the device is given them, at the mixer's
+  // rate (the dump, the mute and the tone test all see that).
+  auto shape = [&](int n) {
+    if (dump) std::fwrite(buf, sizeof(float), size_t(n) * 2, dump);
+    if (mute) std::memset(buf, 0, sizeof(float) * 2 * size_t(n));
+    if (tone) {
+      static double phase = 0;
+      for (int i = 0; i < n; i++) {
+        buf[2 * i] = buf[2 * i + 1] = float(0.2 * std::sin(phase));
+        phase += 2 * kPi * 440.0 / m->rate();
+        if (phase > 2 * kPi) phase -= 2 * kPi;
+      }
+    }
+  };
+  // n frames of the mix into buf (the mixer thread's way, or the old one
+  // where this callback mixes).
+  auto mix = [&](int n) {
+    if (m->log_timing) {
+      const auto w = Clock::now();
+      m->mu().lock();
+      m->mu().unlock();
+      wait = std::max(wait, std::chrono::duration<double, std::milli>(Clock::now() - w).count());
+    }
     m->Mix(buf, n);
-    SDL_PutAudioStreamData(s, buf, n * int(2 * sizeof(float)));
-    frames -= n;
+    shape(n);
+  };
+  // n frames from the ring into buf, silence for the ones it does not
+  // hold: what the device plays then is a click.
+  int silent = 0;
+  auto take = [&](int n) {
+    const int got = m->Take(buf, n);
+    if (got < n) silent += n - got;
+    shape(n);
+  };
+  const int bpf = int(2 * sizeof(float));  // a stereo float frame
+  if (m->mix_thread()) {
+    // The mixer thread has mixed it: take the frames from the ring and
+    // let SDL convert them. No lock here, and no guest memory.
+    if (SDL_AudioStream* conv = m->conv()) {
+      for (int left; (left = additional - SDL_GetAudioStreamAvailable(conv)) > 0;) {
+        // Frames at the mixer's rate for what the device is still owed
+        // (one more: a conversion rounds down).
+        const int64_t need = (int64_t(left) * m->rate() + int64_t(m->device_rate()) * bpf - 1) /
+                             (int64_t(m->device_rate()) * bpf);
+        const int n = int(std::min<int64_t>(need + 1, kChunk));
+        take(n);
+        SDL_PutAudioStreamData(conv, buf, n * bpf);
+      }
+      for (int left = additional; left > 0;) {
+        const int got = SDL_GetAudioStreamData(conv, buf, std::min(left, int(sizeof buf)));
+        if (got <= 0) break;
+        SDL_PutAudioStreamData(s, buf, got);
+        left -= got;
+      }
+    } else {
+      for (int frames = total; frames > 0;) {
+        const int n = std::min(frames, kChunk);
+        take(n);
+        SDL_PutAudioStreamData(s, buf, n * bpf);
+        frames -= n;
+      }
+    }
+  } else if (SDL_AudioStream* conv = m->conv()) {
+    // Mixed at our rate, converted to the device's by SDL (band-limited).
+    while (SDL_GetAudioStreamAvailable(conv) < additional) {
+      mix(kChunk);
+      SDL_PutAudioStreamData(conv, buf, int(sizeof buf));
+    }
+    for (int left = additional; left > 0;) {
+      const int got = SDL_GetAudioStreamData(conv, buf, std::min(left, int(sizeof buf)));
+      if (got <= 0) break;
+      SDL_PutAudioStreamData(s, buf, got);
+      left -= got;
+    }
+  } else {
+    for (int frames = total; frames > 0;) {
+      const int n = std::min(frames, kChunk);
+      mix(n);
+      SDL_PutAudioStreamData(s, buf, n * bpf);
+      frames -= n;
+    }
   }
+  if (!m->log_timing || total <= 0) return;
+  const double copy = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+  if (m->mix_thread())
+    LogDevice(m->device_rate(), total, copy, gap, silent);
+  else
+    m->Timing(wait, copy, gap, total);
 }
 
 }  // namespace
@@ -174,18 +369,53 @@ bool Mixer::Open(int rate) {
     WarnF("audio: SDL audio init failed: %s\n", SDL_GetError());
     return false;
   }
-  SDL_AudioSpec spec{SDL_AUDIO_F32, 2, rate};
+  // The device runs at its own rate (asked for another, macOS converts and
+  // the requests come unevenly: gaps of up to 70 ms on a 23 ms buffer);
+  // the mix is converted to it here.
+  SDL_AudioSpec dev{};
+  if (!SDL_GetAudioDeviceFormat(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &dev, nullptr) || dev.freq <= 0)
+    dev.freq = rate;
+  device_rate_ = dev.freq;
+  SDL_AudioSpec spec{SDL_AUDIO_F32, 2, device_rate_};
+  if (device_rate_ != rate) {
+    SDL_AudioSpec mix{SDL_AUDIO_F32, 2, rate};
+    conv_ = SDL_CreateAudioStream(&mix, &spec);
+    if (!conv_) {
+      WarnF("audio: no %d to %d Hz conversion: %s\n", rate, device_rate_, SDL_GetError());
+      spec.freq = device_rate_ = rate;
+    }
+  }
   stream_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec,
                                       AudioCallback, this);
   if (!stream_) {
     WarnF("audio: cannot open a playback device: %s\n", SDL_GetError());
+    if (conv_) SDL_DestroyAudioStream(conv_);
+    conv_ = nullptr;
     SDL_QuitSubSystem(SDL_INIT_AUDIO);
     return false;
   }
   Init(rate);  // the device starts paused: no Mix runs yet
+  // What the device asks for in one request: its buffer, in the mixer's
+  // frames (the callback is handed a bufferful at a time). The ring is
+  // sized from this, not from a constant.
+  int dev_frames = 0;
+  SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(stream_), &dev, &dev_frames);
+  if (dev_frames <= 0) dev_frames = kChunk;  // SDL would not say: its usual buffer
+  request_frames_ = std::max((dev_frames * rate + device_rate_ - 1) / device_rate_, 1);
+  // A thread of our own mixes from here on, into a ring the callback
+  // copies out; RECOMP_AUDIO_MIXTHREAD=0 keeps the callback mixing.
+  static const bool own_thread = [] {
+    const char* e = std::getenv("RECOMP_AUDIO_MIXTHREAD");
+    return !(e && *e == '0');
+  }();
+  if (own_thread) StartThread();
   SDL_ResumeAudioStreamDevice(stream_);
-  WarnF("audio: %d Hz stereo on SDL driver '%s'\n", rate,
-        SDL_GetCurrentAudioDriver());
+  WarnF("audio: %d Hz stereo on SDL driver '%s' (device %d Hz, %d channels, %d-frame buffer)\n",
+        rate, SDL_GetCurrentAudioDriver(), dev.freq, dev.channels, dev_frames);
+  if (own_thread)
+    WarnF("audio: mixing on a thread of its own, %d-frame periods (%d ms), a %d-frame ring "
+          "(%d-frame device requests)\n",
+          period_, int(std::lround(period_ * 1000.0 / rate_)), ring_.Capacity(), request_frames_);
   return true;
 }
 
@@ -204,12 +434,123 @@ void Mixer::Init(int rate) {
 }
 
 void Mixer::Close() {
+  // The mixer thread first: it fills the ring the callback drains (both
+  // lock-free, so it may stop while the device still asks), then the
+  // streams stop the callback.
+  StopThread();
   if (stream_) {
     SDL_DestroyAudioStream(stream_);  // stops the callback first
     stream_ = nullptr;
+    if (conv_) SDL_DestroyAudioStream(conv_);
+    conv_ = nullptr;
     SDL_QuitSubSystem(SDL_INIT_AUDIO);
   }
+  thread_mode_.store(false, std::memory_order_relaxed);
   reverb_.Close();
+}
+
+// A period is 10 ms of the mixer's rate. The ring holds two device
+// requests and a period at its fill: two requests of slack are what the
+// old in-callback mixing had (it ran on the device's own thread), and
+// they let the thread come back from a stall of 40 ms without silence,
+// mixing several periods in the one wake it gets.
+void Mixer::StartThread() {
+  period_ = std::max(int(std::lround(rate_ * kPeriodMs / 1000.0)), 1);
+  period_target_ = 2 * request_frames_ + period_;
+  int capacity = 1;
+  while (capacity < period_target_ + period_) capacity *= 2;
+  ring_.Reset(capacity);
+  // A ring of silence at the fill to start with: the device's first
+  // requests can come before the thread's first periods.
+  mix_buf_.assign(size_t(2) * size_t(period_target_), 0.0f);
+  ring_.Write(mix_buf_.data(), period_target_);
+  stop_.store(false, std::memory_order_relaxed);
+  thread_mode_.store(true, std::memory_order_relaxed);
+  try {
+    thread_ = std::thread(&Mixer::ThreadMain, this);
+  } catch (const std::system_error& e) {
+    // No thread to be had: the callback mixes, the way it used to.
+    WarnF("audio: no mixer thread (%s), mixing in the device callback\n", e.what());
+    thread_mode_.store(false, std::memory_order_relaxed);
+  }
+}
+
+void Mixer::StopThread() {
+  if (!thread_.joinable()) return;
+  stop_.store(true, std::memory_order_relaxed);
+  thread_.join();  // a period at most
+}
+
+// The mixer thread: real-time on its period, each wake topping the ring
+// back up to its fill with what the device has taken since the last one.
+void Mixer::ThreadMain() {
+  platform::SetThreadName("recomp-mixer");
+  // The class a game's own threads run in first: a host that refuses the
+  // real-time policy below leaves the thread at that class.
+  platform::SetThreadQos({platform::ThreadQos::kUserInteractive, 0});
+  // Then an audio render thread as Core Audio makes one: woken every
+  // period, two milliseconds of mix in it (a period measures 0.1-0.6 ms,
+  // and a stall is caught up with two periods' worth at once), five to be
+  // done by. Without it the game's own user-interactive threads starve the
+  // mixer thread and the device plays silence.
+  // RECOMP_AUDIO_MIXRT=0: no real-time policy, for an A/B against the
+  // host's scheduler.
+  static const bool want_realtime = [] {
+    const char* e = std::getenv("RECOMP_AUDIO_MIXRT");
+    return !(e && *e == '0');
+  }();
+  const uint64_t period_ns = uint64_t(1e9) * uint64_t(period_) / uint64_t(rate_);
+  const bool realtime = want_realtime && platform::SetThreadRealTime(period_ns, 2000000, 5000000);
+  if (want_realtime && !realtime)
+    WarnF("audio: the mixer thread is not real-time; a busy host can starve it\n");
+  uint64_t next = 0;  // the next period's start, on the monotonic clock
+  auto woken = std::chrono::steady_clock::now();
+  while (!stop_.load(std::memory_order_relaxed)) {
+    const auto t0 = std::chrono::steady_clock::now();
+    const double period_ms = std::chrono::duration<double, std::milli>(t0 - woken).count();
+    woken = t0;
+    double wait = 0, mix_ms = 0;
+    // What the device took since the last period is what the ring is
+    // short of its fill; that, and what fits, is what is mixed now: a
+    // stall of several periods is caught up in this one wake.
+    const int free = ring_.Free();
+    const int n = std::min(period_target_ - (ring_.Capacity() - free), free);
+    if (n > 0) {
+      if (log_timing) {
+        const auto w = std::chrono::steady_clock::now();
+        mu_.lock();
+        mu_.unlock();
+        wait = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - w)
+                   .count();
+      }
+      Mix(mix_buf_.data(), n);
+      ring_.Write(mix_buf_.data(), n);
+      mix_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                   .count();
+    }
+    if (log_timing)
+      LogMixer(n > 0, wait, mix_ms, period_ms, ring_.Capacity() - ring_.Free(), ring_.Capacity());
+    // The period grid, waited for by absolute deadline: a wake less than a
+    // period late keeps its deadline (the next wait is shorter, lateness
+    // does not add up), one a period late or more moves it (no burst of
+    // catch-up wakes).
+    const uint64_t now = platform::MonotonicNs();
+    if (!next || now >= next + period_ns) next = now;
+    next += period_ns;
+    if (next <= now) continue;  // already late: mix again at once
+    if (realtime)
+      platform::WaitUntilNs(next);
+    else
+      platform::SleepUntilNs(next);
+  }
+}
+
+// The device callback's side of the ring: n frames, silence for the ones
+// the mixer thread has not put there yet.
+int Mixer::Take(float* out, int n) {
+  const int got = ring_.Read(out, n);
+  if (got < n) std::memset(out + 2 * size_t(got), 0, sizeof(float) * 2 * size_t(n - got));
+  return got;
 }
 
 void Mixer::Add(Voice* v) {
@@ -463,6 +804,33 @@ void Mixer::MixVoice(Voice& v, float* out, int frames, bool reverb) {
     }
   }
   settle();
+}
+
+void Mixer::Timing(double wait_ms, double total_ms, double gap_ms, int frames) {
+  static double max_wait = 0, max_total = 0, max_gap = 0;
+  static uint64_t late = 0, calls = 0, last_ms = 0, frames_sum = 0, min_frames = ~0ull;
+  max_wait = std::max(max_wait, wait_ms);
+  max_total = std::max(max_total, total_ms);
+  max_gap = std::max(max_gap, gap_ms);
+  frames_sum += uint64_t(frames);
+  min_frames = std::min<uint64_t>(min_frames, uint64_t(frames));
+  calls++;
+  if (device_rate_ && total_ms > 1000.0 * frames / device_rate_) late++;
+  const uint64_t now = uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now().time_since_epoch())
+                                    .count());
+  if (now - last_ms < 5000) return;
+  if (last_ms)
+    std::fprintf(stderr,
+                 "audio: %llu device requests (%llu-%llu frames), %llu late; longest lock wait "
+                 "%.2f ms, longest %.2f ms, longest gap between requests %.1f ms\n",
+                 (unsigned long long)calls, (unsigned long long)min_frames,
+                 (unsigned long long)(calls ? frames_sum / calls : 0), (unsigned long long)late,
+                 max_wait, max_total, max_gap);
+  last_ms = now;
+  max_wait = max_total = max_gap = 0;
+  late = calls = frames_sum = 0;
+  min_frames = ~0ull;
 }
 
 void Mixer::LowPass(const std::vector<std::array<float, 2>>& table, float lf, float hf,

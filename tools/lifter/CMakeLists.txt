@@ -15,5 +15,7 @@ add_executable(recomp_lift
   program.cpp
   function.cpp
   emit.cpp
+  flags.cpp
+  flagstest.cpp
   x87test.cpp)
 target_link_libraries(recomp_lift PRIVATE recomp_image Zydis)

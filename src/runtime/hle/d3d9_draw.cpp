@@ -1,8 +1,8 @@
 // Direct3D 9 draws. The device's state reaches gfx::Device at each draw
-// (render states that changed, viewport, scissor, targets). Draws with
+// (render states, viewport and scissor that changed; targets when bound). Draws with
 // shaders (translated from D3DXCompileShader's HLSL or from bytecode)
 // become gfx::ShaderDraw: the vertex declaration (or FVF) is matched to the
-// vertex shader's input semantics, and the streams, indices, constant
+// vertex shader's input semantics (once per pair), and the streams, indices, constant
 // registers and samplers are passed as they are. Draws without shaders
 // use gfx::Device's fixed-function pipeline (D3D7 semantics) with the
 // D3D9 state in its terms: sampler states at D3D7's texture-stage
@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstring>
 #include <set>
 #include <string>
@@ -22,20 +23,62 @@
 #include "runtime/hle/d3d9_impl.h"
 #include "runtime/hle/hle.h"
 #include "runtime/log.h"
+#include "runtime/perf.h"
+#include "runtime/platform.h"
 
 namespace recomp::d3d9 {
 
-void SyncState(Device& d) {
-  for (uint32_t s = 0; s < 256; s++) {
-    if (d.synced && d.sent_rs[s] == d.rs[s]) continue;
-    d.gfx->SetRenderState(s, d.rs[s]);
-    d.sent_rs[s] = d.rs[s];
+namespace {
+
+// What SyncState sends: the render states that changed, and the viewport
+// and scissor rectangle if they changed.
+struct StateChanges {
+  uint32_t states[256][2];
+  uint32_t count = 0;
+  gfx::Viewport viewport;
+  gfx::Rect scissor;
+  bool has_viewport = false, has_scissor = false;
+};
+
+// Only the render states marked dirty are compared (DXVK's dirty flags,
+// D3D9DeviceEx::PrepareDraw); one set back to the value gfx has is not
+// sent. Recorded as sent.
+void TakeChanges(Device& d, StateChanges& c) {
+  for (uint32_t w = 0; w < 4; w++) {
+    uint64_t m = d.rs.dirty[w];
+    d.rs.dirty[w] = 0;
+    for (; m; m &= m - 1) {
+      const uint32_t s = w * 64 + uint32_t(std::countr_zero(m));
+      if (d.synced && d.sent_rs[s] == d.rs[s]) continue;
+      c.states[c.count][0] = s;
+      c.states[c.count][1] = d.rs[s];
+      c.count++;
+      d.sent_rs[s] = d.rs[s];
+    }
+  }
+  const guest::D3DVIEWPORT9& v = d.viewport;
+  if (!d.synced || std::memcmp(&v, &d.sent_viewport, sizeof v)) {
+    c.viewport = {v.X, v.Y, v.Width, v.Height, v.MinZ, v.MaxZ};
+    c.has_viewport = true;
+    d.sent_viewport = v;
+  }
+  const guest::D3DRECT& r = d.scissor;
+  if (!d.synced || std::memcmp(&r, &d.sent_scissor, sizeof r)) {
+    c.scissor = {r.x1, r.y1, r.x2, r.y2};
+    c.has_scissor = true;
+    d.sent_scissor = r;
   }
   d.synced = true;
-  const guest::D3DVIEWPORT9& v = d.viewport;
-  d.gfx->SetViewport({v.X, v.Y, v.Width, v.Height, v.MinZ, v.MaxZ});
-  const guest::D3DRECT& r = d.scissor;
-  d.gfx->SetScissor({r.x1, r.y1, r.x2, r.y2});
+}
+
+}  // namespace
+
+void SyncState(Device& d) {
+  StateChanges c;
+  TakeChanges(d, c);
+  for (uint32_t i = 0; i < c.count; i++) d.gfx->SetRenderState(c.states[i][0], c.states[i][1]);
+  if (c.has_viewport) d.gfx->SetViewport(c.viewport);
+  if (c.has_scissor) d.gfx->SetScissor(c.scissor);
 }
 
 namespace {
@@ -119,7 +162,7 @@ void SyncFixedFunction(Device& d) {
     d.gfx->SetTextureStageState(s, 19, ss[8]);  // MIPMAPLODBIAS
     d.gfx->SetTextureStageState(s, 20, ss[9]);  // MAXMIPLEVEL
     d.gfx->SetTextureStageState(s, 21, ss[10]);  // MAXANISOTROPY
-    auto* t = active ? com::As<Texture>(d.textures[s]) : nullptr;
+    Texture* t = active ? d.textures[s].obj : nullptr;
     if (t && t->cube) FatalF("d3d9: fixed-function stage %u with a cube texture", s);
     d.gfx->SetTexture(s, t ? t->tex : 0);
   }
@@ -138,11 +181,11 @@ void SyncFixedFunction(Device& d) {
 
 // A draw without shaders: stream 0 with the FVF.
 void DrawFixed(Device& d, gfx::ShaderDraw& sd, const char* what) {
-  if (com::As<VertexDecl>(d.decl) || !d.fvf)
+  if (d.decl.obj || !d.fvf)
     FatalF("d3d9: fixed-function %s with a vertex declaration (only FVFs are supported)", what);
   if (!sd.streams[0].data) {
     const Device::Stream& st = d.streams[0];
-    auto* b = com::As<Buffer>(st.buffer);
+    Buffer* b = st.buffer.obj;
     if (!b || st.offset >= b->length) return;
     sd.streams[0] = {static_cast<const uint8_t*>(GPtr(b->mem)) + st.offset, b->length - st.offset,
                      st.stride};
@@ -167,7 +210,6 @@ void DrawFixed(Device& d, gfx::ShaderDraw& sd, const char* what) {
   }
   SyncState(d);
   SyncFixedFunction(d);
-  BindTargets(d);
   d.gfx->Draw(sd.prim, d.fvf, vs.data + size_t(first) * vs.stride, nv, vs.stride,
               sd.indices ? idx.data() : nullptr, ni);
 }
@@ -275,21 +317,33 @@ void NoteFfVertexGaps(const Device& d, uint32_t fvf) {
   }
 }
 
-// The stand-in vertex shader for d.fvf (compiled once per source) and its
-// constants in `c`.
+// The stand-in vertex shader for d.fvf (compiled once per source, found by
+// the state the source is made from) and its constants in `c`.
 const Device::FfVertexShader& FfVertexShaderFor(Device& d, float (*c)[4]) {
-  std::string src = FfVertexSource(d, d.fvf);
-  auto it = d.ff_vs.find(src);
-  if (it == d.ff_vs.end()) {
-    auto p = std::make_shared<hlsl::Program>();
-    std::string err;
-    if (!hlsl::Compile(src, {}, "main", "vs_2_0", 0, p.get(), &err))
-      FatalF("d3d9: the fixed-function vertex shader for FVF %X does not translate: %s", d.fvf,
-             err.c_str());
-    Device::FfVertexShader v;
-    v.id = d.gfx->CreateShader(*p);
-    v.program = std::move(p);
-    it = d.ff_vs.emplace(src, std::move(v)).first;
+  // What FfVertexSource reads: the FVF, and each stage's TEXCOORDINDEX and
+  // TEXTURETRANSFORMFLAGS.
+  std::array<uint32_t, 17> key;
+  key[0] = d.fvf;
+  for (uint32_t s = 0; s < 8; s++) {
+    key[1 + 2 * s] = d.tss[s][11];
+    key[2 + 2 * s] = d.tss[s][24];
+  }
+  const Device::FfVertexShader*& found = d.ff_vs_by_state[key];
+  if (!found) {
+    std::string src = FfVertexSource(d, d.fvf);
+    auto it = d.ff_vs.find(src);
+    if (it == d.ff_vs.end()) {
+      auto p = std::make_shared<hlsl::Program>();
+      std::string err;
+      if (!hlsl::Compile(src, {}, "main", "vs_2_0", 0, p.get(), &err))
+        FatalF("d3d9: the fixed-function vertex shader for FVF %X does not translate: %s", d.fvf,
+               err.c_str());
+      Device::FfVertexShader v;
+      v.id = d.gfx->CreateShader(*p);
+      v.program = std::move(p);
+      it = d.ff_vs.emplace(src, std::move(v)).first;
+    }
+    found = &it->second;
   }
   NoteFfVertexGaps(d, d.fvf);
   // World * View * Projection (row vectors), stored by column.
@@ -324,7 +378,7 @@ const Device::FfVertexShader& FfVertexShaderFor(Device& d, float (*c)[4]) {
   c[4][1] = float(v.Y);
   c[4][2] = v.Width ? 2.0f / float(v.Width) : 0.0f;
   c[4][3] = v.Height ? -2.0f / float(v.Height) : 0.0f;
-  return it->second;
+  return *found;
 }
 
 // The fixed-function texture stages (D3D9 numbering) as HLSL, for draws
@@ -388,7 +442,7 @@ std::string FfPixelSource(const Device& d) {
   for (uint32_t s = 0; s < 8; s++) {
     const uint32_t* t = d.tss[s];
     if (t[1] == 1) break;  // COLOROP DISABLE: this and the later stages are off
-    const auto* tx = com::As<Texture>(d.textures[s]);
+    const Texture* tx = d.textures[s].obj;
     const uint32_t set = t[11] & 0xFFFF;
     if (tx) {
       const std::string n = std::to_string(s), tc = "i.t" + std::to_string(set);
@@ -430,20 +484,39 @@ void NoteFfPixelGaps(const Device& d) {
 }
 
 // The stand-in pixel shader for the current stages (compiled once per
-// source) and its constants in `c`.
+// source, found by the state the source is made from) and its constants
+// in `c`.
 const Device::FfVertexShader& FfPixelShaderFor(Device& d, float (*c)[4]) {
-  std::string src = FfPixelSource(d);
-  auto it = d.ff_ps.find(src);
-  if (it == d.ff_ps.end()) {
-    auto p = std::make_shared<hlsl::Program>();
-    std::string err;
-    if (!hlsl::Compile(src, {}, "main", "ps_2_0", 0, p.get(), &err))
-      FatalF("d3d9: the fixed-function pixel shader does not translate: %s\n%s", err.c_str(),
-             src.c_str());
-    Device::FfVertexShader v;
-    v.id = d.gfx->CreateShader(*p);
-    v.program = std::move(p);
-    it = d.ff_ps.emplace(src, std::move(v)).first;
+  // What FfPixelSource reads: each stage's operations, arguments, result,
+  // coordinate set and transform flags and its texture's kind, up to the
+  // first disabled stage; SPECULARENABLE.
+  std::array<uint32_t, 97> key{};
+  for (uint32_t s = 0; s < 8; s++) {
+    const uint32_t* t = d.tss[s];
+    uint32_t* k = &key[12 * s];
+    static const uint8_t kStates[11] = {1, 2, 3, 4, 5, 6, 11, 24, 26, 27, 28};
+    for (int i = 0; i < 11; i++) k[i] = t[kStates[i]];
+    const Texture* tx = d.textures[s].obj;
+    k[11] = tx ? (tx->cube ? 2 : 1) : 0;
+    if (t[1] == 1) break;
+  }
+  key[96] = d.rs[29];
+  const Device::FfVertexShader*& found = d.ff_ps_by_state[key];
+  if (!found) {
+    std::string src = FfPixelSource(d);
+    auto it = d.ff_ps.find(src);
+    if (it == d.ff_ps.end()) {
+      auto p = std::make_shared<hlsl::Program>();
+      std::string err;
+      if (!hlsl::Compile(src, {}, "main", "ps_2_0", 0, p.get(), &err))
+        FatalF("d3d9: the fixed-function pixel shader does not translate: %s\n%s", err.c_str(),
+               src.c_str());
+      Device::FfVertexShader v;
+      v.id = d.gfx->CreateShader(*p);
+      v.program = std::move(p);
+      it = d.ff_ps.emplace(src, std::move(v)).first;
+    }
+    found = &it->second;
   }
   NoteFfPixelGaps(d);
   // TEXTUREFACTOR (A8R8G8B8) as a colour.
@@ -452,39 +525,45 @@ const Device::FfVertexShader& FfPixelShaderFor(Device& d, float (*c)[4]) {
   c[0][1] = float((f >> 8) & 0xFF) / 255.0f;
   c[0][2] = float(f & 0xFF) / 255.0f;
   c[0][3] = float(f >> 24) / 255.0f;
-  return it->second;
+  return *found;
 }
 
-// Completes `sd` (primitive, counts, and any streams already given) from
-// the device's bindings and draws it.
-void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
-  Shader* vs = com::As<Shader>(d.vs);
-  Shader* ps = com::As<Shader>(d.ps);
-  if (!vs && !ps) {
-    DrawFixed(d, sd, what);
-    return;
-  }
-  // The fixed-function pixel stage after a vertex shader: a pixel shader in
-  // its place.
-  const Device::FfVertexShader* ffp = nullptr;
-  static float ffp_consts[224][4];
-  if (!ps) ffp = &FfPixelShaderFor(d, ffp_consts);
-  // A pixel shader after the fixed-function vertex stage: a vertex shader
-  // in its place (FVF draws only).
-  const Device::FfVertexShader* ff = nullptr;
-  static float ff_consts[256][4];
-  if (!vs) {
-    if (com::As<VertexDecl>(d.decl) || !d.fvf)
-      FatalF("d3d9: %s with a pixel shader, no vertex shader and a vertex declaration", what);
-    ff = &FfVertexShaderFor(d, ff_consts);
-  }
-  const hlsl::Program& vprog = ff ? *ff->program : *vs->program;
+void DrawCounted(Device& d, gfx::ShaderDraw& sd, const char* what);
 
+// A table of input layouts with as many entries as this: its entries left
+// by programs that are gone are dropped (a game creating and releasing vertex
+// shaders across levels would otherwise keep every program's entry, and the
+// program, as long as the table). A miss is a cold path; a hit is a few
+// comparisons either way.
+constexpr size_t kPruneLayoutsAt = 256;
+
+template <typename Map>
+void PruneLayouts(Map& layouts) {
+  for (auto it = layouts.begin(); it != layouts.end();) {
+    if (it->second.program.expired()) it = layouts.erase(it);
+    else ++it;
+  }
+}
+
+// The vertex shader's inputs from the vertex declaration or the FVF
+// (`ff`: for a stand-in shader), worked out on their first draw together.
+const std::vector<gfx::VertexInput>& InputsFor(Device& d,
+                                               const std::shared_ptr<const hlsl::Program>& prog,
+                                               bool ff, const char* what) {
+  InputLayout* l;
   std::vector<guest::D3DVERTEXELEMENT9> from_fvf;
-  const std::vector<guest::D3DVERTEXELEMENT9>* elements = nullptr;
-  if (auto* decl = com::As<VertexDecl>(d.decl)) {
+  const std::vector<guest::D3DVERTEXELEMENT9>* elements;
+  if (VertexDecl* decl = d.decl.obj) {
+    if (decl->layouts.size() >= kPruneLayoutsAt) PruneLayouts(decl->layouts);
+    auto [it, fresh] = decl->layouts.try_emplace(prog.get());
+    l = &it->second;
+    if (!fresh && l->Of(prog.get())) return l->inputs;
     elements = &decl->elements;
   } else if (d.fvf) {
+    if (d.fvf_layouts.size() >= kPruneLayoutsAt) PruneLayouts(d.fvf_layouts);
+    auto [it, fresh] = d.fvf_layouts.try_emplace({d.fvf | uint64_t(ff) << 32, prog.get()});
+    l = &it->second;
+    if (!fresh && l->Of(prog.get())) return l->inputs;
     from_fvf = FvfElements(d.fvf);
     // The stand-in shader reads a pretransformed position as POSITION.
     if (ff)
@@ -494,30 +573,79 @@ void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
   } else {
     FatalF("d3d9: %s without a vertex declaration or FVF", what);
   }
-  const auto& sem = vprog.inputs;
-  std::vector<gfx::VertexInput> inputs(sem.size());
+  l->program = prog;
+  const auto& sem = prog->inputs;
+  l->inputs.resize(sem.size());
   for (size_t i = 0; i < sem.size(); i++) {
     for (const auto& e : *elements) {
       if (e.Stream == 0xFF) break;
       if (e.Usage == sem[i].usage && e.UsageIndex == sem[i].index) {
-        inputs[i] = {e.Stream, e.Offset, e.Type};
+        l->inputs[i] = {e.Stream, e.Offset, e.Type};
         break;
       }
     }
   }
+  return l->inputs;
+}
+
+// Completes `sd` (primitive, counts, and any streams already given) from
+// the device's bindings and draws it (timed for <ID>_PERF).
+void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
+  if (!perf::On()) return DrawCounted(d, sd, what);
+  const uint64_t t0 = platform::MonotonicNs();
+  DrawCounted(d, sd, what);
+  g_perf.draws.fetch_add(1, std::memory_order_relaxed);
+  g_perf.draw_ns.fetch_add(platform::MonotonicNs() - t0, std::memory_order_relaxed);
+}
+
+void DrawCounted(Device& d, gfx::ShaderDraw& sd, const char* what) {
+  static const bool check = [] {
+    const char* e = Env("D3D9_CHECK_BINDINGS");
+    return e && *e == '1';
+  }();
+  if (check) CheckBindings(d);
+  Shader* vs = d.vs.obj;
+  Shader* ps = d.ps.obj;
+  // Without the backend's fixed-function pipeline, stand-in shaders for
+  // both stages.
+  if (!vs && !ps && d.gfx->HasFixedFunction()) {
+    DrawFixed(d, sd, what);
+    return;
+  }
+  // The fixed-function pixel stage after a vertex shader: a pixel shader in
+  // its place.
+  const Device::FfVertexShader* ffp = nullptr;
+  static float ffp_consts[224][4];
+  if (!ps) {
+    ffp = &FfPixelShaderFor(d, ffp_consts);
+    if (perf::On()) g_perf.standin_ps.fetch_add(1, std::memory_order_relaxed);
+  }
+  // A pixel shader after the fixed-function vertex stage: a vertex shader
+  // in its place (FVF draws only).
+  const Device::FfVertexShader* ff = nullptr;
+  static float ff_consts[256][4];
+  if (!vs) {
+    if (d.decl.obj || !d.fvf)
+      FatalF("d3d9: %s with a pixel shader, no vertex shader and a vertex declaration", what);
+    ff = &FfVertexShaderFor(d, ff_consts);
+    if (perf::On()) g_perf.standin_vs.fetch_add(1, std::memory_order_relaxed);
+  }
+  const std::vector<gfx::VertexInput>& inputs =
+      InputsFor(d, ff ? ff->program : vs->program, ff != nullptr, what);
   sd.inputs = inputs.data();
   sd.input_count = uint32_t(inputs.size());
 
   for (int s = 0; s < 16; s++) {
     const Device::Stream& st = d.streams[s];
-    if (st.freq != 1 && st.buffer)
+    if (st.freq != 1 && st.buffer.guest)
       FatalF("d3d9: %s with stream %d frequency %08X (instancing is not supported yet)", what, s,
              st.freq);
     if (sd.streams[s].data) continue;  // given by the caller (UP draws)
-    auto* b = com::As<Buffer>(st.buffer);
+    Buffer* b = st.buffer.obj;
     if (!b || st.offset >= b->length) continue;
     sd.streams[s] = {static_cast<const uint8_t*>(GPtr(b->mem)) + st.offset, b->length - st.offset,
                      st.stride};
+    NoteBufferUse(d, b);
   }
 
   sd.vs = ff ? ff->id : vs->id;
@@ -528,13 +656,23 @@ void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
   sd.ps_float = ffp ? ffp_consts : d.ps_f;
   sd.ps_int = d.ps_i;
   sd.ps_bool = reinterpret_cast<const uint32_t*>(d.ps_b);
+  sd.vs_float_version = ff ? 0 : d.vs_f_version;  // stand-ins' constants change per draw
+  sd.ps_float_version = ffp ? 0 : d.ps_f_version;
+  sd.vs_ib_version = d.vs_ib_version;
+  sd.ps_ib_version = d.ps_ib_version;
   for (int i = 0; i < 20; i++) {
-    auto* t = com::As<Texture>(d.textures[i]);
+    const Texture* t = d.textures[i].obj;
     sd.textures[i] = t ? t->tex : 0;
   }
   sd.sampler_states = d.ss;
-  SyncState(d);
-  BindTargets(d);
+  sd.sampler_versions = d.ss_version;
+  // The changed state goes with the draw (one call into gfx).
+  StateChanges changes;
+  TakeChanges(d, changes);
+  sd.states = changes.states;
+  sd.state_count = changes.count;
+  sd.viewport = changes.has_viewport ? &changes.viewport : nullptr;
+  sd.scissor = changes.has_scissor ? &changes.scissor : nullptr;
   d.gfx->DrawShader(sd);
 }
 
@@ -563,7 +701,7 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::DrawPrimitive", D3DDev9_DrawPrimitive, 
 // (Type, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount)
 HLE_NAMED("d3d9.dll", "IDirect3DDevice9::DrawIndexedPrimitive", D3DDev9_DrawIndexedPrimitive, 7) {
   Device* d = Dev(c);
-  auto* ib = com::As<Buffer>(d->indices);
+  Buffer* ib = d->indices.obj;
   gfx::ShaderDraw sd;
   sd.prim = Arg(c, 1);
   sd.primitives = Arg(c, 6);
@@ -573,6 +711,7 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::DrawIndexedPrimitive", D3DDev9_DrawInde
   uint64_t start = uint64_t(Arg(c, 5)) * sd.index_size;
   if (start + uint64_t(n) * sd.index_size > ib->length) return D3DERR_INVALIDCALL;
   sd.indices = static_cast<const uint8_t*>(GPtr(ib->mem)) + start;
+  NoteBufferUse(*d, ib);
   sd.base_vertex = int32_t(Arg(c, 2));
   sd.min_index = Arg(c, 3);
   sd.vertex_count = Arg(c, 4);
@@ -593,7 +732,7 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::DrawPrimitiveUP", D3DDev9_DrawPrimitive
   if (!sd.vertex_count || !EnsureReadable(c, Arg(c, 3), bytes)) return D3DERR_INVALIDCALL;
   sd.streams[0] = {static_cast<const uint8_t*>(GPtr(Arg(c, 3))), bytes, stride};
   Draw(*d, sd, "DrawPrimitiveUP");
-  Bind(&d->streams[0].buffer, 0);
+  Bind(d->streams[0].buffer, 0);
   d->streams[0].offset = d->streams[0].stride = 0;
   return D3D_OK;
 }
@@ -617,9 +756,9 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::DrawIndexedPrimitiveUP", D3DDev9_DrawIn
   sd.indices = GPtr(Arg(c, 5));
   sd.streams[0] = {static_cast<const uint8_t*>(GPtr(Arg(c, 7))), vbytes, stride};
   Draw(*d, sd, "DrawIndexedPrimitiveUP");
-  Bind(&d->streams[0].buffer, 0);
+  Bind(d->streams[0].buffer, 0);
   d->streams[0].offset = d->streams[0].stride = 0;
-  Bind(&d->indices, 0);
+  Bind(d->indices, 0);
   return D3D_OK;
 }
 

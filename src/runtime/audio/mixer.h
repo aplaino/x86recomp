@@ -9,19 +9,32 @@
 // low-pass on the direct path and the send (see Voice::direct_lf), and the
 // Miles-compatible digital master reverb (Voice::wet, DigitalReverb).
 //
-// Locking: Voice fields are shared with the audio thread and may only be
+// Threads: a thread of our own mixes, a period at a time, into a lock-free
+// ring of frames (FrameRing) that the SDL device callback copies out and
+// converts. The thread is real-time on its period (10 ms, DirectSound's
+// fragment), and the ring keeps two device requests and a period of audio
+// ahead of what the device has taken, so a wake held off for tens of
+// milliseconds costs no silence: the one wake mixes several periods back.
+// Play cursors and position notifications advance on the mixer thread, in
+// play order, so SDL's real-time thread takes no lock and reads no guest
+// state. RECOMP_AUDIO_MIXTHREAD=0 mixes in the callback again, the old way.
+//
+// Locking: Voice fields are shared with the mixer thread and may only be
 // touched with Mixer::mu() held. The mixer never calls into guest code;
 // it only raises Voice::eos for the owner to act on.
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include "runtime/audio/digital_reverb.h"
 #include "runtime/audio/miles65.h"
 #include "runtime/audio/reverb.h"
+#include "runtime/audio/ring.h"
 #include "runtime/audio/source.h"
 #include "runtime/audio/vec3.h"
 
@@ -61,6 +74,10 @@ struct Voice {
   // 10000: hundredths of a dB taken off the other channel); positional
   // ones use the DS3D model with the mixer's rolloff factor.
   bool dsound = false;
+  // Source frames read at a time (0: the mixer's chunk, 1024). A game that
+  // streams into a ring and refills it on position notifications needs
+  // reads close to the play position, not a chunk ahead of it.
+  int read_chunk = 0;
   // DS3DMODE_HEADRELATIVE: pos is in the listener's frame.
   bool head_relative = false;
   Vec3 pos;
@@ -116,8 +133,15 @@ class Mixer {
   void Close();
 
   std::mutex& mu() { return mu_; }
+  // The mix converted to the device's rate (null when the two are the
+  // same), and that rate.
+  SDL_AudioStream* conv() const { return conv_; }
+  int device_rate() const { return device_rate_; }
   // Output rate; 0 until opened (no device: never).
   int rate() const { return rate_; }
+  // The mixer thread fills a ring the device callback copies out (False
+  // with RECOMP_AUDIO_MIXTHREAD=0, where the callback mixes).
+  bool mix_thread() const { return thread_mode_.load(std::memory_order_relaxed); }
   // With mu() held:
   void Add(Voice* v);
   void Remove(Voice* v);
@@ -131,8 +155,18 @@ class Mixer {
   // The millisecond clock of the reverb's tail: the time mixed so far.
   uint32_t now_ms() const { return rate_ ? uint32_t(mixed_ * 1000 / uint64_t(rate_)) : 0; }
 
-  // Called by the audio thread.
+  // Called by the mixer thread, or by the device callback with
+  // RECOMP_AUDIO_MIXTHREAD=0: locks mu(), zeroes out and mixes into it.
   void Mix(float* out, int frames);
+  // Called by the device callback when the mixer thread mixes: n frames
+  // from the ring into out, silence for the ones it did not have, and how
+  // many it had (fewer is an underrun the callback counts).
+  int Take(float* out, int n);
+  // <ID>_AUDIO_LOG=1: every 5 s, the audio thread's longest wait for mu()
+  // and longest mix, and how many device requests took longer than the
+  // audio they returned (heard as a crackle).
+  bool log_timing = false;
+  void Timing(double wait_ms, double total_ms, double gap_ms, int frames);
 
  private:
   void Init(int rate);
@@ -145,9 +179,16 @@ class Mixer {
   void LowPass(const std::vector<std::array<float, 2>>& table, float lf, float hf,
                float* a) const;
 
+  // The mixer thread: started by Open (RECOMP_AUDIO_MIXTHREAD) before the
+  // device resumes, stopped and joined by Close before the streams go.
+  void StartThread();
+  void StopThread();
+  void ThreadMain();
+
   std::mutex mu_;
   SDL_AudioStream* stream_ = nullptr;
-  int rate_ = 0;
+  SDL_AudioStream* conv_ = nullptr;
+  int rate_ = 0, device_rate_ = 0;
   float master_ = 1.0f;
   // LowPass coefficients (a1, a2) per 10 mB of HF cut, 0 to -10000.
   std::vector<std::array<float, 2>> low_pass_;
@@ -163,6 +204,16 @@ class Mixer {
   float rolloff_ = 1.0f;
   miles65::Listener listener65_;
   std::vector<Voice*> voices_;
+  // The mixer thread's side: the ring the callback drains, the period it
+  // mixes (kPeriodMs of rate_) and the fill it keeps it at.
+  std::atomic<bool> thread_mode_{false};  // the ring is in use
+  std::thread thread_;
+  std::atomic<bool> stop_{false};
+  FrameRing ring_;
+  int request_frames_ = 0;  // one device request, in the mixer's frames
+  int period_ = 0;          // frames in a period
+  int period_target_ = 0;   // frames the ring is kept filled to
+  std::vector<float> mix_buf_;  // the periods one wake mixes, at most
 };
 
 Mixer& GetMixer();

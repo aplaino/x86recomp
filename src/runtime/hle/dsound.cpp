@@ -14,9 +14,12 @@
 // feed the mixer's DS3D model (pan by azimuth, distance attenuation with
 // the listener's rolloff factor); DS3D_DEFERRED settings wait for
 // CommitDeferredSettings. Cones and Doppler are stored, not applied.
-// Position notifications (IDirectSoundNotify) and effects are not
+// Position notifications (IDirectSoundNotify) set their events when the
+// mixer's read cursor passes the offset (a little before it is heard, by
+// the mixer's latency: that data has been taken by then). Effects are not
 // implemented: fatal and named.
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -81,6 +84,7 @@ void WriteVec(uint32_t va, const audio::Vec3& v) {
 struct Format {
   uint16_t channels = 2, bits = 16, block = 4;
   uint32_t rate = 44100;
+  bool is_float = false;  // IEEE float samples (32 bits)
 };
 
 // A buffer's samples, shared with its duplicates and the mixer: the guest
@@ -90,6 +94,19 @@ struct Data {
   Format fmt;
   std::vector<uint8_t> bytes;
   uint32_t mem = 0;
+  // IDirectSoundNotify: {frame, event}, sorted by frame; and the event for
+  // DSBPN_OFFSETSTOP (set when the buffer stops). Under the mixer's lock.
+  std::vector<std::pair<int64_t, uint32_t>> notify;
+  uint32_t notify_stop = 0;
+  // <ID>_AUDIO_LOG=1, looping notified buffers (a game's stream ring):
+  // per 64-frame block, written (Unlock) since the mixer last took it.
+  // Taking a block the game did not refill is an underrun (heard as a
+  // crackle). Under the mixer's lock.
+  std::vector<uint8_t> fresh;
+  uint64_t underruns = 0, blocks_read = 0;
+  // Blocks whose copy differed from guest memory when taken (written
+  // without an Unlock after), and blocks written again before taken.
+  uint64_t stale = 0, overwritten = 0;
   ~Data() {
     if (mem) HeapFreeProcess(mem);
   }
@@ -97,10 +114,37 @@ struct Data {
 
 // Plays a Data as a ring (looping) or once. Called with the mixer's lock
 // held, as is everything that changes it.
+// Sample c of the frame at p as a float in [-1, 1].
+float SampleAt(const Format& f, const uint8_t* p, int c) {
+  switch (f.bits) {
+    case 8: return (float(p[c]) - 128.0f) / 128.0f;
+    case 16: {
+      int16_t v;
+      std::memcpy(&v, p + 2 * c, 2);
+      return float(v) / 32768.0f;
+    }
+    case 24: {
+      const uint8_t* q = p + 3 * c;
+      const int32_t v = int32_t(uint32_t(q[0]) << 8 | uint32_t(q[1]) << 16 | uint32_t(q[2]) << 24);
+      return float(v) / 2147483648.0f;
+    }
+    default: {  // 32
+      if (f.is_float) {
+        float v;
+        std::memcpy(&v, p + 4 * c, 4);
+        return v;
+      }
+      int32_t v;
+      std::memcpy(&v, p + 4 * c, 4);
+      return float(v) / 2147483648.0f;
+    }
+  }
+}
+
 class RingSource : public audio::Source {
  public:
   explicit RingSource(std::shared_ptr<Data> d) : d_(std::move(d)) {
-    channels_ = d_->fmt.channels;
+    channels_ = std::min<int>(d_->fmt.channels, 2);  // more are mixed down
     rate_ = int(d_->fmt.rate);
   }
   bool loop = false;
@@ -115,22 +159,54 @@ class RingSource : public audio::Source {
   int Read(float* out, int n) override {
     const int64_t frames = Frames();
     const Format& f = d_->fmt;
+    float* const first = out;
     int got = 0;
     for (; got < n; got++) {
       if (!frames || (!loop && next_ >= frames)) break;
       const uint8_t* p = d_->bytes.data() + size_t(next_ % frames) * f.block;
-      for (int c = 0; c < f.channels; c++) {
-        float s;
-        if (f.bits == 8) {
-          s = (float(p[c]) - 128.0f) / 128.0f;
-        } else {
-          int16_t v;
-          std::memcpy(&v, p + 2 * c, 2);
-          s = float(v) / 32768.0f;
-        }
-        *out++ = s;
+      if (f.channels <= 2) {
+        for (int c = 0; c < f.channels; c++) *out++ = SampleAt(f, p, c);
+      } else {
+        // WAVEFORMATEXTENSIBLE order: FL FR C LFE BL BR SL SR. Centre and
+        // surrounds at -3 dB into both sides; LFE left out.
+        constexpr float k = 0.7071f;
+        float l = SampleAt(f, p, 0), r = SampleAt(f, p, 1);
+        if (f.channels >= 3) l += k * SampleAt(f, p, 2), r += k * SampleAt(f, p, 2);
+        for (int c = 4; c + 1 < f.channels; c += 2)
+          l += k * SampleAt(f, p, c), r += k * SampleAt(f, p, c + 1);
+        *out++ = std::clamp(l, -1.0f, 1.0f);
+        *out++ = std::clamp(r, -1.0f, 1.0f);
+      }
+      if (!d_->fresh.empty() && loop && (next_ % frames) % 64 == 0) {
+        uint8_t& f = d_->fresh[size_t((next_ % frames) / 64)];
+        d_->blocks_read++;
+        if (!f) d_->underruns++;
+        f = 0;
+        const size_t off = size_t(next_ % frames) * f_block();
+        const size_t len = std::min<size_t>(64 * f_block(), d_->bytes.size() - off);
+        if (std::memcmp(d_->bytes.data() + off, GPtr(d_->mem + uint32_t(off)), len) != 0) d_->stale++;
       }
       next_++;
+      // Notifications at the frame just taken.
+      if (!d_->notify.empty()) {
+        const int64_t cur = (next_ - 1) % frames;
+        for (const auto& [frame, ev] : d_->notify)
+          if (frame == cur) SignalEventHandle(ev, false);
+      }
+    }
+    // RECOMP_AUDIO_DUMP=dir: what a looping ring gives the mixer, raw float
+    // at its own rate and channels, to dir/ring<frames>_<rate>_<ch>.f32.
+    if (loop && got > 0) {
+      if (!dump_checked_) {
+        dump_checked_ = true;
+        if (const char* dir = std::getenv("RECOMP_AUDIO_DUMP"); dir && *dir) {
+          char path[1024];
+          std::snprintf(path, sizeof path, "%s/ring%lld_%u_%d.f32", dir, (long long)frames,
+                        unsigned(f.rate), channels_);
+          dump_ = std::fopen(path, "wb");
+        }
+      }
+      if (dump_) std::fwrite(first, sizeof(float), size_t(got) * channels_, dump_);
     }
     return got;
   }
@@ -138,11 +214,14 @@ class RingSource : public audio::Source {
     next_ = f;
     return true;
   }
+  size_t f_block() const { return d_->fmt.block; }
   int64_t Length() const override { return loop ? -1 : Frames(); }
 
  private:
   std::shared_ptr<Data> d_;
   int64_t next_ = 0;
+  bool dump_checked_ = false;
+  FILE* dump_ = nullptr;
 };
 
 // ---- objects
@@ -179,6 +258,16 @@ struct Buffer3D : com::Object {
   uint32_t buffer = 0;  // the IDirectSoundBuffer it belongs to (referenced)
   ~Buffer3D() override;
 };
+
+struct Notify : com::Object {
+  uint32_t buffer = 0;  // the IDirectSoundBuffer it belongs to (referenced)
+  ~Notify() override { com::Release(buffer); }
+};
+
+uint32_t NotifyVtable() {
+  return com::Vtable("dsound.dll", "IDirectSoundNotify",
+                     {"QueryInterface", "AddRef", "Release", "SetNotificationPositions"});
+}
 
 struct Listener : com::Object {
   uint32_t primary = 0;  // referenced
@@ -309,15 +398,24 @@ void ChangedListener(uint32_t apply) {
 
 // ---- formats
 
+// WAVEFORMATEX: WAVE_FORMAT_PCM (1) of 8/16/24/32 bits, WAVE_FORMAT_IEEE_FLOAT
+// (3) of 32, or WAVE_FORMAT_EXTENSIBLE (0xFFFE) with either sub-format;
+// 1 to 8 channels.
 bool ReadFormat(uint32_t va, Format* f) {
   if (!va) return false;
   uint16_t tag = uint16_t(Rd32(va)), channels = uint16_t(Rd32(va) >> 16);
   uint32_t rate = Rd32(va + 4);
   uint16_t block = uint16_t(Rd32(va + 12)), bits = uint16_t(Rd32(va + 12) >> 16);
-  if (tag != 1 /* WAVE_FORMAT_PCM */ || (channels != 1 && channels != 2) ||
-      (bits != 8 && bits != 16) || block != channels * bits / 8 || rate < 100 || rate > 200000)
+  if (tag == 0xFFFE) {
+    if (Rd16(va + 16) < 22) return false;  // cbSize: the extensible part
+    tag = uint16_t(Rd32(va + 24));         // SubFormat's first field
+  }
+  const bool is_float = tag == 3;
+  if ((tag != 1 && !is_float) || channels < 1 || channels > 8 ||
+      (is_float ? bits != 32 : (bits != 8 && bits != 16 && bits != 24 && bits != 32)) ||
+      block != channels * bits / 8 || rate < 100 || rate > 200000)
     return false;
-  *f = {channels, bits, block, rate};
+  *f = {channels, bits, block, rate, is_float};
   return true;
 }
 
@@ -326,7 +424,7 @@ void WriteFormat(uint32_t va, uint32_t size, const Format& f) {
   uint8_t w[18] = {};
   auto p16 = [&](int o, uint32_t v) { w[o] = uint8_t(v), w[o + 1] = uint8_t(v >> 8); };
   auto p32 = [&](int o, uint32_t v) { p16(o, v & 0xFFFF), p16(o + 2, v >> 16); };
-  p16(0, 1);
+  p16(0, f.is_float ? 3 : 1);
   p16(2, f.channels);
   p32(4, f.rate);
   p32(8, f.rate * f.block);
@@ -342,10 +440,56 @@ HLE_NAMED("dsound.dll", "#11", DirectSoundCreate8, 3) {
   if (!Arg(c, 1)) return DSERR_INVALIDPARAM;
   Wr32(Arg(c, 1), 0);
   if (Arg(c, 2)) return DSERR_NOAGGREGATION;
-  if (!M().Open(48000)) return DSERR_NODRIVER;
+  // The mix runs at 44.1 kHz, the rate games' sounds and stream rings
+  // are made at: those play sample for sample, and SDL converts the mix to
+  // the device's rate with its band-limited resampler. Mixed at 48 kHz,
+  // they went through the mixer's linear interpolation, whose images and
+  // aliasing are heard as a crackle on bright sounds.
+  if (!M().Open(44100)) return DSERR_NODRIVER;
   Wr32(Arg(c, 1), com::Publish(std::make_shared<DirectSound>(), DirectSoundVtable()));
   return DS_OK;
 }
+
+// The one output device: its GUID, what GetDeviceID gives for the default
+// playback device, and what the enumerations list.
+constexpr uint8_t kDeviceGuid[16] = {0x52, 0x45, 0x43, 0x4F, 0x4D, 0x50, 0x00, 0x00,
+                                     'D',  'S',  'O',  'U',  'N',  'D',  0x00, 0x01};
+
+// GetDeviceID(pGuidSrc, pGuidDest): a default device id (or our own GUID)
+// to the device GUID; capture devices do not exist.
+HLE_NAMED("dsound.dll", "#9", GetDeviceID, 2) {
+  const gaddr src = Arg(c, 0), dst = Arg(c, 1);
+  if (!dst) return DSERR_INVALIDPARAM;
+  // DSDEVID_DefaultCapture / DefaultVoiceCapture: DEF0FAE1 / DEF0FAE3-...
+  if (src && (Rd32(src) == 0xDEF00001 || Rd32(src) == 0xDEF00003)) return DSERR_NODRIVER;
+  std::memcpy(GPtr(dst), kDeviceGuid, 16);
+  return DS_OK;
+}
+
+// DirectSoundEnumerateA/W(callback, context): the primary driver (NULL
+// GUID, as Windows lists it first), then the device.
+uint32_t Enumerate(Ctx& c, bool wide) {
+  const gaddr cb = Arg(c, 0), ctx = Arg(c, 1);
+  const gaddr guid = HeapAllocProcess(16, false), desc = HeapAllocProcess(128, true),
+              module = HeapAllocProcess(64, true);
+  std::memcpy(GPtr(guid), kDeviceGuid, 16);
+  auto put = [&](gaddr va, const char* s) {
+    if (wide) PutWStr(va, s); else PutStr(va, s);
+  };
+  put(desc, "Primary Sound Driver");
+  put(module, "");
+  if (CallGuest(c, cb, {0, desc, module, ctx})) {
+    put(desc, "Speakers");
+    put(module, "recomp.audio");
+    CallGuest(c, cb, {guid, desc, module, ctx});
+  }
+  HeapFreeProcess(guid);
+  HeapFreeProcess(desc);
+  HeapFreeProcess(module);
+  return DS_OK;
+}
+HLE_NAMED("dsound.dll", "#2", DirectSoundEnumerateA, 2) { return Enumerate(c, false); }
+HLE_NAMED("dsound.dll", "#3", DirectSoundEnumerateW, 2) { return Enumerate(c, true); }
 
 HLE_NAMED("dsound.dll", "IDirectSound8::QueryInterface", DS8_QueryInterface, 3) {
   uint32_t riid = Arg(c, 1), out = Arg(c, 2);
@@ -416,6 +560,8 @@ HLE_NAMED("dsound.dll", "IDirectSound8::CreateSoundBuffer", DS8_CreateSoundBuffe
   if (bytes < 4 || bytes > 0x0FFFFFFF) return DSERR_INVALIDPARAM;
   bytes -= bytes % d->fmt.block;
   if ((flags & DSBCAPS_CTRL3D) && d->fmt.channels != 1) return DSERR_INVALIDPARAM;
+  RECOMP_TRACE("  dsound: buffer %u bytes, %u ch %u bit%s %u Hz, flags %X\n", bytes,
+               d->fmt.channels, d->fmt.bits, d->fmt.is_float ? " float" : "", d->fmt.rate, flags);
   d->bytes.assign(bytes, d->fmt.bits == 8 ? 0x80 : 0);
   d->mem = HeapAllocProcess(bytes, true);
   if (d->fmt.bits == 8) std::memset(GPtr(d->mem), 0x80, bytes);
@@ -428,6 +574,10 @@ HLE_NAMED("dsound.dll", "IDirectSound8::CreateSoundBuffer", DS8_CreateSoundBuffe
   b->voice->src = std::move(src);
   b->voice->dsound = true;
   b->voice->ds3d = true;
+  // Read close to the play cursor: games refill the part just played on
+  // notifications (GTA IV: 7 segments of 512 frames) or from the write
+  // cursor, which is where the mixer has read up to.
+  b->voice->read_chunk = 64;
   b->voice->state = audio::Voice::State::Paused;
   b->pending3d = b->p3d;
   ApplyVoice(*b);
@@ -449,6 +599,10 @@ HLE_NAMED("dsound.dll", "IDirectSound8::DuplicateSoundBuffer", DS8_DuplicateSoun
   b->voice->src = std::move(src);
   b->voice->dsound = true;
   b->voice->ds3d = true;
+  // Read close to the play cursor: games refill the part just played on
+  // notifications (GTA IV: 7 segments of 512 frames) or from the write
+  // cursor, which is where the mixer has read up to.
+  b->voice->read_chunk = 64;
   b->voice->state = audio::Voice::State::Paused;
   b->volume = o->volume;
   b->pan = o->pan;
@@ -498,8 +652,14 @@ HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::QueryInterface", DSB8_QueryInterfa
     Wr32(out, b->buffer3d);
     return com::kS_OK;
   }
-  if (com::GuidEq(riid, kIID_IDirectSoundNotify))
-    FatalF("dsound: IDirectSoundNotify (position notifications) is not supported yet");
+  if (com::GuidEq(riid, kIID_IDirectSoundNotify) && !b->primary &&
+      (b->flags & DSBCAPS_CTRLPOSITIONNOTIFY)) {
+    auto n = std::make_shared<Notify>();
+    n->buffer = Arg(c, 0);
+    com::AddRef(Arg(c, 0));
+    Wr32(out, com::Publish(n, NotifyVtable()));
+    return com::kS_OK;
+  }
   return com::kE_NOINTERFACE;
 }
 HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::AddRef", DSB8_AddRef, 1) { return com::AddRef(Arg(c, 0)); }
@@ -538,6 +698,18 @@ HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::GetCurrentPosition", DSB8_GetCurre
       b->playing = false;
     }
     play = uint32_t(PlayFrame(*b)) * b->data->fmt.block;
+    if (Data& d = *b->data; !d.fresh.empty()) {  // <ID>_AUDIO_LOG: every 5 s
+      static uint64_t last_ms = 0;
+      const uint64_t now = TickCount();
+      if (now - last_ms >= 5000) {
+        last_ms = now;
+        std::fprintf(stderr,
+                     "dsound: ring of %zu bytes: %llu underruns, %llu stale, %llu overwritten in %llu blocks\n",
+                     d.bytes.size(), (unsigned long long)d.underruns, (unsigned long long)d.stale,
+                     (unsigned long long)d.overwritten, (unsigned long long)d.blocks_read);
+        d.underruns = d.blocks_read = d.stale = d.overwritten = 0;
+      }
+    }
     // Ahead of the play cursor by what the mixer has read: not playing,
     // the two are equal.
     write = b->playing && b->voice->state == audio::Voice::State::Playing
@@ -673,6 +845,10 @@ HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::Lock", DSB8_Lock, 8) {
 // written goes to the mixer's copy.
 HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::Unlock", DSB8_Unlock, 5) {
   SoundBuffer* b = Buf(c);
+  if (static bool once = false; !once && Env("AUDIO_LOG")) {
+    once = true;
+    std::fprintf(stderr, "dsound: Unlock called from %08X (bytes %u)\n", Rd32(c.esp), Arg(c, 2));
+  }
   if (b->primary) return DSERR_INVALIDCALL;
   Data& d = *b->data;
   uint32_t size = uint32_t(d.bytes.size());
@@ -682,6 +858,13 @@ HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::Unlock", DSB8_Unlock, 5) {
     if (!p || !n) continue;
     if (p < d.mem || p - d.mem > size || n > size - (p - d.mem)) return DSERR_INVALIDPARAM;
     std::memcpy(d.bytes.data() + (p - d.mem), GPtr(p), n);
+    if (!d.fresh.empty()) {
+      const uint32_t block = 64 * d.fmt.block;
+      for (uint32_t o = (p - d.mem) / block; o * block < p - d.mem + n && o < d.fresh.size(); o++) {
+        if (d.fresh[o] && o * block >= p - d.mem && (o + 1) * block <= p - d.mem + n) d.overwritten++;
+        d.fresh[o] = 1;
+      }
+    }
   }
   return DS_OK;
 }
@@ -713,6 +896,7 @@ HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::Stop", DSB8_Stop, 1) {
   // The mixer has read ahead; playing again continues from the play
   // cursor.
   b->voice->Seek(PlayFrame(*b));
+  if (b->data && b->data->notify_stop) SignalEventHandle(b->data->notify_stop, false);
   return DS_OK;
 }
 
@@ -999,6 +1183,47 @@ HLE_NAMED("dsound.dll", "IDirectSound3DListener::CommitDeferredSettings", DS3DL_
     ApplyVoice(*b);
   }
   g_dirty3d.clear();
+  return DS_OK;
+}
+
+// ---- IDirectSoundNotify
+
+HLE_NAMED("dsound.dll", "IDirectSoundNotify::AddRef", DSN_AddRef, 1) { return com::AddRef(Arg(c, 0)); }
+HLE_NAMED("dsound.dll", "IDirectSoundNotify::Release", DSN_Release, 1) { return com::Release(Arg(c, 0)); }
+
+// (cPositionNotifies, DSBPOSITIONNOTIFY[] { dwOffset, hEventNotify }): byte
+// offsets in the buffer; DSBPN_OFFSETSTOP (0xFFFFFFFF) is the stop event.
+HLE_NAMED("dsound.dll", "IDirectSoundNotify::SetNotificationPositions", DSN_SetPositions, 3) {
+  Notify* n = com::As<Notify>(Arg(c, 0));
+  SoundBuffer* b = n ? com::As<SoundBuffer>(n->buffer) : nullptr;
+  if (!b || !b->data) return DSERR_INVALIDPARAM;
+  if (b->playing) return DSERR_INVALIDCALL;  // only while stopped
+  const uint32_t count = Arg(c, 1), list = Arg(c, 2);
+  std::lock_guard<std::mutex> l(M().mu());
+  Data& d = *b->data;
+  d.notify.clear();
+  d.notify_stop = 0;
+  for (uint32_t i = 0; i < count; i++) {
+    const uint32_t off = Rd32(list + 8 * i), ev = Rd32(list + 8 * i + 4);
+    if (off == 0xFFFFFFFF)
+      d.notify_stop = ev;
+    else if (off < d.bytes.size())
+      d.notify.push_back({int64_t(off / d.fmt.block), ev});
+    else
+      return DSERR_INVALIDPARAM;
+  }
+  std::sort(d.notify.begin(), d.notify.end());
+  for (const auto& [frame, ev] : d.notify) MarkEventOrdered(ev);
+  static const bool audio_log = [] {
+    const char* e = Env("AUDIO_LOG");
+    return e && *e == '1';
+  }();
+  if (audio_log) M().log_timing = true;
+  if (audio_log && !d.notify.empty())
+    d.fresh.assign((d.bytes.size() / d.fmt.block + 63) / 64, 1);
+  RECOMP_TRACE("  dsound: %u notifications in %zu bytes, first at %lld frames, last at %lld\n",
+               count, d.bytes.size(), d.notify.empty() ? -1LL : (long long)d.notify.front().first,
+               d.notify.empty() ? -1LL : (long long)d.notify.back().first);
   return DS_OK;
 }
 

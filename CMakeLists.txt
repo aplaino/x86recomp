@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.25)
 project(x86recomp LANGUAGES C CXX)
+if(APPLE)
+  enable_language(OBJCXX)  # gfx/metal_device.mm
+endif()
 
 # Static recompilation of 32-bit x86 Windows games to native programs: the
 # lifter (build-time tool), the x87 model, and the runtime with its Win32/
@@ -100,6 +103,7 @@ endif()
 add_library(recomp_runtime SHARED
   src/runtime/dispatch.cpp
   src/runtime/pacing.cpp
+  src/runtime/perf.cpp
   src/runtime/platform.cpp
   src/runtime/process.cpp
   src/runtime/watchdog.cpp
@@ -205,6 +209,18 @@ if(APPLE)
   find_package(spirv_cross_glsl CONFIG REQUIRED)
   find_package(spirv_cross_msl CONFIG REQUIRED)
   target_link_libraries(recomp_gfx PRIVATE spirv-cross-msl)
+  # The Metal backend (Objective-C++, ARC).
+  target_sources(recomp_gfx PRIVATE src/runtime/gfx/metal_device.mm)
+  set_source_files_properties(src/runtime/gfx/metal_device.mm
+    TARGET_DIRECTORY recomp_gfx PROPERTIES COMPILE_OPTIONS "-fobjc-arc;-std=c++20")
+  target_link_libraries(recomp_gfx PRIVATE "-framework Metal" "-framework MetalFX"
+                        "-framework QuartzCore" "-framework Foundation")
+  if(RECOMP_IOS)
+    target_link_libraries(recomp_gfx PRIVATE "-framework UIKit")
+  else()
+    target_link_libraries(recomp_gfx PRIVATE "-framework AppKit")
+    add_subdirectory(tools/shader_check)
+  endif()
 endif()
 # SDL_GPU's shaders, one GLSL source per stage (gfx/shaders): glslang
 # compiles it to SPIR-V for Vulkan; for Metal, SPIRV-Cross turns a build
@@ -320,6 +336,10 @@ target_link_libraries(recomp_ucrt PUBLIC recomp_runtime PRIVATE coremath)
 add_library(recomp_online SHARED src/runtime/hle/galaxy64.cpp)
 target_link_libraries(recomp_online PUBLIC recomp_runtime)
 
+# Games for Windows - LIVE (xlive.dll), answering as an offline local profile.
+add_library(recomp_xlive SHARED src/runtime/hle/xlive.cpp)
+target_link_libraries(recomp_xlive PUBLIC recomp_runtime)
+
 # SDL2.dll for x64 guests that link it themselves, on the host's SDL3.
 add_library(recomp_sdl2 SHARED src/runtime/hle/sdl2.cpp src/runtime/hle/sdl2_video.cpp)
 target_link_libraries(recomp_sdl2 PUBLIC recomp_runtime SDL3::SDL3)
@@ -345,6 +365,28 @@ else()
 endif()
 target_include_directories(recomp_dbghelp PRIVATE "${RECOMP_LLVM_ROOT}/include")
 
+set(RECOMP_PGO "" CACHE STRING "Lifted code PGO: empty, generate, or a .profdata path")
+# ThinLTO across the lifted files: a game's thousands of tiny functions
+# (accessors, vector maths) are then inlined into callers in other files,
+# without the register spill and reload around every call. The game's
+# executable must link with -flto=thin too.
+option(RECOMP_LTO "ThinLTO of lifted code" OFF)
+# A game's opt-in (sse.h, RECOMP_SSE_HOST): SSE arithmetic as the host's,
+# without the checks that keep NaN results and MXCSR flags bit-exact.
+option(RECOMP_SSE_HOST "Host SSE arithmetic in lifted code" OFF)
+# A game's opt-in (lifted.h, RECOMP_TSO): x86's memory order between
+# threads on a weakly ordered host (acquire loads, release stores).
+option(RECOMP_TSO "x86 memory order in lifted code" OFF)
+
+# The host CPU lifted code is tuned for: on Apple's arm64 the M1 family
+# (Mac and iPad M1 and later, A14 and later), whose instructions and
+# scheduling model the generic arm64 target leaves unused.
+if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+  set(RECOMP_HOST_CPU "apple-m1" CACHE STRING "-mcpu for lifted code (empty: the compiler's default)")
+else()
+  set(RECOMP_HOST_CPU "" CACHE STRING "-mcpu for lifted code (empty: the compiler's default)")
+endif()
+
 # recomp_add_lifted(<target> <dir>): an OBJECT library of the lifter's
 # output in <dir> (globbed, so re-run cmake after lifting), with the
 # registration of its function table (runtime/lifted_table.cpp). Defines
@@ -361,9 +403,34 @@ function(recomp_add_lifted target dir)
   target_compile_features(${target} PRIVATE cxx_std_20)
   # -fnon-call-exceptions: guest access violations are raised from the
   # SIGSEGV handler and may unwind (GuestResume) out of the faulting frame.
+  # No stack protector (as for recomp_x87): every lifted function with an
+  # Xmm or x87 local got a canary load and check; the guest stack lives in
+  # guest memory, so the host frames it guards hold no guest buffers.
   target_compile_options(${target} PRIVATE -O2 -g0 -fno-strict-aliasing
-                         -fnon-call-exceptions ${RECOMP_X87_FP_FLAGS}
-                         ${RECOMP_FAULT_FRAME_FLAGS})
+                         -fnon-call-exceptions -fno-stack-protector
+                         ${RECOMP_X87_FP_FLAGS} ${RECOMP_FAULT_FRAME_FLAGS})
+  if(RECOMP_HOST_CPU)
+    target_compile_options(${target} PRIVATE -mcpu=${RECOMP_HOST_CPU})
+  endif()
+  if(RECOMP_LTO)
+    target_compile_options(${target} PRIVATE -flto=thin)
+  endif()
+  if(RECOMP_SSE_HOST)
+    target_compile_definitions(${target} PRIVATE RECOMP_SSE_HOST)
+  endif()
+  if(RECOMP_TSO)
+    target_compile_definitions(${target} PRIVATE RECOMP_TSO)
+  endif()
+  # Profile-guided optimisation (RECOMP_PGO): "generate" instruments the
+  # lifted code (the executable must link with -fprofile-instr-generate
+  # too, and write the counts from GameConfig::before_exit, to
+  # LLVM_PROFILE_FILE); a .profdata path optimises with that profile.
+  if(RECOMP_PGO STREQUAL "generate")
+    target_compile_options(${target} PRIVATE -fprofile-instr-generate)
+  elseif(RECOMP_PGO)
+    target_compile_options(${target} PRIVATE -fprofile-instr-use=${RECOMP_PGO}
+                           -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date)
+  endif()
 endfunction()
 
 # recomp_add_lift_tests(EXE <exe> SYMBOLS <dir> MANIFEST <file> [X64]):

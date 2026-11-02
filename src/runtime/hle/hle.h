@@ -81,6 +81,12 @@ inline uint64_t Arg(const Ctx& c, int i) {
   }
 }
 
+// The guest return address of the call into a handler (its low 32 bits
+// on x64).
+inline uint32_t Caller(const Ctx& c) {
+  return g_proc->x64 ? uint32_t(Rd64(c.rsp)) : Rd32(c.esp);
+}
+
 // A handle as a return value: Win64 handles are pointer-sized, their values
 // sign-extended 32-bit ones (the pseudo handles are -1 and -2). Handle
 // arguments are read as their low 32 bits, as Windows does.
@@ -93,7 +99,7 @@ inline uint64_t HandleRet(uint32_t h) {
 // and the result goes to xmm0.
 inline double ArgD(const Ctx& c, int i) {
   double v;
-  if (i < 4) std::memcpy(&v, c.xmm[i].b, 8);
+  if (i < 4) std::memcpy(&v, c.xmm[i].data(), 8);
   else {
     uint64_t b = Arg(c, i);
     std::memcpy(&v, &b, 8);
@@ -102,7 +108,7 @@ inline double ArgD(const Ctx& c, int i) {
 }
 inline float ArgF(const Ctx& c, int i) {
   float v;
-  if (i < 4) std::memcpy(&v, c.xmm[i].b, 4);
+  if (i < 4) std::memcpy(&v, c.xmm[i].data(), 4);
   else {
     uint32_t b = uint32_t(Arg(c, i));
     std::memcpy(&v, &b, 4);
@@ -111,11 +117,11 @@ inline float ArgF(const Ctx& c, int i) {
 }
 // Returns from a handler with a double (float) result in xmm0.
 inline uint64_t RetD(Ctx& c, double v) {
-  std::memcpy(c.xmm[0].b, &v, 8);
+  std::memcpy(c.xmm[0].data(), &v, 8);
   return 0;
 }
 inline uint64_t RetF(Ctx& c, float v) {
-  std::memcpy(c.xmm[0].b, &v, 4);
+  std::memcpy(c.xmm[0].data(), &v, 4);
   return 0;
 }
 

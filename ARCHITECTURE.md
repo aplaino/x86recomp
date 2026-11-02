@@ -239,6 +239,50 @@ lifter is tractable (rexglue-style: one C++ function per guest function).
     halve again in one game, whose frame time drops 0.6%. In a
     frame-capped game they drop 20% outside the limiter, and its work
     per frame does not change measurably.
+- Flags across calls (32-bit images; tools/lifter/flags.h): a spill
+  used to pack every flag at every call, return and tail call, so the
+  last flag-setting instruction before one (often `add esp`/`sub esp`)
+  had its PF (a popcount), AF and OF computed for nobody. The lifter now
+  solves, over the whole program, which arithmetic flags each function
+  may read at entry (`reads`) and which its callers may read after it
+  returns (`ret`), as box64's and FEX's flag elimination do inside a
+  block, and a spill keeps only those (LIFT_SPILL_F/LIFT_SPILL_NF):
+  - per instruction, reads and writes from Zydis' flag table, plus the
+    undefined flags the lifted code writes anyway (Logic clears AF, the
+    shifts write AF/OF); no write where it depends on a count (shift or
+    rotate by CL or by a multiple of 32, RCL/RCR, rep cmps/scas) or where
+    the lifted code leaves an undefined flag as it was (MUL's SF ZF AF PF);
+  - a direct call to g needs reads(g), and what is live after it goes
+    into ret(g) (g passes on what it does not write, so that lands in
+    reads(g) too); a tail call to g needs reads(g) and gives ret(g) the
+    caller's ret; a return keeps ret; a replaced function counts as its
+    lifted body;
+  - what the lifter cannot follow is taken to keep the calling
+    convention: a function entered through a pointer (indirect call or
+    jump) reads no flag at entry; hooks and imports read none
+    (RaiseException and RtlUnwind, which copy EFLAGS into a CONTEXT,
+    read all) and pass them through; code found only by a pointer scan
+    (weak entries, much of it data decoded as code) constrains nothing.
+    Flags read after an indirect call (or a resumed SEH/setjmp frame)
+    are kept by every return (`indirect`);
+  - DF, AC and ID live in Ctx::eflags only in 32-bit lifted code (cld,
+    std, popfd write them there; string instructions read DF there), so
+    no spill carries them. The analysis covers CF PF AF ZF SF OF.
+  The masks are a least fixpoint (a worklist over functions; they only
+  grow). Without the convention assumptions, junk entries and a few
+  hand-written stubs made every spill keep every flag. lift_report.txt
+  lists the functions that read flags at entry (address-taken ones
+  marked), the manifest hooks after which flags are read, and what first
+  put each flag into `indirect`; `--flags-dump VA` shows the liveness
+  per instruction, `--flags-table` each mnemonic's reads and writes, and
+  `--all-flags` lifts without the analysis. Checked by
+  tests/lift_flags_test (programs whose flags cross calls, returns, tail
+  and indirect calls, run with and without the analysis) and, on a game,
+  by `--flags-check`: every spill keeps all flags as before,
+  c.flags_valid records which the optimised spill would have kept, and
+  an instruction reading a flag outside them is logged (FlagCheckFail).
+  In a game of 3.3M lifted instructions, all but 7 of 176k direct
+  calls, 75k returns and 41k indirect calls spill no flag.
 - Calls: direct `call` -> C++ call; the real return address is pushed to
   the guest stack so code that reads it (__alloca_probe, SEH) still
   works. `ret N` pops. Tail `jmp` to another entry -> tail call.
@@ -544,6 +588,18 @@ live in Ctx and are used in place (never cached in locals).
 - Not modelled, fatal if reached: unmasked SIMD exceptions (#XM), and
   FTZ/DAZ actually changing a result.
 - Integer and data-movement forms are plain portable C++.
+- 32-bit lifted functions keep the XMM registers they use in locals
+  (X0..X7). Xmm is a 16-byte vector type, not a byte array, so a local
+  stays in one host SIMD register (as a byte array clang cut it into
+  bytes, or kept it in the frame). The out-of-line models (ArithModel
+  ...) take and return registers by value and are cold: a reference to
+  a local would pin it in memory at every instruction.
+- Whether MXCSR is as usual (masked, round to nearest, no FTZ/DAZ, PE
+  set; the fast paths' condition) is the function's local MU, read at
+  entry, after every call (LIFT_RELOAD) and after LDMXCSR, instead of a
+  load of c.mxcsr at each SSE instruction. Nothing else in a function
+  changes MXCSR's control bits, and the models only set sticky flags,
+  which cannot make a usual MXCSR unusual.
 - tests/lift_sse_test runs every SSE form in a game EXE lifted and
   natively from random states rich in special values (for a game whose
   EXE has 244 forms: 2.44M checks, all bit-exact).
@@ -839,7 +895,23 @@ late-frame rule; on an idle host wake-ups land 15-30 us (Linux) or
   recomp_add_digital_reverb_test lifts the original routines from the
   user's installed DLL at build time (`recomp_lift --only`) and compares;
   tests/digital_reverb_test checks a hash of our output on every host.
-  runtime/audio is its own library (`recomp_audio`, no HLE);
+  The mixer runs on a thread of its own, a 10 ms period (DirectSound's
+  fragment) at a time, into a lock-free single-producer/single-consumer
+  ring of float frames. The thread is real-time on Apple hosts (a Mach
+  time-constraint policy: 10 ms period, 2 ms of work, done by 5 ms,
+  preemptible), and its period is waited for by absolute deadline, so a
+  late wake is followed by a shorter wait rather than by accumulated
+  lateness. The ring keeps two device requests and a period ahead of what
+  the device has taken (sized from the device's own buffer, 2323 frames
+  at 44.1 kHz with a 1024-frame device buffer); a wake held off for tens
+  of milliseconds costs no silence, because that one wake mixes several
+  periods back. The SDL device callback only copies the ring out and lets
+  SDL convert it, so SDL's real-time thread takes no lock and reads no
+  guest memory; it plays silence and counts an underrun for whatever the
+  ring was short of. Play cursors and position notifications advance on
+  the mixer thread, in play order. RECOMP_AUDIO_MIXTHREAD=0 mixes in the
+  callback again, the old way, for A/B. runtime/audio is its own library
+  (`recomp_audio`, no HLE);
   tools/eax_capture renders with it offline to compare against
   recordings of real Creative hardware.
 - Measured against hardware (an Audigy 2 ZS under Windows 98 SE through

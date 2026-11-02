@@ -5,9 +5,17 @@
 //            [--x87-test OUT.cpp]   (forms for tests/lift_x87_test.cpp)
 //            [--int-test OUT.cpp]   (forms for tests/lift_int_test.cpp)
 //            [--sse-test OUT.cpp]   (forms for tests/lift_sse_test.cpp)
+//            [--flags-test OUT.cpp] (programs for tests/lift_flags_test.cpp)
 //            [--module <game.dll> --symbols DIR [--manifest FILE]
 //             [--base HEX]]...
 //            [--only VA[,VA...]]   (just these functions and their callees)
+//            [--all-flags]   (spill every flag at calls and returns)
+//            [--flags-check] (spill every flag, report reads the analysis
+//                             would not have spilled; see lifted.h)
+//            [--flags-table] (each mnemonic's flag reads and writes as the
+//                             analysis sees them, for review)
+//            [--flags-dump VA[,VA...]] (the flags live before each
+//                             instruction of these functions)
 //
 // Each --module adds a DLL the game loads itself, lifted into the same
 // output; --symbols/--manifest/--base after it apply to that DLL. DLLs
@@ -39,6 +47,7 @@
 #include <vector>
 
 #include "emit.h"
+#include "flags.h"
 #include "function.h"
 #include "program.h"
 #include "x87test.h"
@@ -97,8 +106,10 @@ int main(int argc, char** argv) {
   std::string outdir = "generated";
   uint64_t per_file = 12000;
   uint64_t dump = 0;
-  std::string x87_test, int_test, sse_test;
+  std::string x87_test, int_test, sse_test, flags_test;
   std::set<uint64_t> only;
+  bool all_flags = false, flags_check = false, flags_table = false;
+  std::set<uint64_t> flags_dump;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     auto val = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -110,9 +121,22 @@ int main(int argc, char** argv) {
     else if (a == "--out") outdir = val();
     else if (a == "--insns-per-file") per_file = std::stoull(val());
     else if (a == "--dump") dump = std::stoull(val(), nullptr, 16);
+    else if (a == "--all-flags") all_flags = true;
+    else if (a == "--flags-check") flags_check = true;
+    else if (a == "--flags-table") flags_table = true;
+    else if (a == "--flags-dump") {
+      std::string list = val();
+      for (size_t pos = 0; pos < list.size();) {
+        size_t end = list.find(',', pos);
+        if (end == std::string::npos) end = list.size();
+        flags_dump.insert(std::stoull(list.substr(pos, end - pos), nullptr, 16));
+        pos = end + 1;
+      }
+    }
     else if (a == "--x87-test") x87_test = val();
     else if (a == "--int-test") int_test = val();
     else if (a == "--sse-test") sse_test = val();
+    else if (a == "--flags-test") flags_test = val();
     else if (a == "--only") {
       std::string list = val();
       for (size_t pos = 0; pos < list.size();) {
@@ -126,6 +150,11 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "unknown argument %s\n", a.c_str());
       return 2;
     }
+  }
+  // --flags-test needs no EXE: its programs are built in.
+  if (!flags_test.empty()) {
+    lifter::Decoder dec32;
+    return lifter::WriteFlagsTest(dec32, flags_test, kFilePrologue);
   }
   if (mods[0].path.empty()) {
     std::fprintf(stderr, "usage: recomp_lift --exe game.exe "
@@ -197,7 +226,15 @@ int main(int argc, char** argv) {
   // calls, but code running into it from elsewhere continues inline. A
   // direct call or tail call makes it a strong entry. Only pointers into
   // the module they were found in count: an image holds no static pointers
-  // into another one, so those are just numbers.
+  // into another one, so those are just numbers. Outside .rdata and .data
+  // the base relocations say where the pointers are: system DLLs keep
+  // function tables (the CRT's initialiser lists) in .text. A relocation
+  // inside an instruction of a function found so far is an address operand
+  // (a switch table, a global), not a stored pointer, so that scan waits
+  // for the first fixpoint and then skips those. As such a section also
+  // holds strings and constants, a target counts only where a compiled
+  // function can start: after alignment padding (int3, nop) or right after
+  // a ret, and not inside a function found so far.
   if (!only.empty()) {
     p.entries = only;
     p.weak.clear();
@@ -228,68 +265,99 @@ int main(int argc, char** argv) {
     }
   size_t recovered_tables = 0, completed_tables = 0;
   std::set<uint64_t> tables_read;  // jmps whose table was read from the image
-  while (!work.empty()) {
-    uint64_t e = work.front();
-    work.pop_front();
-    if (!done.insert(e).second) continue;
-    lifter::Function f;
-    lifter::BuildFunction(p, dec, e, &f);
-    // Switch tables Ghidra did not export: recover them and rebuild, as
-    // their targets may hold further switches. Tables it did export are
-    // read from the image too, and completed: its list can miss cases (a
-    // four-way switch in g_Rhapsody came with two targets, and the other
-    // two cases jumped out of the lifted code).
-    for (bool more = true; more;) {
-      more = false;
-      for (const auto& [va, in] : f.insns) {
-        if (tables_read.count(va)) continue;
-        std::vector<uint64_t> targets;
-        if (!lifter::RecoverJumpTable(p, f, in, &targets)) continue;
-        tables_read.insert(va);
-        auto known = p.jumptables.find(va);
-        if (known == p.jumptables.end()) {
-          p.jumptables[va] = std::move(targets);
-          recovered_tables++;
-          more = true;
-          continue;
-        }
-        bool added = false;
-        for (uint64_t t : targets)
-          if (std::find(known->second.begin(), known->second.end(), t) == known->second.end()) {
-            known->second.push_back(t);
-            added = true;
+  // Instruction bytes of the strong functions built so far: [start, end).
+  std::vector<std::pair<uint64_t, uint64_t>> code;
+  auto drain = [&]() {
+    while (!work.empty()) {
+      uint64_t e = work.front();
+      work.pop_front();
+      if (!done.insert(e).second) continue;
+      lifter::Function f;
+      lifter::BuildFunction(p, dec, e, &f);
+      // Switch tables Ghidra did not export: recover them and rebuild, as
+      // their targets may hold further switches. Tables it did export are
+      // read from the image too, and completed: its list can miss cases (a
+      // four-way switch in g_Rhapsody came with two targets, and the other
+      // two cases jumped out of the lifted code).
+      for (bool more = true; more;) {
+        more = false;
+        for (const auto& [va, in] : f.insns) {
+          if (tables_read.count(va)) continue;
+          std::vector<uint64_t> targets;
+          if (!lifter::RecoverJumpTable(p, f, in, &targets)) continue;
+          tables_read.insert(va);
+          auto known = p.jumptables.find(va);
+          if (known == p.jumptables.end()) {
+            p.jumptables[va] = std::move(targets);
+            recovered_tables++;
+            more = true;
+            continue;
           }
-        if (added) {
-          completed_tables++;
-          more = true;
+          bool added = false;
+          for (uint64_t t : targets)
+            if (std::find(known->second.begin(), known->second.end(), t) == known->second.end()) {
+              known->second.push_back(t);
+              added = true;
+            }
+          if (added) {
+            completed_tables++;
+            more = true;
+          }
+        }
+        if (more) {
+          f = {};
+          lifter::BuildFunction(p, dec, e, &f);
         }
       }
-      if (more) {
-        f = {};
-        lifter::BuildFunction(p, dec, e, &f);
+      for (const auto* s : {&f.direct_calls, &f.tail_calls, &f.setjmp_returns})
+        for (uint64_t t : *s) {
+          if (!p.InText(t)) continue;
+          p.weak.erase(t);  // really entered as a function
+          if (p.entries.insert(t).second) work.push_back(t);
+        }
+      const lifter::Module* fm = p.TextOf(e);
+      if (!only.empty()) continue;
+      for (const auto& [va, in] : f.insns) {
+        if (!in.ok) continue;
+        for (int i = 0; i < in.d.operand_count_visible; i++) {
+          const auto& o = in.ops[i];
+          if (o.type == ZYDIS_OPERAND_TYPE_IMMEDIATE && !o.imm.is_relative)
+            candidate(fm, p.x64 ? o.imm.value.u : static_cast<uint32_t>(o.imm.value.u),
+                      &from_code_ptrs);
+          // x64 code takes a function's address with a RIP-relative lea.
+          if (o.type == ZYDIS_OPERAND_TYPE_MEMORY && o.mem.base == ZYDIS_REGISTER_RIP &&
+              in.d.mnemonic == ZYDIS_MNEMONIC_LEA)
+            candidate(fm, in.next() + o.mem.disp.value, &from_code_ptrs);
+        }
       }
+      if (!p.weak.count(e))
+        for (const auto& [va, in] : f.insns)
+          if (in.ok) code.emplace_back(va, in.next());
     }
-    for (const auto* s : {&f.direct_calls, &f.tail_calls, &f.setjmp_returns})
-      for (uint64_t t : *s) {
-        if (!p.InText(t)) continue;
-        p.weak.erase(t);  // really entered as a function
-        if (p.entries.insert(t).second) work.push_back(t);
+  };
+  drain();
+  if (only.empty()) {
+    std::sort(code.begin(), code.end());
+    auto in_code = [&](uint64_t a) {
+      auto it = std::upper_bound(code.begin(), code.end(), std::make_pair(a, ~uint64_t(0)));
+      return it != code.begin() && a < std::prev(it)->second;
+    };
+    for (const auto& m : p.modules)
+      for (uint64_t at : m.img.fixups) {
+        const auto sec = std::find_if(m.img.sections.begin(), m.img.sections.end(),
+                                      [&](const auto& s) { return at - s.va < s.vsize; });
+        if (sec == m.img.sections.end() || sec->name == ".rdata" || sec->name == ".data" ||
+            in_code(at))
+          continue;
+        const uint64_t t = p.x64 ? p.mem.read<uint64_t>(at) : p.mem.read<uint32_t>(at);
+        if (p.TextOf(t) != &m || in_code(t)) continue;
+        const uint8_t before = p.mem.read<uint8_t>(t - 1);
+        if (before != 0xCC && before != 0x90 && before != 0xC3 &&
+            p.mem.read<uint8_t>(t - 3) != 0xC2)
+          continue;
+        candidate(&m, t, &from_data_ptrs);
       }
-    const lifter::Module* fm = p.TextOf(e);
-    if (!only.empty()) continue;
-    for (const auto& [va, in] : f.insns) {
-      if (!in.ok) continue;
-      for (int i = 0; i < in.d.operand_count_visible; i++) {
-        const auto& o = in.ops[i];
-        if (o.type == ZYDIS_OPERAND_TYPE_IMMEDIATE && !o.imm.is_relative)
-          candidate(fm, p.x64 ? o.imm.value.u : static_cast<uint32_t>(o.imm.value.u),
-                    &from_code_ptrs);
-        // x64 code takes a function's address with a RIP-relative lea.
-        if (o.type == ZYDIS_OPERAND_TYPE_MEMORY && o.mem.base == ZYDIS_REGISTER_RIP &&
-            in.d.mnemonic == ZYDIS_MNEMONIC_LEA)
-          candidate(fm, in.next() + o.mem.disp.value, &from_code_ptrs);
-      }
-    }
+    drain();
   }
   std::printf("functions: %zu (%zu from Ghidra/exports, %zu discovered: "
               "%zu via code pointers, %zu via data pointers; %zu weak)\n",
@@ -297,6 +365,48 @@ int main(int argc, char** argv) {
               from_code_ptrs, from_data_ptrs, p.weak.size());
   std::printf("jump tables: %zu from Ghidra (%zu completed from the image), %zu recovered\n",
               p.jumptables.size() - recovered_tables, completed_tables, recovered_tables);
+
+  if (flags_table) {
+    // mnemonic and kind of count -> (use, kill) -> an example
+    std::map<std::string, std::map<std::pair<uint32_t, uint32_t>, uint64_t>> t;
+    for (uint64_t e : p.entries) {
+      lifter::Function f;
+      lifter::BuildFunction(p, dec, e, &f);
+      for (const auto& [va, in] : f.insns) {
+        if (!in.ok) continue;
+        const lifter::FlagEffect fe = lifter::InsnFlags(in);
+        std::string k = ZydisMnemonicGetString(in.d.mnemonic);
+        if (in.d.attributes &
+            (ZYDIS_ATTRIB_HAS_REP | ZYDIS_ATTRIB_HAS_REPE | ZYDIS_ATTRIB_HAS_REPNE))
+          k = "rep " + k;
+        if (in.d.operand_count_visible > 1 &&
+            in.ops[in.d.operand_count_visible - 1].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+            in.ops[in.d.operand_count_visible - 1].reg.value == ZYDIS_REGISTER_CL)
+          k += " ,cl";
+        t[k].emplace(std::make_pair(fe.use, fe.kill), va);
+      }
+    }
+    for (const auto& [m, v] : t)
+      for (const auto& [uk, va] : v)
+        std::printf("%-16s use %03X kill %03X  e.g. %08llX\n", m.c_str(), uk.first, uk.second,
+                    (unsigned long long)va);
+    return 0;
+  }
+
+  // Flags live across calls and returns, over the final CFGs (flags.h).
+  lifter::FlagLiveness flags;
+  std::string flags_report;
+  if (!p.x64 && !all_flags) {
+    flags.Run(p, dec, &flags_report, flags_dump);
+    for (uint64_t f : flags_dump)
+      std::printf("flags of %08llX:\n%s", (unsigned long long)f, flags.Dump(f).c_str());
+    p.flags = &flags;
+    if (flags_check) {
+      p.flags_check = true;
+      prologue.insert(prologue.find("#include"), "#define RECOMP_LIFT_FLAGS_CHECK 1\n");
+    }
+    std::printf("%s", flags_report.substr(0, flags_report.find('\n') + 1).c_str());
+  }
 
   // Pass 2: final CFGs and emission.
   std::filesystem::create_directories(outdir);
@@ -399,6 +509,7 @@ int main(int argc, char** argv) {
     unimpl += n;
   }
   report += "warnings:\n" + report_warnings;
+  report += flags_report;
   if (p.modules.size() > 1) {
     report += "modules:\n";
     for (const auto& m : p.modules) {

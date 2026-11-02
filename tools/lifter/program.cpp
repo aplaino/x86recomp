@@ -120,9 +120,16 @@ bool Program::Load(const std::string& path, const std::string& symdir,
   }
 
   // Imports that never return; a call through their IAT slot ends a block.
-  for (const auto& imp : img.imports)
+  for (const auto& imp : img.imports) {
     if (imp.name == "ExitProcess" || imp.name == "ExitThread")
       noreturn_iat.insert(imp.iat_va);
+    iat.insert(imp.iat_va);
+    // The handlers that put the caller's EFLAGS in a CONTEXT for SEH
+    // handlers (runtime/hle/kernel32_seh.cpp); the others never read them.
+    if (imp.name == "RaiseException" || imp.name == "RtlUnwind" ||
+        imp.name == "RtlRaiseException")
+      flags_iat.insert(imp.iat_va);
+  }
   return true;
 }
 

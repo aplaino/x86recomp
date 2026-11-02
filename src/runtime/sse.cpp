@@ -346,46 +346,37 @@ typename Fmt<!FromDbl>::U CvtLane(Scope& sc, typename Fmt<FromDbl>::U a) {
 
 }  // namespace
 
-void CheckAligned(Ctx& c, uint64_t a, uint64_t va) {
-  (void)c;
-  if (a & 15)
-    FatalF("sse: misaligned 16-byte operand %08llX at %08llX (#GP)",
-           (unsigned long long)a, (unsigned long long)va);
+void Misaligned(uint64_t a, uint64_t va, unsigned align) {
+  FatalF("sse: misaligned %u-byte operand %08llX at %08llX (#GP)", align,
+         (unsigned long long)a, (unsigned long long)va);
 }
 
-void CheckAligned(Ctx& c, uint64_t a, uint64_t va, unsigned align) {
-  (void)c;
-  if (a & (align - 1))
-    FatalF("sse: misaligned %u-byte operand %08llX at %08llX (#GP)", align,
-           (unsigned long long)a, (unsigned long long)va);
-}
-
-void Arith(Ctx& c, Op op, bool dbl, int lanes, Xmm& d, const Xmm& s,
-           uint64_t va) {
+Xmm ArithModel(Ctx& c, Op op, bool dbl, int lanes, Xmm d, Xmm s, uint64_t va) {
   if (dbl)
     ArithT<true>(c, op, lanes, d, s, va);
   else
     ArithT<false>(c, op, lanes, d, s, va);
+  return d;
 }
 
-void Cmp(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s, uint8_t pred,
-         uint64_t va) {
+Xmm CmpModel(Ctx& c, bool dbl, int lanes, Xmm d, Xmm s, uint8_t pred, uint64_t va) {
   if (dbl)
     CmpT<true>(c, lanes, d, s, pred, va);
   else
     CmpT<false>(c, lanes, d, s, pred, va);
+  return d;
 }
 
-int Comi(Ctx& c, bool dbl, bool ordered, const Xmm& a, const Xmm& b,
-         uint64_t va) {
+int ComiModel(Ctx& c, bool dbl, bool ordered, Xmm a, Xmm b, uint64_t va) {
   return dbl ? ComiT<true>(c, ordered, a, b, va) : ComiT<false>(c, ordered, a, b, va);
 }
 
-void Sqrt(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s, uint64_t va) {
+Xmm SqrtModel(Ctx& c, bool dbl, int lanes, Xmm d, Xmm s, uint64_t va) {
   if (dbl)
     SqrtT<true>(c, lanes, d, s, va);
   else
     SqrtT<false>(c, lanes, d, s, va);
+  return d;
 }
 
 // For a positive normal x, the float nearest to y = 1/sqrt(x). A first
@@ -444,21 +435,9 @@ uint32_t RcpLane(uint32_t x) {
   return r;
 }
 
-void Rcp(Xmm& d, const Xmm& s) {
-  Xmm r;
-  for (int i = 0; i < 4; i++) SetLane<uint32_t>(r, i, RcpLane(Lane<uint32_t>(s, i)));
-  d = r;
-}
+uint64_t Cvtsi2sdLane(int32_t v) { return i32_to_f64(v).v; }
 
-void Rsqrt(Xmm& d, const Xmm& s) {
-  Xmm r;
-  for (int i = 0; i < 4; i++) SetLane<uint32_t>(r, i, RsqrtLane(Lane<uint32_t>(s, i)));
-  d = r;
-}
-
-void Cvtsi2sd(Xmm& d, int32_t v) { SetLane<uint64_t>(d, 0, i32_to_f64(v).v); }
-
-uint32_t CvtToI32(Ctx& c, bool dbl, const Xmm& s, bool truncate, uint64_t va) {
+uint32_t CvtToI32Model(Ctx& c, bool dbl, Xmm s, bool truncate, uint64_t va) {
   Scope sc(c, va);
   bool den = dbl ? IsDenormal<true>(Lane<uint64_t>(s, 0))
                  : IsDenormal<false>(Lane<uint32_t>(s, 0));
@@ -474,7 +453,7 @@ uint32_t CvtToI32(Ctx& c, bool dbl, const Xmm& s, bool truncate, uint64_t va) {
   return uint32_t(r);
 }
 
-uint64_t CvtToI64(Ctx& c, bool dbl, const Xmm& s, bool truncate, uint64_t va) {
+uint64_t CvtToI64(Ctx& c, bool dbl, Xmm s, bool truncate, uint64_t va) {
   Scope sc(c, va);
   bool den = dbl ? IsDenormal<true>(Lane<uint64_t>(s, 0))
                  : IsDenormal<false>(Lane<uint32_t>(s, 0));
@@ -490,15 +469,15 @@ uint64_t CvtToI64(Ctx& c, bool dbl, const Xmm& s, bool truncate, uint64_t va) {
   return uint64_t(r);
 }
 
-void MinMax(Ctx& c, bool max, bool dbl, int lanes, Xmm& d, const Xmm& s,
-            uint64_t va) {
+Xmm MinMaxModel(Ctx& c, bool max, bool dbl, int lanes, Xmm d, Xmm s, uint64_t va) {
   if (dbl)
     MinMaxT<true>(c, max, lanes, d, s, va);
   else
     MinMaxT<false>(c, max, lanes, d, s, va);
+  return d;
 }
 
-void CvtFloat(Ctx& c, bool to_dbl, int lanes, Xmm& d, const Xmm& s, uint64_t va) {
+Xmm CvtFloatModel(Ctx& c, bool to_dbl, int lanes, Xmm d, Xmm s, uint64_t va) {
   Scope sc(c, va);
   Xmm r = d;
   if (to_dbl) {
@@ -510,10 +489,10 @@ void CvtFloat(Ctx& c, bool to_dbl, int lanes, Xmm& d, const Xmm& s, uint64_t va)
     if (lanes == 2) SetLane<uint64_t>(r, 1, 0);  // CVTPD2PS zeroes the top
   }
   sc.Finish();
-  d = r;
+  return r;
 }
 
-void CvtIntToF(Ctx& c, bool dbl, bool src64, uint64_t v, Xmm& d, uint64_t va) {
+Xmm CvtIntToFModel(Ctx& c, bool dbl, bool src64, uint64_t v, Xmm d, uint64_t va) {
   Scope sc(c, va);
   sc.Begin();
   if (dbl)
@@ -522,9 +501,10 @@ void CvtIntToF(Ctx& c, bool dbl, bool src64, uint64_t v, Xmm& d, uint64_t va) {
     SetLane<uint32_t>(d, 0, src64 ? i64_to_f32(int64_t(v)).v : i32_to_f32(int32_t(v)).v);
   sc.End();
   sc.Finish();
+  return d;
 }
 
-void CvtToDq(Ctx& c, bool dbl, bool truncate, Xmm& d, const Xmm& s, uint64_t va) {
+Xmm CvtToDqModel(Ctx& c, bool dbl, bool truncate, Xmm s, uint64_t va) {
   Scope sc(c, va);
   const uint8_t mode = truncate ? uint8_t(softfloat_round_minMag) : RoundingMode(c.mxcsr);
   Xmm r{};
@@ -540,20 +520,23 @@ void CvtToDq(Ctx& c, bool dbl, bool truncate, Xmm& d, const Xmm& s, uint64_t va)
   }
   sc.End();
   sc.Finish();
-  d = r;
+  return r;
 }
 
-void Cvtdq2ps(Ctx& c, Xmm& d, const Xmm& s, uint64_t va) {
+Xmm Cvtdq2psModel(Ctx& c, Xmm s, uint64_t va) {
   Scope sc(c, va);
   Xmm r;
   sc.Begin();
   for (int i = 0; i < 4; i++) SetLane<uint32_t>(r, i, i32_to_f32(Lane<int32_t>(s, i)).v);
   sc.End();
   sc.Finish();
-  d = r;
+  return r;
 }
 
+void (*g_ldmxcsr_note)(uint32_t v, uint64_t va) = nullptr;
+
 void Ldmxcsr(Ctx& c, uint32_t v, uint64_t va) {
+  if (g_ldmxcsr_note) g_ldmxcsr_note(v, va);
   if (v & 0xFFFF0000u)
     FatalF("sse: ldmxcsr %08X sets reserved bits at %08llX (#GP)", v,
            (unsigned long long)va);

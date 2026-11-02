@@ -122,36 +122,36 @@ bool PeImage::Load(const std::string& path, GuestMemory& mem,
   }
 
   // Base relocations: add the load delta to every HIGHLOW (and, in x64
-  // images, DIR64) fixup.
-  if (image_base != preferred_base) {
-    auto [rel_rva, rel_size] = dir(5);
-    if (!rel_size) {
-      *err = "image has no relocations and cannot move from its preferred base";
-      return false;
-    }
-    const uint64_t delta = image_base - preferred_base;
-    for (gaddr blk = image_base + rel_rva; blk < image_base + rel_rva + rel_size;) {
-      uint32_t page = mem.read<uint32_t>(blk), size = mem.read<uint32_t>(blk + 4);
-      if (size < 8) break;
-      for (uint32_t i = 8; i + 2 <= size; i += 2) {
-        uint16_t e = mem.read<uint16_t>(blk + i);
-        gaddr at = image_base + page + (e & 0xFFF);
-        switch (e >> 12) {
-          case 0:  // IMAGE_REL_BASED_ABSOLUTE: padding
-            break;
-          case 3:  // IMAGE_REL_BASED_HIGHLOW
-            mem.write<uint32_t>(at, uint32_t(mem.read<uint32_t>(at) + delta));
-            break;
-          case 10:  // IMAGE_REL_BASED_DIR64
-            mem.write<uint64_t>(at, mem.read<uint64_t>(at) + delta);
-            break;
-          default:
-            *err = "unsupported base relocation type " + std::to_string(e >> 12);
-            return false;
-        }
+  // images, DIR64) fixup. The sites are recorded at any base.
+  auto [rel_rva, rel_size] = dir(5);
+  if (image_base != preferred_base && !rel_size) {
+    *err = "image has no relocations and cannot move from its preferred base";
+    return false;
+  }
+  const uint64_t delta = image_base - preferred_base;
+  for (gaddr blk = image_base + rel_rva; rel_size && blk < image_base + rel_rva + rel_size;) {
+    uint32_t page = mem.read<uint32_t>(blk), size = mem.read<uint32_t>(blk + 4);
+    if (size < 8) break;
+    for (uint32_t i = 8; i + 2 <= size; i += 2) {
+      uint16_t e = mem.read<uint16_t>(blk + i);
+      gaddr at = image_base + page + (e & 0xFFF);
+      switch (e >> 12) {
+        case 0:  // IMAGE_REL_BASED_ABSOLUTE: padding
+          break;
+        case 3:  // IMAGE_REL_BASED_HIGHLOW
+          if (delta) mem.write<uint32_t>(at, uint32_t(mem.read<uint32_t>(at) + delta));
+          fixups.push_back(at);
+          break;
+        case 10:  // IMAGE_REL_BASED_DIR64
+          if (delta) mem.write<uint64_t>(at, mem.read<uint64_t>(at) + delta);
+          fixups.push_back(at);
+          break;
+        default:
+          *err = "unsupported base relocation type " + std::to_string(e >> 12);
+          return false;
       }
-      blk += size;
     }
+    blk += size;
   }
 
   // Imports: point every IAT slot at its thunk address.

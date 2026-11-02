@@ -389,7 +389,7 @@ uint32_t SamplerStateFor(uint32_t tss) {
 // ---- state setters (shared by the methods and ApplyStateBlock) -----------------------
 
 void SetRS(Device& d, uint32_t s, uint32_t v) {
-  if (s < 256) d.rs[s] = v;
+  if (s < 256) d.rs.Set(s, v);
 }
 uint32_t GetTSS(Device& d, uint32_t stage, uint32_t t) {
   if (uint32_t ss = SamplerStateFor(t)) return d.ss[stage][ss];
@@ -398,12 +398,12 @@ uint32_t GetTSS(Device& d, uint32_t stage, uint32_t t) {
 void SetTSS(Device& d, uint32_t stage, uint32_t t, uint32_t v) {
   if (stage >= 8 || t >= 33) return;
   if (uint32_t ss = SamplerStateFor(t))
-    d.ss[stage][ss] = v;
+    d.SetSamplerState(stage, ss, v);
   else
     d.tss[stage][t] = v;
 }
 void SetTex(Device& d, uint32_t stage, uint32_t tex) {
-  if (stage < 8) Bind(&d.textures[stage], tex);
+  if (stage < 8) Bind(d.textures[stage], tex);
 }
 void SetXform(Device& d, uint32_t t, const float* m) {
   std::array<float, 16> a;
@@ -439,38 +439,38 @@ void SetClip(Device& d, Device8& x, uint32_t i, const float* p) {
 void SetVs(Device& d, Device8& x, uint32_t h) {
   x.vs = h;
   if (h <= kVsHandleBase) {  // an FVF
-    Bind(&d.vs, 0);
-    Bind(&d.decl, 0);
+    Bind(d.vs, 0);
+    Bind(d.decl, 0);
     d.fvf = h;
     return;
   }
   auto it = x.vshaders.find(h);
   if (it == x.vshaders.end()) FatalF("d3d8: SetVertexShader with unknown handle %08X", h);
   const VertexShader8& s = it->second;
-  Bind(&d.decl, s.decl9);
+  Bind(d.decl, s.decl9);
   d.fvf = 0;
-  Bind(&d.vs, s.vs9);
+  Bind(d.vs, s.vs9);
   for (const auto& [reg, v] : s.consts)
     if (reg < 256) std::memcpy(d.vs_f[reg], v.data(), 16);
 }
 void SetPs(Device& d, Device8& x, uint32_t h) {
   x.ps = h;
   if (!h) {
-    Bind(&d.ps, 0);
+    Bind(d.ps, 0);
     return;
   }
   auto it = x.pshaders.find(h);
   if (it == x.pshaders.end()) FatalF("d3d8: SetPixelShader with unknown handle %08X", h);
-  Bind(&d.ps, it->second.ps9);
+  Bind(d.ps, it->second.ps9);
 }
 void SetStream(Device& d, uint32_t n, uint32_t vb, uint32_t stride) {
   if (n >= 16) return;
-  Bind(&d.streams[n].buffer, vb);
+  Bind(d.streams[n].buffer, vb);
   d.streams[n].offset = 0;
   d.streams[n].stride = stride;
 }
 void SetIdx(Device& d, Device8& x, uint32_t ib, uint32_t base) {
-  Bind(&d.indices, ib);
+  Bind(d.indices, ib);
   x.base_vertex = base;
 }
 
@@ -478,7 +478,7 @@ void SetIdx(Device& d, Device8& x, uint32_t ib, uint32_t base) {
 void Capture(Device& d, Device8& x, StateBlock& b) {
   for (auto& [s, v] : b.rs) v = d.rs[s];
   for (auto& [k, v] : b.tss) v = GetTSS(d, k.first, k.second);
-  for (auto& [s, v] : b.textures) v = d.textures[s];
+  for (auto& [s, v] : b.textures) v = d.textures[s].guest;
   for (auto& [t, m] : b.transforms) {
     auto it = d.transforms.find(t);
     if (it != d.transforms.end()) m = it->second;
@@ -493,8 +493,8 @@ void Capture(Device& d, Device8& x, StateBlock& b) {
   if (b.ps) b.ps = x.ps;
   for (auto& [r, v] : b.vsc) std::memcpy(v.data(), d.vs_f[r], 16);
   for (auto& [r, v] : b.psc) std::memcpy(v.data(), d.ps_f[r], 16);
-  for (auto& [n, s] : b.streams) s = {d.streams[n].buffer, d.streams[n].stride};
-  if (b.indices) b.indices = std::make_pair(d.indices, x.base_vertex);
+  for (auto& [n, s] : b.streams) s = {d.streams[n].buffer.guest, d.streams[n].stride};
+  if (b.indices) b.indices = std::make_pair(d.indices.guest, x.base_vertex);
 }
 
 void Apply(Device& d, Device8& x, const StateBlock& b) {
@@ -693,22 +693,11 @@ void ParseDecl(uint32_t va, VertexShader8* s, std::vector<D3DVERTEXELEMENT9>* el
   elems->push_back({0xFF, 0, 17, 0, 0, 0});  // D3DDECL_END
 }
 
-// A D3D8 function up to and including END (comments skipped whole).
+// A D3D8 function up to and including END, stepped over instruction by
+// instruction (hlsl::ReadBytecode).
 std::vector<uint32_t> ReadTokens(uint32_t va) {
-  std::vector<uint32_t> t{Rd32(va)};
-  for (uint32_t p = va + 4;;) {
-    uint32_t tok = Rd32(p);
-    if ((tok & 0xFFFF) == 0xFFFE) {
-      uint32_t n = (tok >> 16) & 0x7FFF;
-      for (uint32_t i = 0; i <= n; i++) t.push_back(Rd32(p + 4 * i));
-      p += 4 * (n + 1);
-      continue;
-    }
-    t.push_back(tok);
-    p += 4;
-    if (tok == 0x0000FFFF) break;
-    if (t.size() > (1u << 20)) FatalF("d3d8: shader function without END");
-  }
+  std::vector<uint32_t> t = hlsl::ReadBytecode([va](size_t i) { return Rd32(va + 4 * uint32_t(i)); }, 1u << 20);
+  if (t.empty()) FatalF("d3d8: shader function without END");
   return t;
 }
 
@@ -1188,7 +1177,7 @@ HLE_NAMED("d3d8.dll", "IDirect3DDevice8::SetRenderState", D3DDev8_SetRenderState
 
 HLE_NAMED("d3d8.dll", "IDirect3DDevice8::GetTexture", D3DDev8_GetTexture, 3) {
   if (Arg(c, 1) >= 8) return D3DERR_INVALIDCALL;
-  uint32_t t = Dev(c)->textures[Arg(c, 1)];
+  uint32_t t = Dev(c)->textures[Arg(c, 1)].guest;
   if (t) com::AddRef(t);
   Wr32(Arg(c, 2), As8(t));
   return D3D_OK;
@@ -1431,8 +1420,8 @@ HLE_NAMED("d3d8.dll", "IDirect3DDevice8::SetStreamSource", D3DDev8_SetStreamSour
 HLE_NAMED("d3d8.dll", "IDirect3DDevice8::GetStreamSource", D3DDev8_GetStreamSource, 4) {
   if (Arg(c, 1) >= 16) return D3DERR_INVALIDCALL;
   const Device::Stream& s = Dev(c)->streams[Arg(c, 1)];
-  if (s.buffer) com::AddRef(s.buffer);
-  Wr32(Arg(c, 2), As8(s.buffer));
+  if (s.buffer.guest) com::AddRef(s.buffer.guest);
+  Wr32(Arg(c, 2), As8(s.buffer.guest));
   Wr32(Arg(c, 3), s.stride);
   return D3D_OK;
 }
@@ -1448,7 +1437,7 @@ HLE_NAMED("d3d8.dll", "IDirect3DDevice8::SetIndices", D3DDev8_SetIndices, 3) {
 }
 
 HLE_NAMED("d3d8.dll", "IDirect3DDevice8::GetIndices", D3DDev8_GetIndices, 3) {
-  uint32_t ib = Dev(c)->indices;
+  uint32_t ib = Dev(c)->indices.guest;
   if (ib) com::AddRef(ib);
   Wr32(Arg(c, 1), As8(ib));
   Wr32(Arg(c, 2), X(c).base_vertex);

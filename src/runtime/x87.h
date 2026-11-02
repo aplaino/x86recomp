@@ -563,6 +563,57 @@ template <bool kWide = false>
   return StoreF64(cw, v);
 }
 
+// FIST m16/m32/m64 of zero or of a normal value whose integer, rounded
+// with RC as extF80_to_i64 does, fits the format (`lim` = 2^(bits-1): a
+// magnitude below it, or equal to it when negative), in integers: the
+// two's complement bits, PE when inexact, C1 when the magnitude was
+// rounded up. False for the rest (out of range: the indefinite and IE,
+// specials, denormals). Shared with the model (x87.cpp, StoreIntValue).
+[[gnu::always_inline]] inline bool StoreIntCore(uint32_t cw, V v, uint64_t lim, SV* out) {
+  const uint32_t e = v.se & 0x7FFFu;
+  if (e == 0 && v.sig == 0) {
+    *out = {0, 0};
+    return true;
+  }
+  // |v| < 2^63 with J set; the significand has 0x3FFF + 63 - e fraction
+  // bits (1 or more).
+  if (!(v.sig >> 63) || e - 1 >= 0x3FFFu + 62) return false;
+  const uint32_t frac = 0x3FFFu + 63 - e;
+  uint64_t keep, rest;  // integer part; the fraction as a share of 2^64
+  if (frac < 64) {
+    keep = v.sig >> frac;
+    rest = v.sig << (64 - frac);
+  } else {
+    keep = 0;
+    rest = frac == 64 ? v.sig : 1;  // below one half, not zero
+  }
+  const bool sign = (v.se >> 15) & 1;
+  const int rc = int(cw >> 10) & 3;
+  const bool inc = rc == 0 ? rest > (1ull << 63) || (rest == (1ull << 63) && (keep & 1))
+                 : rc == 1 ? sign && rest
+                 : rc == 2 ? !sign && rest
+                           : false;
+  keep += inc;
+  if (sign ? keep > lim : keep >= lim) return false;
+  *out = {sign ? 0 - keep : keep, (rest ? 0x20u : 0u) | uint64_t(rest && inc) << 16};
+  return true;
+}
+[[gnu::always_inline]] inline SV StoreI16Fast(uint32_t cw, V v) {
+  SV r;
+  if (StoreIntCore(cw, v, 1ull << 15, &r)) return r;
+  return StoreI16(cw, v);
+}
+[[gnu::always_inline]] inline SV StoreI32Fast(uint32_t cw, V v) {
+  SV r;
+  if (StoreIntCore(cw, v, 1ull << 31, &r)) return r;
+  return StoreI32(cw, v);
+}
+[[gnu::always_inline]] inline SV StoreI64Fast(uint32_t cw, V v) {
+  SV r;
+  if (StoreIntCore(cw, v, 1ull << 63, &r)) return r;
+  return StoreI64(cw, v);
+}
+
 // FCOM/FUCOM of two zero or normal values: C3/C2/C0 alone (no flags can
 // arise: no NaN, denormal or unsupported operand).
 [[gnu::always_inline]] inline bool Ordinary(V v) {
@@ -739,6 +790,32 @@ template <bool kWide = false>
     return {fb, (back != x ? 0x20u : 0u) | uint64_t(std::fabs(back) > m) << 16};
   }
   return StoreF32Fast(cw, FromD(x));
+}
+// FIST m16/m32/m64 of a double (RC=nearest): the host's round to
+// nearest even when the integer fits the format (`lim` = 2^(bits-1)),
+// PE when that changed the value, C1 when it grew in magnitude; the
+// exact store otherwise (out of range: the indefinite and IE).
+[[gnu::always_inline]] inline bool StoreIntD(double x, double lim, SV* out) {
+  const double r = __builtin_roundeven(x);
+  if (!(r >= -lim && r < lim)) return false;
+  *out = {uint64_t(int64_t(r)),
+          (r != x ? 0x20u : 0u) | uint64_t(std::fabs(r) > std::fabs(x)) << 16};
+  return true;
+}
+[[gnu::always_inline]] inline SV StoreI16D(uint32_t cw, double x) {
+  SV r;
+  if (StoreIntD(x, 0x1p15, &r)) return r;
+  return StoreI16(cw, FromD(x));
+}
+[[gnu::always_inline]] inline SV StoreI32D(uint32_t cw, double x) {
+  SV r;
+  if (StoreIntD(x, 0x1p31, &r)) return r;
+  return StoreI32(cw, FromD(x));
+}
+[[gnu::always_inline]] inline SV StoreI64D(uint32_t cw, double x) {
+  SV r;
+  if (StoreIntD(x, 0x1p63, &r)) return r;
+  return StoreI64(cw, FromD(x));
 }
 // FST m64 of a double in range: exact, no flags.
 [[gnu::always_inline]] inline uint64_t StoreF64D(double x) { return std::bit_cast<uint64_t>(x); }
