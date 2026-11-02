@@ -1,4 +1,4 @@
-x86recomp is MIT-licensed (LICENSE). It includes the third-party material
+SwARc is MIT-licensed (LICENSE). It includes the third-party material
 below, under the licences that follow.
 
 tests/ppc/vmx128_test.cpp: test vectors (input and expected
