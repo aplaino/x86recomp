@@ -5,8 +5,6 @@
 #include <deque>
 #include <functional>
 
-#include "x86/unwind.h"
-
 namespace lifter {
 
 Decoder::Decoder(bool x64) {
@@ -154,27 +152,20 @@ const Insn* Before(const Function& f, uint64_t va) {
 
 namespace {
 
-// The .pdata entry whose range holds va, or null.
-const recomp::PeFunction* PdataAt(const recomp::PeImage& img, uint64_t va) {
-  const auto& f = img.functions;
-  auto it = std::upper_bound(f.begin(), f.end(), va,
-                             [](uint64_t v, const recomp::PeFunction& e) { return v < e.begin; });
-  if (it == f.begin()) return nullptr;
+// The function range (Module::ranges) that holds va, or null.
+const Module::Range* RangeAt(const Module& m, uint64_t va) {
+  const auto& r = m.ranges;
+  auto it = std::upper_bound(r.begin(), r.end(), va,
+                             [](uint64_t v, const Module::Range& e) { return v < e.begin; });
+  if (it == r.begin()) return nullptr;
   --it;
   return va < it->end ? &*it : nullptr;
 }
 
-// The start of the function a .pdata range belongs to: chained fragments
-// (code the compiler moved out of line) lead to their parent, in short
-// form (unwind RVA with bit 0 set) or through the UNWIND_INFO.
-uint64_t PrimaryOf(const Program& p, const recomp::PeImage& img, const recomp::PeFunction* f) {
-  for (int depth = 0; f && f->chained() && depth < 32; depth++) {
-    uint64_t parent = p.mem.read<uint32_t>(f->entry + 8) & 1
-                          ? f->unwind
-                          : recomp::unwind::Read(p.mem, img.image_base, f->unwind).chained;
-    f = PdataAt(img, img.image_base + p.mem.read<uint32_t>(parent));
-  }
-  return f ? f->begin : 0;
+// The entry of the function whose range holds va, or 0.
+uint64_t HomeOf(const Module& m, uint64_t va) {
+  const Module::Range* r = RangeAt(m, va);
+  return r ? r->home : 0;
 }
 
 // x64 MSVC switches: a table of 32-bit RVAs indexed off the image base
@@ -185,7 +176,7 @@ uint64_t PrimaryOf(const Program& p, const recomp::PeImage& img, const recomp::P
 //   add rT, rB; jmp rT
 // Without a bounds check (an index the compiler knows is in range, such as
 // a state variable), the table runs while its entries target the jmp's own
-// function, to the end of the .pdata range that holds it (MSVC places a
+// function, to the end of the function range that holds it (MSVC places a
 // function's tables inside its range, after the code).
 // Clang's tables hold signed offsets from the table itself, which a
 // RIP-relative lea put in a register:
@@ -303,14 +294,13 @@ bool RecoverJumpTable64(const Program& p, const Function& f, const Insn& jmp,
   };
   auto unbounded = [&]() {
     if (state < kJa || two_level) return false;
-    const recomp::PeImage& img = mod->pe;
-    const uint64_t home = PrimaryOf(p, img, PdataAt(img, jmp.va));
-    const recomp::PeFunction* holder = PdataAt(img, table);
-    if (!home || !holder || PrimaryOf(p, img, holder) != home) return false;
+    const uint64_t home = HomeOf(*mod, jmp.va);
+    const Module::Range* holder = RangeAt(*mod, table);
+    if (!home || !holder || holder->home != home) return false;
     targets->clear();
     for (uint64_t a = table; a + 4 <= holder->end; a += 4) {
       uint64_t tv = entry(a);
-      if (p.TextOf(tv) != mod || PrimaryOf(p, img, PdataAt(img, tv)) != home) break;
+      if (p.TextOf(tv) != mod || HomeOf(*mod, tv) != home) break;
       if (std::find(targets->begin(), targets->end(), tv) == targets->end())
         targets->push_back(tv);
     }

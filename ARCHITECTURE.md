@@ -1155,8 +1155,7 @@ only those below it.
 - A CPU core per guest CPU, each behind its own option. The x86 core
   (RECOMP_X86, on by default): its lifter (tools/lifter_x86,
   recomp_lift), the CPU model (src/x86: lifted.h, ctx.h, the x87 and SSE
-  models in recomp_x87), PE images (recomp_pe: the lifter's own format,
-  and what Win32 loads), and the runtime every x86 guest runs on
+  models in recomp_x87), and the runtime every x86 guest runs on
   (recomp_x86): dispatch and the fault handler, the process and its
   threads, calls between the host and lifted code, the HLE registry and
   its calling conventions (32-bit stdcall/cdecl, Win64, System V),
@@ -1165,12 +1164,13 @@ only those below it.
 - Platform modules (platforms/<name>, option RECOMP_PLATFORM_<NAME>):
   an OS and its system libraries on a core, with their own
   CMakeLists.txt, CLAUDE.md, docs and tests. Win32 (platforms/win32, on
-  by default) is the PC games' platform: the Win32 process (PE loading,
-  PEB, TEBs, static TLS, SEH), the HLE of kernel32, user32, gdi32 and the
-  rest of Windows (recomp_win32), and of DirectX and the middleware, one
-  library per DLL (recomp_d3d9, recomp_mss32, ...). Console platforms
-  are modules the same way, on the core of their CPU; a game's build
-  compiles and links only its own platform.
+  by default) is the PC games' platform: PE images and x64 unwind data
+  (recomp_pe, which the lifter reads PE through), the Win32 process (PE
+  loading, PEB, TEBs, static TLS, SEH), the HLE of kernel32, user32,
+  gdi32 and the rest of Windows (recomp_win32), and of DirectX and the
+  middleware, one library per DLL (recomp_d3d9, recomp_mss32, ...).
+  Console platforms are modules the same way, on the core of their CPU;
+  a game's build compiles and links only its own platform.
 
 The x86 core knows no platform. A platform's loader (Win32's
 RunProcess) creates the process (StartProcess: the arena and the thunk
@@ -1191,11 +1191,11 @@ that nothing in it depends on Windows.
 What belongs to a core: the CPU (every ISA extension the model claims is
 core lifter work, tested by the core's tests), lifted.h, the unwinder's
 mechanics, the HLE calling conventions. What belongs to a platform: its
-executable formats (beyond PE, a reader registered with the lifter: the
-lifter's ImageReader, compiled into recomp_lift only when the platform
-is enabled), its address space layout ("nothing below 4 GiB" is Win64's
-rule), its process and thread bring-up, its system libraries (HLE) and
-its GPU front end.
+executable formats (PE is Win32's; each a reader registered with the
+lifter, its ImageReader, compiled into recomp_lift only when the
+platform is enabled), its address space layout ("nothing below 4 GiB"
+is Win64's rule), its process and thread bring-up, its system libraries
+(HLE) and its GPU front end.
 
 Guest and host are separate axes. Every guest's lifted code is portable
 C++, so each one runs on every host (Linux x86-64, macOS arm64), and the

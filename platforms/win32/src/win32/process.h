@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "x86/pe_image.h"
+#include "win32/pe_image.h"
 #include "x86/runtime.h"
 
 namespace recomp {

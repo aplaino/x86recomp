@@ -9,8 +9,8 @@
 #include <cstdint>
 
 #include "runtime/guest_memory.h"
+#include "win32/unwind.h"
 #include "x86/ctx.h"
-#include "x86/unwind.h"
 
 namespace recomp::hle::seh64 {
 

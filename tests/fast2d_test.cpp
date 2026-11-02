@@ -37,8 +37,8 @@
 #include <string>
 
 #include "runtime/log.h"
+#include "win32/pe_image.h"
 #include "x86/lifted.h"
-#include "x86/pe_image.h"
 #endif
 
 namespace {

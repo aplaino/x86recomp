@@ -103,12 +103,9 @@ target_compile_options(recomp_x87 PRIVATE -O2 -fno-stack-protector
                        ${RECOMP_X87_FP_FLAGS} ${RECOMP_FAULT_FRAME_FLAGS})
 target_compile_options(softfloat PRIVATE -O2)
 
-# PE images (and x64 unwind data): the lifter's own format, and what the
-# Win32 platform loads; other formats are the platforms' image readers.
-add_library(recomp_pe SHARED src/x86/pe_image.cpp src/x86/unwind.cpp)
-target_link_libraries(recomp_pe PUBLIC recomp_base)
-
-# Lifter (build-time tool): x86 machine code -> C++.
+# Lifter (build-time tool): x86 machine code -> C++. It reads no
+# executable format itself: each platform adds the reader of its own
+# (ImageReader, tools/lifter_x86/program.h).
 add_subdirectory(tools/lifter_x86)
 
 # The runtime of every x86 guest: dispatch and the fault handler, the

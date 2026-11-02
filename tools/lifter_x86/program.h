@@ -13,7 +13,6 @@
 #include <vector>
 
 #include "runtime/guest_memory.h"
-#include "x86/pe_image.h"
 
 namespace lifter {
 
@@ -27,28 +26,38 @@ struct Module {
   // Read-only data outside .text that may hold switch tables (an ELF's
   // .rodata; MSVC puts its tables in .text).
   std::vector<std::pair<uint64_t, uint64_t>> rodata;
-  recomp::PeImage pe;  // PE modules only; empty for an ImageReader's
+  // Function ranges the format records (an x64 PE's .pdata), in address
+  // order, each with the entry of the function it belongs to (a chained
+  // fragment's parent): x64 switch tables without a bounds check run to
+  // the end of their function's range. Empty if the format has none.
+  struct Range {
+    uint64_t begin, end, home;
+  };
+  std::vector<Range> ranges;
 };
 
 struct Program;
 
-// A non-PE executable format, read by a platform module (ARCHITECTURE.md,
-// "Layout: base, CPU cores, platform modules"), which registers it from a
-// static initialiser in the source it adds to recomp_lift. Match says whether a
-// file is in its format (and whether it is x64 code); Load maps the image
-// into p.mem, fills m (all but name) and adds what the format itself says
-// about code to p: function entries, names, noreturn import slots.
+// An executable format, read by a platform module (ARCHITECTURE.md,
+// "Layout: base, CPU cores, platform modules"; PE is Win32's), which
+// registers it from a static initialiser in the source it adds to
+// recomp_lift. Match says whether a file is in its format (and whether it
+// is x64 code); Load maps the image into p.mem, fills m (all but name) and
+// adds what the format itself says about code to p: function entries,
+// names, noreturn import slots, x64 language handlers' frames. A format
+// that says too little about its code to lift without them needs symbols.
 struct ImageReader {
   bool (*Match)(const std::string& path, bool* x64);
   bool (*Load)(Program& p, Module& m, const std::string& path, uint64_t base,
                std::string* err);
+  bool needs_symbols = false;
 };
 void RegisterImageReader(const ImageReader& r);
 
 struct Program {
   recomp::GuestMemory mem;
   std::vector<Module> modules;  // [0] is the EXE
-  bool x64 = false;  // PE32+ AMD64 images (all modules are one or the other)
+  bool x64 = false;  // x64 images (all modules are one or the other)
 
   std::set<uint64_t> entries;                 // function entry points
   // Entries known only from pointer scans (a dword in data or an
@@ -65,7 +74,7 @@ struct Program {
   std::map<uint64_t, std::string> names;      // demangled or Ghidra names
   std::set<uint64_t> noreturn;                // functions that never return
   std::map<uint64_t, std::vector<uint64_t>> jumptables;  // jmp va -> targets
-  std::set<uint64_t> noreturn_iat;            // IAT slots of ExitProcess etc.
+  std::set<uint64_t> noreturn_iat;            // import slots of ExitProcess etc.
   std::map<uint64_t, std::string> probes;     // manifest: probe on entry
   std::set<uint64_t> replaced;                // manifest: the game project
                                               // defines f_X; the lifted body
@@ -86,7 +95,7 @@ struct Program {
   std::map<uint64_t, EhFrame> eh_frames;      // by function entry
 
   // Maps an image (at `base`, 0 for its preferred base) and reads its
-  // symbols (none if symdir is empty; PE images need them). The first one
+  // symbols (none if symdir is empty; some formats need them). The first one
   // is the EXE.
   bool Load(const std::string& path, const std::string& symdir, uint64_t base,
             std::string* err);

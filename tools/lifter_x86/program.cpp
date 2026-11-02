@@ -1,7 +1,5 @@
 #include "program.h"
 
-#include "x86/unwind.h"
-
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -43,52 +41,6 @@ std::vector<ImageReader>& Readers() {
   return r;
 }
 
-bool IsPeFile(const std::string& path) {
-  std::ifstream f(path, std::ios::binary);
-  char mz[2] = {};
-  return f.read(mz, 2) && mz[0] == 'M' && mz[1] == 'Z';
-}
-
-// Maps a PE image into m and adds its .pdata functions, entry point and
-// noreturn imports.
-bool LoadPe(Program& p, Module& m, const std::string& path, uint64_t base,
-            std::string* err) {
-  if (!m.pe.Load(path, p.mem, err, base)) return false;
-  const recomp::PeImage& img = m.pe;
-  m.base = img.image_base;
-  m.preferred_base = img.preferred_base;
-  for (const auto& s : img.sections) {
-    if (s.name == ".text") {
-      m.text_lo = s.va;
-      m.text_hi = s.va + s.vsize;
-    }
-    if (s.name == ".rdata" || s.name == ".data") m.data.push_back({s.va, s.va + s.vsize});
-  }
-  auto in_text = [&](uint64_t va) { return va >= m.text_lo && va < m.text_hi; };
-
-  // x64: every .pdata entry that is not a chained fragment starts a
-  // function (ARCHITECTURE.md, "64-bit guests"); those with a language
-  // handler can be resumed into.
-  for (const auto& fn : img.functions) {
-    if (fn.chained() || !in_text(fn.begin)) continue;
-    p.entries.insert(fn.begin);
-    recomp::unwind::Info u = recomp::unwind::Read(p.mem, img.image_base, fn.unwind);
-    if (u.flags & (recomp::unwind::kEHandler | recomp::unwind::kUHandler))
-      p.eh_frames[fn.begin] = {fn.begin + u.prolog, u.frame_reg, u.frame_off};
-  }
-
-  if (img.entry) {
-    p.entries.insert(img.entry);
-    p.names.emplace(img.entry, img.dll ? "_DllMainCRTStartup" : "WinMainCRTStartup");
-  }
-
-  // Imports that never return; a call through their IAT slot ends a block.
-  for (const auto& imp : img.imports)
-    if (imp.name == "ExitProcess" || imp.name == "ExitThread")
-      p.noreturn_iat.insert(imp.iat_va);
-  return true;
-}
-
 }  // namespace
 
 void RegisterImageReader(const ImageReader& r) { Readers().push_back(r); }
@@ -101,19 +53,15 @@ bool Program::Load(const std::string& path, const std::string& symdir,
     *err = "cannot open " + path;
     return false;
   }
-  if (IsPeFile(path)) {
-    image_x64 = recomp::PeImage::IsX64File(path);
-    if (symdir.empty()) {
-      *err = "--symbols missing";
-      return false;
-    }
-  } else {
-    for (const ImageReader& r : Readers())
-      if (r.Match(path, &image_x64)) reader = &r;
-    if (!reader) {
-      *err = "not a PE image, and no enabled platform reads its format";
-      return false;
-    }
+  for (const ImageReader& r : Readers())
+    if (r.Match(path, &image_x64)) reader = &r;
+  if (!reader) {
+    *err = path + ": no enabled platform reads its format";
+    return false;
+  }
+  if (reader->needs_symbols && symdir.empty()) {
+    *err = "--symbols missing";
+    return false;
   }
   if (!mem.base()) {
     x64 = image_x64;
@@ -127,7 +75,7 @@ bool Program::Load(const std::string& path, const std::string& symdir,
   }
   Module& m = modules.emplace_back();
   m.name = std::filesystem::path(path).stem().string();
-  if (!(reader ? reader->Load(*this, m, path, base, err) : LoadPe(*this, m, path, base, err))) {
+  if (!reader->Load(*this, m, path, base, err)) {
     if (modules.size() > 1) *err += " (give the module another --base)";
     return false;
   }

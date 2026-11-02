@@ -16,4 +16,5 @@ add_executable(recomp_lift
   function.cpp
   emit.cpp
   x87test.cpp)
-target_link_libraries(recomp_lift PRIVATE recomp_pe Zydis)
+target_include_directories(recomp_lift PRIVATE ${RECOMP_ROOT}/src)
+target_link_libraries(recomp_lift PRIVATE recomp_base Zydis)

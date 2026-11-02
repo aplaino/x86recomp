@@ -1,4 +1,4 @@
-#include "x86/pe_image.h"
+#include "win32/pe_image.h"
 
 #include <cstdio>
 #include <cstring>

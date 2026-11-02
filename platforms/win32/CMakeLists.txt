@@ -5,6 +5,17 @@
 # CORE-MATH, behind the x64 CRT's math imports (recomp_ucrt).
 include(${RECOMP_ROOT}/cmake/coremath.cmake)  # defines target `coremath`
 
+# PE images and x64 unwind data (.pdata), for the lifter's PE reader
+# (lifter/pe_reader.cpp) and the Win32 process.
+add_library(recomp_pe SHARED src/win32/pe_image.cpp src/win32/unwind.cpp)
+target_include_directories(recomp_pe PUBLIC src)
+target_link_libraries(recomp_pe PUBLIC recomp_base)
+
+# recomp_lift reads PE images.
+target_sources(recomp_lift PRIVATE lifter/pe_reader.cpp)
+target_include_directories(recomp_lift PRIVATE ${RECOMP_ROOT}/tools/lifter_x86)
+target_link_libraries(recomp_lift PRIVATE recomp_pe)
+
 # The Win32 process (PE image, PEB, TEBs, TLS, SEH) and the core of the
 # Win32 HLE: kernel32, user32, gdi32, advapi32, winmm, ws2_32, shell and
 # COM, and the window and event pump every graphics API presents through.

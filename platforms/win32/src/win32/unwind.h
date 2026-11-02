@@ -8,7 +8,7 @@
 #include <cstdint>
 
 #include "runtime/guest_memory.h"
-#include "x86/pe_image.h"
+#include "win32/pe_image.h"
 
 namespace recomp::unwind {
 
