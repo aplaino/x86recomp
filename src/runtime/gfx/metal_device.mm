@@ -2757,6 +2757,24 @@ void main() {
   }
 
   // `opaque`: alpha read as 1 (X8 formats uploaded as they are).
+  int64_t GpuAllocatedBytes() const override { return int64_t(dev_.currentAllocatedSize); }
+
+  std::string GpuMemoryText() const override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    uint64_t tex = 0, rt = 0, depth = 0, draw = 0;
+    for (const auto& [id, t] : textures_)
+      if (t.tex) (t.rt ? rt : tex) += t.tex.allocatedSize;
+    for (const auto& [id, d] : depths_)
+      if (d.tex) depth += d.tex.allocatedSize;
+    for (const Arena& a : arenas_)
+      for (id<MTLBuffer> b : a.chunks) draw += b.length;
+    char buf[160];
+    std::snprintf(buf, sizeof buf, "textures %llu MB (%zu), targets %llu MB, depth %llu MB, draw data %llu MB",
+                  (unsigned long long)(tex >> 20), textures_.size(), (unsigned long long)(rt >> 20),
+                  (unsigned long long)(depth >> 20), (unsigned long long)(draw >> 20));
+    return buf;
+  }
+
   // DXT is stored as B8G8R8A8 (decoded on upload) where BC cannot be sampled.
   MTLPixelFormat TexFormat(Format f) const {
     return IsCompressed(f) && !bc_ ? MTLPixelFormatBGRA8Unorm : PixelFormat(f);

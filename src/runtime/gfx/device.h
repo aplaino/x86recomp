@@ -184,6 +184,10 @@ class Device {
   // GPU time per presented frame, in ms, averaged over the frames the GPU
   // finished since the last call; negative if the backend cannot tell.
   virtual double TakeGpuFrameMs() { return -1; }
+  // Memory the GPU allocations take, in bytes (-1: unknown).
+  virtual int64_t GpuAllocatedBytes() const { return -1; }
+  // What the GPU allocations are, for the FPS report (empty: not known).
+  virtual std::string GpuMemoryText() const { return {}; }
   // Intervals between frames as the display showed them, in ms, since the
   // last call: median, 99th percentile and maximum; false if the backend
   // cannot tell.

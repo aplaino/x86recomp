@@ -191,8 +191,17 @@ void PresentFrame(gfx::Device& dev, int w, int h) {
       static uint64_t peeks_before = 0;
       const uint64_t peeks = g_peek_messages.load(std::memory_order_relaxed);
       const double gpu = dev.TakeGpuFrameMs();
-      char gpu_text[32] = "";
-      if (gpu >= 0) std::snprintf(gpu_text, sizeof gpu_text, "; GPU %.2f ms a frame", gpu);
+      char gpu_text[64] = "";
+      if (gpu >= 0) {
+        const int64_t mem = dev.GpuAllocatedBytes();
+        int n = std::snprintf(gpu_text, sizeof gpu_text, "; GPU %.2f ms a frame", gpu);
+        if (mem >= 0) std::snprintf(gpu_text + n, sizeof gpu_text - n, ", %lld MB", (long long)(mem >> 20));
+        static const bool detail = [] {  // <ID>_GPU_MEMORY=1: what that memory is, on its own line
+          const char* e = Env("GPU_MEMORY");
+          return e && *e == '1';
+        }();
+        if (detail) WarnF("gfx memory: %s\n", dev.GpuMemoryText().c_str());
+      }
       double sm, s99, smax;
       char shown_text[80] = "";
       if (dev.TakeShownIntervals(&sm, &s99, &smax))
