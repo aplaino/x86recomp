@@ -709,7 +709,9 @@ class GpuDevice final : public Device {
     auto it = gpu_buffers_.find(id);
     if (it == gpu_buffers_.end() || !size) return;
     if (at + size > it->second.size) FatalF("gfx: an upload past buffer %u's end", id);
-    if (draw_copied_.count(it->second.b)) Flush();  // draws recorded with it
+    if (draw_copied_.count(it->second.b) ||
+        std::find(draw_indices_.begin(), draw_indices_.end(), it->second.b) != draw_indices_.end())
+      Flush();  // draws recorded with it
     std::memcpy(MapUpload(size), src, size);
     SDL_UnmapGPUTransferBuffer(dev_, upload_tb_);
     SDL_GPUCommandBuffer* cmd = Begin();  // after MapUpload, which may submit it
@@ -1729,6 +1731,15 @@ void r_color0(inout vec4 c) {
       if (bit == gpu_buffers_.end()) FatalF("gfx: DrawProgram: no buffer %u", d.indirect);
       c.indexed = true;
       c.indirect = bit->second.b;
+    } else if (d.index_buffer) {
+      auto bit = gpu_buffers_.find(d.index_buffer);
+      if (bit == gpu_buffers_.end()) FatalF("gfx: DrawProgram: no buffer %u", d.index_buffer);
+      c.indexed = true;
+      c.indices = bit->second.b;
+      c.short_indices = d.index_size == 2;
+      c.first = d.first_index;
+      c.base = d.base_vertex;
+      if (draw_indices_.empty() || draw_indices_.back() != c.indices) draw_indices_.push_back(c.indices);
     } else if (d.indices) {
       c.indexed = true;
       c.first = uint32_t(indices_.size());
@@ -2020,6 +2031,8 @@ void r_color0(inout vec4 c) {
     uint32_t first = 0, count = 0;
     int32_t base = 0;
     SDL_GPUBuffer* indirect = nullptr;  // a GPU buffer's draw (ProgramDraw)
+    SDL_GPUBuffer* indices = nullptr;   // a GPU buffer's indices (ProgramDraw)
+    bool short_indices = false;         // theirs are 16-bit
     int shader = -1;   // shader_cmds_ index for a DrawShader
     int program = -1;  // program_cmds_ index for a DrawProgram
   };
@@ -2496,12 +2509,15 @@ void r_color0(inout vec4 c) {
       SDL_GPURenderPass* rp =
           SDL_BeginGPURenderPass(cmd, cts, Uint32(pass_targets_), pass_depth_ ? &dt : nullptr);
       if (vbuf_) SDL_BindGPUVertexStorageBuffers(rp, 0, &vbuf_, 1);
-      SDL_GPUBuffer* bound_ib = nullptr;  // ibuf_, or an indirect draw's buffer
-      auto bind_indices = [&](SDL_GPUBuffer* b) {
-        if (b == bound_ib) return;
+      SDL_GPUBuffer* bound_ib = nullptr;  // ibuf_, or a draw's GPU buffer
+      bool bound_short = false;
+      auto bind_indices = [&](SDL_GPUBuffer* b, bool short_indices = false) {
+        if (b == bound_ib && short_indices == bound_short) return;
         SDL_GPUBufferBinding ib{b, 0};
-        SDL_BindGPUIndexBuffer(rp, &ib, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+        SDL_BindGPUIndexBuffer(rp, &ib, short_indices ? SDL_GPU_INDEXELEMENTSIZE_16BIT
+                                                       : SDL_GPU_INDEXELEMENTSIZE_32BIT);
         bound_ib = b;
+        bound_short = short_indices;
       };
       if (ibuf_ && ibytes) bind_indices(ibuf_);
       SDL_GPUGraphicsPipeline* bound = nullptr;
@@ -2555,7 +2571,8 @@ void r_color0(inout vec4 c) {
             bind_indices(c.indirect);
             SDL_DrawGPUIndexedPrimitivesIndirect(rp, c.indirect, 0, 1);
           } else if (c.indexed) {
-            bind_indices(ibuf_);
+            if (c.indices) bind_indices(c.indices, c.short_indices);
+            else bind_indices(ibuf_);
             SDL_DrawGPUIndexedPrimitives(rp, c.count, pc.instances, c.first, c.base, 0);
           } else {
             SDL_DrawGPUPrimitives(rp, c.count, pc.instances, c.first, 0);
@@ -2625,6 +2642,7 @@ void r_color0(inout vec4 c) {
     pmem_.clear();
     draw_copies_.clear();
     draw_copied_.clear();
+    draw_indices_.clear();
     ubytes_.clear();
     uploads_.clear();
     upload_bytes_.clear();
@@ -3889,6 +3907,7 @@ void r_color0(inout vec4 c) {
   std::map<BufferId, GpuBuffer> gpu_buffers_;
   std::vector<BufferCopy> draw_copies_;  // GPU buffers' into pmem_ (pbuf_)
   std::unordered_map<SDL_GPUBuffer*, size_t> draw_copied_;  // each one's last there
+  std::vector<SDL_GPUBuffer*> draw_indices_;  // GPU buffers drawn from as indices
   SDL_GPUBuffer* pbuf_ = nullptr;
   SDL_GPUBuffer* cro_ = nullptr;
   SDL_GPUBuffer* crw_ = nullptr;

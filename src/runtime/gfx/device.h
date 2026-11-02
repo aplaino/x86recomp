@@ -273,6 +273,10 @@ struct ProgramDraw {
   int32_t base_vertex = 0;
   const void* indices = nullptr;  // vertex_count of them; null: not indexed
   uint32_t index_size = 2;
+  // Instead of indices: a GPU buffer's, index_size bytes each, from its
+  // first_index'th.
+  BufferId index_buffer = 0;
+  uint32_t first_index = 0;
   // Instead of the counts and indices: a GPU buffer with an indexed
   // draw's five words (index count, instance count, first index, base
   // vertex, first instance) and its 32-bit indices.

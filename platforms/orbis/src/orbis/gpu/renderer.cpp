@@ -1486,8 +1486,18 @@ void Draw(const Regs& r, const DrawCall& call) {
   d.vertex_count = call.count;
   d.instance_count = std::max(call.instances, 1u);
   if (call.indices) {
-    if (!Readable(call.indices, uint64_t(call.count) * call.index_size)) return;
-    d.indices = GPtr(call.indices);
+    // Kept like large ranges: a scene's draws use a few hundred index
+    // ranges, each over and over.
+    const uint32_t bytes = call.count * call.index_size;
+    gaddr at;
+    KeptRange* k;
+    if ((k = Kept(s, call.indices, bytes, &at)) && !((call.indices - at) % call.index_size)) {
+      d.index_buffer = k->buffer;
+      d.first_index = uint32_t((call.indices - at) / call.index_size);
+    } else {
+      if (!Readable(call.indices, bytes)) return;
+      d.indices = GPtr(call.indices);
+    }
     d.index_size = call.index_size;
   }
   s.dev->DrawProgram(d);
