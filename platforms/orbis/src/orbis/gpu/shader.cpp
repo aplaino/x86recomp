@@ -1828,21 +1828,23 @@ Resolved Resolve(const StageState& st) {
   // The key: the stage, its registers that shape the code, the code's
   // words (CodeId), each memory instruction's binding and the formats it reads or writes.
   std::string& k = rv.r.key;
+  const auto add = [&k](const void* p, size_t n) { k.append(static_cast<const char*>(p), n); };
+  k.reserve(176 + 28 * rv.sites.size() + rv.r.buffers.size());
   const uint32_t head[] = {uint32_t(st.stage), st.rsrc1, st.rsrc2, st.ps_input_addr,
                            st.col_format, st.z_format, st.col_swap, st.threads[0], st.threads[1],
                            st.threads[2]};
-  k = Hex(head, sizeof head);
-  if (st.stage == Stage::Pixel) k += Hex(st.ps_input_cntl, sizeof st.ps_input_cntl);
+  add(head, sizeof head);
+  if (st.stage == Stage::Pixel) add(st.ps_input_cntl, sizeof st.ps_input_cntl);
   const uint32_t id = CodeId(rv.code());
-  k += Hex(&id, sizeof id);
+  add(&id, sizeof id);
   for (auto& [pc, s] : rv.sites) {
     const uint32_t site[4] = {uint32_t(s.buffer), uint32_t(s.image), s.vsharp[3], s.vsharp[1] >> 31};
-    k += Hex(site, sizeof site);
+    add(site, sizeof site);
     if (s.image >= 0) {
       const ImageRef& ref = rv.r.images[size_t(s.image)];
       const uint32_t f[3] = {ref.t[1] & (ref.storage ? 0x3FF00000 : 0x3C000000), ref.t[3] & 0xF0000FFF,
                              ref.s[0] & 0x7000};
-      k += Hex(f, sizeof f);
+      add(f, sizeof f);
     }
   }
   for (const BufferRange& b : rv.r.buffers) k += b.written ? 'w' : 'r';

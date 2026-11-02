@@ -83,6 +83,7 @@ struct Engines {
   uint8_t ce_ram[48 * 1024] = {};
   uint64_t ce_count = 0, de_count = 0;
   bool warned_draw = false, warned_dispatch = false;
+  std::vector<uint32_t> packet;  // Step's, kept: a packet's words
 };
 
 uint64_t Ns() {
@@ -152,7 +153,8 @@ bool Step(Engines& e, Stream& s, bool ce) {
   const gaddr b = f.p + 4;
   if (b + 4 * uint64_t(n) > f.end)
     FatalF("GPU: packet %02X at %llX runs past its buffer", op, (unsigned long long)f.p);
-  std::vector<uint32_t> d(n);
+  std::vector<uint32_t>& d = e.packet;
+  d.resize(n);
   std::memcpy(d.data(), GPtr(b), 4 * n);
   auto next = [&] { f.p = b + 4 * uint64_t(n); };
   switch (op) {
