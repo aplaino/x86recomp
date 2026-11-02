@@ -354,6 +354,7 @@ void SetUpSwapChain(Device& d, uint32_t self) {
     SetExclusiveMode(d.hwnd, 0, 0);
   }
   d.gfx->ResetSwapChain(int(p.BackBufferWidth), int(p.BackBufferHeight), Vsync(p));
+  d.gfx->SetBackBufferAlpha(p.BackBufferFormat == D3DFMT_A8R8G8B8 || p.BackBufferFormat == 35);  // A2R10G10B10
   for (auto& rt : d.render_targets) Bind(rt, 0);
   Bind(d.depth_stencil, 0);
   if (d.backbuffer) com::Release(d.backbuffer->guest);

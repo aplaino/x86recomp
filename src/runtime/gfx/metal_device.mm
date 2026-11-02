@@ -2760,6 +2760,8 @@ void main() {
   // `opaque`: alpha read as 1 (X8 formats uploaded as they are).
   int64_t GpuAllocatedBytes() const override { return int64_t(dev_.currentAllocatedSize); }
 
+  void SetBackBufferAlpha(bool on) override { back_buffer_alpha_ = on; }
+
   std::string GpuMemoryText() const override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     uint64_t tex = 0, rt = 0, depth = 0, draw = 0;
@@ -3046,7 +3048,7 @@ void main() {
     p.level[0] = t0 ? current_level_ : 0;
     p.fmt[0] = c0 ? c0.pixelFormat : MTLPixelFormatInvalid;
     p.ids[0] = t0 ? current_color_ : 0;
-    p.alpha = t0 && HasAlpha(t0->fmt);
+    p.alpha = t0 ? HasAlpha(t0->fmt) : back_buffer_alpha_;
     p.w = w;
     p.h = h;
     p.targets = c0 ? 1 : 0;
@@ -4011,6 +4013,7 @@ void main() {
   id<MTLCommandQueue> queue_ = nil;
   CAMetalLayer* layer_ = nil;
   size_t uniform_align_ = 256;
+  bool back_buffer_alpha_ = false;  // SetBackBufferAlpha
   bool bc_ = true;  // the GPU samples BC1-3 (else DXT is decoded on upload)
 
   // The encoding thread, its queue of recorded batches and the batch being

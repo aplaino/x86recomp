@@ -210,6 +210,10 @@ class Device {
   // (Re)creates the swap chain: a w x h back buffer presented to the
   // window. Called on SetDisplayMode / device creation.
   virtual void ResetSwapChain(int w, int h, bool vsync) = 0;
+  // Whether the back buffer keeps alpha (A8R8G8B8, A2R10G10B10): blending
+  // with its destination alpha then reads it, as a game masking with it
+  // expects (GTA IV's round radar); without, alpha reads 1.
+  virtual void SetBackBufferAlpha(bool) {}
 
   // ---- resources
   virtual TextureId CreateTexture(int w, int h, int levels, Format fmt,
