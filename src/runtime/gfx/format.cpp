@@ -20,6 +20,7 @@ BufferId Device::CreateBuffer(uint32_t) {
   FatalF("gfx: this backend has no programs (console GPUs need SDL_GPU)");
 }
 void Device::DestroyBuffer(BufferId) {}
+void Device::UpdateBuffer(BufferId, uint32_t, const void*, uint32_t) {}
 void Device::UpdateImage(TextureId, int, int, const Rect&, const void*, uint32_t) {}
 void Device::ReadImage(TextureId, int, int, const Rect&, void*, uint32_t) {}
 void Device::ClearImage(TextureId, int, const Color&) {}

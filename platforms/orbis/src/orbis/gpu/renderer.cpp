@@ -188,6 +188,14 @@ struct Texture {
   uint64_t hash = 0;
   uint64_t checked = ~0ull;  // the submission it was last compared in
 };
+// A run of guest memory that stages read, kept in a GPU buffer.
+struct KeptRange {
+  gfx::BufferId buffer = 0;
+  uint32_t size = 0;
+  uint64_t hash = 0;
+  uint64_t checked = ~0ull;  // the submission it was last compared in
+  uint64_t used = 0;         // the submission it was last read in
+};
 struct Program {
   gfx::ProgramId id = 0;
   Translated vs, ps;
@@ -207,6 +215,8 @@ struct State {
   uint32_t geometry_bytes[4] = {};
   std::vector<DepthTarget> depths;
   std::map<std::string, Texture> textures;
+  std::map<gaddr, KeptRange> kept;  // by base; they do not overlap
+  std::vector<gfx::BufferId> retired;  // merged ones' (draws may still bind them)
   std::unordered_map<std::string, Program> programs;
   std::unordered_map<std::string, Program> compute;
   uint64_t submission = 0;
@@ -573,6 +583,57 @@ gfx::TextureId StorageImage(State& s, const ImageRef& ref) {
   return ColorTarget(s, addr, w, h, fmt, 0, true);
 }
 
+// Read-only ranges of at least this many bytes (vertex buffers, mostly)
+// are kept in GPU buffers, compared once a submission and uploaded when
+// they change, instead of copied for each draw.
+constexpr uint32_t kKeptMin = 64 << 10;
+// Unread for this many submissions, they are let go.
+constexpr uint64_t kKeptIdle = 600;
+
+// The kept range holding [base, base + size), made (from it and any it
+// overlaps) when there is none; its base in *at. Null when the range
+// cannot be kept (more than 64 MiB with those it overlaps).
+KeptRange* Kept(State& s, gaddr base, uint32_t size, gaddr* at) {
+  gaddr lo = base, hi = base + size;
+  auto it = s.kept.upper_bound(base);
+  if (it != s.kept.begin() && std::prev(it)->first + std::prev(it)->second.size > base) --it;
+  auto first = it;
+  for (; it != s.kept.end() && it->first < hi; ++it) {
+    lo = std::min(lo, it->first);
+    hi = std::max<gaddr>(hi, it->first + it->second.size);
+  }
+  if (first == it || first->first != lo || first->first + first->second.size != hi) {
+    if (hi - lo > (64u << 20) || !Readable(lo, hi - lo)) return nullptr;
+    for (auto e = first; e != it; ++e) s.retired.push_back(e->second.buffer);
+    s.kept.erase(first, it);
+    KeptRange& k = s.kept.emplace(lo, KeptRange{}).first->second;
+    k.size = uint32_t(hi - lo);
+    k.buffer = s.dev->CreateBuffer(k.size);
+    k.hash = ContentHash(GPtr(lo), k.size);
+    k.checked = s.submission;
+    s.dev->UpdateBuffer(k.buffer, 0, GPtr(lo), k.size);
+    first = s.kept.find(lo);
+  }
+  KeptRange& k = first->second;
+  if (k.checked != s.submission) {
+    const uint64_t hash = ContentHash(GPtr(lo), k.size);
+    if (hash != k.hash) s.dev->UpdateBuffer(k.buffer, 0, GPtr(lo), k.size);
+    k.hash = hash;
+    k.checked = s.submission;
+  }
+  k.used = s.submission;
+  *at = lo;
+  return &k;
+}
+
+// Kept ranges that [base, base + size) overlaps compare again.
+void KeptWritten(State& s, gaddr base, uint64_t size) {
+  auto it = s.kept.upper_bound(base);
+  if (it != s.kept.begin()) --it;
+  for (; it != s.kept.end() && it->first < base + size; ++it)
+    if (it->first + it->second.size > base) it->second.checked = ~0ull;
+}
+
 // The device's view of a stage's resolved resources: its buffers, its
 // textures with their samplers, its uniforms.
 struct Bound {
@@ -600,6 +661,12 @@ void Bind(State& s, const StageState& st, const Resolved& r, Bound& b,
     if (kept) {
       if (rw) b.rw.push_back({nullptr, br.size, kept});
       else b.ro.push_back({nullptr, br.size, kept});
+      continue;
+    }
+    gaddr at;
+    KeptRange* k;
+    if (!rw && br.size >= kKeptMin && (k = Kept(s, br.base, br.size, &at)) && !((br.base - at) & 3)) {
+      b.ro.push_back({nullptr, br.size, k->buffer, uint32_t(br.base - at)});
       continue;
     }
     const bool ok = Readable(br.base, br.size);
@@ -1242,17 +1309,30 @@ void Dispatch(const Regs& r, const uint32_t groups[3]) {
     s.dev->DispatchProgram(d);
   }
   for (const BufferRange& br : rc.buffers)
-    if (br.written) HtileWritten(s, br.base, br.size);
+    if (br.written) HtileWritten(s, br.base, br.size), KeptWritten(s, br.base, br.size);
 }
 
 void MemoryWritten(gaddr base, uint64_t size) {
   std::lock_guard<std::mutex> l(G().mu);
   HtileWritten(G(), base, size);
+  KeptWritten(G(), base, size);
 }
 
 void NextSubmission() {
   std::lock_guard<std::mutex> l(G().mu);
-  G().submission++;
+  State& s = G();
+  s.submission++;
+  if (!s.dev) return;
+  for (gfx::BufferId b : s.retired) s.dev->DestroyBuffer(b);
+  s.retired.clear();
+  for (auto it = s.kept.begin(); it != s.kept.end();) {
+    if (s.submission - it->second.used < kKeptIdle) {
+      ++it;
+      continue;
+    }
+    s.dev->DestroyBuffer(it->second.buffer);
+    it = s.kept.erase(it);
+  }
 }
 
 }  // namespace recomp::orbis::gpu

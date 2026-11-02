@@ -240,7 +240,8 @@ struct SamplerDesc {
 struct BufferData {  // copied when the draw or dispatch is recorded
   const void* data = nullptr;
   uint32_t size = 0;
-  BufferId buffer = 0;  // instead of data: a GPU buffer's first size bytes
+  BufferId buffer = 0;  // instead of data: a GPU buffer's size bytes from offset
+  uint32_t offset = 0;
 };
 struct RwBufferData {  // read, and written back once the dispatch has run
   void* data = nullptr;
@@ -415,6 +416,9 @@ class Device {
   virtual DepthId CreateDepthArray(int w, int h, int layers, Format fmt);
   virtual BufferId CreateBuffer(uint32_t size);
   virtual void DestroyBuffer(BufferId b);
+  // Uploads `size` bytes to a GPU buffer at byte `at`; draws recorded
+  // before it read what was there.
+  virtual void UpdateBuffer(BufferId b, uint32_t at, const void* src, uint32_t size);
   // Uploads `r` of a level and layer of an image, as it is in memory.
   virtual void UpdateImage(TextureId t, int level, int layer, const Rect& r, const void* src,
                            uint32_t pitch);

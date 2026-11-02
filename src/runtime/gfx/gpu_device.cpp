@@ -682,6 +682,24 @@ class GpuDevice final : public Device {
     gpu_buffers_.erase(it);
   }
 
+  void UpdateBuffer(BufferId id, uint32_t at, const void* src, uint32_t size) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    auto it = gpu_buffers_.find(id);
+    if (it == gpu_buffers_.end() || !size) return;
+    if (at + size > it->second.size) FatalF("gfx: an upload past buffer %u's end", id);
+    if (draw_copied_.count(it->second.b)) Flush();  // draws recorded with it
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(dev_);
+    if (!cmd) FatalF("gfx: SDL_AcquireGPUCommandBuffer: %s", SDL_GetError());
+    std::memcpy(MapUpload(size), src, size);
+    SDL_UnmapGPUTransferBuffer(dev_, upload_tb_);
+    SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
+    SDL_GPUTransferBufferLocation from{upload_tb_, 0};
+    SDL_GPUBufferRegion to{it->second.b, at, size};
+    SDL_UploadToGPUBuffer(cp, &from, &to, false);
+    SDL_EndGPUCopyPass(cp);
+    Submit(cmd);
+  }
+
   // A 2D depth target (layers 0) or a 2D array of `layers`.
   DepthId NewDepth(int w, int h, int layers, Format fmt) {
     std::lock_guard<std::recursive_mutex> l(mu_);
@@ -1737,7 +1755,7 @@ void r_color0(inout vec4 c) {
       const BufferData& bd = d.cs.buffers[b];
       table[4 * b] = uint32_t(ro.size() / 4);
       table[4 * b + 1] = bd.size;
-      if (bd.buffer) ro_in.push_back(GpuBufferCopy(bd.buffer, ro.size(), bd.size));
+      if (bd.buffer) ro_in.push_back(GpuBufferCopy(bd.buffer, ro.size(), bd.size, bd.offset));
       AppendWords(ro, bd.buffer ? nullptr : bd.data, bd.size);
     }
     std::vector<uint32_t> rw_at(st.rw_buffers);
@@ -2476,6 +2494,7 @@ void r_color0(inout vec4 c) {
     program_cmds_.clear();
     pmem_.clear();
     draw_copies_.clear();
+    draw_copied_.clear();
     ubytes_.clear();
     uploads_.clear();
     upload_bytes_.clear();
@@ -3297,20 +3316,21 @@ void r_color0(inout vec4 c) {
     uint32_t at;    // its offset in an arena
     uint32_t size;  // bytes
     uint32_t held = 0;  // the bytes it takes in pmem_ (a draw's)
+    uint32_t from = 0;  // its offset in the buffer
   };
-  // A GPU buffer's first `size` bytes (no more than it has) and their
-  // place in an arena.
-  BufferCopy GpuBufferCopy(BufferId id, size_t at, uint32_t size) {
+  // A GPU buffer's `size` bytes from `from` (no more than it has) and
+  // their place in an arena.
+  BufferCopy GpuBufferCopy(BufferId id, size_t at, uint32_t size, uint32_t from = 0) {
     auto it = gpu_buffers_.find(id);
-    if (it == gpu_buffers_.end()) FatalF("gfx: no buffer %u", id);
-    return {it->second.b, uint32_t(at), std::min(size, it->second.size) & ~3u};
+    if (it == gpu_buffers_.end() || from > it->second.size) FatalF("gfx: no buffer %u", id);
+    return {it->second.b, uint32_t(at), std::min(size, it->second.size - from) & ~3u, 0, from};
   }
   // Copies GPU buffers into an arena (in) or the arena back into them.
   static void CopyBuffers(SDL_GPUCopyPass* cp, const std::vector<BufferCopy>& copies,
                           SDL_GPUBuffer* arena, bool in) {
     for (const BufferCopy& c : copies) {
       if (!c.size) continue;
-      SDL_GPUBufferLocation a{arena, c.at}, b{c.buffer, 0};
+      SDL_GPUBufferLocation a{arena, c.at}, b{c.buffer, c.from};
       if (in) SDL_CopyGPUBufferToBuffer(cp, &b, &a, c.size, false);
       else SDL_CopyGPUBufferToBuffer(cp, &a, &b, c.size, false);
     }
@@ -3361,13 +3381,22 @@ void r_color0(inout vec4 c) {
   // overlap one copied earlier in the same draw (a vertex buffer's
   // interleaved streams, each bound from its own offset) share its copy:
   // inside it, they are found there; past its end, if it is the arena's
-  // last, it grows by what they add.
+  // last, it grows by what they add. A GPU buffer's bytes inside its
+  // last copy in the flush are found there (it is not written before the
+  // flush: dispatches and uploads flush first).
   size_t DrawBuffer(const BufferData& bd) {
     if (bd.buffer) {
-      draw_copies_.push_back(GpuBufferCopy(bd.buffer, pmem_.size(), bd.size));
-      draw_copies_.back().held = (bd.size + 3) & ~3u;
+      BufferCopy c = GpuBufferCopy(bd.buffer, pmem_.size(), bd.size, bd.offset);
+      auto [it, added] = draw_copied_.try_emplace(c.buffer, draw_copies_.size());
+      if (!added) {
+        const BufferCopy& e = draw_copies_[it->second];
+        if (c.from >= e.from && c.from + c.size <= e.from + e.size) return e.at + (c.from - e.from);
+        it->second = draw_copies_.size();
+      }
+      c.held = (bd.size + 3) & ~3u;
+      draw_copies_.push_back(c);
       AppendWords(pmem_, nullptr, bd.size);
-      return draw_copies_.back().at;
+      return c.at;
     }
     const auto* p = static_cast<const uint8_t*>(bd.data);
     if (p && bd.size) {
@@ -3693,6 +3722,7 @@ void r_color0(inout vec4 c) {
   std::vector<DrawSpan> draw_spans_;  // the current draw's (DrawBuffer)
   std::map<BufferId, GpuBuffer> gpu_buffers_;
   std::vector<BufferCopy> draw_copies_;  // GPU buffers' into pmem_ (pbuf_)
+  std::unordered_map<SDL_GPUBuffer*, size_t> draw_copied_;  // each one's last there
   SDL_GPUBuffer* pbuf_ = nullptr;
   SDL_GPUBuffer* cro_ = nullptr;
   SDL_GPUBuffer* crw_ = nullptr;
