@@ -94,6 +94,14 @@ bool Unmap(gaddr addr, uint64_t len) {
   return vm.Decommit(addr, RoundUp(len));
 }
 
+// The allocations in [start, end), unmapping them (g_direct_mu held).
+void ReleaseDirect(uint64_t start, uint64_t end) {
+  for (auto it = g_direct.lower_bound(start); it != g_direct.end() && it->first < end;) {
+    if (it->second.mapped) Unmap(it->second.mapped, it->second.len);
+    it = g_direct.erase(it);
+  }
+}
+
 }  // namespace
 }  // namespace recomp::orbis::kernel
 
@@ -252,9 +260,25 @@ ORBIS_HLE("libkernel", sceKernelMapNamedDirectMemory, 7) {
 ORBIS_HLE("libkernel", sceKernelReleaseDirectMemory, 2) {
   const uint64_t start = Arg(c, 0), end = start + Arg(c, 1);
   std::lock_guard<std::mutex> l(g_direct_mu);
-  for (auto it = g_direct.lower_bound(start); it != g_direct.end() && it->first < end;) {
-    if (it->second.mapped) Unmap(it->second.mapped, it->second.len);
-    it = g_direct.erase(it);
-  }
+  ReleaseDirect(start, end);
+  return 0;
+}
+
+// int sceKernelCheckedReleaseDirectMemory(off_t start, size_t len): in
+// 11.00's libkernel, like sceKernelReleaseDirectMemory an ioctl on the
+// direct memory device (0x80108015 for 0x80108002), whose kernel side also
+// checks the range. A range whole allocations fill is released; others
+// (what the kernel answers is not measured) are fatal.
+ORBIS_HLE("libkernel", sceKernelCheckedReleaseDirectMemory, 2) {
+  const uint64_t start = Arg(c, 0), end = start + Arg(c, 1);
+  std::lock_guard<std::mutex> l(g_direct_mu);
+  uint64_t at = start;
+  for (auto it = g_direct.find(start); it != g_direct.end() && it->first == at && at < end; ++it)
+    at += it->second.len;
+  if (start == end || at != end)
+    recomp::FatalF("sceKernelCheckedReleaseDirectMemory(%llX, %llX): a range not filled by "
+                   "whole allocations, not implemented yet",
+                   (unsigned long long)start, (unsigned long long)(end - start));
+  ReleaseDirect(start, end);
   return 0;
 }
