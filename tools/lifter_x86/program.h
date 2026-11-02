@@ -32,9 +32,9 @@ struct Module {
 
 struct Program;
 
-// A non-PE executable format, read by a console platform's module
-// (ARCHITECTURE.md, "Console platforms"), which registers it from a static
-// initialiser in the source it adds to recomp_lift. Match says whether a
+// A non-PE executable format, read by a platform module (ARCHITECTURE.md,
+// "Layout: base, CPU cores, platform modules"), which registers it from a
+// static initialiser in the source it adds to recomp_lift. Match says whether a
 // file is in its format (and whether it is x64 code); Load maps the image
 // into p.mem, fills m (all but name) and adds what the format itself says
 // about code to p: function entries, names, noreturn import slots.

@@ -16,9 +16,9 @@
 // base). Their functions go into gen_<module>_NNN.cpp, the EXE's into
 // gen_NNN.cpp, and table.cpp lists them all.
 //
-// --exe and --module also take the formats an enabled console platform
-// reads (ARCHITECTURE.md, "Console platforms"); for those, --symbols ""
-// lifts without Ghidra's symbols.
+// --exe and --module also take the formats an enabled platform module
+// reads (ARCHITECTURE.md, "Layout: base, CPU cores, platform modules");
+// for those, --symbols "" lifts without Ghidra's symbols.
 //
 // --only lifts the given functions and whatever they call or tail-call
 // directly, nothing else (no Ghidra entries, exports or pointer

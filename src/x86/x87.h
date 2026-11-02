@@ -159,10 +159,10 @@ void DecStp(State& s);
 namespace run {
 
 // Lifted runs are used when true (<ID>_X87_RUNS=0 disables them, for A/B;
-// RunProcess reads it).
+// StartProcess reads it).
 extern bool g_enabled;
 // Runs use host doubles (below) when true (<ID>_X87_DOUBLE=0 disables
-// them, for A/B; RunProcess reads it).
+// them, for A/B; StartProcess reads it).
 extern bool g_doubles;
 
 // A register value in a run: F80 without padding (two full 64-bit fields),

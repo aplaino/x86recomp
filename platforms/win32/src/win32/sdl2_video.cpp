@@ -26,10 +26,10 @@
 #include <vector>
 
 #include "runtime/log.h"
+#include "win32/hle.h"
 #include "win32/kernel32_state.h"
 #include "win32/user32_window.h"
 #include "win32/win32.h"
-#include "x86/hle.h"
 #include "x86/runtime.h"
 
 namespace recomp::hle {
@@ -568,7 +568,7 @@ HLE64(kDll, SDL_GetWindowWMInfo, kCdecl) {
   Wr32(info + 4, 1);  // SDL_SYSWM_WINDOWS
   Wr64(info + 8, w.hwnd);
   Wr64(info + 16, DcForWindow(w.hwnd));
-  Wr64(info + 24, g_proc->img.image_base);
+  Wr64(info + 24, g_win32->img.image_base);
   return 1;
 }
 

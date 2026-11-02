@@ -25,9 +25,9 @@
 #include <vector>
 
 #include "runtime/log.h"
+#include "win32/hle.h"
 #include "win32/kernel32_state.h"
 #include "win32/win32.h"
-#include "x86/hle.h"
 
 namespace recomp {
 
@@ -515,7 +515,7 @@ bool RunThreadObject(const std::shared_ptr<ThreadObject>& to) {
 uint32_t NewThread(uint64_t stack, gaddr entry, uint64_t param, bool suspended, uint32_t* tid) {
   GuestSyncPoint sync;
   auto to = std::make_shared<ThreadObject>();
-  to->thread = CreateGuestThread(stack ? stack : g_proc->img.stack_reserve);
+  to->thread = CreateGuestThread(stack ? stack : g_win32->img.stack_reserve);
   to->entry = entry;
   to->param = param;
   {

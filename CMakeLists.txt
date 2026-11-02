@@ -1,12 +1,13 @@
 cmake_minimum_required(VERSION 3.25)
 project(SwARc LANGUAGES C CXX)
 
-# Static recompilation of 32-bit x86 Windows games to native programs: the
-# lifter (build-time tool), the x87 model, and the runtime with its Win32/
-# DirectX/Miles HLE. A game project pulls this in with add_subdirectory()
-# and links the parts its EXE imports; see README.md. Console platforms
-# are modules on top, each behind its own option (ARCHITECTURE.md,
-# "Console platforms").
+# Static recompilation of games to native programs. Three layers
+# (ARCHITECTURE.md, "Layout"): the base every guest shares (the host
+# layer, guest memory), a CPU core per guest CPU (the x86 core: its
+# lifter, CPU model and runtime), and the platform modules on a core
+# (platforms/<name>: Win32 for PC games, the consoles), each behind its own
+# option. A game project pulls this in with add_subdirectory() and links
+# the parts its program imports; see README.md.
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -25,10 +26,15 @@ if(NOT APPLE)
 endif()
 
 # --- guests and host -------------------------------------------------------
-# Guests: RECOMP_X86 is everything at the end of this file, the x86 lifter
-# and CPU model with the Win32 HLE (PC games); each console platform is a
-# module with its own option. A game for another CPU turns RECOMP_X86 off.
-option(RECOMP_X86 "x86 lifter, CPU model and Win32 HLE (PC games)" ON)
+# Guests: RECOMP_X86 is everything at the end of this file, the x86 core
+# (lifter, CPU model, runtime); each platform is a module on a core, with
+# its own option. A game for another CPU turns RECOMP_X86 off.
+option(RECOMP_X86 "x86 core: lifter, CPU model and runtime" ON)
+# Windows PC games, on the x86 core.
+option(RECOMP_PLATFORM_WIN32 "Win32 platform module (Windows PC games)" ON)
+if(RECOMP_PLATFORM_WIN32 AND NOT RECOMP_X86)
+  message(FATAL_ERROR "RECOMP_PLATFORM_WIN32 needs RECOMP_X86")
+endif()
 
 # The host layer (cmake/host.cmake): what a native program needs on its
 # host, whatever its guest CPU. SDL3 (windows, input, audio output),
@@ -65,23 +71,28 @@ else()
   set(RECOMP_FAULT_FRAME_FLAGS "" CACHE INTERNAL "")
 endif()
 
-# Guest address space + PE mapping. Shared by the runtime, the x87 model
-# and the lifter.
-add_library(recomp_image SHARED
+# --- base runtime ----------------------------------------------------------
+# What any guest's runtime builds on (src/runtime): the guest address
+# space (arena, allocator, lazily filled regions), the host platform layer
+# (signals, threads' stacks) and frame pacing. Only the x86 core uses it
+# so far.
+add_library(recomp_base SHARED
   src/runtime/guest_memory.cpp
-  src/x86/pe_image.cpp
-  src/x86/unwind.cpp)
-target_include_directories(recomp_image PUBLIC src)
-target_compile_features(recomp_image PUBLIC cxx_std_20)
-target_link_libraries(recomp_image PUBLIC recomp_log)
+  src/runtime/guest_alloc.cpp
+  src/runtime/lazy_mem.cpp
+  src/runtime/platform.cpp
+  src/runtime/pacing.cpp)
+target_include_directories(recomp_base PUBLIC src)
+target_compile_features(recomp_base PUBLIC cxx_std_20)
+target_link_libraries(recomp_base PUBLIC recomp_log Threads::Threads)
 
-# --- x87 and SSE models (SoftFloat 3e) ---------------------------------
+# --- x86 core --------------------------------------------------------------
+# x87 and SSE models (SoftFloat 3e).
 include(cmake/softfloat.cmake)  # defines target `softfloat`
-include(cmake/coremath.cmake)  # defines target `coremath`
 add_library(recomp_x87 SHARED src/x86/x87.cpp src/x86/sse.cpp)
 target_include_directories(recomp_x87 PUBLIC src)
 target_compile_features(recomp_x87 PUBLIC cxx_std_20)
-target_link_libraries(recomp_x87 PRIVATE softfloat recomp_image)
+target_link_libraries(recomp_x87 PRIVATE softfloat recomp_base)
 # Every x87 instruction of the game runs through these: always optimise
 # (an -O0 debug build made float-heavy scenes several times slower).
 # No stack protector: its canary check sat in every hot x87 helper.
@@ -91,119 +102,31 @@ set(RECOMP_X87_FP_FLAGS -ffp-contract=off -fno-fast-math CACHE INTERNAL "")
 target_compile_options(recomp_x87 PRIVATE -O2 -fno-stack-protector
                        ${RECOMP_X87_FP_FLAGS} ${RECOMP_FAULT_FRAME_FLAGS})
 target_compile_options(softfloat PRIVATE -O2)
-# ----------------------------------------------------------------------
 
-# Lifter (build-time tool): x86-32 machine code -> C++.
+# PE images (and x64 unwind data): the lifter's own format, and what the
+# Win32 platform loads; other formats are the platforms' image readers.
+add_library(recomp_pe SHARED src/x86/pe_image.cpp src/x86/unwind.cpp)
+target_link_libraries(recomp_pe PUBLIC recomp_base)
+
+# Lifter (build-time tool): x86 machine code -> C++.
 add_subdirectory(tools/lifter_x86)
 
-# Runtime core and the Win32 HLE. HLE handlers register themselves from
-# static initialisers, which run when their library is loaded.
-add_library(recomp_runtime SHARED
+# The runtime of every x86 guest: dispatch and the fault handler, the
+# process and its threads, calls between the host and lifted code, the
+# HLE registry and its calling conventions, presentation and the hang
+# watchdog. A platform module loads the program and sets its hooks
+# (x86/runtime.h).
+add_library(recomp_x86 SHARED
   src/x86/dispatch.cpp
-  src/runtime/pacing.cpp
-  src/runtime/platform.cpp
   src/x86/process.cpp
-  src/x86/watchdog.cpp
-  src/runtime/guest_alloc.cpp
-  src/runtime/lazy_mem.cpp
   src/x86/hle.cpp
-  platforms/win32/src/win32/kernel32.cpp
-  platforms/win32/src/win32/winmm_timer.cpp
-  platforms/win32/src/win32/kernel32_file.cpp
-  platforms/win32/src/win32/kernel32_sync.cpp
-  platforms/win32/src/win32/kernel32_seh.cpp
-  platforms/win32/src/win32/seh64.cpp
-  platforms/win32/src/win32/kernel32_misc.cpp
-  platforms/win32/src/win32/advapi32.cpp
-  platforms/win32/src/win32/user32_input.cpp
-  platforms/win32/src/win32/user32_window.cpp
-  platforms/win32/src/win32/gdi32.cpp
-  platforms/win32/src/win32/shell_net.cpp
-  platforms/win32/src/win32/ws2_32.cpp
-  platforms/win32/src/win32/com.cpp
-  src/x86/present.cpp)
-target_include_directories(recomp_runtime PUBLIC platforms/win32/src)
-target_link_libraries(recomp_runtime PUBLIC recomp_image recomp_x87
-                      SDL3::SDL3 Threads::Threads
+  src/x86/present.cpp
+  src/x86/watchdog.cpp)
+target_link_libraries(recomp_x86 PUBLIC recomp_base recomp_x87 SDL3::SDL3
                       PRIVATE recomp_gfx)  # presentation (x86/present.cpp)
-# Nothing in a game refers to an HLE module's symbols: keep the linker
-# from dropping them where it links --as-needed (ld64 keeps every dylib).
-if(NOT APPLE)
-  target_link_options(recomp_runtime INTERFACE "LINKER:--no-as-needed")
-endif()
-
-if(FFMPEG_FOUND)
-  # Miles Sound System (mss32) on the software mixer.
-  add_library(recomp_mss32 SHARED platforms/win32/src/win32/mss32.cpp)
-  target_link_libraries(recomp_mss32 PUBLIC recomp_runtime recomp_audio)
-
-  # DirectSound 8 (dsound) on the same software mixer.
-  add_library(recomp_dsound SHARED platforms/win32/src/win32/dsound.cpp)
-  target_link_libraries(recomp_dsound PUBLIC recomp_runtime recomp_audio)
-
-  # Bink video (binkw32) on ffmpeg; audio through the Miles mixer.
-  add_library(recomp_bink SHARED platforms/win32/src/win32/binkw32.cpp)
-  target_link_libraries(recomp_bink PUBLIC recomp_mss32)
-endif()
-
-
-
 if(DXVK_NATIVE_DIR)
-  target_compile_definitions(recomp_runtime PUBLIC RECOMP_HAVE_D3D9)
+  target_compile_definitions(recomp_x86 PUBLIC RECOMP_HAVE_D3D9)
 endif()
-
-# DirectDraw 7 / Direct3D 7 over gfx::Device.
-add_library(recomp_d3d7 SHARED
-  platforms/win32/src/win32/ddraw.cpp
-  platforms/win32/src/win32/d3d7.cpp)
-target_link_libraries(recomp_d3d7 PUBLIC recomp_runtime recomp_gfx)
-
-# XInput 1.3 on SDL gamepads, and the WMI that tells games which
-# DirectInput game controllers are XInput pads.
-add_library(recomp_xinput SHARED platforms/win32/src/win32/xinput.cpp
-            platforms/win32/src/win32/wbem.cpp)
-target_link_libraries(recomp_xinput PUBLIC recomp_runtime)
-
-# DirectInput 8 (keyboard and mouse) on the event pump's raw input; it
-# lists the XInput pads as game controllers.
-add_library(recomp_dinput8 SHARED platforms/win32/src/win32/dinput8.cpp)
-target_link_libraries(recomp_dinput8 PUBLIC recomp_runtime recomp_xinput)
-
-# Direct3D 9 and D3DX 9 over gfx::Device.
-add_library(recomp_d3d9 SHARED platforms/win32/src/win32/d3d9.cpp
-  platforms/win32/src/win32/d3d9_draw.cpp platforms/win32/src/win32/d3d9_resource.cpp
-  platforms/win32/src/win32/d3dx9.cpp)
-target_link_libraries(recomp_d3d9 PUBLIC recomp_runtime recomp_gfx recomp_hlsl)
-# D3DX's maths rounds like the original only without contraction into FMA.
-set_source_files_properties(platforms/win32/src/win32/d3dx9.cpp TARGET_DIRECTORY recomp_d3d9
-  PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
-
-# OpenGL 1.x (opengl32, wgl, gdi32 pixel formats) over gfx::Device.
-add_library(recomp_opengl SHARED
-  src/runtime/gl/context.cpp
-  platforms/win32/src/win32/opengl32.cpp)
-target_link_libraries(recomp_opengl PUBLIC recomp_runtime recomp_gfx)
-
-# dbghelp (UnDecorateSymbolName) on LLVM's Microsoft demangler.
-# The x64 C and C++ runtime DLLs (UCRT, VCRUNTIME140, MSVCP140): x64 guests
-# import them, 32-bit ones link their CRT statically.
-add_library(recomp_ucrt SHARED platforms/win32/src/win32/ucrt.cpp
-            platforms/win32/src/win32/ucrt_stdio.cpp platforms/win32/src/win32/ucrt_time.cpp
-            platforms/win32/src/win32/vcruntime.cpp platforms/win32/src/win32/vcruntime_eh.cpp
-            platforms/win32/src/win32/msvcp140.cpp)
-target_link_libraries(recomp_ucrt PUBLIC recomp_runtime PRIVATE coremath)
-
-# Store and online service SDKs (GOG Galaxy, ...), answering as offline.
-add_library(recomp_online SHARED platforms/win32/src/win32/galaxy64.cpp)
-target_link_libraries(recomp_online PUBLIC recomp_runtime)
-
-# SDL2.dll for x64 guests that link it themselves, on the host's SDL3.
-add_library(recomp_sdl2 SHARED platforms/win32/src/win32/sdl2.cpp
-            platforms/win32/src/win32/sdl2_video.cpp)
-target_link_libraries(recomp_sdl2 PUBLIC recomp_runtime SDL3::SDL3)
-
-add_library(recomp_dbghelp SHARED platforms/win32/src/win32/dbghelp.cpp)
-target_link_libraries(recomp_dbghelp PUBLIC recomp_runtime PRIVATE recomp_demangle)
 
 # recomp_add_lifted(<target> <dir>): an OBJECT library of the lifter's
 # output in <dir> (globbed, so re-run cmake after lifting), with the
@@ -248,7 +171,7 @@ function(recomp_add_lift_tests)
         COMMENT "Lifting the EXE's ${_kind} instruction forms for lift_${_kind}64_test")
       add_executable(lift_${_kind}64_test "${_tests}/lift_x64_test.cpp" "${_forms}")
       target_include_directories(lift_${_kind}64_test PRIVATE "${RECOMP_ROOT}/src" "${_tests}")
-      target_link_libraries(lift_${_kind}64_test PRIVATE recomp_x87 recomp_image)
+      target_link_libraries(lift_${_kind}64_test PRIVATE recomp_x87 recomp_base)
       target_compile_options(lift_${_kind}64_test PRIVATE -O1 -fno-strict-aliasing
                              ${RECOMP_X87_FP_FLAGS})
       if(_kind STREQUAL "sse")
@@ -268,7 +191,7 @@ function(recomp_add_lift_tests)
       COMMENT "Lifting the EXE's ${_kind} instruction forms for lift_${_kind}_test")
     add_executable(lift_${_kind}_test "${_tests}/lift_${_kind}_test.cpp" "${_forms}")
     target_include_directories(lift_${_kind}_test PRIVATE "${RECOMP_ROOT}/src" "${_tests}")
-    target_link_libraries(lift_${_kind}_test PRIVATE recomp_x87 recomp_image)
+    target_link_libraries(lift_${_kind}_test PRIVATE recomp_x87 recomp_base)
     target_compile_options(lift_${_kind}_test PRIVATE -O1 -fno-strict-aliasing
                            ${RECOMP_X87_FP_FLAGS})
     add_test(NAME lift_${_kind} COMMAND lift_${_kind}_test)
@@ -278,99 +201,12 @@ function(recomp_add_lift_tests)
   set_tests_properties(lift_sse PROPERTIES TIMEOUT 900)
 endfunction()
 
-# recomp_add_digital_reverb_test(DLL <mss32.dll>): checks the Miles-
-# compatible digital reverb against the original routines of the user's
-# installed mss32.dll (Miles 6.5e), lifted at build time with --only into
-# the build tree and run on the x87 model. Nothing from the DLL is kept in
-# the source tree; without the DLL there is no test. The routines' VAs are
-# those of one build, so any other DLL is skipped (by its SHA-256).
-function(recomp_add_digital_reverb_test)
-  cmake_parse_arguments(A "" "DLL" "" ${ARGN})
-  if(NOT EXISTS "${A_DLL}")
-    return()
-  endif()
-  # mss32.dll 6.5e (platforms/win32/docs/miles.md).
-  set(_known 7855b8fbae917cb8449f2d4361ab61b5ecec4df0a11130d797cb0aa99b4260ea)
-  file(SHA256 "${A_DLL}" _hash)
-  if(NOT _hash STREQUAL _known)
-    message(STATUS "digital_reverb_oracle: ${A_DLL} is not the mss32.dll 6.5e build "
-                   "its addresses come from (SHA-256 ${_hash}); test skipped")
-    return()
-  endif()
-  set(_dir "${CMAKE_CURRENT_BINARY_DIR}/digital_reverb_oracle")
-  foreach(_tsv functions exports jumptables)
-    file(WRITE "${_dir}/symbols/${_tsv}.tsv" "header\n")
-  endforeach()
-  file(WRITE "${_dir}/empty.manifest" "")
-  set(_gen "${_dir}/gen/gen_000.cpp" "${_dir}/gen/table.cpp")
-  add_custom_command(OUTPUT ${_gen}
-    COMMAND recomp_lift --exe "${A_DLL}" --symbols "${_dir}/symbols"
-            --manifest "${_dir}/empty.manifest"
-            --only 2112AA10,2112AA70,2112ACE0,2112B040,2112B0F0,2112BCC0
-            --out "${_dir}/gen"
-    DEPENDS recomp_lift "${A_DLL}"
-    COMMENT "Lifting mss32's reverb routines for digital_reverb_oracle_test")
-  add_executable(digital_reverb_oracle_test "${RECOMP_ROOT}/tests/digital_reverb_test.cpp"
-                 "${RECOMP_ROOT}/src/runtime/audio/digital_reverb.cpp" ${_gen})
-  target_compile_definitions(digital_reverb_oracle_test PRIVATE DIGITAL_REVERB_ORACLE)
-  target_include_directories(digital_reverb_oracle_test PRIVATE "${RECOMP_ROOT}/src")
-  target_link_libraries(digital_reverb_oracle_test PRIVATE recomp_x87 recomp_image)
-  target_compile_options(digital_reverb_oracle_test PRIVATE -O2 -ffp-contract=off
-                         -fno-strict-aliasing)
-  add_test(NAME digital_reverb_oracle COMMAND digital_reverb_oracle_test "${A_DLL}")
-  set_tests_properties(digital_reverb_oracle PROPERTIES TIMEOUT 600)
-endfunction()
+add_subdirectory(tests/x86)
+if(RECOMP_PLATFORM_WIN32)
+  add_subdirectory(platforms/win32)
+endif()
 
-# recomp_add_fast2d_test(MSS32 <mss32.dll> FAST2D <msssoft.m3d>): checks
-# Miles 6.5's sample levels and Fast 2D (runtime/audio/miles65) bit for bit
-# against the original routines, lifted from the user's installed Miles
-# 6.5e at build time (tests/fast2d_test.cpp). Nothing from the DLLs is
-# stored in the source tree; skipped unless both files are given and are
-# the builds the addresses come from.
-function(recomp_add_fast2d_test)
-  cmake_parse_arguments(A "" "MSS32;FAST2D" "" ${ARGN})
-  if(NOT EXISTS "${A_MSS32}" OR NOT EXISTS "${A_FAST2D}")
-    return()
-  endif()
-  # mss32.dll 6.5e and miles/msssoft.m3d (platforms/win32/docs/miles.md).
-  set(_known_mss32 7855b8fbae917cb8449f2d4361ab61b5ecec4df0a11130d797cb0aa99b4260ea)
-  set(_known_fast2d 62233bebccb6aeb97370a8499c577e2982f46924e3a1bc55c53fa1f8a2404252)
-  foreach(_f MSS32 FAST2D)
-    file(SHA256 "${A_${_f}}" _hash)
-    string(TOLOWER "${_f}" _name)
-    if(NOT _hash STREQUAL _known_${_name})
-      message(STATUS "fast2d_oracle: ${A_${_f}} is not the Miles 6.5e build "
-                     "its addresses come from (SHA-256 ${_hash}); test skipped")
-      return()
-    endif()
-  endforeach()
-  set(_dir "${CMAKE_CURRENT_BINARY_DIR}/fast2d_oracle")
-  foreach(_tsv functions exports jumptables)
-    file(WRITE "${_dir}/symbols/${_tsv}.tsv" "header\n")
-  endforeach()
-  file(WRITE "${_dir}/empty.manifest" "")
-  set(_gen "${_dir}/gen/gen_000.cpp" "${_dir}/gen/gen_msssoft_000.cpp" "${_dir}/gen/table.cpp")
-  add_custom_command(OUTPUT ${_gen}
-    COMMAND recomp_lift --exe "${A_MSS32}" --symbols "${_dir}/symbols"
-            --manifest "${_dir}/empty.manifest"
-            --module "${A_FAST2D}" --symbols "${_dir}/symbols"
-            --manifest "${_dir}/empty.manifest"
-            --only 2112A810,2112A930,21136D30,22401000,22401870,224019B0
-            --out "${_dir}/gen"
-    DEPENDS recomp_lift "${A_MSS32}" "${A_FAST2D}"
-    COMMENT "Lifting Miles 6.5e's level and Fast 2D routines for fast2d_oracle_test")
-  add_executable(fast2d_oracle_test "${RECOMP_ROOT}/tests/fast2d_test.cpp"
-                 "${RECOMP_ROOT}/src/runtime/audio/miles65.cpp" ${_gen})
-  target_compile_definitions(fast2d_oracle_test PRIVATE FAST2D_ORACLE)
-  target_include_directories(fast2d_oracle_test PRIVATE "${RECOMP_ROOT}/src")
-  target_compile_features(fast2d_oracle_test PRIVATE cxx_std_20)
-  target_link_libraries(fast2d_oracle_test PRIVATE recomp_x87 recomp_image)
-  target_compile_options(fast2d_oracle_test PRIVATE -O2 -ffp-contract=off
-                         -fno-strict-aliasing)
-  add_test(NAME fast2d_oracle COMMAND fast2d_oracle_test "${A_MSS32}" "${A_FAST2D}")
-  set_tests_properties(fast2d_oracle PROPERTIES TIMEOUT 600)
-endfunction()
-
+# --- base tests and tools --------------------------------------------------
 add_subdirectory(tests)
 # Dev tool: renders the EAX capture cases with recomp_audio (eax_render).
 if(PROJECT_IS_TOP_LEVEL AND FFMPEG_FOUND)

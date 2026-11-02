@@ -1,4 +1,5 @@
-// Frame presentation shared by the graphics APIs (ddraw, opengl32).
+// Frame presentation shared by the graphics APIs (Win32's ddraw, opengl32,
+// a console platform's video output).
 
 #include "x86/present.h"
 
@@ -11,7 +12,6 @@
 #include <vector>
 
 #include "runtime/log.h"
-#include "win32/user32_window.h"
 #include "x86/runtime.h"
 #include "x86/watchdog.h"
 
@@ -48,7 +48,7 @@ void PresentFrame(gfx::Device& dev, int w, int h) {
   // Loading screens present without pumping messages; keep answering the
   // window system (compositor pings) so the window does not look hung.
   // Events are only queued for the game, as Windows would.
-  PumpHostEvents();
+  if (g_proc->pump_events) g_proc->pump_events();
   WatchdogFrame();
   // <ID>_HITCH=ms: report frames that took longer than that.
   static const double hitch_ms = [] {

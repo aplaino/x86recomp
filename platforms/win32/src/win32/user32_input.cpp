@@ -13,11 +13,11 @@
 #include <vector>
 
 #include "runtime/log.h"
+#include "win32/hle.h"
 #include "win32/input_state.h"
 #include "win32/kernel32_state.h"
 #include "win32/user32_window.h"
 #include "win32/win32.h"
-#include "x86/hle.h"
 
 namespace recomp {
 

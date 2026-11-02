@@ -16,9 +16,9 @@
 #include <vector>
 
 #include "runtime/log.h"
+#include "win32/hle.h"
 #include "win32/kernel32_state.h"
 #include "win32/win32.h"
-#include "x86/hle.h"
 
 namespace recomp {
 
@@ -83,11 +83,11 @@ GuestHeap* FindHeap(gaddr handle) {
 void SetEnvironmentBlock(const std::vector<std::string>& vars);
 
 void InitKernel32State() {
-  Process& p = *g_proc;
+  Win32Process& p = *g_win32;
   g_process_heap = NewHeap(1u << 20, 0);
   if (!g_process_heap) FatalF("cannot create the process heap");
   p.process_heap = g_process_heap->handle();
-  if (p.x64)
+  if (g_proc->x64)
     Wr64(kPebVa64 + 0x30, p.process_heap);  // PEB ProcessHeap
   else
     Wr32(kPebVa + 0x18, uint32_t(p.process_heap));
@@ -109,13 +109,13 @@ void InitKernel32State() {
 
 std::vector<std::string> EnvironmentVars() {
   std::vector<std::string> vars;
-  const char* env = g_proc->mem.ptr<const char>(g_proc->environ_a);
+  const char* env = g_proc->mem.ptr<const char>(g_win32->environ_a);
   for (const char* e = env; *e; e += std::strlen(e) + 1) vars.push_back(e);
   return vars;
 }
 
 void SetEnvironmentBlock(const std::vector<std::string>& vars) {
-  Process& p = *g_proc;
+  Win32Process& p = *g_win32;
   std::string block;
   for (const std::string& e : vars) block.append(e).push_back('\0');
   block.push_back('\0');
@@ -165,13 +165,13 @@ std::recursive_mutex g_loader_mu;
 
 Module* LiftedDll(const std::string& name) {
   std::string n = NormaliseDll(name);
-  for (Module& m : g_proc->modules)
+  for (Module& m : g_win32->modules)
     if (m.name == n) return &m;
   return nullptr;
 }
 
 Module* LoadedDllAt(gaddr hmodule) {
-  for (Module& m : g_proc->modules)
+  for (Module& m : g_win32->modules)
     if (m.refs && m.img.image_base == hmodule) return &m;
   return nullptr;
 }
@@ -190,11 +190,11 @@ bool CallDllMain(Ctx& c, Module& m, uint32_t reason) {
 std::string GArg(gaddr p, bool wide) { return wide ? Narrow(GWStr(p)) : GStr(p); }
 
 gaddr ModuleHandleOf(gaddr name, bool wide) {
-  if (!name) return g_proc->img.image_base;
+  if (!name) return g_win32->img.image_base;
   std::string n = GArg(name, wide);
   std::string exe = Lower(Game().exe_name);
   if (NormaliseDll(n) == exe || Lower(n) == exe.substr(0, exe.rfind('.')))
-    return g_proc->img.image_base;
+    return g_win32->img.image_base;
   if (Module* m = LiftedDll(n)) {
     std::lock_guard<std::recursive_mutex> l(g_loader_mu);
     if (m->refs) return m->img.image_base;
@@ -213,7 +213,7 @@ HLE64("kernel32.dll", GetModuleFileNameA, 3) {
   gaddr mod = Arg(c, 0), buf = Arg(c, 1);
   uint32_t size = uint32_t(Arg(c, 2));
   std::string path = GuestExePath();
-  if (mod && mod != g_proc->img.image_base) {
+  if (mod && mod != g_win32->img.image_base) {
     std::lock_guard<std::recursive_mutex> l(g_loader_mu);
     Module* m = LoadedDllAt(mod);
     if (!m) {
@@ -221,7 +221,7 @@ HLE64("kernel32.dll", GetModuleFileNameA, 3) {
       return 0;
     }
     path = GuestGameDir() + "\\" +
-           Game().lifted_dlls[size_t(m - g_proc->modules.data())].name;
+           Game().lifted_dlls[size_t(m - g_win32->modules.data())].name;
   }
   if (!size) return 0;
   std::string s = path.substr(0, size - 1);
@@ -294,8 +294,8 @@ HLE64("kernel32.dll", GetProcAddress, 2) {
   return a;
 }
 
-HLE64("kernel32.dll", GetCommandLineA, 0) { return g_proc->cmdline_a; }
-HLE64("kernel32.dll", GetCommandLineW, 0) { return g_proc->cmdline_w; }
+HLE64("kernel32.dll", GetCommandLineA, 0) { return g_win32->cmdline_a; }
+HLE64("kernel32.dll", GetCommandLineW, 0) { return g_win32->cmdline_w; }
 
 // STARTUPINFOA/W: 68 bytes in 32-bit guests, 104 in x64 ones (its handles
 // and string pointers are pointer-sized); nothing set but cb.
@@ -308,15 +308,15 @@ uint64_t StartupInfo(gaddr si) {
 HLE64("kernel32.dll", GetStartupInfoA, 1) { return StartupInfo(Arg(c, 0)); }
 HLE64("kernel32.dll", GetStartupInfoW, 1) { return StartupInfo(Arg(c, 0)); }
 
-HLE("kernel32.dll", GetEnvironmentStrings, 0) { return g_proc->environ_a; }
-HLE("kernel32.dll", GetEnvironmentStringsW, 0) { return g_proc->environ_w; }
+HLE("kernel32.dll", GetEnvironmentStrings, 0) { return g_win32->environ_a; }
+HLE("kernel32.dll", GetEnvironmentStringsW, 0) { return g_win32->environ_w; }
 HLE("kernel32.dll", FreeEnvironmentStringsA, 1) { return 1; }
 HLE("kernel32.dll", FreeEnvironmentStringsW, 1) { return 1; }
 
 HLE("kernel32.dll", GetEnvironmentVariableA, 3) {
   std::string name = GStr(Arg(c, 0));
   uint32_t buf = Arg(c, 1), size = Arg(c, 2);
-  const char* env = g_proc->mem.ptr<const char>(g_proc->environ_a);
+  const char* env = g_proc->mem.ptr<const char>(g_win32->environ_a);
   std::string key = Lower(name) + "=";
   for (const char* e = env; *e; e += std::strlen(e) + 1) {
     std::string kv = e;
@@ -404,7 +404,7 @@ HLE64("kernel32.dll", TerminateProcess, 2) {
 }
 
 HLE64("kernel32.dll", GetLastError, 0) {
-  return Rd32(CurrentThread()->teb + 0x34);
+  return Rd32(Teb(CurrentThread()) + 0x34);
 }
 HLE64("kernel32.dll", SetLastError, 1) {
   SetLastError(Arg(c, 0));
@@ -549,7 +549,7 @@ HLE("kernel32.dll", GetComputerNameA, 2) {
 
 // ---- heaps ---------------------------------------------------------------
 
-HLE64("kernel32.dll", GetProcessHeap, 0) { return g_proc->process_heap; }
+HLE64("kernel32.dll", GetProcessHeap, 0) { return g_win32->process_heap; }
 
 HLE("kernel32.dll", HeapCreate, 3) {
   GuestHeap* h = NewHeap(Arg(c, 1), Arg(c, 2));
@@ -776,8 +776,8 @@ std::mutex g_tls_mu;
 uint64_t g_tls_used = 0;
 
 gaddr TlsSlot(uint32_t i) {
-  return g_proc->x64 ? CurrentThread()->teb + 0x1480 + 8 * i
-                     : CurrentThread()->teb + 0xE10 + 4 * i;
+  return g_proc->x64 ? Teb(CurrentThread()) + 0x1480 + 8 * i
+                     : Teb(CurrentThread()) + 0xE10 + 4 * i;
 }
 
 HLE64("kernel32.dll", TlsAlloc, 0) {

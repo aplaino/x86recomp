@@ -13,17 +13,9 @@
 #include <vector>
 
 #include "runtime/guest_memory.h"
+#include "x86/layout.h"
 
 namespace recomp {
-
-// Guest layout constants. Everything stays below 0x80000000 because the
-// game is not large-address-aware and may treat pointers as signed.
-inline constexpr gaddr kThunkBase = 0x7F000000;
-inline constexpr uint32_t kThunkStride = 0x10;
-inline constexpr uint32_t kThunkRegionSize = 0x00100000;
-// x64 guests get nothing below 4 GiB (ARCHITECTURE.md, "64-bit guests"):
-// their thunks sit near the top of the default 64 GiB arena.
-inline constexpr gaddr kThunkBase64 = 0xFFF000000;
 
 struct PeSection {
   std::string name;

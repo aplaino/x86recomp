@@ -21,8 +21,8 @@
 #include "runtime/log.h"
 #include "win32/com.h"
 #include "win32/d3d9_impl.h"
+#include "win32/hle.h"
 #include "win32/user32_window.h"
-#include "x86/hle.h"
 #include "x86/present.h"
 #include "x86/x87.h"
 

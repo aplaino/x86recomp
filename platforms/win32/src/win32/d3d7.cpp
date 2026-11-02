@@ -16,8 +16,8 @@
 
 #include "runtime/log.h"
 #include "win32/ddraw_impl.h"
+#include "win32/hle.h"
 #include "win32/kernel32_state.h"
-#include "x86/hle.h"
 
 namespace recomp::ddraw {
 

@@ -23,9 +23,9 @@
 #include "runtime/gfx/device.h"
 #include "runtime/gl/context.h"
 #include "runtime/log.h"
+#include "win32/hle.h"
 #include "win32/kernel32_state.h"
 #include "win32/user32_window.h"
-#include "x86/hle.h"
 #include "x86/present.h"
 
 namespace recomp::hle {

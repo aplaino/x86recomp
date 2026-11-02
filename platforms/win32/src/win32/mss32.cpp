@@ -13,7 +13,7 @@
 // Miles 6.5 changed some exports under the same names (3D sample volume
 // from S32 0-127 to F32 0-1, returned in st(0)), and how volume, pan and
 // a 3D position become channel gains (Voice::miles; runtime/audio/
-// miles65.h; platforms/win32/docs/miles.md); the generation is read from the mss32.dll
+// miles65.h; docs/miles.md); the generation is read from the mss32.dll
 // that ships with the game (6.1c or 6.5e).
 //
 // Callbacks (end of sample/stream, timers) run on a Miles service thread,
@@ -47,8 +47,8 @@
 #include "runtime/audio/mixer.h"
 #include "runtime/audio/source.h"
 #include "runtime/log.h"
+#include "win32/hle.h"
 #include "win32/kernel32_state.h"
-#include "x86/hle.h"
 
 namespace recomp::hle {
 namespace {

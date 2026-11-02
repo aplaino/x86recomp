@@ -2,7 +2,6 @@
 // Process-level state owned by the kernel32 HLE: heaps, handles, the
 // command line and environment, and guest <-> host path mapping.
 
-#include <atomic>
 #include <cstdint>
 #include <ctime>
 #include <memory>
@@ -10,6 +9,7 @@
 #include <vector>
 
 #include "runtime/guest_alloc.h"
+#include "win32/process.h"
 
 namespace recomp {
 
@@ -95,44 +95,11 @@ std::string NarrowPath(const std::u16string& path);
 std::vector<std::string> HostDirs(const std::string& guest_dir);
 std::string GuestCurrentDir();
 
-// Thrown by ExitThread to unwind a guest thread's host stack back to its
-// start routine; caught in process.cpp.
-struct GuestThreadExit {
-  uint32_t code;
-};
+// A guest thread finished (Process::thread_exit): its handle is signalled.
 void OnGuestThreadFinished(uint32_t tid, uint32_t exit_code);
 
-struct Thread;
 // SetEvent (or PulseEvent) on an event handle from host code (WinMM
 // timers). False if `h` is not an event.
 bool SignalEventHandle(uint32_t h, bool pulse);
-
-// Runs guest function entry(param) on a new detached host thread bound to
-// guest thread t.
-void StartHostThread(Thread* t, gaddr entry, uint64_t param);
-
-// Memory ordering of guest synchronisation calls. On Windows every one of
-// them (critical sections, waits, events, mutexes, Interlocked*, thread
-// start and exit, TlsAlloc/TlsFree, Sleep) is a full barrier: a locked
-// instruction or a kernel entry. x86 is TSO, but arm64 hosts are weakly
-// ordered and lifted code reaches guest memory with plain loads and
-// stores, so a guest that hands data over through one of these calls
-// relies on more than the host primitive behind it gives. A host mutex is
-// acquire on lock and release on unlock: enough for data written inside a
-// critical section to be seen by the next owner, but accesses outside it
-// may move into it and pass each other there, so lock + unlock is not a
-// full barrier. Each such handler therefore opens a GuestSyncPoint, a
-// seq_cst fence on entry and on exit (also when it returns early or
-// throws): every guest access before the call is ordered before the call's
-// own effects, and those before every guest access after it.
-inline void GuestSyncFence() {
-  std::atomic_thread_fence(std::memory_order_seq_cst);
-}
-struct GuestSyncPoint {
-  GuestSyncPoint() { GuestSyncFence(); }
-  ~GuestSyncPoint() { GuestSyncFence(); }
-  GuestSyncPoint(const GuestSyncPoint&) = delete;
-  GuestSyncPoint& operator=(const GuestSyncPoint&) = delete;
-};
 
 }  // namespace recomp

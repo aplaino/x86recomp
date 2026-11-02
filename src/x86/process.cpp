@@ -1,5 +1,6 @@
-// Process and thread bring-up: arena, image, PEB/TEB, TLS, stacks, and the
-// host threads that run guest code.
+// Process and thread bring-up: the arena, guest threads' stacks and Ctx,
+// and the host threads that run guest code. The platform does the rest
+// through Process's hooks.
 
 #include <pthread.h>
 #include <sys/mman.h>
@@ -20,7 +21,6 @@
 
 #include "runtime/log.h"
 #include "runtime/platform.h"
-#include "win32/kernel32_state.h"
 #include "x86/hle.h"
 #include "x86/lifted.h"
 #include "x86/runtime.h"
@@ -39,14 +39,11 @@ namespace {
 thread_local Thread* t_current = nullptr;
 std::mutex g_threads_mu;
 std::map<uint32_t, std::unique_ptr<Thread>> g_threads;  // by tid
-gaddr g_next_teb = 0;  // the next TEB is below it (kTebTop, kTebTop64)
 
 // Host stack for each guest thread. Guest call depth maps 1:1 onto host
 // call depth, and lifted frames are larger than the originals, so be
 // generous; the memory is only touched as needed.
 constexpr size_t kHostStack = 256u << 20;
-
-constexpr uint32_t kTlsArraySlots = 64;
 
 }  // namespace
 
@@ -57,8 +54,6 @@ uint32_t GuestProcessorCount() {
   return std::clamp<unsigned>(n, 2, 8);  // capped: 2002 code may assume few
 }
 
-const GameConfig& Game() { return g_proc->game; }
-
 const char* Env(const char* name) {
   if (!g_proc) return nullptr;
   std::string var;
@@ -66,6 +61,14 @@ const char* Env(const char* name) {
   var += '_';
   var += name;
   return std::getenv(var.c_str());
+}
+
+bool Background() {
+  static const bool bg = [] {
+    const char* e = Env("BACKGROUND");
+    return e && *e && *e != '0';
+  }();
+  return bg;
 }
 
 std::string DataDir() {
@@ -174,53 +177,6 @@ uint64_t CallGuest(Ctx& c, gaddr va, std::initializer_list<uint64_t> args) {
   return c.eax;
 }
 
-// The thread's TEB and TLS array, in the layout of the process's mode.
-static void InitTeb(Thread* t) {
-  Process& p = *g_proc;
-  const gaddr teb = t->teb;
-  // Static TLS of the image (__declspec(thread)): a per-thread copy of the
-  // template, found through the TEB's ThreadLocalStoragePointer
-  // [tls_index].
-  const uint32_t ptr = p.x64 ? 8 : 4;
-  gaddr tls_array = HeapAllocProcess(kTlsArraySlots * ptr, true);
-  if (p.x64) {  // NT_TIB64 and the x64 TEB
-    Wr64(teb + 0x08, t->stack_hi);  // StackBase
-    Wr64(teb + 0x10, t->stack_lo);  // StackLimit
-    Wr64(teb + 0x30, teb);          // Self
-    Wr64(teb + 0x40, kGuestPid);    // ClientId
-    Wr64(teb + 0x48, t->tid);
-    Wr64(teb + 0x58, tls_array);    // ThreadLocalStoragePointer
-    Wr64(teb + 0x60, kPebVa64);
-  } else {
-    Wr32(teb + 0x00, 0xFFFFFFFF);  // SEH chain: empty
-    Wr32(teb + 0x04, uint32_t(t->stack_hi));
-    Wr32(teb + 0x08, uint32_t(t->stack_lo));
-    Wr32(teb + 0x18, uint32_t(teb));  // Self
-    Wr32(teb + 0x20, kGuestPid);
-    Wr32(teb + 0x24, t->tid);
-    Wr32(teb + 0x2C, uint32_t(tls_array));
-    Wr32(teb + 0x30, kPebVa);
-  }
-  auto block = [&](const PeImage& img, int index) {
-    const PeTls& tls = img.tls;
-    uint64_t raw = tls.raw_end - tls.raw_start;
-    gaddr b = HeapAllocProcess(raw + tls.zero_fill + 16, true);
-    std::memcpy(GPtr(b), GPtr(tls.raw_start), raw);
-    WrPtr(tls_array + ptr * uint32_t(index), b);
-  };
-  if (p.img.has_tls) block(p.img, 0);
-  // Lifted DLLs with static TLS (x64 guests, as on Vista and later): every
-  // thread has their blocks, loaded or not, since all are mapped at start.
-  for (const Module& m : p.modules)
-    if (m.tls_index >= 0) block(m.img, m.tls_index);
-}
-
-// Static TLS callbacks are not run (no supported module has any).
-static void CheckNoTlsCallbacks(const PeImage& img, const std::string& name) {
-  if (img.has_tls && img.tls.callbacks && RdPtr(img.tls.callbacks))
-    FatalF("%s has TLS callbacks: not supported", name.c_str());
-}
-
 Thread* CreateGuestThread(uint64_t stack_size) {
   auto t = std::make_unique<Thread>();
   Process& p = *g_proc;
@@ -233,29 +189,13 @@ Thread* CreateGuestThread(uint64_t stack_size) {
   t->stack_hi = stack + stack_size;
 
   t->tid = p.next_tid.fetch_add(4);
-  if (!p.thread_init) {
-    const uint32_t stride = p.x64 ? kTebStride64 : kTebStride;
-    {
-      std::lock_guard<std::mutex> l(g_threads_mu);
-      if (!g_next_teb) g_next_teb = p.x64 ? kTebTop64 : kTebTop;
-      g_next_teb -= stride;
-      if (p.x64 && g_next_teb < kTebLo64) FatalF("too many guest threads");
-      t->teb = g_next_teb;
-    }
-    p.mem.Commit(t->teb, stride, Prot::RW);
-    InitTeb(t.get());
-  }
-
   Ctx& c = t->ctx;
   std::memset(&c, 0, sizeof c);
   c.eflags = 0x202;
-  if (p.x64) {
+  if (p.x64)
     c.rsp = t->stack_hi - 16;
-    c.gs_base = t->teb;
-  } else {
+  else
     c.esp = uint32_t(t->stack_hi - 16);
-    c.fs_base = uint32_t(t->teb);
-  }
   c.thread = t.get();
   x87::Init(c.fpu);
   x87::SetControlWord(c.fpu, p.fpu_control);
@@ -282,8 +222,8 @@ static void CheckHostFp() {
 static uint32_t RunGuestThread(Thread* t, const std::function<uint64_t(Ctx&)>& body) {
   // Thread start is a full barrier on Windows. pthread_create already
   // makes the creator's writes visible here; the fence states it for
-  // weakly ordered hosts like every other guest sync point
-  // (kernel32_state.h). The exit side fences in OnGuestThreadFinished.
+  // weakly ordered hosts like every other guest sync point (runtime.h).
+  // The exit side fences after the thread_exit hook.
   GuestSyncFence();
   t_current = t;
   CheckHostFp();
@@ -295,7 +235,8 @@ static uint32_t RunGuestThread(Thread* t, const std::function<uint64_t(Ctx&)>& b
   } catch (const GuestThreadExit& e) {
     r = e.code;
   }
-  OnGuestThreadFinished(t->tid, r);
+  if (g_proc->thread_exit) g_proc->thread_exit(t, r);
+  GuestSyncFence();
   return r;
 }
 
@@ -373,38 +314,6 @@ uint32_t RunMainThread(Thread* t, const std::function<uint64_t(Ctx&)>& body) {
   return g_main_exit;
 }
 
-const PeImage* ImageAt(gaddr va) {
-  const Process& p = *g_proc;
-  if (va - p.img.image_base < p.img.image_size) return &p.img;
-  for (const Module& m : p.modules)
-    if (va - m.img.image_base < m.img.image_size) return &m.img;
-  return nullptr;
-}
-
-void MapModule(Module& m) {
-  Process& p = *g_proc;
-  if (m.img.image_size) p.mem.Decommit(m.img.image_base, m.img.image_size);
-  std::string err;
-  if (!m.img.Load(m.host_path, p.mem, &err, m.base, hle::ImportThunk))
-    FatalF("lifted DLL %s: %s", m.name.c_str(), err.c_str());
-  // Windows XP did not set up static TLS for LoadLibrary'd DLLs either,
-  // so 32-bit DLLs of that era have none. x64 ones get a slot of their own
-  // after the EXE's (slot 0), kept across remaps.
-  if (m.img.has_tls) {
-    if (!p.x64)
-      FatalF("lifted DLL %s has static TLS (__declspec(thread)): not supported",
-             m.name.c_str());
-    CheckNoTlsCallbacks(m.img, m.name);
-    if (m.tls_index < 0) {
-      int next = 1;
-      for (const Module& o : p.modules) next = std::max(next, o.tls_index + 1);
-      m.tls_index = next;
-    }
-    Wr32(m.img.tls.index_va, uint32_t(m.tls_index));
-  }
-  m.stale = false;
-}
-
 Process& StartProcess(const GameConfig& game, const std::string& game_dir, bool x64) {
   g_proc = new Process;
   Process& p = *g_proc;
@@ -427,64 +336,6 @@ Process& StartProcess(const GameConfig& game, const std::string& game_dir, bool 
   p.mem.Protect(thunks + hle::kDataExportOffset, kThunkRegionSize - hle::kDataExportOffset,
                 Prot::RW);
   return p;
-}
-
-int RunProcess(const GameConfig& game, const std::string& exe_path,
-               const std::string& game_dir, const std::string& game_args) {
-  Process& p = StartProcess(game, game_dir, PeImage::IsX64File(exe_path));
-  p.game_args = game_args;
-  std::string err;
-  if (!p.img.Load(exe_path, p.mem, &err, 0, hle::ImportThunk))
-    FatalF("%s", err.c_str());
-  for (const auto& d : game.lifted_dlls) {
-    Module& m = p.modules.emplace_back();
-    m.name = hle::NormaliseDll(d.name);
-    m.host_path = HostPath(GuestGameDir() + "\\" + d.name);
-    m.base = d.base;
-    MapModule(m);
-  }
-
-  if (p.x64) {
-    // Everything above 4 GiB, below the TEBs (runtime.h).
-    p.vm.Init(&p.mem, kUserLo64, kTebLo64);
-  } else {
-    p.vm.Init(&p.mem, 0x00010000, kThunkBase);
-    p.vm.MarkReserved(hle::kModuleRegion, hle::kModuleRegionSize);
-  }
-  p.vm.MarkReserved(p.img.image_base, p.img.image_size);
-  for (const Module& m : p.modules) p.vm.MarkReserved(m.img.image_base, m.img.image_size);
-
-  // PEB: only the fields Win32 code commonly peeks at. x64 guests see
-  // Windows 10 (22H2), 32-bit ones Windows XP.
-  if (p.x64) {
-    p.mem.Commit(kPebVa64, 0x1000, Prot::RW);
-    Wr64(kPebVa64 + 0x10, p.img.image_base);
-    Wr32(kPebVa64 + 0xB8, GuestProcessorCount());  // NumberOfProcessors
-    Wr32(kPebVa64 + 0x118, 10);     // OSMajorVersion
-    Wr32(kPebVa64 + 0x11C, 0);      // OSMinorVersion
-    Wr16(kPebVa64 + 0x120, 19045);  // OSBuildNumber
-    Wr32(kPebVa64 + 0x124, 2);      // OSPlatformId: VER_PLATFORM_WIN32_NT
-  } else {
-    p.mem.Commit(kPebVa, 0x1000, Prot::RW);
-    Wr32(kPebVa + 0x08, uint32_t(p.img.image_base));
-    Wr32(kPebVa + 0x64, GuestProcessorCount());  // NumberOfProcessors
-    Wr32(kPebVa + 0xA4, 5);      // OSMajorVersion (Windows XP)
-    Wr32(kPebVa + 0xA8, 1);      // OSMinorVersion
-    Wr16(kPebVa + 0xAC, 2600);   // OSBuildNumber
-    Wr32(kPebVa + 0xB0, 2);      // OSPlatformId: VER_PLATFORM_WIN32_NT
-  }
-
-  // The image's TLS index: slot 0 (lifted DLLs have theirs, MapModule).
-  if (p.img.has_tls) {
-    CheckNoTlsCallbacks(p.img, game.exe_name);
-    Wr32(p.img.tls.index_va, 0);
-  }
-
-  InitDispatch();
-  InitKernel32State();
-
-  Thread* main = CreateGuestThread(p.img.stack_reserve);
-  return int(RunMainThread(main, [&](Ctx& c) { return CallGuest(c, p.img.entry, {}); }));
 }
 
 }  // namespace recomp

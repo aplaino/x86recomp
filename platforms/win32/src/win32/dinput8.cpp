@@ -18,11 +18,11 @@
 
 #include "runtime/log.h"
 #include "win32/com.h"
+#include "win32/hle.h"
 #include "win32/input_state.h"
 #include "win32/kernel32_state.h"
 #include "win32/user32_window.h"
 #include "win32/xinput.h"
-#include "x86/hle.h"
 
 namespace recomp::hle {
 namespace {

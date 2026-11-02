@@ -1,4 +1,4 @@
-# recomp_lift: x86-32 -> C++ lifter (build-time only, never linked into a game).
+# recomp_lift: x86 -> C++ lifter (build-time only, never linked into a game).
 
 set(ZYDIS_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 set(ZYDIS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -16,4 +16,4 @@ add_executable(recomp_lift
   function.cpp
   emit.cpp
   x87test.cpp)
-target_link_libraries(recomp_lift PRIVATE recomp_image Zydis)
+target_link_libraries(recomp_lift PRIVATE recomp_pe Zydis)

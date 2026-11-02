@@ -11,7 +11,6 @@
 #include <vector>
 
 #include "runtime/log.h"
-#include "win32/win32.h"
 #include "x86/watchdog.h"
 
 namespace recomp::hle {
@@ -25,21 +24,16 @@ std::map<std::pair<std::string, std::string>, Def>& Registry() {
   return r;
 }
 
-// Real export tables of provided DLLs whose games fetch every entry point
-// up front (see Exports in hle.h).
-std::map<std::string, std::set<std::string>>& DeclaredExports() {
-  static std::map<std::string, std::set<std::string>> e;
-  return e;
+// Libraries whose handlers run under one lock (Serialised).
+std::set<std::string>& SerialisedLibs() {
+  static std::set<std::string> s;
+  return s;
 }
 
 struct Slot {
   std::string dll, name;
   const Def* def;  // nullptr: unimplemented
-  // DirectDraw/Direct3D 7 entry points run under one process-wide lock,
-  // like DirectDraw with DDSCL_MULTITHREADED (which the game requests):
-  // its worker thread uploads textures while the main thread renders,
-  // and neither our ddraw state nor the d3d9 device is reentrant.
-  bool graphics;
+  bool serialised;  // its library is Serialised
 };
 
 std::mutex g_slots_mu;  // serialises AddSlot
@@ -51,21 +45,8 @@ std::deque<Slot> g_slots;  // under g_slots_mu; stable refs
 constexpr size_t kMaxSlots = kDataExportOffset / kThunkStride;
 std::atomic<const Slot*> g_slot_table[kMaxSlots];
 
-// Pseudo HMODULEs for DLLs we provide. Real modules are guest pointers to
-// a PE header; nothing in the game dereferences these, so a recognisable
-// value outside the arena's used ranges is enough.
-const std::vector<std::string>& KnownDlls() {
-  static const std::vector<std::string> dlls = {
-      "kernel32.dll", "user32.dll",  "gdi32.dll",    "advapi32.dll",
-      "ole32.dll",    "version.dll", "winmm.dll",    "wsock32.dll",
-      "ddraw.dll",    "mss32.dll",   "binkw32.dll",  "dbghelp.dll",
-      "imm32.dll",    "shfolder.dll", "ntdll.dll",   "opengl32.dll"};
-  return dlls;
-}
-
 // The thunk region of this process's mode.
 gaddr ThunkBase() { return g_proc->x64 ? kThunkBase64 : kThunkBase; }
-gaddr ModuleRegion() { return g_proc->x64 ? kModuleRegion64 : kModuleRegion; }
 
 gaddr AddSlot(const std::string& dll, const std::string& name) {
   std::lock_guard<std::mutex> l(g_slots_mu);
@@ -76,7 +57,7 @@ gaddr AddSlot(const std::string& dll, const std::string& name) {
   gaddr thunk = ThunkBase() + uint32_t(g_slots.size()) * kThunkStride;
   auto it = Registry().find({dll, name});
   g_slots.push_back({dll, name, it == Registry().end() ? nullptr : &it->second,
-                     dll == "ddraw.dll"});
+                     SerialisedLibs().count(dll) != 0});
   g_slot_table[g_slots.size() - 1].store(&g_slots.back(),
                                          std::memory_order_release);
   return thunk;
@@ -120,25 +101,7 @@ DataExport::DataExport(const char* dll, const char* name, uint32_t size, void (*
   DataRegistry()[{dll, name}] = DataDef{size, init};
 }
 
-Exports::Exports(const char* dll, std::initializer_list<const char*> names) {
-  auto& s = DeclaredExports()[dll];
-  for (const char* n : names) s.insert(n);
-}
-
-std::string NormaliseDll(std::string dll) {
-  dll = win32::Lower(dll);
-  size_t slash = dll.find_last_of("\\/");
-  if (slash != std::string::npos) dll = dll.substr(slash + 1);
-  if (dll.find('.') == std::string::npos) dll += ".dll";
-  // The UCRT's API sets (api-ms-win-crt-runtime-l1-1-0.dll, ...) are all
-  // ucrtbase.dll, as Windows' API set map resolves them.
-  if (dll.rfind("api-ms-win-crt-", 0) == 0) return "ucrtbase.dll";
-  return dll;
-}
-
-gaddr ImportThunk(const std::string& dll, const std::string& name) {
-  return BindImport(NormaliseDll(dll), name);
-}
+Serialised::Serialised(const char* lib) { SerialisedLibs().insert(lib); }
 
 gaddr BindImport(const std::string& lib, const std::string& name) {
   if (gaddr data = DataAddress(lib, name)) return data;
@@ -149,6 +112,10 @@ gaddr BindImport(const std::string& lib, const std::string& name) {
 
 bool IsDataExport(const std::string& lib, const std::string& name) {
   return DataRegistry().count({lib, name}) != 0;
+}
+
+bool HasHandler(const std::string& lib, const std::string& name) {
+  return Registry().count({lib, name}) != 0;
 }
 
 void CallThunk(Ctx& c, gaddr thunk) {
@@ -204,9 +171,9 @@ void CallThunk(Ctx& c, gaddr thunk) {
   uint64_t r;
   {
     Inside inside(s->name.c_str(), ret);
-    static std::recursive_mutex graphics_mu;
-    std::unique_lock<std::recursive_mutex> gl;
-    if (s->graphics) gl = std::unique_lock<std::recursive_mutex>(graphics_mu);
+    static std::recursive_mutex serial_mu;
+    std::unique_lock<std::recursive_mutex> sl;
+    if (s->serialised) sl = std::unique_lock<std::recursive_mutex>(serial_mu);
     r = d.fn(c);
   }
   if (trace) TraceF("[%04X]   -> %llX\n", CurrentThread()->tid, (unsigned long long)r);
@@ -219,57 +186,8 @@ void CallThunk(Ctx& c, gaddr thunk) {
   }
 }
 
-gaddr ModuleHandle(const std::string& dll) {
-  std::string n = NormaliseDll(dll);
-  const auto& k = KnownDlls();
-  auto it = std::find(k.begin(), k.end(), n);
-  if (it == k.end()) return 0;
-  return ModuleRegion() + uint32_t(it - k.begin()) * 0x10000;
-}
-
-gaddr ProcAddress(gaddr hmodule, const std::string& name) {
-  const auto& k = KnownDlls();
-  gaddr idx = (hmodule - ModuleRegion()) / 0x10000;
-  if (hmodule < ModuleRegion() || idx >= k.size()) return 0;
-  if (gaddr data = DataAddress(k[idx], name)) return data;
-  const std::string& dll = k[idx];
-  if (!Registry().count({dll, name})) {
-    auto ex = DeclaredExports().find(dll);
-    if (ex != DeclaredExports().end() && ex->second.count(name))
-      return AddSlot(dll, name);  // a real export; fatal if ever called
-    WarnF("GetProcAddress(%s, %s): not implemented, returning NULL\n",
-          dll.c_str(), name.c_str());
-    return 0;
-  }
-  return AddSlot(dll, name);
-}
-
 gaddr ThunkFor(const std::string& dll, const std::string& name) {
   return AddSlot(dll, name);
-}
-
-// TEB LastErrorValue: +0x34 (32-bit), +0x68 (x64).
-void SetLastError(uint32_t e) {
-  Wr32(CurrentThread()->teb + (g_proc->x64 ? 0x68 : 0x34), e);
-}
-
-uint32_t CopyOut(gaddr buf, uint32_t size, const std::string& s) {
-  if (s.size() + 1 > size) return uint32_t(s.size() + 1);
-  PutStr(buf, s);
-  return uint32_t(s.size());
-}
-
-uint32_t PutCounted(gaddr buf, uint32_t cap, const std::string& s, bool wide) {
-  if (!cap) return uint32_t(s.size() + 1);
-  if (s.size() + 1 > cap) {
-    SetLastError(win32::kErrorInsufficientBuffer);
-    return 0;
-  }
-  if (wide)
-    PutWStr(buf, s);
-  else
-    PutStr(buf, s);
-  return uint32_t(s.size() + 1);
 }
 
 }  // namespace recomp::hle

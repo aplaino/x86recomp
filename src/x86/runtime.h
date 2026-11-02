@@ -1,6 +1,8 @@
 #pragma once
-// Process-wide runtime state and the services HLE code builds on: guest
-// memory access, calling back into lifted code, guest threads.
+// The x86 core's process: guest memory, the guest's threads and calls
+// between the host and lifted code, whatever the platform. A platform
+// module (platforms/<name>) loads the program's images and sets the
+// hooks below; the services HLE code builds on are here.
 
 #include <atomic>
 #include <cstdint>
@@ -11,68 +13,18 @@
 #include "runtime/guest_alloc.h"
 #include "runtime/guest_memory.h"
 #include "x86/ctx.h"
-#include "x86/pe_image.h"
+#include "x86/layout.h"
 
 namespace recomp {
 
-// What the runtime needs to know about the game it runs. Filled in by the
-// game's main() and passed to RunProcess.
+// What every platform needs to know about the game it runs; a platform's
+// own configuration extends it (win32::GameConfig).
 struct GameConfig {
   // Short id, e.g. "game": the per-user data directory is
   // $XDG_DATA_HOME/<id>, and dev/test switches are read from environment
   // variables named <ID>_<SWITCH> (GAME_TRACE, ...).
   std::string id;
-  // Where the game believes it is installed, e.g. "C:\Games\Game";
-  // guest paths below it map onto the host game directory.
-  std::string guest_dir;
-  // The EXE's file name in guest_dir (GetModuleFileName, command line).
-  std::string exe_name;
-
-  // Registry values the retail installer would have written, seeded on
-  // the first run (the registry file does not exist yet). Keys are full
-  // paths with the root abbreviated: "HKLM\Software\...".
-  struct RegistryString {
-    std::string key, name, value;
-  };
-  std::vector<RegistryString> registry;
-
-  // Optional: where the game keeps its own cursor and how it scales
-  // pointer movement, for games that re-centre the pointer every frame
-  // and move their cursor by the delta (user32 GetCursorPos keeps that
-  // cursor under the host pointer). `userdata` is GWL_USERDATA of the
-  // game's main window. Returns false if not available yet.
-  bool (*game_cursor)(uint32_t userdata, int32_t* x, int32_t* y, float* kx,
-                      float* ky) = nullptr;
-
-  // How a game window that covers the whole screen the game sees (a
-  // fullscreen window after a display mode change, DirectDraw exclusive
-  // mode) is shown on the host. The frame keeps its aspect either way
-  // (black bars where it differs from the screen's). <ID>_FULLSCREEN=
-  // window|desktop|exclusive overrides it; automated runs (<ID>_BACKGROUND)
-  // default to window.
-  enum class Fullscreen {
-    Window,     // a host window of the mode's size
-    Desktop,    // borderless fullscreen at the desktop's resolution
-    Exclusive,  // fullscreen in the host display mode closest to the game's
-  };
-  Fullscreen fullscreen = Fullscreen::Desktop;
-
-  // Video memory DirectDraw reports, in MB. Games pick detail settings
-  // from it; a game's best profile may need more than the default.
-  uint32_t video_memory_mb = 64;
-
-  // DLLs the game loads itself (LoadLibrary) whose code is lifted with
-  // the EXE (recomp_lift --module), e.g. a game logic DLL. They
-  // are read from guest_dir (the host game directory) by file name.
-  struct LiftedDll {
-    std::string name;   // file name, e.g. "game.dll"
-    uint32_t base = 0;  // the lifter's --base for it; 0 = preferred base
-  };
-  std::vector<LiftedDll> lifted_dlls;
 };
-
-// The running game's configuration (valid once RunProcess has started).
-const GameConfig& Game();
 
 // Dev/test switch `name` from the environment: getenv("<ID>_<name>"),
 // e.g. Env("TRACE") reads GAME_TRACE for id "game". Null if unset.
@@ -83,63 +35,37 @@ const char* Env(const char* name);
 // which corrupt their data once their threads really run in parallel.
 uint32_t GuestProcessorCount();
 
-// Fixed guest layout (see ARCHITECTURE.md). TEBs grow down from kTebTop.
-inline constexpr uint32_t kPebVa = 0x7FFDF000;
-inline constexpr uint32_t kTebTop = 0x7FFDE000;
-inline constexpr uint32_t kTebStride = 0x1000;
-// Return address pushed when the host calls into guest code; reaching it
-// means the guest function returned to us.
-inline constexpr uint32_t kReturnToHost = kThunkBase + kThunkRegionSize - 0x10;
-
-// x64 guests (ARCHITECTURE.md, "64-bit guests"): a 64 GiB arena with
-// nothing below 4 GiB. From the top: the thunks (pe_image.h), the pseudo
-// module handles (hle.h), the PEB, then TEBs growing down (two pages each:
-// the x64 TEB is 0x1838 bytes); the allocator hands out the rest above
-// 4 GiB.
-inline constexpr unsigned kArenaBits64 = 36;
-inline constexpr gaddr kUserLo64 = 0x100000000;
-inline constexpr gaddr kPebVa64 = 0xFFD000000;
-inline constexpr gaddr kTebTop64 = kPebVa64;
-inline constexpr uint32_t kTebStride64 = 0x2000;
-inline constexpr gaddr kTebLo64 = kTebTop64 - 0x1000000;  // room for 2048
-inline constexpr gaddr kReturnToHost64 = kThunkBase64 + kThunkRegionSize - 0x10;
-
-// A lifted DLL (GameConfig::lifted_dlls). All of them are mapped at
-// startup, so their address ranges stay free; LoadLibrary makes one
-// visible and runs its DllMain.
-struct Module {
-  std::string name;  // lower case, e.g. "game.dll"
-  std::string host_path;
-  gaddr base = 0;    // where the lifter put it; 0 = preferred base
-  PeImage img;
-  int refs = 0;        // LoadLibrary count (under kernel32's loader lock)
-  bool stale = false;  // has run since it was mapped: map afresh on load
-  int tls_index = -1;  // its static TLS slot (x64 guests), -1: none
-};
-
 struct Thread;
 
 struct Process {
   GameConfig game;
   GuestMemory mem;
-  PeImage img;
-  std::vector<Module> modules;  // fixed after startup
   GuestAllocator vm;     // VirtualAlloc-style regions
   std::string game_dir;  // host path of the game install, no trailing '/'
-  std::string game_args; // appended to the guest command line
-  bool x64 = false;      // the EXE is a PE32+ AMD64 image (Win64 ABI)
+  bool x64 = false;      // x64 code (Win64 ABI unless sysv), else 32-bit
   bool sysv = false;     // x64 with the System V ABI (a console platform's)
-  // A console platform's per-thread setup (its TCB, Ctx::fs_base), run by
-  // CreateGuestThread instead of making a TEB.
-  void (*thread_init)(Thread* t) = nullptr;
   uint16_t fpu_control = 0x027F;  // x87 control word of new threads (Windows')
-  // Code ranges [lo, lo + size) of a platform's images, which dispatch
-  // looks lifted functions up in (PE images give their .text).
+  // Code ranges [lo, lo + size) of the program's lifted images, which
+  // dispatch looks lifted functions up in; the first is the fast path.
   std::vector<std::pair<gaddr, uint64_t>> code;
-  gaddr process_heap = 0;
-  gaddr cmdline_a = 0, cmdline_w = 0;
-  gaddr environ_a = 0, environ_w = 0;
   std::atomic<uint32_t> next_tid{0x100};
+
+  // The platform's hooks; each may be null.
+  // Per-thread setup run by CreateGuestThread once the Ctx is set up: the
+  // thread's control block (a TEB, a TCB) and the segment base that finds
+  // it (Ctx::fs_base or gs_base).
+  void (*thread_init)(Thread* t) = nullptr;
+  // A guest thread's start routine returned or exited (GuestThreadExit),
+  // on that thread: whoever waits for it may go on.
+  void (*thread_exit)(Thread* t, uint32_t code) = nullptr;
+  // A fault in guest memory that is not the runtime's own (lazy_mem.h),
+  // in 32-bit guest code: the platform's exception dispatch (Win32's SEH
+  // chain). Returns true to retry the faulting instruction; may throw
+  // GuestResume to continue elsewhere. Without it the fault is fatal.
+  bool (*guest_fault)(Ctx& c, bool write, gaddr addr) = nullptr;
+  // Services the host's window system for the guest (Win32: SDL events to
+  // window messages), after each presented frame (x86/present.h).
+  void (*pump_events)() = nullptr;
 };
 
 extern Process* g_proc;
@@ -147,9 +73,19 @@ extern Process* g_proc;
 struct Thread {
   Ctx ctx;
   uint32_t tid = 0;
-  gaddr teb = 0;
   gaddr stack_lo = 0, stack_hi = 0;
 };
+
+// Thrown to end a guest thread (ExitThread, pthread_exit): unwinds its host
+// stack back to where it started, which returns `code` as its exit code.
+struct GuestThreadExit {
+  uint32_t code;
+};
+
+// <ID>_BACKGROUND=1 (used for automated test runs): never move or hide the
+// host pointer, don't take focus when the window appears, and answer
+// message boxes with their default button.
+bool Background();
 
 // Per-host-thread pointer to the guest thread running on it.
 Thread* CurrentThread();
@@ -178,42 +114,32 @@ std::u16string GWStr(gaddr va);              // NUL-terminated WCHAR*
 void PutStr(gaddr va, const std::string& s); // writes s + NUL
 void PutWStr(gaddr va, const std::string& s); // ASCII s as WCHARs + NUL
 
-// The EXE's or a lifted DLL's image containing va, or null.
-const PeImage* ImageAt(gaddr va);
-
-// (Re)maps lifted DLL m from its file: fresh data, imports bound.
-void MapModule(Module& m);
-
 // Calls guest function `va` with stdcall/cdecl arguments from the host
 // (WndProc, enumeration callbacks, thread start routines). Returns eax.
 // Handles both conventions: the stack pointer is restored afterwards. In
 // x64 processes the Win64 convention: rcx, rdx, r8, r9, then the stack
-// above 32 bytes of shadow space; returns rax.
+// above 32 bytes of shadow space; returns rax. System V processes:
+// rdi, rsi, rdx, rcx, r8, r9, then the stack.
 uint64_t CallGuest(Ctx& c, gaddr va, std::initializer_list<uint64_t> args);
 
 // Dispatch for x64 guests (lifted.h declares it to x64 lifted code only).
 void Dispatch(Ctx& c, uint64_t target, uint64_t va);
 
-// Sets up the process (arena, image, PEB, heaps, command line) and runs
-// the guest entry point on a new guest thread. exe_path is the host file
-// to load (it need not be in game_dir, e.g. an unpacked copy). Returns the
-// exit code.
-int RunProcess(const GameConfig& game, const std::string& exe_path,
-               const std::string& game_dir, const std::string& game_args = {});
-
-// Creates the guest-side structures of a thread (TEB, TLS, stack) and
+// Creates a guest thread (its stack, the platform's thread_init) and
 // initialises its Ctx. Does not start it.
 Thread* CreateGuestThread(uint64_t stack_size);
 
-// For a console platform's process bring-up (RunProcess does all of it
-// for PE games). StartProcess creates g_proc with its arena and thunk
-// region; InitDispatch registers the code ranges once the images are
-// mapped; RunMainThread runs body (its guest calls) as guest thread t on
-// the process main thread, with a big host stack, and returns its exit
-// code.
+// A platform's process bring-up (Win32's RunProcess, a console platform's
+// loader). StartProcess creates g_proc with its arena and thunk region;
+// InitDispatch registers Process::code once the images are mapped;
+// RunMainThread runs body (its guest calls) as guest thread t on the
+// process main thread, with a big host stack, and returns its exit code.
 Process& StartProcess(const GameConfig& game, const std::string& game_dir, bool x64);
 void InitDispatch();
 uint32_t RunMainThread(Thread* t, const std::function<uint64_t(Ctx&)>& body);
+// Whether va is the entry of a lifted function in Process::code (once
+// InitDispatch has run).
+bool IsLifted(gaddr va);
 
 // Per-user data directory: $XDG_DATA_HOME/<id>, else ~/.local/share/<id>
 // (~/Library/Application Support/<id> on macOS) (settings, saves, the guest's C: drive, crash and hang reports).
@@ -224,8 +150,36 @@ void MakeDirs(const std::string& path);
 // DataDir()/crashes/crash-<time>-<pid>.txt; creates the directory.
 std::string ReportPath(const char* kind);
 
+// Runs guest function entry(param) on a new detached host thread bound to
+// guest thread t (from CreateGuestThread).
+void StartHostThread(Thread* t, gaddr entry, uint64_t param);
+
 // Runs host function fn on a new detached host thread bound to guest thread
 // t (from CreateGuestThread), so fn may CallGuest(t->ctx, ...).
 void StartServiceThread(Thread* t, std::function<void()> fn);
+
+// Memory ordering of guest synchronisation calls. On Windows every one of
+// them (critical sections, waits, events, mutexes, Interlocked*, thread
+// start and exit, TlsAlloc/TlsFree, Sleep) is a full barrier: a locked
+// instruction or a kernel entry. x86 is TSO, but arm64 hosts are weakly
+// ordered and lifted code reaches guest memory with plain loads and
+// stores, so a guest that hands data over through one of these calls
+// relies on more than the host primitive behind it gives. A host mutex is
+// acquire on lock and release on unlock: enough for data written inside a
+// critical section to be seen by the next owner, but accesses outside it
+// may move into it and pass each other there, so lock + unlock is not a
+// full barrier. Each such handler therefore opens a GuestSyncPoint, a
+// seq_cst fence on entry and on exit (also when it returns early or
+// throws): every guest access before the call is ordered before the
+// call's own effects, and those before every guest access after it.
+inline void GuestSyncFence() {
+  std::atomic_thread_fence(std::memory_order_seq_cst);
+}
+struct GuestSyncPoint {
+  GuestSyncPoint() { GuestSyncFence(); }
+  ~GuestSyncPoint() { GuestSyncFence(); }
+  GuestSyncPoint(const GuestSyncPoint&) = delete;
+  GuestSyncPoint& operator=(const GuestSyncPoint&) = delete;
+};
 
 }  // namespace recomp

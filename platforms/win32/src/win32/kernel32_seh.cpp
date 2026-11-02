@@ -12,9 +12,9 @@
 #include <cstring>
 
 #include "runtime/log.h"
+#include "win32/hle.h"
 #include "win32/kernel32_state.h"
 #include "win32/seh64.h"
-#include "x86/hle.h"
 #include "x86/lifted.h"
 
 namespace recomp::hle {

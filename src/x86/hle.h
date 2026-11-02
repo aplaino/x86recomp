@@ -1,20 +1,22 @@
 #pragma once
-// High-level emulation of the Win32/DirectX API surface: host
-// implementations of imported functions, bound to the import thunks.
+// High-level emulation: host implementations of the functions a program
+// imports from system libraries, bound to import thunks. The registry and
+// the calling conventions are the x86 core's; each platform names its
+// libraries and binds its imports (Win32: win32/hle.h).
 //
-// A handler reads its arguments from the guest stack (Arg(c, i)), returns
-// the value for EAX, and the framework pops the return address plus nargs
+// A handler reads its arguments with Arg(c, i), returns the value for EAX,
+// and in 32-bit guests the framework pops the return address plus nargs
 // stack slots (stdcall). nargs = kCdecl pops only the return address.
 // Imports without a handler are bound to a fatal stub that names them:
 // there are no silent default stubs.
 //
-// x64 processes call the same handlers with the Win64 convention: Arg
-// reads rcx, rdx, r8, r9 and then the stack, the return value goes to
-// rax, nargs is unused (the caller pops). Handlers written for 32-bit
-// guests keep guest pointers and structure fields in uint32_t, so only
-// those declared with HLE64 (audited: pointers in gaddr, x64 structure
-// layouts) can be called from x64 code; calling another is fatal and
-// names it.
+// x64 processes call the same handlers with the Win64 convention (or the
+// System V one, Process::sysv): Arg reads the argument registers and then
+// the stack, the return value goes to rax, nargs is unused (the caller
+// pops). Handlers written for 32-bit guests keep guest pointers and
+// structure fields in uint32_t, so only those declared with HLE64
+// (audited: pointers in gaddr, x64 structure layouts) can be called from
+// x64 code; calling another is fatal and names it.
 
 #include <cstdint>
 #include <cstring>
@@ -33,15 +35,10 @@ inline constexpr int kCdecl = -1;
 // A host fault then is a runtime bug, not a guest access violation.
 extern thread_local int t_hle_depth;
 
-// Guest range used for pseudo HMODULE values of the DLLs we provide.
-inline constexpr uint32_t kModuleRegion = 0x70000000;
-inline constexpr uint32_t kModuleRegionSize = 0x00200000;
-inline constexpr gaddr kModuleRegion64 = 0xFFE000000;  // x64 (runtime.h)
-
 using Fn = uint64_t (*)(Ctx& c);
 
-// A handler, registered under (dll, export name), e.g. ("kernel32.dll",
-// "Sleep") or ("mss32.dll", "_AIL_startup@0").
+// A handler, registered under (library, export name), e.g.
+// ("kernel32.dll", "Sleep") or ("mss32.dll", "_AIL_startup@0").
 struct Def {
   int nargs;
   Fn fn;
@@ -52,7 +49,7 @@ struct Registrar {
   Registrar(const char* dll, const char* name, int nargs, Fn fn, bool x64 = false);
 };
 
-// A data export of a DLL we provide (a C++ static member, a global the
+// A data export of a library we provide (a C++ static member, a global the
 // guest reads through its IAT slot): `size` bytes of guest memory, zero or
 // set by `init`, allocated on first import. They live in the upper half of
 // the thunk region (kDataExportOffset), which is writable.
@@ -61,12 +58,11 @@ struct DataExport {
   DataExport(const char* dll, const char* name, uint32_t size, void (*init)(gaddr) = nullptr);
 };
 
-// The full export table of a DLL we provide, for games that GetProcAddress
-// every entry point up front and only call some (an engine's GL loader
-// that resolves all of opengl32). GetProcAddress then returns a thunk for any listed name;
-// calling one without a handler is fatal and names it, as for imports.
-struct Exports {
-  Exports(const char* dll, std::initializer_list<const char*> names);
+// Every handler of library `lib` runs under one process-wide lock, for a
+// library whose state is not reentrant and that games call from several
+// threads (DirectDraw with DDSCL_MULTITHREADED).
+struct Serialised {
+  explicit Serialised(const char* lib);
 };
 
 // Argument i of the call into a handler. Win64: rcx, rdx, r8, r9, then
@@ -94,13 +90,6 @@ inline uint64_t Arg(const Ctx& c, int i) {
     case 3: return c.r9;
     default: return Rd64(c.rsp + 8 + 8 * uint64_t(i));
   }
-}
-
-// A handle as a return value: Win64 handles are pointer-sized, their values
-// sign-extended 32-bit ones (the pseudo handles are -1 and -2). Handle
-// arguments are read as their low 32 bits, as Windows does.
-inline uint64_t HandleRet(uint32_t h) {
-  return g_proc->x64 ? uint64_t(int64_t(int32_t(h))) : h;
 }
 
 // Floating-point arguments and results. Win64: argument i of a float or
@@ -138,50 +127,21 @@ inline uint64_t RetF(Ctx& c, float v) {
   return 0;
 }
 
-// IAT value for a static import dll!name of the EXE or a lifted DLL: its
-// handler's thunk (PeImage::Load's binder).
-gaddr ImportThunk(const std::string& dll, const std::string& name);
-
-// The same for a library named as the HLE registers it (a console
-// platform's, whose names are not DLL names): a data export's address or
-// a handler's thunk (an unimplemented import's, fatal when called).
+// The value for an import slot of lib!name, lib named as the HLE registers
+// it: a data export's address or a handler's thunk (an unimplemented
+// import's, fatal when called).
 gaddr BindImport(const std::string& lib, const std::string& name);
 // True if lib!name is a data export (DataExport).
 bool IsDataExport(const std::string& lib, const std::string& name);
+// True if lib!name has a handler.
+bool HasHandler(const std::string& lib, const std::string& name);
 
-// "KERNEL32.dll", "C:\x\Foo" -> "kernel32.dll", "foo.dll".
-std::string NormaliseDll(std::string dll);
+// Thunk address for lib!name whether or not a handler exists (calling an
+// unimplemented one is fatal and names it). Used for COM vtables.
+gaddr ThunkFor(const std::string& lib, const std::string& name);
 
 // Called by Dispatch for any address in the thunk region.
 void CallThunk(Ctx& c, gaddr thunk);
-
-// Pseudo module handles for DLLs the game loads (LoadLibrary/
-// GetModuleHandle). Returns 0 for DLLs we don't provide.
-gaddr ModuleHandle(const std::string& dll);
-// Thunk address for dll!name (GetProcAddress); 0 if not implemented.
-gaddr ProcAddress(gaddr hmodule, const std::string& name);
-
-// Thunk address for dll!name whether or not a handler exists (calling an
-// unimplemented one is fatal and names it). Used for COM vtables.
-gaddr ThunkFor(const std::string& dll, const std::string& name);
-
-void SetLastError(uint32_t e);
-
-// Writes s + NUL to a counted guest buffer the Win32 way: returns the
-// length written without NUL, or the size needed (with NUL) if it does not
-// fit.
-uint32_t CopyOut(gaddr buf, uint32_t size, const std::string& s);
-// The NLS convention (GetLocaleInfo, GetDateFormat): `cap` characters
-// (WCHARs if `wide`), 0 asks for the size; returns the count with NUL, or
-// 0 with ERROR_INSUFFICIENT_BUFFER.
-uint32_t PutCounted(gaddr buf, uint32_t cap, const std::string& s, bool wide);
-
-// Makes [va, va+len) readable before host code copies it, the way a DLL's
-// read would on Windows: each uncommitted page raises a guest access
-// violation, which the game's handlers may resolve (a game that
-// demand-pages archive data commits file views this way). False if a page stays
-// inaccessible.
-bool EnsureReadable(Ctx& c, gaddr va, uint64_t len);
 
 }  // namespace recomp::hle
 

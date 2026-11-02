@@ -19,7 +19,7 @@
 #include <string>
 
 #include "runtime/log.h"
-#include "x86/hle.h"
+#include "win32/hle.h"
 
 namespace recomp::hle {
 namespace {
@@ -118,10 +118,10 @@ HLE("dbghelp.dll", SymInitialize, 3) { return 1; }
 HLE("dbghelp.dll", SymCleanup, 1) { return 1; }
 HLE("dbghelp.dll", SymGetOptions, 0) { return 0; }
 HLE("dbghelp.dll", SymSetOptions, 1) { return Arg(c, 0); }
-HLE("dbghelp.dll", SymLoadModule, 6) { return g_proc->img.image_base; }
+HLE("dbghelp.dll", SymLoadModule, 6) { return g_win32->img.image_base; }
 HLE("dbghelp.dll", SymGetModuleBase, 2) {
   uint32_t a = Arg(c, 1);
-  const PeImage& img = g_proc->img;
+  const PeImage& img = g_win32->img;
   return a >= img.image_base && a < img.image_base + img.image_size ? img.image_base : 0;
 }
 HLE("dbghelp.dll", SymFunctionTableAccess, 2) { return 0; }

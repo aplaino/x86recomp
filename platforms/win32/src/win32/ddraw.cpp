@@ -26,10 +26,10 @@
 
 #include "runtime/log.h"
 #include "win32/ddraw_impl.h"
+#include "win32/hle.h"
 #include "win32/input_state.h"
 #include "win32/kernel32_state.h"
 #include "win32/user32_window.h"
-#include "x86/hle.h"
 #include "x86/present.h"
 #include "x86/watchdog.h"
 
@@ -47,6 +47,12 @@ constexpr guest::GUID kIID_IDirectDrawGammaControl = {0x69C11C3E, 0xB46B, 0x11D1
 // GameConfig::video_memory_mb, with 8 MB in use (the primary surface).
 uint32_t VidMemTotal() { return Game().video_memory_mb << 20; }
 uint32_t VidMemFree() { return VidMemTotal() - (8u << 20); }
+
+// DirectDraw/Direct3D 7 entry points run under one process-wide lock,
+// like DirectDraw with DDSCL_MULTITHREADED (which games request): its
+// worker thread uploads textures while the main thread renders, and
+// neither our ddraw state nor the d3d9 device is reentrant.
+hle::Serialised g_serialised("ddraw.dll");
 
 State g_state;
 Uint64 g_last_present_ms = 0;  // SDL ticks of the last frame Present

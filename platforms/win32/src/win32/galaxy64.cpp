@@ -1,4 +1,4 @@
-// Galaxy64.dll (the GOG Galaxy SDK's C++ API; platforms/win32/docs/galaxy.md) for x64
+// Galaxy64.dll (the GOG Galaxy SDK's C++ API; docs/galaxy.md) for x64
 // guests, answering as a PC without the Galaxy service: Init and
 // ProcessData succeed, sign-in never does. The accessors (User(),
 // Utils()...) return guest objects whose vtables are thunks named
@@ -12,8 +12,8 @@
 #include <vector>
 
 #include "runtime/log.h"
+#include "win32/hle.h"
 #include "win32/kernel32_state.h"
-#include "x86/hle.h"
 #include "x86/runtime.h"
 
 namespace recomp::hle {

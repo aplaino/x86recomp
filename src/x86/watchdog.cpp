@@ -88,7 +88,7 @@ void Dump(const char* what, double stalled) {
   if (fd < 0) return;
   char buf[256];
   std::snprintf(buf, sizeof buf, "%s hang dump: %s for %.1f s\n",
-                Game().id.c_str(), what, stalled);
+                g_proc->game.id.c_str(), what, stalled);
   WriteAll(fd, buf);
   std::vector<HostThread> threads;
   {

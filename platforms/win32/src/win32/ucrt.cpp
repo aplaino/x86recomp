@@ -17,10 +17,10 @@
 #include <vector>
 
 #include "runtime/log.h"
+#include "win32/hle.h"
 #include "win32/kernel32_state.h"
 #include "win32/ucrt.h"
 #include "win32/win32.h"
-#include "x86/hle.h"
 #include "x86/runtime.h"
 
 namespace recomp::hle {
@@ -165,7 +165,7 @@ HLE64("ucrtbase.dll", _set_app_type, kCdecl) {
 }
 
 HLE64("ucrtbase.dll", _configure_narrow_argv, kCdecl) {
-  std::vector<std::string> args = win32::SplitCommandLine(GStr(g_proc->cmdline_a));
+  std::vector<std::string> args = win32::SplitCommandLine(GStr(g_win32->cmdline_a));
   Wr32(G().argc, uint32_t(args.size()));
   Wr64(G().argv, GuestStrings(args));
   return 0;
@@ -184,8 +184,8 @@ HLE64("ucrtbase.dll", _get_initial_narrow_environment, kCdecl) {
 
 // The command line after the program name (WinMain's lpCmdLine).
 HLE64("ucrtbase.dll", _get_narrow_winmain_command_line, kCdecl) {
-  const char* base = g_proc->mem.ptr<const char>(g_proc->cmdline_a);
-  return g_proc->cmdline_a + gaddr(SkipProgramName(base) - base);
+  const char* base = g_proc->mem.ptr<const char>(g_win32->cmdline_a);
+  return g_win32->cmdline_a + gaddr(SkipProgramName(base) - base);
 }
 
 HLE64("ucrtbase.dll", _set_fmode, kCdecl) {

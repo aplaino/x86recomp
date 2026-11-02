@@ -31,9 +31,9 @@ extern "C" {
 
 #include "runtime/audio/mixer.h"
 #include "runtime/log.h"
+#include "win32/hle.h"
 #include "win32/kernel32_state.h"
 #include "win32/mss32.h"
-#include "x86/hle.h"
 
 namespace recomp::hle {
 namespace {

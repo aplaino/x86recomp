@@ -26,11 +26,11 @@
 
 #include "runtime/display.h"
 #include "runtime/log.h"
+#include "win32/hle.h"
 #include "win32/input_state.h"
 #include "win32/kernel32_state.h"
 #include "win32/user32_window.h"
 #include "win32/win32.h"
-#include "x86/hle.h"
 #include "x86/present.h"
 #include "x86/watchdog.h"
 
@@ -39,14 +39,6 @@ namespace recomp {
 // SDL_MouseID of <ID>_TEST_INPUT "pointer" events: they stand for the host
 // pointer, which automated (background) runs otherwise ignore.
 constexpr SDL_MouseID kTestPointer = 0xD51D51;
-
-bool Background() {
-  static const bool bg = [] {
-    const char* e = Env("BACKGROUND");
-    return e && *e && *e != '0';
-  }();
-  return bg;
-}
 
 namespace {
 
@@ -654,8 +646,8 @@ bool TakeMessage(uint32_t hwnd, uint32_t lo, uint32_t hi, bool remove, Msg* out)
 }
 
 
-GameConfig::Fullscreen FullscreenPolicy() {
-  using F = GameConfig::Fullscreen;
+win32::GameConfig::Fullscreen FullscreenPolicy() {
+  using F = win32::GameConfig::Fullscreen;
   static const F f = [] {
     const char* e = Env("FULLSCREEN");
     if (!e || !*e) return Background() ? F::Window : Game().fullscreen;
@@ -702,7 +694,7 @@ bool CoversScreen(const Window& w) {
 // or the screen size. Leaving it gives the host window the client size
 // again.
 void UpdateFullscreen(uint32_t hwnd) {
-  using F = GameConfig::Fullscreen;
+  using F = win32::GameConfig::Fullscreen;
   SDL_Window* sdl;
   bool want;
   int sw, sh, cw, ch;

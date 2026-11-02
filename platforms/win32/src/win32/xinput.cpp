@@ -14,9 +14,9 @@
 #include <mutex>
 
 #include "runtime/log.h"
+#include "win32/hle.h"
 #include "win32/user32_window.h"
 #include "win32/xinput.h"
-#include "x86/hle.h"
 
 namespace recomp::hle {
 namespace {

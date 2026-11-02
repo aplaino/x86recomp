@@ -8,7 +8,7 @@
 #include <vector>
 
 #include "runtime/log.h"
-#include "x86/hle.h"
+#include "win32/hle.h"
 #include "x86/lifted.h"
 #include "x86/runtime.h"
 

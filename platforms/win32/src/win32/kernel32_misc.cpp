@@ -7,9 +7,9 @@
 #include <string>
 
 #include "runtime/log.h"
+#include "win32/hle.h"
 #include "win32/kernel32_state.h"
 #include "win32/win32.h"
-#include "x86/hle.h"
 
 namespace recomp::hle {
 namespace {
@@ -22,12 +22,12 @@ using namespace win32;
 // data pointer and LockResource is the identity, as on Win32.
 
 uint32_t RsrcBase() {
-  for (const auto& s : g_proc->img.sections)
+  for (const auto& s : g_win32->img.sections)
     if (s.name == ".rsrc") return s.va;
   return 0;
 }
 
-bool IsOwnModule(uint32_t h) { return h == 0 || h == g_proc->img.image_base; }
+bool IsOwnModule(uint32_t h) { return h == 0 || h == g_win32->img.image_base; }
 
 // Name-or-id argument as a comparable key: "#123" for integer ids.
 std::string ResKey(uint32_t v) {
@@ -93,7 +93,7 @@ HLE("kernel32.dll", FindResourceExA, 4) {
 
 HLE("kernel32.dll", LoadResource, 2) {
   uint32_t hrsrc = Arg(c, 1);
-  return hrsrc ? g_proc->img.image_base + Rd32(hrsrc) : 0;
+  return hrsrc ? g_win32->img.image_base + Rd32(hrsrc) : 0;
 }
 
 HLE("kernel32.dll", LockResource, 1) { return Arg(c, 0); }
@@ -324,7 +324,7 @@ HLE64("kernel32.dll", DebugBreak, 0) {
 bool FindVersionResource(uint32_t* va, uint32_t* size) {
   uint32_t e = FindResourceImpl("#16", "", 0);  // RT_VERSION, first name/lang
   if (!e) return false;
-  *va = g_proc->img.image_base + Rd32(e);
+  *va = g_win32->img.image_base + Rd32(e);
   *size = Rd32(e + 4);
   return true;
 }

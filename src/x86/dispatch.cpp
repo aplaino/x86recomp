@@ -1,9 +1,10 @@
 // Indirect control flow and the fatal paths of lifted code.
 //
 // Dispatch() maps a guest address to its lifted function through a dense
-// table over the .text of the EXE or of a lifted DLL, or to an HLE handler
-// for thunk addresses. Anything else is fatal: there is no interpreter
-// fallback (CLAUDE.md).
+// table over each of the program's code ranges (Process::code: the .text
+// of the EXE or of a lifted DLL), or to an HLE handler for thunk
+// addresses. Anything else is fatal: there is no interpreter fallback
+// (CLAUDE.md).
 
 #include <execinfo.h>
 #include <pthread.h>
@@ -33,8 +34,8 @@ uint8_t* g_guest_base = nullptr;
 
 namespace {
 
-// One per image: the EXE's first, then the lifted DLLs'. Built before any
-// guest code runs and never changed afterwards.
+// One per code range: the first (the EXE's) apart, as the fast path. Built
+// before any guest code runs and never changed afterwards.
 struct CodeRange {
   uint64_t lo = 0, size = 0;
   std::vector<GuestFn> table;  // by va - lo
@@ -56,10 +57,12 @@ CodeRange RangeOf(uint64_t lo, uint64_t size) {
   return r;
 }
 
-CodeRange TextOf(const PeImage& img) {
-  for (const auto& s : img.sections)
-    if (s.name == ".text") return RangeOf(s.va, s.vsize);
-  return RangeOf(0, 0);
+// The code range containing va, or null.
+const CodeRange* CodeAt(uint64_t va) {
+  if (va - g_exe.lo < g_exe.size) return &g_exe;
+  for (const CodeRange& d : g_dlls)
+    if (va - d.lo < d.size) return &d;
+  return nullptr;
 }
 
 void DumpGuestState64(const Ctx& c) {
@@ -82,13 +85,13 @@ void DumpGuestState64(const Ctx& c) {
                f.of, f.df, c.mxcsr);
   if (!g_proc) return;
   // x64 code keeps no frame chain: show the stack's qwords that point
-  // into an image (return addresses, mostly).
-  std::fprintf(stderr, "  stack (image addresses):\n");
+  // into code (return addresses, mostly).
+  std::fprintf(stderr, "  stack (code addresses):\n");
   int shown = 0;
   for (uint64_t a = c.rsp; shown < 24 && a < c.rsp + 0x2000; a += 8) {
     if (!g_proc->mem.IsCommitted(a)) break;
     uint64_t v = Rd64(a);
-    if (ImageAt(v)) {
+    if (CodeAt(v)) {
       std::fprintf(stderr, "    [rsp+%04llX] %016llX\n", (unsigned long long)(a - c.rsp),
                    (unsigned long long)v);
       shown++;
@@ -166,15 +169,11 @@ const bool kFatalReportSet = (g_fatal_report = FatalReport, true);
 
 // Host faults (SIGSEGV/SIGBUS) in guest memory are first offered to the
 // lazy regions (lazy_mem.h), whose pages fault by design, on any thread
-// and from host code too. Others are guest access
-// violations: they go to the guest SEH chain (games may demand-page data
-// from an exception filter). Anything unhandled, or a fault outside
-// the arena (a runtime bug), is reported with the host call chain (lifted
-// functions are named f_<guest va>) and exits.
-namespace hle {
-bool RaiseAccessViolation(Ctx& c, bool write, uint32_t addr);
-extern thread_local int t_hle_depth;
-}
+// and from host code too. Others are guest access violations: they go to
+// the platform's exception dispatch (Process::guest_fault; Win32 games
+// may demand-page data from an exception filter). Anything unhandled, or
+// a fault outside the arena (a runtime bug), is reported with the host
+// call chain (lifted functions are named f_<guest va>) and exits.
 
 namespace {
 // Faults can nest: an exception filter may itself touch a not-yet-paged
@@ -204,17 +203,15 @@ void FaultHandler(int sig, siginfo_t* si, void* uc) {
   if (guest32 && lazy::HandleFault(uint32_t(a - base)))
     return;  // filled: retry the faulting instruction
   platform::FaultContext fc = platform::ReadFaultContext(uc);
-  if (guest32 && CurrentThread() &&
+  if (guest32 && g_proc->guest_fault && CurrentThread() &&
       t_fault_depth < kMaxFaultDepth && hle::t_hle_depth == 0) {
     ++t_fault_depth;
     bool cont;
     if constexpr (platform::kThrowThroughSignalFrames) {
-      cont = hle::RaiseAccessViolation(CurrentThread()->ctx, fc.write,
-                                       uint32_t(a - base));
+      cont = g_proc->guest_fault(CurrentThread()->ctx, fc.write, a - base);
     } else {
       try {
-        cont = hle::RaiseAccessViolation(CurrentThread()->ctx, fc.write,
-                                         uint32_t(a - base));
+        cont = g_proc->guest_fault(CurrentThread()->ctx, fc.write, a - base);
       } catch (...) {
         --t_fault_depth;
         t_fault_exception = std::current_exception();
@@ -292,23 +289,17 @@ void InitDispatch() {
     FatalF("no lifted code registered (recomp_add_lifted compiles "
            "x86/lifted_table.cpp into it)");
   InstallFaultHandler();
-  g_exe = TextOf(g_proc->img);
-  for (const Module& m : g_proc->modules) {
-    CodeRange& r = g_dlls.emplace_back(TextOf(m.img));
-    // A DLL lifted at another base, or not at all, has no functions here.
-    if (m.img.entry && !r.table[m.img.entry - r.lo])
-      FatalF("%s at %08llX: its entry point %08llX is not lifted (lift it with "
-             "recomp_lift --module, at the same --base)",
-             m.name.c_str(), (unsigned long long)m.img.image_base,
-             (unsigned long long)m.img.entry);
-  }
-  // A platform's images (no PE EXE): the first is the fast path.
   for (const auto& [lo, size] : g_proc->code) {
     if (!g_exe.size)
       g_exe = RangeOf(lo, size);
     else
       g_dlls.push_back(RangeOf(lo, size));
   }
+}
+
+bool IsLifted(gaddr va) {
+  const CodeRange* r = CodeAt(va);
+  return r && r->table[va - r->lo];
 }
 
 void Dispatch(Ctx& c, uint64_t target, uint64_t va) {

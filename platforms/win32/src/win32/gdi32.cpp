@@ -7,8 +7,8 @@
 #include <cstring>
 
 #include "runtime/log.h"
+#include "win32/hle.h"
 #include "win32/input_state.h"
-#include "x86/hle.h"
 
 namespace recomp::hle {
 namespace {
