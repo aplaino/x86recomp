@@ -1317,7 +1317,7 @@ class MetalDevice final : public Device {
       sh.has_lean = has_lean;
       if (has_lean) {
         NSString* src = @(msl.c_str());
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        dispatch_async(AheadQueue(), ^{
           Lean(hash, src);
         });
       }
@@ -3390,6 +3390,18 @@ void main() {
 
   // A shader of `hash` was made: the recipes it completes, compiled in the
   // background.
+  // Work done ahead (pipelines from earlier runs' recipes, lean shader
+  // variants): one at a time, at background priority. On the global queues
+  // GCD ran one per core: on an iPad the first run with a Mac's 1,700
+  // recipes compiled on every core at once (and Metal's compiler service
+  // at their priority) and the game crawled for minutes.
+  static dispatch_queue_t AheadQueue() {
+    static dispatch_queue_t q = dispatch_queue_create(
+        "recomp.gfx.ahead",
+        dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_BACKGROUND, 0));
+    return q;
+  }
+
   void PrebuildFor(uint64_t hash) {
     auto [lo, hi] = recipe_by_shader_.equal_range(hash);
     for (auto it = lo; it != hi; ++it) {
@@ -3411,7 +3423,7 @@ void main() {
       std::mutex* mu = &prebuilt_mu_;
       auto* done = &prebuilt_;
       const uint64_t ps_hash = r.ps;
-      dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+      dispatch_async(AheadQueue(), ^{
         if (src) {
           id<MTLFunction> ps = Lean(ps_hash, src);
           if (!ps) return;
