@@ -153,8 +153,8 @@ struct ShaderDraw {
 // their declarations:
 //   - textures (combined image and sampler): `layout(R_TEXTURE(n))
 //     uniform sampler2D ...;` for n < textures, of the kind the GLSL says;
-//   - read-only buffers: their words in `r_mem[]`, buffer b from word
-//     r_buf[b].x, r_buf[b].y bytes long;
+//   - read-only buffers: buffer b's word i is `r_ld(b, i)`, r_buf[b].y
+//     bytes long;
 //   - compute's read-write buffers likewise in `r_rw[]` and r_rwbuf[b];
 //     its storage images `layout(R_IMAGE(n), <format>) uniform image2D`;
 //   - the stage's own uniform block: `layout(R_UNIFORMS) uniform ...`.

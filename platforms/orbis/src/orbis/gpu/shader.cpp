@@ -1593,7 +1593,7 @@ struct Translator {
     g += "};\n";
     if (nro)
       g += "uint r_rd(int b, uint a) {\n  uint o = a - r_region[b].x;\n"
-           "  return o < r_region[b].z ? r_mem[r_buf[b].x + (o >> 2)] : 0u;\n}\n"
+           "  return o < r_region[b].z ? r_ld(uint(b), o >> 2) : 0u;\n}\n"
            "uint r_rdu(int b, uint a) {\n  uint lo = r_rd(b, a & ~3u), hi = r_rd(b, (a & ~3u) + 4u);\n"
            "  uint sh = (a & 3u) * 8u;\n  return sh == 0u ? lo : (lo >> sh) | (hi << (32u - sh));\n}\n";
     if (nrw)

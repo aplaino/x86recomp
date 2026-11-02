@@ -1,9 +1,10 @@
 // gfx::Device's programs (console GPUs' path) on the SDL_GPU backend: a
 // draw reading a buffer, a uniform block and a texture into a colour
 // target, the scissor, clears and depth testing, a compute dispatch
-// writing a buffer (written back) and a storage image, and reading images
-// back. Needs a
-// Vulkan device (lavapipe will do); exits 77 (skipped) without one.
+// writing a buffer (written back) and a storage image, GPU buffers read
+// by draws and dispatches and drawn from as indices, and reading images
+// back. Needs a Vulkan device (lavapipe will do); exits 77 (skipped)
+// without one.
 
 #include <SDL3/SDL.h>
 
@@ -29,9 +30,9 @@ void Check(bool ok, const char* what) {
 
 const char* kVs = R"(
 void main() {
-  uint b = r_buf[0].x + uint(gl_VertexIndex) * 3u;
-  gl_Position = vec4(uintBitsToFloat(r_mem[b]), uintBitsToFloat(r_mem[b + 1u]),
-                     uintBitsToFloat(r_mem[b + 2u]), 1.0);
+  uint b = uint(gl_VertexIndex) * 3u;
+  gl_Position = vec4(uintBitsToFloat(r_ld(0u, b)), uintBitsToFloat(r_ld(0u, b + 1u)),
+                     uintBitsToFloat(r_ld(0u, b + 2u)), 1.0);
 }
 )";
 const char* kFs = R"(
@@ -44,7 +45,7 @@ const char* kCs = R"(
 layout(R_IMAGE(0), r32ui) uniform writeonly uimage2D img;
 void main() {
   uint i = gl_GlobalInvocationID.x;
-  r_rw[r_rwbuf[0].x + i] = r_mem[r_buf[0].x + i] * 2u + 1u;
+  r_rw[r_rwbuf[0].x + i] = r_ld(0u, i) * 2u + 1u;
   if (i < 16u) imageStore(img, ivec2(i & 3u, i >> 2), uvec4(i * 10u));
 }
 )";
@@ -88,8 +89,8 @@ int main() {
   const TextureId rt = dev->CreateImage(rd);
   const DepthId depth = dev->CreateDepth(4, 4, Format::D32);
 
-  auto draw = [&](const std::vector<float>& tri, const float color[4], const Rect& scissor,
-                  bool depth_test) {
+  auto draw_from = [&](const BufferData& vb, const float color[4], const Rect& scissor,
+                       bool depth_test, BufferId index_buffer = 0, uint32_t first_index = 0) {
     ProgramDraw d;
     d.program = prog;
     d.targets[0] = {rt, 0};
@@ -99,13 +100,18 @@ int main() {
     d.viewport = {0, 0, 4, 4, 0, 1};
     d.scissor = scissor;
     d.vertex_count = 3;
-    BufferData vb{tri.data(), uint32_t(tri.size() * 4)};
+    d.index_buffer = index_buffer;
+    d.first_index = first_index;
     d.vs.buffers = &vb;
     d.fs.textures = &tex;
     SamplerDesc smp;
     d.fs.samplers = &smp;
     d.fs.uniforms = color;
     dev->DrawProgram(d);
+  };
+  auto draw = [&](const std::vector<float>& tri, const float color[4], const Rect& scissor,
+                  bool depth_test) {
+    draw_from({tri.data(), uint32_t(tri.size() * 4)}, color, scissor, depth_test);
   };
   auto pixels = [&] {
     std::vector<uint32_t> px(16);
@@ -179,6 +185,47 @@ int main() {
   ok = true;
   for (uint32_t i = 0; i < 16; i++) ok &= iv[i] == i * 10;
   Check(ok, "a dispatch's storage image reads back");
+
+  // GPU buffers: a draw's vertices from one, at an offset, as they were
+  // when it was recorded (the update after it is for the next draw).
+  const std::vector<float> cover = Cover(0), away = {5, 5, 0, 6, 5, 0, 5, 6, 0};
+  const BufferId vbuf = dev->CreateBuffer(64);
+  dev->UpdateBuffer(vbuf, 16, cover.data(), 36);
+  dev->ClearImage(rt, 0, {0, 0, 0, 1});
+  draw_from({nullptr, 36, vbuf, 16}, red, {0, 0, 4, 4}, false);
+  dev->UpdateBuffer(vbuf, 16, away.data(), 36);
+  draw_from({nullptr, 36, vbuf, 16}, blue, {0, 0, 4, 4}, false);
+  px = pixels();
+  Check(px[0] == 0xFF0000FFu && px[15] == 0xFF0000FFu,
+        "a draw reads a GPU buffer as it was when recorded");
+  // 16-bit indices from a GPU buffer, from its third.
+  const uint16_t idx[6] = {7, 7, 0, 1, 2, 0};
+  const BufferId ibuf = dev->CreateBuffer(sizeof idx);
+  dev->UpdateBuffer(ibuf, 0, idx, sizeof idx);
+  const float green[4] = {0, 1, 0, 1};
+  draw_from({cover.data(), 36}, green, {0, 0, 4, 4}, false, ibuf, 2);
+  px = pixels();
+  Check(px[0] == 0xFF008000u && px[15] == 0xFF008000u, "a draw's indices from a GPU buffer");
+  // A dispatch reading a GPU buffer.
+  std::vector<uint32_t> gin(64);
+  for (uint32_t i = 0; i < 64; i++) gin[i] = i + 100;
+  const BufferId gbuf = dev->CreateBuffer(256);
+  dev->UpdateBuffer(gbuf, 0, gin.data(), 256);
+  BufferData gb{nullptr, 256, gbuf};
+  pdp.cs.buffers = &gb;
+  std::fill(out.begin(), out.end(), 0xDEADBEEF);
+  dev->DispatchProgram(pdp);
+  ok = true;
+  for (uint32_t i = 0; i < 64; i++) ok &= out[i] == (i + 100) * 2 + 1;
+  Check(ok, "a dispatch reads a GPU buffer");
+  // A buffer past the GPU buffers' room grows it; the others keep theirs.
+  const BufferId big = dev->CreateBuffer(96u << 20);
+  std::fill(out.begin(), out.end(), 0xDEADBEEF);
+  dev->DispatchProgram(pdp);
+  ok = true;
+  for (uint32_t i = 0; i < 64; i++) ok &= out[i] == (i + 100) * 2 + 1;
+  Check(big != 0 && ok, "GPU buffers keep their contents when their room grows");
+  for (BufferId b : {vbuf, ibuf, gbuf, big}) dev->DestroyBuffer(b);
 
   dev->DrawImage(rt, {0, 0, 4, 4});
   dev->Present();

@@ -487,7 +487,7 @@ class GpuDevice final : public Device {
                               dummy_array_})
       if (t) SDL_ReleaseGPUTexture(dev_, t);
     for (auto& b : blit_pool_) SDL_ReleaseGPUTexture(dev_, b.tex);
-    for (SDL_GPUBuffer* b : {vbuf_, ibuf_, pbuf_, cro_, crw_})
+    for (SDL_GPUBuffer* b : {vbuf_, ibuf_, pbuf_, cro_, crw_, heap_})
       if (b) SDL_ReleaseGPUBuffer(dev_, b);
     for (SDL_GPUTransferBuffer* b : {upload_tb_, download_tb_})
       if (b) SDL_ReleaseGPUTransferBuffer(dev_, b);
@@ -683,15 +683,9 @@ class GpuDevice final : public Device {
   BufferId CreateBuffer(uint32_t size) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     if (!size) return 0;
-    // Copied to and from the dispatch and draw arenas, and drawn from as
-    // indices and indirect arguments.
-    SDL_GPUBufferCreateInfo bi{};
-    bi.usage = SDL_GPU_BUFFERUSAGE_INDEX | SDL_GPU_BUFFERUSAGE_INDIRECT;
-    bi.size = (size + 3) & ~3u;
-    SDL_GPUBuffer* b = SDL_CreateGPUBuffer(dev_, &bi);
-    if (!b) FatalF("gfx: cannot create a %u-byte buffer: %s", bi.size, SDL_GetError());
+    const uint32_t n = (size + 3) & ~3u;
     const BufferId id = next_id_++;
-    gpu_buffers_[id] = {b, bi.size};
+    gpu_buffers_[id] = {HeapAlloc(n), n};
     return id;
   }
 
@@ -700,7 +694,7 @@ class GpuDevice final : public Device {
     auto it = gpu_buffers_.find(id);
     if (it == gpu_buffers_.end()) return;
     Flush();  // draws recorded with it
-    SDL_ReleaseGPUBuffer(dev_, it->second.b);
+    HeapFree(it->second.at, it->second.size);
     gpu_buffers_.erase(it);
   }
 
@@ -709,15 +703,14 @@ class GpuDevice final : public Device {
     auto it = gpu_buffers_.find(id);
     if (it == gpu_buffers_.end() || !size) return;
     if (at + size > it->second.size) FatalF("gfx: an upload past buffer %u's end", id);
-    if (draw_copied_.count(it->second.b) ||
-        std::find(draw_indices_.begin(), draw_indices_.end(), it->second.b) != draw_indices_.end())
+    if (std::find(draw_read_.begin(), draw_read_.end(), id) != draw_read_.end())
       Flush();  // draws recorded with it
     std::memcpy(MapUpload(size), src, size);
     SDL_UnmapGPUTransferBuffer(dev_, upload_tb_);
     SDL_GPUCommandBuffer* cmd = Begin();  // after MapUpload, which may submit it
     SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
     SDL_GPUTransferBufferLocation from{upload_tb_, upload_at_};
-    SDL_GPUBufferRegion to{it->second.b, at, size};
+    SDL_GPUBufferRegion to{heap_, it->second.at + at, size};
     SDL_UploadToGPUBuffer(cp, &from, &to, false);
     SDL_EndGPUCopyPass(cp);
     Submit(cmd);
@@ -1459,6 +1452,7 @@ void r_color0(inout vec4 c) {
 
   ProgramId CreateProgram(const ProgramDesc& d) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
+    if (!heap_) GrowHeap(0);  // bound beside the arenas
 #if defined(__APPLE__)
     FatalF("gfx: programs on Metal are not implemented yet");
 #endif
@@ -1476,7 +1470,7 @@ void r_color0(inout vec4 c) {
       ci.entrypoint = "main";
       ci.format = SDL_GPU_SHADERFORMAT_SPIRV;
       ci.num_samplers = d.cs.textures;
-      ci.num_readonly_storage_buffers = d.cs.buffers ? 1 : 0;
+      ci.num_readonly_storage_buffers = d.cs.buffers ? 2 : 0;
       ci.num_readwrite_storage_textures = d.cs.rw_images;
       ci.num_readwrite_storage_buffers = d.cs.rw_buffers ? 1 : 0;
       ci.num_uniform_buffers = ProgramUniformBlocks(d.cs);
@@ -1497,7 +1491,7 @@ void r_color0(inout vec4 c) {
         si.format = SDL_GPU_SHADERFORMAT_SPIRV;
         si.stage = vertex ? SDL_GPU_SHADERSTAGE_VERTEX : SDL_GPU_SHADERSTAGE_FRAGMENT;
         si.num_samplers = st.textures;
-        si.num_storage_buffers = st.buffers ? 1 : 0;
+        si.num_storage_buffers = st.buffers ? 2 : 0;
         si.num_uniform_buffers = ProgramUniformBlocks(st);
         SDL_GPUShader* sh = SDL_CreateGPUShader(dev_, &si);
         if (!sh) FatalF("gfx: SDL_CreateGPUShader (program): %s", SDL_GetError());
@@ -1730,16 +1724,19 @@ void r_color0(inout vec4 c) {
       auto bit = gpu_buffers_.find(d.indirect);
       if (bit == gpu_buffers_.end()) FatalF("gfx: DrawProgram: no buffer %u", d.indirect);
       c.indexed = true;
-      c.indirect = bit->second.b;
+      c.indirect = heap_;
+      c.buffer_at = bit->second.at;
+      DrawRead(d.indirect);
     } else if (d.index_buffer) {
       auto bit = gpu_buffers_.find(d.index_buffer);
       if (bit == gpu_buffers_.end()) FatalF("gfx: DrawProgram: no buffer %u", d.index_buffer);
       c.indexed = true;
-      c.indices = bit->second.b;
+      c.indices = heap_;
+      c.buffer_at = bit->second.at;
       c.short_indices = d.index_size == 2;
       c.first = d.first_index;
       c.base = d.base_vertex;
-      if (draw_indices_.empty() || draw_indices_.back() != c.indices) draw_indices_.push_back(c.indices);
+      DrawRead(d.index_buffer);
     } else if (d.indices) {
       c.indexed = true;
       c.first = uint32_t(indices_.size());
@@ -1782,21 +1779,22 @@ void r_color0(inout vec4 c) {
     Flush();
 
     // The read-only and read-write buffers, each in its own arena, and
-    // their places in the uniform block. GPU buffers are copied into the
-    // arenas, and read-write ones' results back out, on the GPU.
+    // their places in the uniform block. Read-only GPU buffers are read
+    // in the heap; read-write ones are copied into their arena, and their
+    // results back out, on the GPU.
     Arena ro, rw;
     std::vector<uint32_t> table(4 * size_t(st.buffers + st.rw_buffers), 0);
-    std::vector<BufferCopy> ro_in, rw_in, rw_out;
+    std::vector<BufferCopy> rw_in, rw_out;
     bool host_rw = false;
     for (uint32_t b = 0; b < st.buffers; b++) {
       const BufferData& bd = d.cs.buffers[b];
+      if (bd.buffer) {
+        HeapEntry(bd, &table[4 * b]);
+        continue;
+      }
       table[4 * b] = uint32_t(ro.size() / 4);
       table[4 * b + 1] = bd.size;
-      if (bd.buffer) {
-        ro_in.push_back(GpuBufferCopy(bd.buffer, ro.size(), bd.size, bd.offset));
-        ro_in.back().held = (bd.size + 3) & ~3u;
-      }
-      AppendWords(ro, bd.buffer ? nullptr : bd.data, bd.size);
+      AppendWords(ro, bd.data, bd.size);
     }
     std::vector<uint32_t> rw_at(st.rw_buffers);
     for (uint32_t b = 0; b < st.rw_buffers; b++) {
@@ -1821,21 +1819,16 @@ void r_color0(inout vec4 c) {
     if (!ro.empty() || !rw.empty()) {
       auto* p = MapUpload(ro.size() + rw.size());
       SDL_GPUTransferBuffer* tb = upload_tb_;
-      HostSpans(ro_in, ro.size(), [&](size_t at, size_t n) { std::memcpy(p + at, ro.data() + at, n); });
+      if (!ro.empty()) std::memcpy(p, ro.data(), ro.size());
       HostSpans(rw_in, rw.size(), [&](size_t at, size_t n) { std::memcpy(p + ro.size() + at, rw.data() + at, n); });
       SDL_UnmapGPUTransferBuffer(dev_, tb);
       SDL_GPUCommandBuffer* cmd = Begin();  // after MapUpload, which may submit it
       SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
       if (!ro.empty()) {
         EnsureBuffer(cro_, cro_cap_, ro.size(), SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ);
-        bool cycle = true;
-        HostSpans(ro_in, ro.size(), [&](size_t at, size_t n) {
-          SDL_GPUTransferBufferLocation src{tb, Uint32(upload_at_ + at)};
-          SDL_GPUBufferRegion dst{cro_, Uint32(at), Uint32(n)};
-          SDL_UploadToGPUBuffer(cp, &src, &dst, cycle);
-          cycle = false;
-        });
-        CopyBuffers(cp, ro_in, cro_, true);
+        SDL_GPUTransferBufferLocation src{tb, upload_at_};
+        SDL_GPUBufferRegion dst{cro_, 0, Uint32(ro.size())};
+        SDL_UploadToGPUBuffer(cp, &src, &dst, true);
       }
       if (!rw.empty()) {
         EnsureBuffer(crw_, crw_cap_, rw.size(),
@@ -1872,7 +1865,8 @@ void r_color0(inout vec4 c) {
       for (uint32_t i = 0; i < sc.ntex; i++) tbs[i] = {sc.tex[i], sc.smp[i]};
       SDL_BindGPUComputeSamplers(cp, 0, tbs, sc.ntex);
     }
-    if (!ro.empty()) SDL_BindGPUComputeStorageBuffers(cp, 0, &cro_, 1);
+    SDL_GPUBuffer* bufs[2] = {cro_, heap_};
+    if (!ro.empty()) SDL_BindGPUComputeStorageBuffers(cp, 0, bufs, 2);
     Uint32 slot = 0;
     if (!table.empty()) SDL_PushGPUComputeUniformData(cmd, slot++, table.data(), Uint32(table.size() * 4));
     if (st.uniform_bytes)
@@ -2032,7 +2026,8 @@ void r_color0(inout vec4 c) {
     int32_t base = 0;
     SDL_GPUBuffer* indirect = nullptr;  // a GPU buffer's draw (ProgramDraw)
     SDL_GPUBuffer* indices = nullptr;   // a GPU buffer's indices (ProgramDraw)
-    bool short_indices = false;         // theirs are 16-bit
+    uint32_t buffer_at = 0;             // that buffer's place in it
+    bool short_indices = false;         // its indices are 16-bit
     int shader = -1;   // shader_cmds_ index for a DrawShader
     int program = -1;  // program_cmds_ index for a DrawProgram
   };
@@ -2433,9 +2428,7 @@ void r_color0(inout vec4 c) {
       if (!upload_bytes_.empty()) std::memcpy(p, upload_bytes_.data(), upload_bytes_.size());
       if (vbytes) std::memcpy(p + ubytes, verts_.data(), vbytes);
       if (ibytes) std::memcpy(p + ubytes + vbytes, indices_.data(), ibytes);
-      HostSpans(draw_copies_, pbytes, [&](size_t at, size_t n) {
-        std::memcpy(p + ubytes + vbytes + ibytes + at, pmem_.data() + at, n);
-      });
+      if (pbytes) std::memcpy(p + ubytes + vbytes + ibytes, pmem_.data(), pbytes);
       SDL_UnmapGPUTransferBuffer(dev_, upload_tb_);
 
       cmd = Begin();  // after MapUpload, which may submit it
@@ -2471,14 +2464,9 @@ void r_color0(inout vec4 c) {
       }
       if (pbytes) {
         EnsureBuffer(pbuf_, pbuf_cap_, pbytes, SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
-        bool cycle = true;
-        HostSpans(draw_copies_, pbytes, [&](size_t at, size_t n) {
-          SDL_GPUTransferBufferLocation src{upload_tb_, Uint32(upload_at_ + ubytes + vbytes + ibytes + at)};
-          SDL_GPUBufferRegion dst{pbuf_, Uint32(at), Uint32(n)};
-          SDL_UploadToGPUBuffer(cp, &src, &dst, cycle);
-          cycle = false;
-        });
-        CopyBuffers(cp, draw_copies_, pbuf_, true);
+        SDL_GPUTransferBufferLocation src{upload_tb_, Uint32(upload_at_ + ubytes + vbytes + ibytes)};
+        SDL_GPUBufferRegion dst{pbuf_, 0, Uint32(pbytes)};
+        SDL_UploadToGPUBuffer(cp, &src, &dst, true);
       }
       SDL_EndGPUCopyPass(cp);
     }
@@ -2509,14 +2497,16 @@ void r_color0(inout vec4 c) {
       SDL_GPURenderPass* rp =
           SDL_BeginGPURenderPass(cmd, cts, Uint32(pass_targets_), pass_depth_ ? &dt : nullptr);
       if (vbuf_) SDL_BindGPUVertexStorageBuffers(rp, 0, &vbuf_, 1);
-      SDL_GPUBuffer* bound_ib = nullptr;  // ibuf_, or a draw's GPU buffer
+      SDL_GPUBuffer* bound_ib = nullptr;  // ibuf_, or the heap at a draw's GPU buffer
+      uint32_t bound_at = 0;
       bool bound_short = false;
-      auto bind_indices = [&](SDL_GPUBuffer* b, bool short_indices = false) {
-        if (b == bound_ib && short_indices == bound_short) return;
-        SDL_GPUBufferBinding ib{b, 0};
+      auto bind_indices = [&](SDL_GPUBuffer* b, uint32_t at = 0, bool short_indices = false) {
+        if (b == bound_ib && at == bound_at && short_indices == bound_short) return;
+        SDL_GPUBufferBinding ib{b, at};
         SDL_BindGPUIndexBuffer(rp, &ib, short_indices ? SDL_GPU_INDEXELEMENTSIZE_16BIT
                                                        : SDL_GPU_INDEXELEMENTSIZE_32BIT);
         bound_ib = b;
+        bound_at = at;
         bound_short = short_indices;
       };
       if (ibuf_ && ibytes) bind_indices(ibuf_);
@@ -2554,8 +2544,9 @@ void r_color0(inout vec4 c) {
               else SDL_BindGPUVertexSamplers(rp, 0, tb, sc.ntex);
             }
             if (sc.storage) {
-              if (st) SDL_BindGPUFragmentStorageBuffers(rp, 0, &pbuf_, 1);
-              else SDL_BindGPUVertexStorageBuffers(rp, 0, &pbuf_, 1);
+              SDL_GPUBuffer* bufs[2] = {pbuf_, heap_};
+              if (st) SDL_BindGPUFragmentStorageBuffers(rp, 0, bufs, 2);
+              else SDL_BindGPUVertexStorageBuffers(rp, 0, bufs, 2);
               if (!st) vertex_storage = false;
             }
           }
@@ -2568,10 +2559,10 @@ void r_color0(inout vec4 c) {
           SDL_SetGPUScissor(rp, &c.scissor);
           SDL_SetGPUStencilReference(rp, c.stencil_ref);
           if (c.indirect) {
-            bind_indices(c.indirect);
-            SDL_DrawGPUIndexedPrimitivesIndirect(rp, c.indirect, 0, 1);
+            bind_indices(c.indirect, c.buffer_at);
+            SDL_DrawGPUIndexedPrimitivesIndirect(rp, c.indirect, c.buffer_at, 1);
           } else if (c.indexed) {
-            if (c.indices) bind_indices(c.indices, c.short_indices);
+            if (c.indices) bind_indices(c.indices, c.buffer_at, c.short_indices);
             else bind_indices(ibuf_);
             SDL_DrawGPUIndexedPrimitives(rp, c.count, pc.instances, c.first, c.base, 0);
           } else {
@@ -2640,9 +2631,7 @@ void r_color0(inout vec4 c) {
     shader_cmds_.clear();
     program_cmds_.clear();
     pmem_.clear();
-    draw_copies_.clear();
-    draw_copied_.clear();
-    draw_indices_.clear();
+    draw_read_.clear();
     ubytes_.clear();
     uploads_.clear();
     upload_bytes_.clear();
@@ -3415,8 +3404,9 @@ void r_color0(inout vec4 c) {
     pre += b;
     if (st.buffers) {
       std::snprintf(b, sizeof b,
-                    "layout(std430, set = %d, binding = %u) readonly buffer RMem { uint r_mem[]; };\n",
-                    res, st.textures);
+                    "layout(std430, set = %d, binding = %u) readonly buffer RMem { uint r_mem[]; };\n"
+                    "layout(std430, set = %d, binding = %u) readonly buffer RHeap { uint r_heap[]; };\n",
+                    res, st.textures, res, st.textures + 1);
       pre += b;
     }
     if (stage == ShaderStage::Compute) {
@@ -3445,6 +3435,10 @@ void r_color0(inout vec4 c) {
       pre += " };\n";
       binding = 1;
     }
+    // Buffer b's word i: in the arena (r_mem) or, a GPU buffer, the heap.
+    if (st.buffers)
+      pre += "uint r_ld(uint b, uint i) {\n  uint w = r_buf[b].x + i;\n"
+             "  return r_buf[b].z != 0u ? r_heap[w] : r_mem[w];\n}\n";
     std::snprintf(b, sizeof b, "#define R_UNIFORMS set = %d, binding = %u\n", uni, binding);
     pre += b;
     const std::string glsl = pre + st.glsl;
@@ -3458,14 +3452,14 @@ void r_color0(inout vec4 c) {
   }
 
   struct GpuBuffer {
-    SDL_GPUBuffer* b;
+    uint32_t at;  // its place in heap_
     uint32_t size;
   };
   struct BufferCopy {
     SDL_GPUBuffer* buffer;
     uint32_t at;    // its offset in an arena
     uint32_t size;  // bytes
-    uint32_t held = 0;  // the bytes it takes in pmem_ (a draw's)
+    uint32_t held = 0;  // the bytes it takes in the arena
     uint32_t from = 0;  // its offset in the buffer
   };
   // A GPU buffer's `size` bytes from `from` (no more than it has) and
@@ -3473,7 +3467,8 @@ void r_color0(inout vec4 c) {
   BufferCopy GpuBufferCopy(BufferId id, size_t at, uint32_t size, uint32_t from = 0) {
     auto it = gpu_buffers_.find(id);
     if (it == gpu_buffers_.end() || from > it->second.size) FatalF("gfx: no buffer %u", id);
-    return {it->second.b, uint32_t(at), std::min(size, it->second.size - from) & ~3u, 0, from};
+    return {heap_, uint32_t(at), std::min(size, it->second.size - from) & ~3u, 0,
+            it->second.at + from};
   }
   // Copies GPU buffers into an arena (in) or the arena back into them.
   static void CopyBuffers(SDL_GPUCopyPass* cp, const std::vector<BufferCopy>& copies,
@@ -3484,6 +3479,79 @@ void r_color0(inout vec4 c) {
       if (in) SDL_CopyGPUBufferToBuffer(cp, &b, &a, c.size, false);
       else SDL_CopyGPUBufferToBuffer(cp, &a, &b, c.size, false);
     }
+  }
+
+  // GPU buffers are places in one, the heap: draws and dispatches read
+  // them there (bound beside their arenas, a table entry's z set) instead
+  // of copies in the arenas, and draws take indices and indirect
+  // arguments from them. Copies to and from the arenas (read-write
+  // buffers, uploads) are of their places. It grows by doubling, after a
+  // flush (the recorded draws name it).
+  static constexpr uint32_t kHeapAlign = 256;
+  uint32_t HeapAlloc(uint32_t size) {
+    size = (size + kHeapAlign - 1) & ~(kHeapAlign - 1);
+    for (;;) {
+      for (auto it = heap_free_.begin(); it != heap_free_.end(); ++it) {
+        if (it->second < size) continue;
+        const uint32_t at = it->first, left = it->second - size;
+        heap_free_.erase(it);
+        if (left) heap_free_[at + size] = left;
+        return at;
+      }
+      GrowHeap(size);
+    }
+  }
+  void HeapFree(uint32_t at, uint32_t size) {
+    size = (size + kHeapAlign - 1) & ~(kHeapAlign - 1);
+    auto next = heap_free_.lower_bound(at);
+    if (next != heap_free_.end() && at + size == next->first) {
+      size += next->second;
+      next = heap_free_.erase(next);
+    }
+    if (next != heap_free_.begin()) {
+      auto prev = std::prev(next);
+      if (prev->first + prev->second == at) {
+        prev->second += size;
+        return;
+      }
+    }
+    heap_free_[at] = size;
+  }
+  void GrowHeap(uint32_t need) {
+    const uint64_t cap = std::max<uint64_t>(heap_cap_ ? 2ull * heap_cap_ : 64u << 20,
+                                            uint64_t(heap_cap_) + need);
+    if (cap > (2ull << 30)) FatalF("gfx: GPU buffers past 2 GiB");
+    Flush();
+    SDL_GPUBufferCreateInfo bi{};
+    bi.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ |
+               SDL_GPU_BUFFERUSAGE_INDEX | SDL_GPU_BUFFERUSAGE_INDIRECT;
+    bi.size = Uint32(cap);
+    SDL_GPUBuffer* b = SDL_CreateGPUBuffer(dev_, &bi);
+    if (!b) FatalF("gfx: cannot create a %u-byte buffer: %s", bi.size, SDL_GetError());
+    if (heap_) {
+      SDL_GPUCommandBuffer* cmd = Begin();
+      SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
+      SDL_GPUBufferLocation from{heap_, 0}, to{b, 0};
+      SDL_CopyGPUBufferToBuffer(cp, &from, &to, heap_cap_, false);
+      SDL_EndGPUCopyPass(cp);
+      Submit(cmd);
+      SDL_ReleaseGPUBuffer(dev_, heap_);
+    }
+    HeapFree(heap_cap_, uint32_t(cap - heap_cap_));
+    heap_ = b;
+    heap_cap_ = uint32_t(cap);
+  }
+  // A read-only GPU buffer's table entry: its words' place in the heap,
+  // its bytes (no more than it has), and z set.
+  void HeapEntry(const BufferData& bd, uint32_t* e) {
+    auto it = gpu_buffers_.find(bd.buffer);
+    if (it == gpu_buffers_.end() || bd.offset > it->second.size) FatalF("gfx: no buffer %u", bd.buffer);
+    e[0] = (it->second.at + bd.offset) / 4;
+    e[1] = std::min(bd.size, it->second.size - bd.offset);
+    e[2] = 1;
+  }
+  void DrawRead(BufferId id) {
+    if (draw_read_.empty() || draw_read_.back() != id) draw_read_.push_back(id);
   }
 
   // Appends size bytes of data, padded to words with zeros; without data,
@@ -3523,37 +3591,29 @@ void r_color0(inout vec4 c) {
     if (st.buffers) {
       std::vector<uint32_t> table(4 * size_t(st.buffers), 0);
       for (uint32_t b = 0; b < st.buffers; b++) {
-        if (pmem_.size() + r.buffers[b].size > kMaxArena) FatalF("gfx: a draw's buffers pass the arena");
-        table[4 * b] = uint32_t(DrawBuffer(r.buffers[b]) / 4);
-        table[4 * b + 1] = r.buffers[b].size;
+        const BufferData& bd = r.buffers[b];
+        if (bd.buffer) {
+          HeapEntry(bd, &table[4 * b]);
+          DrawRead(bd.buffer);
+          continue;
+        }
+        if (pmem_.size() + bd.size > kMaxArena) FatalF("gfx: a draw's buffers pass the arena");
+        table[4 * b] = uint32_t(DrawBuffer(bd) / 4);
+        table[4 * b + 1] = bd.size;
       }
+      if (pmem_.empty()) AppendWords(pmem_, nullptr, 4);  // pbuf_ is bound
       sc.storage = true;
       AppendUniform(sc, table.data(), uint32_t(table.size() * 4));
     }
     if (st.uniform_bytes) AppendUniform(sc, r.uniforms, st.uniform_bytes);
   }
 
-  // A draw's buffer in the arena: its byte offset there. Buffers that
-  // overlap one copied earlier in the same draw (a vertex buffer's
+  // A draw's host buffer in the arena: its byte offset there. Buffers
+  // that overlap one copied earlier in the same draw (a vertex buffer's
   // interleaved streams, each bound from its own offset) share its copy:
   // inside it, they are found there; past its end, if it is the arena's
-  // last, it grows by what they add. A GPU buffer's bytes inside its
-  // last copy in the flush are found there (it is not written before the
-  // flush: dispatches and uploads flush first).
+  // last, it grows by what they add.
   size_t DrawBuffer(const BufferData& bd) {
-    if (bd.buffer) {
-      BufferCopy c = GpuBufferCopy(bd.buffer, pmem_.size(), bd.size, bd.offset);
-      auto [it, added] = draw_copied_.try_emplace(c.buffer, draw_copies_.size());
-      if (!added) {
-        const BufferCopy& e = draw_copies_[it->second];
-        if (c.from >= e.from && c.from + c.size <= e.from + e.size) return e.at + (c.from - e.from);
-        it->second = draw_copies_.size();
-      }
-      c.held = (bd.size + 3) & ~3u;
-      draw_copies_.push_back(c);
-      AppendWords(pmem_, nullptr, bd.size);
-      return c.at;
-    }
     const auto* p = static_cast<const uint8_t*>(bd.data);
     if (p && bd.size) {
       for (DrawSpan& sp : draw_spans_) {
@@ -3905,9 +3965,10 @@ void r_color0(inout vec4 c) {
   };
   std::vector<DrawSpan> draw_spans_;  // the current draw's (DrawBuffer)
   std::map<BufferId, GpuBuffer> gpu_buffers_;
-  std::vector<BufferCopy> draw_copies_;  // GPU buffers' into pmem_ (pbuf_)
-  std::unordered_map<SDL_GPUBuffer*, size_t> draw_copied_;  // each one's last there
-  std::vector<SDL_GPUBuffer*> draw_indices_;  // GPU buffers drawn from as indices
+  std::vector<BufferId> draw_read_;  // GPU buffers the recorded draws read
+  SDL_GPUBuffer* heap_ = nullptr;   // the GPU buffers (HeapAlloc)
+  uint32_t heap_cap_ = 0;
+  std::map<uint32_t, uint32_t> heap_free_;  // its free runs: place, bytes
   SDL_GPUBuffer* pbuf_ = nullptr;
   SDL_GPUBuffer* cro_ = nullptr;
   SDL_GPUBuffer* crw_ = nullptr;
