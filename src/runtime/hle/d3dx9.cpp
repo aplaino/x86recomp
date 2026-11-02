@@ -436,7 +436,7 @@ uint32_t NewConstantTable(const hlsl::Program& p, uint32_t version) {
   t->constants = p.constants;
   t->handles = HeapAllocProcess(std::max<uint32_t>(uint32_t(p.constants.size()), 1), true);
   for (const auto& k : p.constants) t->names.push_back(GuestString(k.name));
-  t->creator = GuestString("x86recomp HLSL translator");
+  t->creator = GuestString("SwARc HLSL translator");
   return com::Publish(t, ConstantTableVtable());
 }
 

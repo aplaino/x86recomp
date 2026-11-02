@@ -1,6 +1,6 @@
 # Architecture
 
-x86recomp turns a 32-bit x86 Windows game into a native 64-bit program:
+SwARc turns a 32-bit x86 Windows game into a native 64-bit program:
 the game's machine code is lifted to C++ ahead of time and linked with a
 runtime that reimplements the Windows, DirectX and middleware APIs it
 calls (HLE). Nothing here is specific to one game: game projects hold

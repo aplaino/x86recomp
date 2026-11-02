@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compares EAX recordings from real hardware (eaxcap.exe) with x86recomp's
+"""Compares EAX recordings from real hardware (eaxcap.exe) with SwARc's
 renderings of the same cases (eax_render).
 
     python3 -I analyze.py --hw capture/ --sim render/ [--provider eax2]
@@ -799,7 +799,7 @@ def run_set(root, role, keys, plots):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--hw", help="eaxcap.exe output directory (hardware)")
-    ap.add_argument("--sim", help="eax_render output directory (x86recomp)")
+    ap.add_argument("--sim", help="eax_render output directory (SwARc)")
     ap.add_argument("--provider", help="provider tags, comma-separated (default: all)")
     ap.add_argument("--cases", help="case patterns, comma-separated, * wildcards")
     ap.add_argument("--tsv", help="write every metric to this TSV file")

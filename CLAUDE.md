@@ -1,4 +1,4 @@
-# x86recomp: shared lifter + runtime for the PC recomps
+# SwARc: shared lifter + runtime for the PC recomps
 
 Rules only. Design in ARCHITECTURE.md; observed behaviour of the APIs
 and middleware reimplemented here in docs/ (e.g. docs/miles.md). Game
@@ -7,7 +7,7 @@ that game; behaviour of a Windows or middleware API goes here, even when
 a game is where it came up.
 
 ## Layout
-- Library: ~/Documents/Programming/Recomp/x86recomp
+- Library: ~/Documents/Programming/Recomp/SwARc
 - Users (sibling checkouts, they add this tree with add_subdirectory):
   - ~/Documents/Programming/Recomp/Dungeon Siege/DS1 (DS1-Rebuilt)
   - ~/Documents/Programming/Recomp/CoD/CoD1 (Call of Duty)
@@ -75,7 +75,7 @@ a game is where it came up.
   Bink, EAX builds may be named and identified by version and SHA-256.
   The only place game projects are named here is Layout above; their
   list and status live on the project site (sibling checkout
-  ../x86recomp.github.io), which README.md links to.
+  ../SwARc.site), which README.md links to.
 - Dev/test switches are read with Env("NAME") (the game's <ID>_NAME),
   never getenv with a hard-coded prefix, and never at static-init time.
 - Every import needs an explicit HLE handler; an unhandled one is fatal
@@ -89,8 +89,8 @@ a game is where it came up.
 - lifted.h semantics changes must keep tests/lift_semantics_test.cpp
   passing (bit-exact against the host CPU).
 - Another session may be working in the main checkout: do parallel work
-  in a separate git worktree (e.g. ../x86recomp-<topic>) and build games
-  against it in their own build dirs (-DX86RECOMP_DIR=...).
+  in a separate git worktree (e.g. ../SwARc-<topic>) and build games
+  against it in their own build dirs (-DSWARC_DIR=...).
 - 32-bit guests: addresses stay below 0x80000000 unless a game has done
   the large-address audit (ARCHITECTURE.md), and then only behind its
   flag. x64 guests get nothing below 4 GiB.

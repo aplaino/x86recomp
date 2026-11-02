@@ -450,7 +450,7 @@ HLE_NAMED("d3d9.dll", "IDirect3D9::GetAdapterIdentifier", D3D9_GetAdapterIdentif
   std::memset(id, 0, sizeof *id);
   std::snprintf(id->Driver, sizeof id->Driver, "recomp_d3d9.dll");
   std::snprintf(id->Description, sizeof id->Description,
-                "x86recomp Direct3D 9 (%s)",
+                "SwARc Direct3D 9 (%s)",
                 GfxBackend() == gfx::Backend::Gpu ? "SDL_GPU" : "dxvk-native");
   std::snprintf(id->DeviceName, sizeof id->DeviceName, "\\\\.\\DISPLAY1");
   // 9.18.13.0 (a driver version of the D3D9 era).

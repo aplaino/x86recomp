@@ -1,6 +1,6 @@
 /* eaxcap: records what a sound card makes of Miles' 3D providers (Creative
    EAX 1-3 on the card's hardware, Fast 2D, DirectSound3D) for comparison
-   with x86recomp's EAX renderer. It drives the game-shipped mss32.dll and
+   with SwARc's EAX renderer. It drives the game-shipped mss32.dll and
    its plug-ins through the case list in cases.c, plays each stimulus as a
    3D sample and records the card's output ("What U Hear") with waveIn into
    a WAV file and a JSON manifest per case. See README.md.

@@ -1,4 +1,4 @@
-// eax_render: renders the capture cases (cases.c) with x86recomp's own
+// eax_render: renders the capture cases (cases.c) with SwARc's own
 // audio path, driven the way mss32.cpp drives it for Miles' Fast 2D and EAX
 // providers: EAX properties -> per-voice direct and reverb-send levels ->
 // the mixer and its reverb. Writes what eaxcap.exe records from
@@ -409,7 +409,7 @@ void Render(const Options& o, const char* provider, const std::string& tag, int 
   j.Num("record_frames", double(total));
   j.Num("started_at_frame", double(preroll));
   j.Num("peak_dbfs", peak_db);
-  j.Str("renderer", "x86recomp recomp_audio");
+  j.Str("renderer", "SwARc recomp_audio");
   j.Close('}');
   j.Text("\n");
 

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(x86recomp LANGUAGES C CXX)
+project(SwARc LANGUAGES C CXX)
 
 # Static recompilation of 32-bit x86 Windows games to native programs: the
 # lifter (build-time tool), the x87 model, and the runtime with its Win32/

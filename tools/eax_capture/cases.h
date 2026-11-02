@@ -1,5 +1,5 @@
 /* The capture cases and stimuli, shared by eaxcap.exe (real Miles on EAX
-   hardware, Win32) and eax_render (x86recomp's renderer, Linux) so both
+   hardware, Win32) and eax_render (SwARc's renderer, Linux) so both
    record the same cases on the same timeline. Plain C; no OS calls. */
 #ifndef EAX_CAPTURE_CASES_H
 #define EAX_CAPTURE_CASES_H

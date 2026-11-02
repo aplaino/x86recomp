@@ -401,7 +401,7 @@ Enum Context::GetError() {
 
 const char* Context::GetString(Enum name) const {
   switch (name) {
-    case VENDOR: return "x86recomp";
+    case VENDOR: return "SwARc";
     case RENDERER: return "gfx::Device";
     case VERSION: return "1.1.0";
     case EXTENSIONS:

@@ -1,15 +1,17 @@
-# x86recomp
+# SwARc
 
-Static recompilation of x86 and x86-64 Windows games into native 64-bit
-programs: the scaffold that gets a game running natively while its code
-is replaced, piece by piece, with hand-written C++. A game's machine
-code is translated ahead of time into C++ and linked against a runtime
-that reimplements the parts of Windows and its middleware the game
-uses. There is no emulator, interpreter or Wine in
-the result, and no game code or data in this repository.
+SwARc, the Swiss Army Recompiler: static recompilation of games into
+native 64-bit programs, the scaffold that gets a game running natively
+while its code is replaced, piece by piece, with hand-written C++. A
+game's machine code is translated ahead of time into C++ and linked
+against a runtime that reimplements the parts of its operating system
+and middleware the game uses: Windows for x86 and x86-64 PC games here,
+consoles as platform modules on the core of their CPU. There is no
+emulator, interpreter or Wine in the result, and no game code or data in
+this repository.
 
 The game ports built on it and their status are on the
-[project site](https://jtm-rootstorm.github.io/x86recomp.site/).
+[project site](https://jtm-rootstorm.github.io/SwARc.site/).
 
 ## What is here
 
@@ -57,10 +59,10 @@ observed behaviour of the middleware reimplemented here
 ## Using it from a game project
 
 ```cmake
-set(X86RECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../x86recomp" CACHE PATH "")
+set(SWARC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../SwARc" CACHE PATH "")
 set(CMAKE_LINK_DEPENDS_NO_SHARED ON)  # no relink when only a library changes
 enable_testing()
-add_subdirectory("${X86RECOMP_DIR}" x86recomp)
+add_subdirectory("${SWARC_DIR}" swarc)
 
 recomp_add_lifted(mygame_lifted "${CMAKE_CURRENT_SOURCE_DIR}/generated")
 add_executable(mygame src/main.cpp $<TARGET_OBJECTS:mygame_lifted>)

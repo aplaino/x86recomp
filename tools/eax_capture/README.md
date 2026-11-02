@@ -1,6 +1,6 @@
-# EAX capture: real Creative hardware vs x86recomp
+# EAX capture: real Creative hardware vs SwARc
 
-x86recomp renders Miles' EAX providers with its own environmental reverb
+SwARc renders Miles' EAX providers with its own environmental reverb
 (`src/runtime/audio`). There is no exact reference for what Creative's
 cards did with the same EAX properties, so this directory measures it:
 
@@ -10,7 +10,7 @@ cards did with the same EAX properties, so this directory measures it:
   (Creative EAX 1/2/3 on the card, Miles Fast 2D, DirectSound3D, ...) and
   records the card's output ("What U Hear") into a WAV file and a JSON
   manifest per case.
-- **eax_render** (Linux) renders the same cases with x86recomp's own audio
+- **eax_render** (Linux) renders the same cases with SwARc's own audio
   code, driven the way `mss32.cpp` drives it, into the same file layout.
 - **analyze.py** aligns both sets, deconvolves the sweeps and compares
   reverb decay, onset, levels and the obstruction/occlusion filters.
@@ -187,7 +187,7 @@ Cases needing a newer EAX version than the provider are skipped; EAX
 attributes on non-EAX providers are logged as skipped. `eaxcap --dry-run`
 prints the whole list.
 
-## Rendering with x86recomp and comparing
+## Rendering with SwARc and comparing
 
 ```bash
 cmake --build out/build/debug --target eax_render
@@ -262,7 +262,7 @@ the comparison (the hardware's far channel sits at its crosstalk, about
 What the renderer still does differently from an Audigy 2 ZS is listed in
 ARCHITECTURE.md (audio, "Measured against hardware").
 
-## Running eaxcap.exe through x86recomp (later)
+## Running eaxcap.exe through SwARc (later)
 
 eaxcap.exe is a plain Win32 EXE, so the port side can run it as a third
 reference: lift it with `recomp_lift` and run it on the runtime with
