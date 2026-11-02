@@ -88,6 +88,7 @@ include(cmake/softfloat.cmake)  # defines target `softfloat`
 target_compile_options(softfloat PRIVATE -O2)
 set_target_properties(softfloat PROPERTIES EXCLUDE_FROM_ALL ON)
 
+# --- PowerPC core ----------------------------------------------------------
 # The PowerPC lifter and CPU model, for the platforms with a PowerPC CPU
 # (RECOMP_PPC, which they turn on), and its tests.
 if(RECOMP_PPC)

@@ -16,7 +16,8 @@ OS or middleware API goes here, even when a game is where it came up.
     Wars: The Complete Saga)
   - ~/Documents/Programming/Recomp/KEX/Q2E (Quake II Enhanced, x64)
 - The base is src/runtime (with cmake/host.cmake); the x86 core is
-  src/x86, tools/lifter_x86 and tests/x86; each platform module is
+  src/x86, tools/lifter_x86 and tests/x86, the PowerPC core src/ppc,
+  tools/lifter_ppc and tests/ppc; each platform module is
   platforms/<name> (Win32: platforms/win32).
 
 ## Build and test
@@ -29,45 +30,6 @@ OS or middleware API goes here, even when a game is where it came up.
   rebuild each one listed under Layout, re-lift if the lifter changed, and
   run its ctest (with <ID>_GAME_EXE set, the EXE-derived oracle tests run
   too).
-
-## PowerPC core (src/ppc, tools/lifter_ppc, tests/ppc)
-Design in src/ppc/ARCHITECTURE.md. These rules hold for every PowerPC
-platform module too.
-- Alone: `cmake --preset ppc && cmake --build --preset ppc && ctest --test-dir out/build/ppc`
-  (no x86 path, no host layer). The oracle tests need qemu-system-ppc64,
-  clang, ld.lld and the repository's `.venv/` Python (standard library
-  only; override with -DRECOMP_PYTHON=...).
-- Lifter output must not change unintentionally: when touching
-  tools/lifter_ppc, diff the fixture's and a platform's lifted code
-  before and after.
-- Nothing in src/ppc, tools/lifter_ppc or tests/ppc knows a console:
-  executable formats come through the lifter's ImageReader (ELF is its
-  own), the system through Import/Sc/Trap/TimeBase. A CPU's extensions
-  of the ISA decode only under its Cpu (tools/lifter_ppc/ppc.h); the
-  generic one is the user instruction set with floating point and VMX.
-- QEMU and emulators are references and test oracles only, never
-  linked, never shipped. GPL sources are never copied, only cited for
-  behaviour (binutils' PowerPC disassembler among them); BSD sources may
-  be read closely, and anything copied keeps its notice in the file and
-  in NOTICE.
-- The CPU is modelled exactly in 32-bit mode (src/ppc/ARCHITECTURE.md,
-  "CPU"); floating point through SoftFloat with the PowerPC's NaN rules
-  under FPSCR (src/ppc/fp.cpp), never host float arithmetic outside
-  proven-exact fast paths with their proof and fuzz test.
-- Where the oracle (QEMU) departs from the ISA, follow the ISA, show the
-  difference with exact arithmetic or the ISA's text, and leave that bit
-  out of the comparison with the reason next to it.
-- ppc/lifted.h semantics changes must keep ppc_lift_forms passing
-  against the oracle (ppc_vmx128_test too for VMX128, which the oracle
-  runs only as VMX twins), and a planted bug (RECOMP_PPC_MUTATION) for
-  each new helper that a test catches.
-- Where the ISA leaves a result undefined, say so next to the code, keep
-  it out of the oracle comparison (tests/ppc/lift_forms_test.cpp,
-  Undefined) and note it for the hardware check in
-  src/ppc/ARCHITECTURE.md.
-- Test fixtures are source (assembly and C built by clang and LLD for
-  big-endian PowerPC64) checked in with their build rule; never a binary
-  from the internet, never anything from a game or a console's firmware.
 
 ## Product constraints (see ARCHITECTURE.md)
 - No emulation in the shipping binary: no interpreter, JIT, runtime
@@ -157,3 +119,42 @@ platform module too.
 - Nothing of one platform in the core: a platform's process, threads'
   control blocks, exception dispatch and window events reach the core
   through Process's hooks (x86/runtime.h).
+
+## PowerPC core (src/ppc, tools/lifter_ppc, tests/ppc)
+Design in src/ppc/ARCHITECTURE.md. These rules hold for every PowerPC
+platform module too.
+- Alone: `cmake --preset ppc && cmake --build --preset ppc && ctest --test-dir out/build/ppc`
+  (no x86 core, no host layer). The oracle tests need qemu-system-ppc64,
+  clang, ld.lld and the repository's `.venv/` Python (standard library
+  only; override with -DRECOMP_PYTHON=...).
+- Lifter output must not change unintentionally: when touching
+  tools/lifter_ppc, diff the fixture's and a platform's lifted code
+  before and after.
+- Nothing in src/ppc, tools/lifter_ppc or tests/ppc knows a console:
+  executable formats come through the lifter's ImageReader (ELF is its
+  own), the system through Import/Sc/Trap/TimeBase. A CPU's extensions
+  of the ISA decode only under its Cpu (tools/lifter_ppc/ppc.h); the
+  generic one is the user instruction set with floating point and VMX.
+- QEMU and emulators are references and test oracles only, never
+  linked, never shipped. GPL sources are never copied, only cited for
+  behaviour (binutils' PowerPC disassembler among them); BSD sources may
+  be read closely, and anything copied keeps its notice in the file and
+  in NOTICE.
+- The CPU is modelled exactly in 32-bit mode (src/ppc/ARCHITECTURE.md,
+  "CPU"); floating point through SoftFloat with the PowerPC's NaN rules
+  under FPSCR (src/ppc/fp.cpp), never host float arithmetic outside
+  proven-exact fast paths with their proof and fuzz test.
+- Where the oracle (QEMU) departs from the ISA, follow the ISA, show the
+  difference with exact arithmetic or the ISA's text, and leave that bit
+  out of the comparison with the reason next to it.
+- ppc/lifted.h semantics changes must keep ppc_lift_forms passing
+  against the oracle (ppc_vmx128_test too for VMX128, which the oracle
+  runs only as VMX twins), and a planted bug (RECOMP_PPC_MUTATION) for
+  each new helper that a test catches.
+- Where the ISA leaves a result undefined, say so next to the code, keep
+  it out of the oracle comparison (tests/ppc/lift_forms_test.cpp,
+  Undefined) and note it for the hardware check in
+  src/ppc/ARCHITECTURE.md.
+- Test fixtures are source (assembly and C built by clang and LLD for
+  big-endian PowerPC64) checked in with their build rule; never a binary
+  from the internet, never anything from a game or a console's firmware.

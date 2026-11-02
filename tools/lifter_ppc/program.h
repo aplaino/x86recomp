@@ -44,9 +44,9 @@ struct Image {
 };
 
 // An executable format, read by a console platform's module (ARCHITECTURE.md,
-// "Console platforms"), which registers it from a static initialiser in the
-// source it adds to recomp_lift_ppc. Match says whether a file is in its
-// format; Load fills the image.
+// "Layout: base, CPU cores, platform modules"), which registers it from a
+// static initialiser in the source it adds to recomp_lift_ppc. Match says
+// whether a file is in its format; Load fills the image.
 struct ImageReader {
   bool (*Match)(const std::string& path);
   bool (*Load)(Image& img, const std::string& path, std::string& err);

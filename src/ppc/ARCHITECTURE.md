@@ -4,12 +4,13 @@ The lifter `recomp_lift_ppc` (`tools/lifter_ppc`: decoder, function
 discovery, jump tables, the emitter) and the CPU model and dispatcher
 lifted code runs on (`src/ppc`, library `recomp_ppc`), shared by every
 console platform with a PowerPC CPU (the top-level ARCHITECTURE.md,
-"Console platforms"). It is built with `RECOMP_PPC`, which such a
-platform turns on, and alone with its tests by the `ppc` preset (no x86
-path, no host layer). Nothing here knows a console's system or
-executable format: the lifter reads ELF itself (`elf.h`), a platform
-registers an image reader for its own, and the platform defines what
-lifted code calls (`Import`, `Sc`, `Trap`, `TimeBase`; ppc/lifted.h).
+"Layout: base, CPU cores, platform modules"). It is built with
+`RECOMP_PPC`, which such a platform turns on, and alone with its tests
+by the `ppc` preset (no x86 core, no host layer). Nothing here knows a
+console's system or executable format: the lifter reads ELF itself
+(`elf.h`), a platform registers an image reader for its own, and the
+platform defines what lifted code calls (`Import`, `Sc`, `Trap`,
+`TimeBase`; ppc/lifted.h).
 Its tests are in `tests/ppc`.
 
 ## Goals and hard constraints
