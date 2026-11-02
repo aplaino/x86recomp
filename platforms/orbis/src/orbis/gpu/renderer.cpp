@@ -200,6 +200,11 @@ struct State {
   std::vector<Target> targets;
   std::vector<TargetView> views;
   gfx::ProgramId stencil_program = 0;  // SampledStencil's
+  gfx::ProgramId strip_program = 0;    // StripProgram's
+  // Geometry shaders' GPU buffers: the ESGS and GSVS rings, the GS's
+  // emits, the copy shader's draw (DrawGeometry); their sizes.
+  gfx::BufferId geometry[4] = {};
+  uint32_t geometry_bytes[4] = {};
   std::vector<DepthTarget> depths;
   std::map<std::string, Texture> textures;
   std::unordered_map<std::string, Program> programs;
@@ -579,9 +584,24 @@ struct Bound {
   std::vector<uint32_t> uniforms;
   gfx::ProgramResources res;
 };
-void Bind(State& s, const StageState& st, const Resolved& r, Bound& b) {
+// A guest range kept in a GPU buffer instead (a geometry shader's ring).
+struct GpuRange {
+  gaddr base;
+  gfx::BufferId buffer;
+};
+void Bind(State& s, const StageState& st, const Resolved& r, Bound& b,
+          const std::vector<GpuRange>* gpu = nullptr) {
   for (const BufferRange& br : r.buffers) {
     const bool rw = RunsAsCompute(st.stage) && br.written;
+    gfx::BufferId kept = 0;
+    if (gpu)
+      for (const GpuRange& g : *gpu)
+        if (g.base == br.base) kept = g.buffer;
+    if (kept) {
+      if (rw) b.rw.push_back({nullptr, br.size, kept});
+      else b.ro.push_back({nullptr, br.size, kept});
+      continue;
+    }
     const bool ok = Readable(br.base, br.size);
     if (rw) b.rw.push_back({ok ? GPtr(br.base) : nullptr, ok ? br.size : 0});
     else b.ro.push_back({ok ? GPtr(br.base) : nullptr, ok ? br.size : 0});
@@ -661,16 +681,101 @@ gfx::Rect Scissor(const Regs& r) {
 // for each), writing its outputs to the ESGS ring; the GS once per
 // primitive, reading them there and writing the vertices it emits to the
 // GSVS ring; then the copy shader draws them, read from that ring, as
-// lists of the GS's output primitive. The rings are the guest's (at their
-// V#s' addresses); each part's waves start at the rings' starts.
+// lists of the GS's output primitive. The rings stay on the GPU (the
+// guest's, at their V#s' addresses, are not written); each part's waves
+// start at the rings' starts.
 struct Geometry {
   StageState es, gs;
   Resolved re, rg;
   gfx::ProgramId pe = 0, pg = 0;
-  gaddr gsvs = 0;
   uint32_t gsvs_vsharp[4] = {};
   uint32_t part = 0;  // primitives per part
+  std::vector<GpuRange> rings;
 };
+
+// One of State::geometry, at least `bytes` long.
+gfx::BufferId GeometryBuffer(State& s, int i, uint32_t bytes) {
+  if (s.geometry_bytes[i] < bytes) {
+    if (s.geometry[i]) s.dev->DestroyBuffer(s.geometry[i]);
+    s.geometry_bytes[i] = std::max(bytes, 2 * s.geometry_bytes[i]);
+    s.geometry[i] = s.dev->CreateBuffer(s.geometry_bytes[i]);
+  }
+  return s.geometry[i];
+}
+
+// The program that turns a part's emits (the GS's, a word per vertex it
+// may emit: bit 0 emitted, bit 1 a strip starts) into the copy shader's
+// indexed indirect draw: its five words, then from word 8 the indices of
+// the strips' points, lines or triangles in primitive order. 64 lanes
+// each take a run of primitives: they count their indices, one lane
+// turns the counts into offsets, then they write them.
+gfx::ProgramId StripProgram(State& s) {
+  if (s.strip_program) return s.strip_program;
+  gfx::ProgramDesc pd;
+  pd.cs.glsl =
+      "layout(std140, R_UNIFORMS) uniform RStrip {\n"
+      // primitives, emits per primitive, GSVS bytes per GS wave, the GSVS
+      // V#'s element size, index stride and stride, output topology
+      "  uint n, max_vert, wave_bytes, es, is, stride, topo;\n"
+      "};\n"
+      "shared uint counts[64];\n"
+      "uint Walk(uint p, bool write, uint at) {\n"
+      "  uint t = p % 64u, m = 0u, a = 0u, b = 0u, k = 0u, out_at = r_rwbuf[0].x + 8u + at;\n"
+      "  for (uint j = 0u; j < max_vert; j++) {\n"
+      "    uint e = r_mem[r_buf[0].x + p * max_vert + j];\n"
+      "    if ((e & 1u) == 0u) break;\n"
+      "    if ((e & 2u) != 0u) m = 0u;\n"
+      "    uint o = 4u * j;\n"
+      "    uint v = ((p / 64u) * wave_bytes + ((t / is) * stride + o / es) * es * is +\n"
+      "              (t % is) * es + o % es) / 4u;\n"
+      "    m++;\n"
+      "    if (topo == 0u) {\n"
+      "      if (write) r_rw[out_at + k] = v;\n"
+      "      k += 1u;\n"
+      "    } else if (topo == 1u && m >= 2u) {\n"
+      "      if (write) { r_rw[out_at + k] = b; r_rw[out_at + k + 1u] = v; }\n"
+      "      k += 2u;\n"
+      "    } else if (topo == 2u && m >= 3u) {\n"
+      // A strip's odd triangles swap their first two vertices (winding).
+      "      if (write) {\n"
+      "        r_rw[out_at + k] = (m % 2u) == 1u ? a : b;\n"
+      "        r_rw[out_at + k + 1u] = (m % 2u) == 1u ? b : a;\n"
+      "        r_rw[out_at + k + 2u] = v;\n"
+      "      }\n"
+      "      k += 3u;\n"
+      "    }\n"
+      "    a = b;\n"
+      "    b = v;\n"
+      "  }\n"
+      "  return k;\n"
+      "}\n"
+      "void main() {\n"
+      "  uint lane = gl_LocalInvocationID.x, per = (n + 63u) / 64u;\n"
+      "  uint first = min(n, lane * per), last = min(n, first + per), c = 0u;\n"
+      "  for (uint p = first; p < last; p++) c += Walk(p, false, 0u);\n"
+      "  counts[lane] = c;\n"
+      "  barrier();\n"
+      "  if (lane == 0u) {\n"
+      "    uint at = 0u;\n"
+      "    for (uint i = 0u; i < 64u; i++) { uint ci = counts[i]; counts[i] = at; at += ci; }\n"
+      "    uint w = r_rwbuf[0].x;\n"
+      "    r_rw[w] = at;\n"
+      "    r_rw[w + 1u] = 1u;\n"
+      "    r_rw[w + 2u] = 8u;\n"
+      "    r_rw[w + 3u] = 0u;\n"
+      "    r_rw[w + 4u] = 0u;\n"
+      "  }\n"
+      "  barrier();\n"
+      "  uint at = counts[lane];\n"
+      "  for (uint p = first; p < last; p++) at += Walk(p, true, at);\n"
+      "}\n";
+  pd.cs.buffers = 1;
+  pd.cs.rw_buffers = 1;
+  pd.cs.uniform_bytes = 32;
+  pd.local_size[0] = 64;
+  s.strip_program = s.dev->CreateProgram(pd);
+  return s.strip_program;
+}
 
 // The compute program of an Export or Geometry stage.
 gfx::ProgramId PassProgram(State& s, const StageState& st, const Resolved& r) {
@@ -755,8 +860,7 @@ bool SetUpGeometry(State& s, const Regs& r, const DrawCall& call, Resolved& rv, 
     return false;
   }
   // No more than the draw's primitives fill: each pass copies its rings
-  // to the host and back, and whole rings for a draw of a few waves cost
-  // most of a frame.
+  // into its arenas and back, whole rings for a draw of a few waves.
   waves = std::min(waves, (call.count / k + 63) / 64);
   if (!waves) return false;
   g->part = 64 * waves;
@@ -765,8 +869,9 @@ bool SetUpGeometry(State& s, const Regs& r, const DrawCall& call, Resolved& rv, 
       if (b.base == esgs.base) b.size = waves * k * es_wave;
       if (b.base == gsvs.base) b.size = waves * gs_wave;
     }
-  g->gsvs = gsvs.base;
   std::memcpy(g->gsvs_vsharp, gsvs.vsharp, sizeof g->gsvs_vsharp);
+  g->rings = {{esgs.base, GeometryBuffer(s, 0, waves * k * es_wave)},
+              {gsvs.base, GeometryBuffer(s, 1, waves * gs_wave)}};
   for (StageState* st : {&g->es, &g->gs}) {
     st->es_wave_bytes = es_wave;
     st->gs_wave_bytes = gs_wave;
@@ -775,16 +880,17 @@ bool SetUpGeometry(State& s, const Regs& r, const DrawCall& call, Resolved& rv, 
   }
   g->pe = PassProgram(s, g->es, g->re);
   g->pg = PassProgram(s, g->gs, g->rg);
-  return g->pe && g->pg;
+  return g->pe && g->pg && StripProgram(s);
 }
 
-// Runs a compute pass of n invocations with one more range (Uniforms()).
-void RunPass(State& s, gfx::ProgramId program, const StageState& st, const Resolved& r, void* extra,
-             uint32_t extra_bytes) {
+// Runs a compute pass of n invocations with one more range (Uniforms()):
+// the ES's vertex indices, or the GS's emits (into a GPU buffer).
+void RunPass(State& s, gfx::ProgramId program, const StageState& st, const Resolved& r,
+             const Geometry& g, void* extra, uint32_t extra_bytes, gfx::BufferId extra_buffer) {
   Bound b;
-  Bind(s, st, r, b);
+  Bind(s, st, r, b, &g.rings);
   if (st.stage == Stage::Export) b.ro.push_back({extra, extra_bytes});
-  else b.rw.push_back({extra, extra_bytes});
+  else b.rw.push_back({extra, extra_bytes, extra_buffer});
   b.res.buffers = b.ro.data();
   gfx::ProgramDispatch d;
   d.program = program;
@@ -795,16 +901,23 @@ void RunPass(State& s, gfx::ProgramId program, const StageState& st, const Resol
   s.dev->DispatchProgram(d);
 }
 
-// The draw's parts: the passes, then the copy shader over the emitted
-// vertices, each as the copy shader's vertex index (its dword in the GSVS
-// ring: the GS wave's place, then the lane's and the vertex's under the
-// ring V#'s swizzle, vertex j at dword j).
+// The draw's parts: the passes, the strips' indices (StripProgram), then
+// the copy shader over the emitted vertices, each as the copy shader's
+// vertex index (its dword in the GSVS ring: the GS wave's place, then the
+// lane's and the vertex's under the ring V#'s swizzle, vertex j at dword
+// j).
 void DrawGeometry(State& s, const DrawCall& call, gfx::ProgramDraw& d, Geometry& g) {
   const uint32_t k = g.es.prim_verts, max_vert = g.gs.max_vert, prims = call.count / k;
   if (call.indices && !Readable(call.indices, uint64_t(call.count) * call.index_size)) return;
   const uint32_t* v = g.gsvs_vsharp;
-  const uint32_t es = 2u << ((v[3] >> 19) & 3), is = 8u << ((v[3] >> 21) & 3), stride = (v[1] >> 16) & 0x3FFF;
-  std::vector<uint32_t> ids, emits, indices, strip;
+  uint32_t params[8] = {0, max_vert, g.gs.gs_wave_bytes, 2u << ((v[3] >> 19) & 3),
+                        8u << ((v[3] >> 21) & 3), (v[1] >> 16) & 0x3FFF};
+  params[6] = d.state.topology == gfx::Topology::PointList  ? 0
+              : d.state.topology == gfx::Topology::LineList ? 1
+                                                            : 2;
+  const gfx::BufferId emits_buf = GeometryBuffer(s, 2, g.part * max_vert * 4);
+  const gfx::BufferId draw_buf = GeometryBuffer(s, 3, 32 + 3 * g.part * max_vert * 4);
+  std::vector<uint32_t> ids, emits;
   for (uint32_t first = 0; first < prims; first += g.part) {
     const uint32_t n = std::min(prims - first, g.part);
     ids.resize(size_t(n) * k);
@@ -817,39 +930,21 @@ void DrawGeometry(State& s, const DrawCall& call, gfx::ProgramDraw& d, Geometry&
       }
     }
     g.es.invocations = n * k;
-    RunPass(s, g.pe, g.es, g.re, ids.data(), n * k * 4);
+    RunPass(s, g.pe, g.es, g.re, g, ids.data(), n * k * 4, 0);
     g.gs.invocations = n;
     g.gs.first_prim = first;
     emits.assign(size_t(n) * max_vert, 0);
-    RunPass(s, g.pg, g.gs, g.rg, emits.data(), n * max_vert * 4);
-    indices.clear();
-    for (uint32_t p = 0; p < n; p++) {
-      const uint32_t t = p % 64;
-      strip.clear();
-      for (uint32_t j = 0; j < max_vert; j++) {
-        const uint32_t e = emits[size_t(p) * max_vert + j];
-        if (!(e & 1)) break;
-        if (e & 2) strip.clear();
-        const uint32_t o = 4 * j;
-        strip.push_back(((p / 64) * g.gs.gs_wave_bytes + ((t / is) * stride + o / es) * es * is +
-                         (t % is) * es + o % es) / 4);
-        const size_t m = strip.size();
-        if (d.state.topology == gfx::Topology::PointList) {
-          indices.push_back(strip[m - 1]);
-        } else if (d.state.topology == gfx::Topology::LineList && m >= 2) {
-          indices.insert(indices.end(), {strip[m - 2], strip[m - 1]});
-        } else if (d.state.topology == gfx::Topology::TriangleList && m >= 3) {
-          // A strip's odd triangles swap their first two vertices (winding).
-          if (m % 2) indices.insert(indices.end(), {strip[m - 3], strip[m - 2], strip[m - 1]});
-          else indices.insert(indices.end(), {strip[m - 2], strip[m - 3], strip[m - 1]});
-        }
-      }
-    }
-    if (indices.empty()) continue;
-    d.indices = indices.data();
-    d.index_size = 4;
-    d.vertex_count = uint32_t(indices.size());
-    d.instance_count = 1;
+    RunPass(s, g.pg, g.gs, g.rg, g, emits.data(), n * max_vert * 4, emits_buf);
+    params[0] = n;
+    const gfx::BufferData in{nullptr, n * max_vert * 4, emits_buf};
+    const gfx::RwBufferData out{nullptr, 32 + 3 * n * max_vert * 4, draw_buf};
+    gfx::ProgramDispatch sd;
+    sd.program = s.strip_program;
+    sd.cs.buffers = &in;
+    sd.cs.uniforms = params;
+    sd.rw_buffers = &out;
+    s.dev->DispatchProgram(sd);
+    d.indirect = draw_buf;
     s.dev->DrawProgram(d);
   }
 }
@@ -1076,7 +1171,7 @@ void Draw(const Regs& r, const DrawCall& call) {
 
   // Resources and the call.
   Bound bv, bp;
-  Bind(s, vs, rv, bv);
+  Bind(s, vs, rv, bv, gs ? &geo.rings : nullptr);
   if (ps.code) Bind(s, ps, rp, bp);
   bv.uniforms[20] = cx[kStepRate0];
   bv.uniforms[21] = cx[kStepRate0 + 1];

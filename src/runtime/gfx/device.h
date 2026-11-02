@@ -159,6 +159,10 @@ struct ShaderDraw {
 //     its storage images `layout(R_IMAGE(n), <format>) uniform image2D`;
 //   - the stage's own uniform block: `layout(R_UNIFORMS) uniform ...`.
 using ProgramId = uint32_t;  // 0: none
+// A buffer that stays on the GPU: dispatches write it and later
+// dispatches and draws read it, in the order they were made, without a
+// copy to the host.
+using BufferId = uint32_t;  // 0: none
 
 enum class TextureKind : uint8_t { Tex2D, Tex2DArray, Cube, Tex3D };
 
@@ -236,10 +240,14 @@ struct SamplerDesc {
 struct BufferData {  // copied when the draw or dispatch is recorded
   const void* data = nullptr;
   uint32_t size = 0;
+  BufferId buffer = 0;  // instead of data: a GPU buffer's first size bytes
 };
 struct RwBufferData {  // read, and written back once the dispatch has run
   void* data = nullptr;
   uint32_t size = 0;
+  // Written back to this GPU buffer instead, with no wait; it starts as
+  // data, or as the buffer is when data is null.
+  BufferId buffer = 0;
 };
 // A stage's resources for one draw or dispatch, as many as the stage
 // declares.
@@ -263,6 +271,10 @@ struct ProgramDraw {
   int32_t base_vertex = 0;
   const void* indices = nullptr;  // vertex_count of them; null: not indexed
   uint32_t index_size = 2;
+  // Instead of the counts and indices: a GPU buffer with an indexed
+  // draw's five words (index count, instance count, first index, base
+  // vertex, first instance) and its 32-bit indices.
+  BufferId indirect = 0;
   ProgramResources vs, fs;
 };
 struct ProgramDispatch {
@@ -401,6 +413,8 @@ class Device {
   // draws go into one layer (ProgramDraw::depth_layer), programs sample
   // it as a 2D array.
   virtual DepthId CreateDepthArray(int w, int h, int layers, Format fmt);
+  virtual BufferId CreateBuffer(uint32_t size);
+  virtual void DestroyBuffer(BufferId b);
   // Uploads `r` of a level and layer of an image, as it is in memory.
   virtual void UpdateImage(TextureId t, int level, int layer, const Rect& r, const void* src,
                            uint32_t pitch);
@@ -417,7 +431,7 @@ class Device {
   virtual void CopyDepth(DepthId src, DepthId dst, const Rect& r);
   virtual void DrawProgram(const ProgramDraw& d);
   // Runs at once (with what was drawn before it) when it has read-write
-  // buffers, which it writes back before returning.
+  // buffers for the host, which it writes back before returning.
   virtual void DispatchProgram(const ProgramDispatch& d);
   // Draws `r` of a level 0 colour image into the back buffer from its
   // top-left corner, for Present to show: its texels as they are stored,
