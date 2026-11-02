@@ -336,8 +336,11 @@ bool RecoverJumpTable64(const Program& p, const Function& f, const Insn& jmp,
   bool below = false;
   ZydisRegister alias = ZYDIS_REGISTER_NONE;  // compared, then copied to idx
   uint32_t alias_cases = 0;
+  // Clang schedules the case-independent stores and loads of the code
+  // after the switch between the bounds check and the jmp: 17 instructions
+  // seen in a game's x64 code.
   const Insn* in = &jmp;
-  for (int steps = 0; steps < 16; steps++) {
+  for (int steps = 0; steps < 32; steps++) {
     bool taken;
     in = prev(in, &taken);
     if (!in) return unbounded();
