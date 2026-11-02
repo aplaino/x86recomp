@@ -1,11 +1,11 @@
-# The PS4 (Orbis OS) platform module (ARCHITECTURE.md, "Console
-# platforms"): built only with RECOMP_PLATFORM_ORBIS.
+# The PS4 (Orbis OS) platform module (ARCHITECTURE.md here): built only
+# with RECOMP_PLATFORM_ORBIS.
 
 # A program is a directory of shared libraries beside a small executable
-# (ARCHITECTURE.md, "Console platforms"): the lifted modules, the loader,
-# each system library's HLE, the GPU, the x86 core and the host layer
-# under them, each replaced alone. A library's change relinks nothing
-# that links it.
+# (ARCHITECTURE.md, "Programs and libraries"): the lifted modules, the
+# loader, each system library's HLE, the GPU, the x86 core and the host
+# layer under them, each replaced alone. A library's change relinks
+# nothing that links it.
 set(CMAKE_LINK_DEPENDS_NO_SHARED ON)
 recomp_bundle(recomp_base recomp_x87 recomp_x86 recomp_log recomp_gfx recomp_hlsl
               recomp_audio)

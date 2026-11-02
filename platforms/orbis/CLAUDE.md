@@ -1,13 +1,14 @@
 # The PS4 (Orbis OS) platform module
 
-Rules only, on top of the repository's CLAUDE.md. Design in the
-top-level ARCHITECTURE.md ("Console platforms"); the system libraries'
-HLE choices and the values not measured on hardware in docs/hle.md.
+Rules only, on top of the repository's CLAUDE.md. Design in
+ARCHITECTURE.md (here); the system libraries' HLE choices and the values
+not measured on hardware in docs/hle.md.
 
 ## Build and test
 - `cmake --preset orbis && cmake --build --preset orbis && ctest --test-dir out/build/orbis`
-  (the x86 path with RECOMP_PLATFORM_ORBIS on). orbis_process_test
-  needs clang and ld.lld for its FreeBSD x86-64 test programs.
+  (the x86 core with RECOMP_PLATFORM_ORBIS on, without Win32).
+  orbis_process_test needs clang and ld.lld for its FreeBSD x86-64 test
+  programs.
 - Changes to the x86 core (lifter, lifted.h, runtime) also go through
   the PC games' validation (the repository's CLAUDE.md).
 

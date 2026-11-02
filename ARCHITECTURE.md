@@ -1238,9 +1238,23 @@ process's hooks and runs the main thread (RunMainThread):
 - pump_events: the host's window events after each presented frame
   (Win32 turns them into window messages).
 Process::sysv selects the System V ABI for HLE arguments and CallGuest,
-Process::fpu_control new threads' x87 control word. The `x86` preset
-builds the core without Win32 (RECOMP_PLATFORM_WIN32 off), which shows
-that nothing in it depends on Windows.
+Process::fpu_control new threads' x87 control word. A guest with no UI
+thread of its own (a console's) runs its main thread beside the host
+loop instead (RunMainThreadBeside: the process main thread runs the
+platform's loop, its window, events and presentation). Guest fibers run
+on coroutines (platform.h), contexts with stacks of their own on one host
+thread, since lifted code keeps its call frames on the host stack. The
+`x86` preset builds the core without Win32 (RECOMP_PLATFORM_WIN32 off),
+and the `orbis` preset the PS4 without it, which shows that nothing in
+the core depends on Windows.
+
+A console platform's programs are directories of shared libraries: its
+lifted code is a lifted module, a shared library of its own with hidden
+symbols (`recomp_add_lifted(<target> <dir> LINK <platform library>)`),
+the executable holds `main()` and little else, and recomp_bundle() puts
+them beside the platform's libraries, the core and the host layer, each
+replaced alone. The PS4 (platforms/orbis, RECOMP_PLATFORM_ORBIS) is the
+first; its design is platforms/orbis/ARCHITECTURE.md.
 
 What belongs to a core: the CPU (every ISA extension the model claims is
 core lifter work, tested by the core's tests), lifted.h, the unwinder's
