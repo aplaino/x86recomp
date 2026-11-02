@@ -1151,7 +1151,9 @@ only those below it.
   recomp_gfx, recomp_hlsl, recomp_audio). The guest address space
   (guest_memory, guest_alloc, lazy_mem), the host platform layer
   (platform.h) and frame pacing (recomp_base). OpenGL's state machine
-  (gl/), which a graphics API front end drives.
+  (gl/), which a graphics API front end drives. SoftFloat
+  (cmake/softfloat.cmake), the exact arithmetic every core's
+  floating-point model is built on.
 - A CPU core per guest CPU, each behind its own option. The x86 core
   (RECOMP_X86, on by default): its lifter (tools/lifter_x86,
   recomp_lift), the CPU model (src/x86: lifted.h, ctx.h, the x87 and SSE

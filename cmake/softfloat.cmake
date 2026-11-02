@@ -1,5 +1,7 @@
-# Berkeley SoftFloat 3e (BSD-3), the arithmetic core of the x87 model
-# (src/x86/x87.cpp). Built the way its
+# Berkeley SoftFloat 3e (BSD-3), the arithmetic core of every core's
+# floating-point model (the x87 and SSE models, src/x86; a core whose CPU
+# has other NaN rules applies them on top, as the specialization below is
+# the x87's). Built the way its
 # build/Linux-x86_64-GCC/Makefile does, with two deliberate differences:
 # - the `8086` specialization (x87 NaN rules: the x87 propagates the NaN
 #   with the larger significand) instead of `8086-SSE`;

@@ -56,6 +56,14 @@ if(PROJECT_IS_TOP_LEVEL)
   enable_testing()
 endif()
 
+# --- base: exact floating point --------------------------------------------
+# SoftFloat 3e (cmake/softfloat.cmake), the definition of correct for every
+# core's floating-point model. Built only for the libraries that link it.
+include(FetchContent)
+include(cmake/softfloat.cmake)  # defines target `softfloat`
+target_compile_options(softfloat PRIVATE -O2)
+set_target_properties(softfloat PROPERTIES EXCLUDE_FROM_ALL ON)
+
 if(NOT RECOMP_X86)
   return()
 endif()
@@ -87,8 +95,7 @@ target_compile_features(recomp_base PUBLIC cxx_std_20)
 target_link_libraries(recomp_base PUBLIC recomp_log Threads::Threads)
 
 # --- x86 core --------------------------------------------------------------
-# x87 and SSE models (SoftFloat 3e).
-include(cmake/softfloat.cmake)  # defines target `softfloat`
+# x87 and SSE models (SoftFloat 3e, from the base).
 add_library(recomp_x87 SHARED src/x86/x87.cpp src/x86/sse.cpp)
 target_include_directories(recomp_x87 PUBLIC src)
 target_compile_features(recomp_x87 PUBLIC cxx_std_20)
@@ -101,7 +108,6 @@ target_link_libraries(recomp_x87 PRIVATE softfloat recomp_base)
 set(RECOMP_X87_FP_FLAGS -ffp-contract=off -fno-fast-math CACHE INTERNAL "")
 target_compile_options(recomp_x87 PRIVATE -O2 -fno-stack-protector
                        ${RECOMP_X87_FP_FLAGS} ${RECOMP_FAULT_FRAME_FLAGS})
-target_compile_options(softfloat PRIVATE -O2)
 
 # Lifter (build-time tool): x86 machine code -> C++. It reads no
 # executable format itself: each platform adds the reader of its own
