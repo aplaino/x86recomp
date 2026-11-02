@@ -86,11 +86,11 @@ place where the two worlds meet:
   views, heap blocks) is placed inside the arena.
 
 ## Game projects
-A game project adds this repository with `add_subdirectory()`, links
-`recomp_runtime` plus the optional HLE modules its EXE imports
+A PC game project adds this repository with `add_subdirectory()`, links
+`recomp_win32` plus the optional HLE modules its EXE imports
 (`recomp_mss32`, `recomp_bink`, `recomp_d3d7`, `recomp_dbghelp`), adds
 its lifted code with `recomp_add_lifted()`, and fills a
-`recomp::GameConfig` in its `main()`:
+`recomp::win32::GameConfig` in its `main()`:
 - `id`: per-user data directory ($XDG_DATA_HOME/<id>) and the prefix of
   dev/test switches (<ID>_TRACE, <ID>_TEST_INPUT, ...);
 - `guest_dir`, `exe_name`: where the game believes it is installed;
@@ -114,14 +114,14 @@ are the exception: changing those still recompiles every game.
   table reaches the dispatcher through `RegisterLiftedFunctions`, called
   before `main()` from x86/lifted_table.cpp, which
   `recomp_add_lifted()` compiles into the lifted code.
-- HLE modules are found by nothing but their registrars: the runtime
+- HLE modules are found by nothing but their registrars: recomp_win32
   makes its consumers link `--no-as-needed`, so a linker that drops
   unreferenced libraries keeps them.
 - Thread-locals use the initial-exec TLS model: the fault handler reads
   them, and a general-dynamic access may allocate.
-- Logging (runtime/log.h) is in the base library, recomp_image, under
-  the x87 model and the runtime; the runtime adds the guest state,
-  backtraces and crash file to FatalF through `g_fatal_report`.
+- Logging (runtime/log.h) is in the base library recomp_log, under
+  everything else; the x86 runtime adds the guest state, backtraces and
+  crash file to FatalF through `g_fatal_report`.
 
 Game-specific patches to lifted code (fixes, enhancements such as
 widescreen) live in the game project as hand-written replacements of
@@ -820,8 +820,9 @@ late-frame rule; on an idle host wake-ups land 15-30 us (Linux) or
   cleanly otherwise); oleaut32 BSTRs.
 - mss32 (Miles): our own mixer on an SDL3 audio stream (runtime/audio):
   resampling, loop counts, gain ramps, the "Miles Fast 2D Positional
-  Audio" model of the game's Miles version (6.1c or 6.5; platforms/win32/docs/miles.md),
-  MP3 through libavcodec. Miles' EAX providers (EAX 1.0, 2.0, 3.0, with
+  Audio" model of the game's Miles version (6.1c or 6.5;
+  platforms/win32/docs/miles.md), MP3 through libavcodec. Miles' EAX
+  providers (EAX 1.0, 2.0, 3.0, with
   Msseax.m3d's attribute names and struct layouts): voices pan like
   DirectSound3D hardware and get an LF level and a 5 kHz level
   (a two-pole low-pass) on the direct path and the send from the EAX
@@ -920,7 +921,7 @@ lock would be correct on x86-64 hosts and racy on Apple Silicon.
   (what one thread wrote before releasing is visible to the next one
   that acquires), but lock + unlock is not a full barrier: accesses
   outside it may move into the critical section and pass each other.
-  So each handler opens a `GuestSyncPoint` (kernel32_state.h): a seq_cst
+  So each handler opens a `GuestSyncPoint` (x86/runtime.h): a seq_cst
   fence on entry and on exit, early returns and ExitThread's unwind
   included. That covers SetEvent, ResetEvent,
   CreateMutexA (it may take ownership), ReleaseMutex,
@@ -1139,65 +1140,69 @@ Order: lifter first (PE32+, .pdata, long-mode emission, oracle tests),
 proven on a DLL with few imports; then the 2^N arena, Ctx and the Win64
 HLE ABI; then the unwinder and CRT; then graphics and audio.
 
-### Console platforms: modules on the shared core (planned)
-Consoles whose CPU the lifter already models (the PS4: x86-64, AMD
-family 16h) are platform modules on the same lifter and runtime, not
-forks, and not mixed into the PC path. A PC game's build never compiles
-or links a console module; another console (later: the Switch, on its
-own lifter base) plugs into the same interfaces.
+### Layout: base, CPU cores, platform modules
+Three layers, each a set of directories and shared libraries; each uses
+only those below it.
 
-What belongs to the core: the CPU (every ISA extension the model
-claims, e.g. VEX SSE and BMI1, is core lifter work, tested by
-tests/x64_isa), the guest arena, lifted.h, the SSE/x87 models, the
-unwinder's mechanics, gfx::Device, the audio mixer, input, and the
-generic seams below. What belongs to a platform: its executable format,
-its calling convention for HLE, its process and thread bring-up, its
-system libraries (HLE) and its GPU front end.
+- The base (src/runtime, cmake/host.cmake): what any guest's program
+  needs on its host. The host layer (RECOMP_HOST, on by default): SDL3,
+  ffmpeg, LLVM's demanglers, gfx::Device on Vulkan or Metal with the
+  shader compilers, HLSL, the software mixer and logging (recomp_log,
+  recomp_gfx, recomp_hlsl, recomp_audio). The guest address space
+  (guest_memory, guest_alloc, lazy_mem), the host platform layer
+  (platform.h) and frame pacing (recomp_base). OpenGL's state machine
+  (gl/), which a graphics API front end drives.
+- A CPU core per guest CPU, each behind its own option. The x86 core
+  (RECOMP_X86, on by default): its lifter (tools/lifter_x86,
+  recomp_lift), the CPU model (src/x86: lifted.h, ctx.h, the x87 and SSE
+  models in recomp_x87), PE images (recomp_pe: the lifter's own format,
+  and what Win32 loads), and the runtime every x86 guest runs on
+  (recomp_x86): dispatch and the fault handler, the process and its
+  threads, calls between the host and lifted code, the HLE registry and
+  its calling conventions (32-bit stdcall/cdecl, Win64, System V),
+  presentation's dev aids and the hang watchdog. Its tests are in
+  tests/x86.
+- Platform modules (platforms/<name>, option RECOMP_PLATFORM_<NAME>):
+  an OS and its system libraries on a core, with their own
+  CMakeLists.txt, CLAUDE.md, docs and tests. Win32 (platforms/win32, on
+  by default) is the PC games' platform: the Win32 process (PE loading,
+  PEB, TEBs, static TLS, SEH), the HLE of kernel32, user32, gdi32 and the
+  rest of Windows (recomp_win32), and of DirectX and the middleware, one
+  library per DLL (recomp_d3d9, recomp_mss32, ...). Console platforms
+  are modules the same way, on the core of their CPU; a game's build
+  compiles and links only its own platform.
 
-The seams (core, generic):
-- Images. The lifter's Program takes modules from an image reader:
-  sections, the text ranges, function starts with their unwind ranges,
-  relocations, imports (a slot address and a name or hash) and exports.
-  PE is the built-in reader; a platform registers its own (the PS4:
-  SELF/ELF with SCE dynamic tables and NID imports, function starts
-  from .eh_frame), compiled into recomp_lift only when that platform is
-  enabled (CMake option RECOMP_PLATFORM_<NAME>).
-- HLE ABI. Arg(), the return registers and float arguments follow the
-  process's ABI: 32-bit stdcall/cdecl, Win64, or System V AMD64
-  (Process::sysv). System V is generic (it is also the Linux and macOS
-  x64 ABI), so it lives in the core: Arg(c, i) is the i-th integer or
-  pointer argument (rdi, rsi, rdx, rcx, r8, r9, then the stack) and
-  ArgD/ArgF the i-th floating-point one (xmm0-7), counted apart; results
-  go to rax or xmm0 and the caller pops, as for Win64. Threads reach
-  their TCB through fs (Ctx::fs_base).
-- Address space. Where images, stacks, TLS and the thunk region go is
-  the platform's choice ("nothing below 4 GiB" is Win64's rule; PS4
-  executables are linked at 0x400000).
-- Process bring-up: a platform entry that loads the modules, binds
-  imports to its HLE, sets up TLS (Windows' TEB through gs; FreeBSD's
-  TCB through fs) and starts the main thread.
+The x86 core knows no platform. A platform's loader (Win32's
+RunProcess) creates the process (StartProcess: the arena and the thunk
+region), maps its images and lists their code ranges in Process::code
+for dispatch, binds imports to its HLE (hle::BindImport), sets the
+process's hooks and runs the main thread (RunMainThread):
+- thread_init: a new thread's control block (Win32's TEB and static TLS,
+  found through fs or gs; a System V platform's TCB through fs);
+- thread_exit: a guest thread finished (Win32 signals its handle);
+- guest_fault: an access violation in guest code (Win32's SEH chain);
+- pump_events: the host's window events after each presented frame
+  (Win32 turns them into window messages).
+Process::sysv selects the System V ABI for HLE arguments and CallGuest,
+Process::fpu_control new threads' x87 control word. The `x86` preset
+builds the core without Win32 (RECOMP_PLATFORM_WIN32 off), which shows
+that nothing in it depends on Windows.
 
-Layout: platforms/<name>/ (its loader, ABI glue, process bring-up and HLE
-libraries as recomp_<name>_* shared libraries, its docs and tests), with
-its own CMakeLists.txt that the top level includes only when the option
-is on. Game projects for that platform turn it on; nothing else does.
-
-The x86 path is its own option, RECOMP_X86 (default on): a game for
-another CPU turns it off and builds without the x86 lifter, CPU model or
-Win32 HLE.
+What belongs to a core: the CPU (every ISA extension the model claims is
+core lifter work, tested by the core's tests), lifted.h, the unwinder's
+mechanics, the HLE calling conventions. What belongs to a platform: its
+executable formats (beyond PE, a reader registered with the lifter: the
+lifter's ImageReader, compiled into recomp_lift only when the platform
+is enabled), its address space layout ("nothing below 4 GiB" is Win64's
+rule), its process and thread bring-up, its system libraries (HLE) and
+its GPU front end.
 
 Guest and host are separate axes. Every guest's lifted code is portable
-C++, so each one runs on every host (Linux x86-64, macOS arm64), and
-what a native program needs on its host is one host layer for all of
-them (cmake/host.cmake, RECOMP_HOST, on by default): SDL3, ffmpeg,
-LLVM's demanglers, gfx::Device on Vulkan or Metal with the shader
-compilers, the software mixer and logging (recomp_log). The x86 path
-and every platform module build on it. RECOMP_HOST off is only for
-CPU-only test builds, such as a lifter's tests cross built for a host
-whose sysroot has none of those libraries.
-
-Each guest option is independent, so one tree can build the x86 path
-and any console platforms together.
+C++, so each one runs on every host (Linux x86-64, macOS arm64), and the
+host layer serves them all. RECOMP_HOST off is only for CPU-only test
+builds, such as a lifter's tests cross built for a host whose sysroot
+has none of its libraries. Each core and platform option is
+independent, so one tree can build several together.
 
 ## Roadmap
 - 64-bit guests (above).

@@ -15,22 +15,29 @@ The game ports built on it and their status are on the
 
 ## What is here
 
-- **Lifter** (`tools/lifter_x86`, `recomp_lift`): decodes a PE with Zydis and
-  emits C++ for every function, one basic block at a time, with exact
-  x86 integer and flag semantics. Straight-line x87 code becomes guarded
-  "runs" that keep the FPU register stack in locals. 32-bit and x64
-  images both lift; x64 code runs on the Win64 ABI against a fixed CPU
-  model (AMD family 16h; SSE3 to SSE4.1, AVX and LZCNT so far).
+Three layers ([ARCHITECTURE.md](ARCHITECTURE.md), "Layout"): the base
+every guest shares (`src/runtime`), a core per guest CPU (the x86 core:
+`src/x86`, `tools/lifter_x86`), and platform modules on a core
+(`platforms/<name>`; Win32 for PC games).
+
+- **Lifter** (`tools/lifter_x86`, `recomp_lift`): decodes a PE with
+  Zydis and emits C++ for every function, one basic block at a time,
+  with exact x86 integer and flag semantics. Straight-line x87 code
+  becomes guarded "runs" that keep the FPU register stack in locals.
+  32-bit and x64 images both lift; x64 code runs on the Win64 ABI
+  against a fixed CPU model (AMD family 16h; SSE3 to SSE4.1, AVX and
+  LZCNT so far).
 - **x87 model** (`src/x86/x87.cpp`): exact 80-bit x87 (precision and
   rounding control, status-word flags) on Berkeley SoftFloat with
   integer fast paths, tested bit for bit against a real x87.
 - **SSE and AVX** (`src/x86/sse.cpp`): the XMM/YMM registers and MXCSR,
   with SoftFloat lanes and x86 NaN rules, tested bit for bit against the
   CPU like the x87 model.
-- **Runtime** (`src/runtime`): the guest address space (4 GiB for
-  32-bit guests), PE loading, threads, SEH and x64 unwinding, crash and
-  hang reports.
-- **HLE** (`src/runtime/hle`): Win32 (kernel32, user32, gdi32, advapi32,
+- **Runtime**: the guest address space (4 GiB for 32-bit guests) in
+  the base (`src/runtime`); dispatch, threads, calls into lifted code,
+  the HLE registry, crash and hang reports in the x86 core (`src/x86`);
+  PE loading, SEH and x64 unwinding in the Win32 platform.
+- **HLE** (`platforms/win32`): Win32 (kernel32, user32, gdi32, advapi32,
   shfolder, ...) on POSIX and SDL3; optional modules for Miles Sound
   System (with EAX 1-3 on our own reverb, modelled on Creative
   hardware), Bink, DirectDraw 7/Direct3D 7 and OpenGL 1.x (on a
@@ -42,18 +49,19 @@ The game ports built on it and their status are on the
   HLSL dialect and compiled Direct3D 9 shaders (shader models 1-3) to
   GLSL, for the programmable pipeline on SDL_GPU.
 - **Tools**: Ghidra export scripts (`tools/ghidra`), a PE symbol dumper
-  (`tools/pe_symbols.py`), dev-time reference checks (`platforms/win32/tools/layout`,
-  `platforms/win32/tools/undname`), and EAX reference measurement (`tools/eax_capture`:
-  a Windows 98 recorder for Creative hardware, the same cases rendered by
-  the runtime, and their comparison).
+  (`tools/pe_symbols.py`), dev-time reference checks
+  (`platforms/win32/tools/layout`, `platforms/win32/tools/undname`), and
+  EAX reference measurement (`tools/eax_capture`: a Windows 98 recorder
+  for Creative hardware, the same cases rendered by the runtime, and
+  their comparison).
 
 Consoles whose CPU the lifter already models are to be platform modules
 on the same core rather than forks: the first, for the PlayStation 4
 (its executable format, system libraries and GPU), is in progress on
 its own branch.
 
-[ARCHITECTURE.md](ARCHITECTURE.md) describes the design; `docs/` the
-observed behaviour of the middleware reimplemented here
+[ARCHITECTURE.md](ARCHITECTURE.md) describes the design; each platform's
+`docs/` the observed behaviour of what it reimplements
 ([platforms/win32/docs/miles.md](platforms/win32/docs/miles.md)).
 
 ## Using it from a game project
@@ -66,11 +74,12 @@ add_subdirectory("${SWARC_DIR}" swarc)
 
 recomp_add_lifted(mygame_lifted "${CMAKE_CURRENT_SOURCE_DIR}/generated")
 add_executable(mygame src/main.cpp $<TARGET_OBJECTS:mygame_lifted>)
-target_link_libraries(mygame PRIVATE recomp_runtime recomp_mss32)
+target_link_libraries(mygame PRIVATE recomp_win32 recomp_mss32)
 ```
 
-`main()` fills a `recomp::GameConfig` (id, guest install directory, EXE
-name, registry seed, optional hooks) and calls `recomp::RunProcess`.
+`main()` fills a `recomp::win32::GameConfig` (id, guest install
+directory, EXE name, registry seed, optional hooks) and calls
+`recomp::RunProcess` (`win32/process.h`).
 The lifter runs as a separate step over the user's own EXE:
 
 ```sh
