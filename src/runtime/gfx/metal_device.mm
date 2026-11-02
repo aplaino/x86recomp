@@ -2742,6 +2742,7 @@ void main() {
   // the GPU each hold one, and one more absorbs their jitter.
   static constexpr int kSlots = 4;
   static constexpr size_t kChunk = 32u << 20;
+  static constexpr size_t kKeptChunks = 2;  // per slot, between frames
 
   void WarnOnce(uint32_t bit, const char* what) {
     if (warned_ & bit) return;
@@ -2835,7 +2836,13 @@ void main() {
   void BeginFrame() {
     dispatch_semaphore_wait(frames_free_, DISPATCH_TIME_FOREVER);
     slot_ = (slot_ + 1) % kSlots;
-    arenas_[slot_].chunk = arenas_[slot_].used = 0;
+    // The slot's last frame is done: a frame that took more (a level's
+    // texture uploads: hundreds of MB, several times that with DXT decoded)
+    // does not keep it. Two standard chunks stay; bigger ones go.
+    Arena& arena = arenas_[slot_];
+    std::erase_if(arena.chunks, [](id<MTLBuffer> b) { return b.length > kChunk; });
+    if (arena.chunks.size() > kKeptChunks) arena.chunks.resize(kKeptChunks);
+    arena.chunk = arena.used = 0;
     serial_++;
     frame_open_ = true;
     draw_serial_.store(serial_, std::memory_order_release);
