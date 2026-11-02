@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <vector>
 
 #include "runtime/gfx/device.h"
 #include "runtime/guest_memory.h"
@@ -40,6 +41,24 @@ void Dispatch(const Regs& r, const uint32_t groups[3]);
 void MemoryWritten(gaddr base, uint64_t size);
 // A new submission: textures read from memory are compared again.
 void NextSubmission();
+
+// Dispatches' results in guest memory land once the device has run them
+// (gfx::ProgramDispatch::land_later), and the command processor's writes
+// the CPU waits on (labels, end-of-pipe events) wait behind them, in
+// order, as on the console. Reads of guest memory on the GPU's side land
+// what they overlap first (and run the signals queued before).
+void BeforeRead(gaddr a, uint64_t n);
+// Runs fn, which writes n bytes at a (n 0: none), once every result queued
+// so far has landed and the signals before it have run; at once if
+// nothing is queued. `words`: what it writes there, if known.
+void Signal(gaddr a, uint64_t n, std::function<void()> fn, std::vector<uint32_t> words = {});
+// The dword the last queued signal writing at a writes, if one does and
+// it is known: what the command processor's waits on memory compare
+// (the device runs what follows after the work the signal waits for).
+bool SignalValue(gaddr a, uint32_t* v);
+// Lands the results the device has finished and runs the signals waiting
+// for them; all of them, waiting, with wait.
+void Settle(bool wait);
 
 // The colour target the GPU rendered at a guest address with this size, or
 // 0 (VideoOut shows it).

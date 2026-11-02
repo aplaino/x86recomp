@@ -249,6 +249,7 @@ struct RwBufferData {  // read, and written back once the dispatch has run
   // Written back to this GPU buffer instead, with no wait; it starts as
   // data, or as the buffer is when data is null.
   BufferId buffer = 0;
+  bool land = false;  // with buffer: written back to data too
 };
 // A stage's resources for one draw or dispatch, as many as the stage
 // declares.
@@ -284,6 +285,9 @@ struct ProgramDispatch {
   ProgramResources cs;
   const RwBufferData* rw_buffers = nullptr;
   const ColorTarget* rw_images = nullptr;  // storage images, at a level
+  // Read-write buffers for the host are written back once the GPU has run
+  // the dispatch (LandWrites), not before DispatchProgram returns.
+  bool land_later = false;
 };
 
 class Device {
@@ -435,8 +439,14 @@ class Device {
   virtual void CopyDepth(DepthId src, DepthId dst, const Rect& r);
   virtual void DrawProgram(const ProgramDraw& d);
   // Runs at once (with what was drawn before it) when it has read-write
-  // buffers for the host, which it writes back before returning.
+  // buffers for the host, which it writes back before returning (unless
+  // land_later).
   virtual void DispatchProgram(const ProgramDispatch& d);
+  // The land_later dispatches with read-write buffers for the host: how
+  // many were queued, and how many have landed after writing back, in
+  // order, those the GPU has run (all of them, waiting, with wait).
+  virtual uint64_t WritesQueued();
+  virtual uint64_t LandWrites(bool wait);
   // Draws `r` of a level 0 colour image into the back buffer from its
   // top-left corner, for Present to show: its texels as they are stored,
   // so an sRGB image's encoded values.

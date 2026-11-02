@@ -8,6 +8,7 @@
 #include <SDL3/SDL.h>
 
 #include <cstdio>
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
@@ -164,6 +165,15 @@ int main() {
   bool ok = true;
   for (uint32_t i = 0; i < 64; i++) ok &= out[i] == i * 2 + 1;
   Check(ok, "a dispatch's read-write buffer comes back written");
+  std::fill(out.begin(), out.end(), 0xDEADBEEF);
+  pdp.land_later = true;
+  dev->DispatchProgram(pdp);
+  Check(dev->WritesQueued() == 1, "a land_later dispatch queues its write-back");
+  Check(dev->LandWrites(true) == 1, "LandWrites lands it");
+  ok = true;
+  for (uint32_t i = 0; i < 64; i++) ok &= out[i] == i * 2 + 1;
+  Check(ok, "a land_later dispatch's read-write buffer is written once landed");
+  pdp.land_later = false;
   std::vector<uint32_t> iv(16);
   dev->ReadImage(img, 0, 0, {0, 0, 4, 4}, iv.data(), 16);
   ok = true;

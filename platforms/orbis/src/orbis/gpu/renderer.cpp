@@ -4,8 +4,11 @@
 #include "orbis/gpu/renderer.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
+#include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -182,6 +185,13 @@ struct DepthTarget {
   gaddr htile = 0;  // DB_HTILE_DATA_BASE (0: none)
   bool htile_stencil = false;  // the HTILE tracks stencil too
   bool htile_clear = false;  // its HTILE says cleared, not applied yet
+  gaddr written = 0;           // a write into its HTILE, checked at its next draw
+  uint64_t written_size = 0;
+  // A dispatch's write of its HTILE, also kept here: its next draw applies
+  // it on the GPU (HtileClear), and the next submission checks it.
+  gfx::BufferId htile_buf = 0;
+  uint32_t htile_buf_size = 0;
+  bool htile_gpu = false, htile_verify = false;
 };
 struct Texture {
   gfx::TextureId tex = 0;
@@ -208,6 +218,8 @@ struct State {
   std::vector<Target> targets;
   std::vector<TargetView> views;
   gfx::ProgramId stencil_program = 0;  // SampledStencil's
+  gfx::ProgramId htile_test = 0, htile_clear = 0;  // HtileClear's
+  gfx::BufferId htile_draw = 0;
   gfx::ProgramId strip_program = 0;    // StripProgram's
   // Geometry shaders' GPU buffers: the ESGS and GSVS rings, the GS's
   // emits, the copy shader's draw (DrawGeometry); their sizes.
@@ -224,6 +236,45 @@ struct State {
 State& G() {
   static State* s = new State;  // the GPU thread uses it until exit
   return *s;
+}
+
+// What BeforeRead, Signal and Settle keep: the guest ranges of results
+// not landed yet and the signals waiting, each with the device's count of
+// queued results it waits for. Its own lock: reads under State::mu land
+// results.
+struct Landings {
+  struct Range {
+    gaddr base;
+    uint64_t size, after;
+  };
+  struct Later {
+    gaddr base;
+    uint64_t size, after;
+    std::function<void()> fn;
+    std::vector<uint32_t> words;  // what fn writes, if known
+  };
+  std::mutex mu;
+  std::atomic<size_t> pending{0};  // ranges and signals
+  std::vector<Range> ranges;
+  std::deque<Later> signals;
+  uint64_t landed = 0;
+};
+Landings& L() {
+  static Landings* l = new Landings;  // the GPU threads use it until exit
+  return *l;
+}
+
+// Lands what the device has finished (all, with wait), then forgets the
+// ranges and runs the signals that waited for it. Under L().mu.
+void LandLocked(Landings& l, bool wait) {
+  gfx::Device* dev = G().dev;
+  if (dev) l.landed = dev->LandWrites(wait);
+  std::erase_if(l.ranges, [&](const Landings::Range& r) { return r.after <= l.landed; });
+  while (!l.signals.empty() && l.signals.front().after <= l.landed) {
+    l.signals.front().fn();
+    l.signals.pop_front();
+  }
+  l.pending = l.ranges.size() + l.signals.size();
 }
 
 // A hash of guest memory, to see whether texels changed: four lanes of
@@ -252,8 +303,12 @@ gaddr ImageBase(const uint32_t t[8]) {
   return (uint64_t(t[0]) | uint64_t(t[1] & 0x3F) << 32) << 8;
 }
 
+// Whether n bytes at a are guest memory; the dispatch results still to
+// land there land first.
 bool Readable(gaddr a, uint64_t n) {
-  return n && g_proc->vm.mem().IsCommitted(a) && g_proc->vm.mem().IsCommitted(a + n - 1);
+  if (!n || !g_proc->vm.mem().IsCommitted(a) || !g_proc->vm.mem().IsCommitted(a + n - 1)) return false;
+  BeforeRead(a, n);
+  return true;
 }
 
 gfx::TextureId ColorTarget(State& s, gaddr addr, uint32_t w, uint32_t h, Format fmt,
@@ -334,6 +389,7 @@ DepthTarget* DepthTargetAt(State& s, gaddr addr, uint32_t w, uint32_t h, Format 
                                 [&](const DepthTarget& d) {
                                   if (d.addr != addr) return false;
                                   s.dev->DestroyDepth(d.depth);
+                                  if (d.htile_buf) s.dev->DestroyBuffer(d.htile_buf);
                                   return true;
                                 }),
                  s.depths.end());
@@ -349,14 +405,118 @@ DepthTarget* DepthTargetAt(State& s, gaddr addr, uint32_t w, uint32_t h, Format 
 // from its start with every tile's ZMASK (bits 0-3) 0 is the fast clear
 // (each tile reads as DB_DEPTH_CLEAR), applied at the target's next draw.
 // HTILE that tracks depth alone; other writes into it are not modelled.
+// Read at that draw (HtileCheck); a dispatch's write of a whole HTILE is
+// applied on the GPU instead (HtileOf, HtileClear).
 void HtileWritten(State& s, gaddr base, uint64_t size) {
   for (DepthTarget& d : s.depths) {
     if (!d.htile || d.htile < base || d.htile >= base + size) continue;
-    const uint8_t* p = GPtr(d.htile);
-    bool clear = d.htile == base && !d.htile_stencil;
-    for (uint64_t i = 0; clear && i + 4 <= size; i += 4) clear = !(p[i] & 0xF);
-    if (clear) d.htile_clear = true;
-    else WarnOnce(17, "an HTILE write other than a full depth clear is not modelled");
+    d.written = base;
+    d.written_size = size;
+    d.htile_gpu = d.htile_verify = false;
+  }
+}
+
+// The same, written to the target's HTILE buffer too (HtileOf).
+void HtileGpuWritten(State& s, gaddr base, uint64_t size) {
+  for (DepthTarget& d : s.depths) {
+    if (d.htile != base) continue;
+    d.written = base;
+    d.written_size = size;
+    d.htile_gpu = d.htile_verify = true;
+  }
+}
+
+bool HtileCleared(const DepthTarget& d, gaddr base, uint64_t size) {
+  BeforeRead(base, size);
+  const uint8_t* p = GPtr(base);
+  bool clear = d.htile == base && !d.htile_stencil;
+  for (uint64_t i = 0; clear && i + 4 <= size; i += 4) clear = !(p[i] & 0xF);
+  if (!clear) WarnOnce(17, "an HTILE write other than a full depth clear is not modelled");
+  return clear;
+}
+
+void HtileCheck(DepthTarget& d) {
+  if (!d.written_size || d.htile_verify) return;
+  d.htile_clear = HtileCleared(d, d.written, d.written_size);
+  d.written_size = 0;
+}
+
+// The depth target whose whole HTILE a dispatch writes at base, if it
+// tracks depth alone: kept in its GPU buffer too (HtileClear).
+DepthTarget* HtileOf(State& s, gaddr base, uint32_t size) {
+  for (DepthTarget& d : s.depths) {
+    if (d.htile != base || d.htile_stencil) continue;
+    if (d.htile_buf_size < size) {
+      if (d.htile_buf) s.dev->DestroyBuffer(d.htile_buf);
+      d.htile_buf = s.dev->CreateBuffer(size);
+      d.htile_buf_size = d.htile_buf ? size : 0;
+    }
+    return d.htile_buf ? &d : nullptr;
+  }
+  return nullptr;
+}
+
+// Applies a dispatch's write of d's HTILE at its next draw without
+// waiting for it: one program turns the HTILE into an indexed indirect
+// draw of a triangle if every tile's ZMASK is 0 (HtileCleared), of none
+// otherwise, and that triangle writes the clear depth over each layer.
+void HtileClear(State& s, DepthTarget& d, float z) {
+  if (!s.htile_test) {
+    gfx::ProgramDesc pd;
+    pd.cs.glsl =
+        "shared uint masks[64];\n"
+        "void main() {\n"
+        "  uint lane = gl_LocalInvocationID.x, at = r_buf[0].x, n = r_buf[0].y / 4u, m = 0u;\n"
+        "  for (uint i = lane; i < n; i += 64u) m |= r_mem[at + i] & 0xFu;\n"
+        "  masks[lane] = m;\n"
+        "  barrier();\n"
+        "  if (lane != 0u) return;\n"
+        "  for (uint i = 1u; i < 64u; i++) m |= masks[i];\n"
+        "  uint w = r_rwbuf[0].x;\n"
+        "  r_rw[w] = m == 0u ? 3u : 0u;\n"
+        "  r_rw[w + 1u] = 1u;\n"
+        "  r_rw[w + 2u] = 8u;\n"
+        "  r_rw[w + 3u] = 0u;\n"
+        "  r_rw[w + 4u] = 0u;\n"
+        "  for (uint i = 0u; i < 3u; i++) r_rw[w + 8u + i] = i;\n"
+        "}\n";
+    pd.cs.buffers = 1;
+    pd.cs.rw_buffers = 1;
+    pd.local_size[0] = 64;
+    s.htile_test = s.dev->CreateProgram(pd);
+    pd = {};
+    pd.vs.glsl =
+        "void main() {\n"
+        "  gl_Position = vec4(float((gl_VertexIndex & 1) * 4 - 1), float((gl_VertexIndex & 2) * 2 - 1), 0.0, 1.0);\n"
+        "}\n";
+    pd.fs.glsl =
+        "layout(std140, R_UNIFORMS) uniform RClear { vec4 r_clear; };\n"
+        "void main() { gl_FragDepth = r_clear.x; }\n";
+    pd.fs.uniform_bytes = 16;
+    s.htile_clear = s.dev->CreateProgram(pd);
+    s.htile_draw = s.dev->CreateBuffer(64);
+  }
+  if (!s.htile_test || !s.htile_clear || !s.htile_draw) return;
+  const gfx::BufferData in{nullptr, d.htile_buf_size, d.htile_buf};
+  const gfx::RwBufferData out{nullptr, 64, s.htile_draw};
+  gfx::ProgramDispatch t;
+  t.program = s.htile_test;
+  t.cs.buffers = &in;
+  t.rw_buffers = &out;
+  s.dev->DispatchProgram(t);
+  const float u[4] = {z, 0, 0, 0};
+  gfx::ProgramDraw c;
+  c.program = s.htile_clear;
+  c.depth = d.depth;
+  c.viewport = {0, 0, d.w, d.h, 0.0f, 1.0f};
+  c.scissor = {0, 0, int32_t(d.w), int32_t(d.h)};
+  c.state.depth_test = c.state.depth_write = true;
+  c.state.depth_compare = gfx::CompareOp::Always;
+  c.indirect = s.htile_draw;
+  c.fs.uniforms = u;
+  for (uint32_t i = 0; i < std::max(d.layers, 1u); i++) {
+    c.depth_layer = int(i);
+    s.dev->DrawProgram(c);
   }
 }
 
@@ -644,6 +804,7 @@ struct Bound {
   std::vector<gfx::ColorTarget> images;
   std::vector<uint32_t> uniforms;
   gfx::ProgramResources res;
+  std::vector<gaddr> htiles;  // HTILEs written to their GPU buffers (HtileOf)
 };
 // A guest range kept in a GPU buffer instead (a geometry shader's ring).
 struct GpuRange {
@@ -670,6 +831,12 @@ void Bind(State& s, const StageState& st, const Resolved& r, Bound& b,
       continue;
     }
     const bool ok = Readable(br.base, br.size);
+    DepthTarget* ht = rw && ok ? HtileOf(s, br.base, br.size) : nullptr;
+    if (ht) {
+      b.rw.push_back({GPtr(br.base), br.size, ht->htile_buf, true});
+      b.htiles.push_back(br.base);
+      continue;
+    }
     if (rw) b.rw.push_back({ok ? GPtr(br.base) : nullptr, ok ? br.size : 0});
     else b.ro.push_back({ok ? GPtr(br.base) : nullptr, ok ? br.size : 0});
   }
@@ -1018,6 +1185,50 @@ void DrawGeometry(State& s, const DrawCall& call, gfx::ProgramDraw& d, Geometry&
 
 }  // namespace
 
+void BeforeRead(gaddr a, uint64_t n) {
+  Landings& l = L();
+  if (!l.pending.load(std::memory_order_relaxed)) return;
+  std::lock_guard<std::mutex> lk(l.mu);
+  bool hit = false;
+  for (const Landings::Range& r : l.ranges) hit |= r.base < a + n && a < r.base + r.size;
+  for (const Landings::Later& r : l.signals) hit |= r.base < a + n && a < r.base + r.size;
+  if (hit) LandLocked(l, true);
+}
+
+void Signal(gaddr a, uint64_t n, std::function<void()> fn, std::vector<uint32_t> words) {
+  Landings& l = L();
+  std::lock_guard<std::mutex> lk(l.mu);
+  gfx::Device* dev = G().dev;
+  const uint64_t after = dev ? dev->WritesQueued() : 0;
+  if (l.signals.empty() && after > l.landed) LandLocked(l, false);
+  if (l.signals.empty() && after <= l.landed) {
+    fn();
+    return;
+  }
+  l.signals.push_back({a, n, after, std::move(fn), std::move(words)});
+  l.pending = l.ranges.size() + l.signals.size();
+}
+
+bool SignalValue(gaddr a, uint32_t* v) {
+  Landings& l = L();
+  if (!l.pending.load(std::memory_order_relaxed)) return false;
+  std::lock_guard<std::mutex> lk(l.mu);
+  for (auto it = l.signals.rbegin(); it != l.signals.rend(); ++it) {
+    if (a + 4 <= it->base || a >= it->base + it->size) continue;
+    if ((a - it->base) % 4 || 4 * it->words.size() != it->size) return false;
+    *v = it->words[(a - it->base) / 4];
+    return true;
+  }
+  return false;
+}
+
+void Settle(bool wait) {
+  Landings& l = L();
+  if (!l.pending.load(std::memory_order_relaxed)) return;
+  std::lock_guard<std::mutex> lk(l.mu);
+  LandLocked(l, wait);
+}
+
 void SetDevice(gfx::Device* dev) {
   std::lock_guard<std::mutex> l(G().mu);
   G().dev = dev;
@@ -1079,6 +1290,11 @@ void Draw(const Regs& r, const DrawCall& call) {
                                     stencil ? uint64_t(cx[kDbStencilReadBase]) << 8 : 0,
                                     last ? last + 1 : 0);
     d.depth = dt->depth;
+    HtileCheck(*dt);
+    if (dt->htile_gpu) {
+      dt->htile_gpu = false;
+      HtileClear(s, *dt, AsFloat(cx[kDbDepthClear]));
+    }
     dt->htile = (cx[kDbZInfo] & (1u << 29)) ? uint64_t(cx[kDbHtileDataBase]) << 8 : 0;
     dt->htile_stencil = stencil && !(cx[kDbStencilInfo] & (1u << 29));  // TILE_STENCIL_DISABLE
     if (dt->htile_clear) {
@@ -1298,6 +1514,7 @@ void Dispatch(const Regs& r, const uint32_t groups[3]) {
   d.cs = b.res;
   d.rw_buffers = b.rw.data();
   d.rw_images = b.images.data();
+  d.land_later = true;
   d.groups[1] = groups[1];
   d.groups[2] = groups[2];
   // More groups in x than the host runs at once: in parts, each told
@@ -1308,8 +1525,23 @@ void Dispatch(const Regs& r, const uint32_t groups[3]) {
     b.uniforms[23] = first;
     s.dev->DispatchProgram(d);
   }
+  bool host = false;
+  for (const gfx::RwBufferData& x : b.rw) host |= x.data != nullptr;
+  if (host) {
+    Landings& l = L();
+    std::lock_guard<std::mutex> lk(l.mu);
+    for (const BufferRange& br : rc.buffers)
+      if (br.written) l.ranges.push_back({br.base, br.size, s.dev->WritesQueued()});
+    l.pending = l.ranges.size() + l.signals.size();
+  }
   for (const BufferRange& br : rc.buffers)
-    if (br.written) HtileWritten(s, br.base, br.size), KeptWritten(s, br.base, br.size);
+    if (br.written) {
+      if (std::find(b.htiles.begin(), b.htiles.end(), br.base) == b.htiles.end())
+        HtileWritten(s, br.base, br.size);
+      else
+        HtileGpuWritten(s, br.base, br.size);
+      KeptWritten(s, br.base, br.size);
+    }
 }
 
 void MemoryWritten(gaddr base, uint64_t size) {
@@ -1323,6 +1555,14 @@ void NextSubmission() {
   State& s = G();
   s.submission++;
   if (!s.dev) return;
+  // The HTILE writes applied on the GPU, landed by now: only to warn about
+  // those that were no full clears.
+  for (DepthTarget& d : s.depths) {
+    if (!d.htile_verify || d.htile_gpu) continue;
+    d.htile_verify = false;
+    HtileCleared(d, d.written, d.written_size);
+    d.written_size = 0;
+  }
   for (gfx::BufferId b : s.retired) s.dev->DestroyBuffer(b);
   s.retired.clear();
   for (auto it = s.kept.begin(); it != s.kept.end();) {

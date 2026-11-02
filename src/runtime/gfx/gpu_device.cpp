@@ -469,6 +469,8 @@ class GpuDevice final : public Device {
     if (!dev_) return;
     SDL_WaitForGPUIdle(dev_);
     for (const InFlight& f : in_flight_) SDL_ReleaseGPUFence(dev_, f.fence);
+    for (const Landing& w : landings_) SDL_ReleaseGPUTransferBuffer(dev_, w.tb);
+    for (const Landing& w : download_pool_) SDL_ReleaseGPUTransferBuffer(dev_, w.tb);
     for (auto& [t, rd] : reads_) FinishRead(rd, nullptr, 0, Format::Unknown);
     for (auto& [k, p] : pipelines_) SDL_ReleaseGPUGraphicsPipeline(dev_, p);
     for (auto& [k, p] : shader_pipelines_) SDL_ReleaseGPUGraphicsPipeline(dev_, p);
@@ -1796,6 +1798,7 @@ void r_color0(inout vec4 c) {
         c.held = (bd.size + 3) & ~3u;
         if (!bd.data) rw_in.push_back(c);
         rw_out.push_back(c);
+        host_rw |= bd.land && bd.data;
       } else {
         host_rw = true;
       }
@@ -1873,21 +1876,60 @@ void r_color0(inout vec4 c) {
     }
     if (!host_rw) {
       Submit(cmd);
-    } else {
-      SDL_GPUTransferBuffer* db = SharedDownload(Uint32(rw.size()));
-      SDL_GPUCopyPass* down = SDL_BeginGPUCopyPass(cmd);
-      SDL_GPUBufferRegion src{crw_, 0, Uint32(rw.size())};
-      SDL_GPUTransferBufferLocation dst{db, 0};
-      SDL_DownloadFromGPUBuffer(down, &src, &dst);
-      SDL_EndGPUCopyPass(down);
-      SDL_GPUFence* f = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
-      SDL_WaitForGPUFences(dev_, true, &f, 1);
-      SDL_ReleaseGPUFence(dev_, f);
-      const auto* p = static_cast<const uint8_t*>(SDL_MapGPUTransferBuffer(dev_, db, false));
-      for (uint32_t b = 0; b < st.rw_buffers; b++)
-        if (!d.rw_buffers[b].buffer)
-          std::memcpy(d.rw_buffers[b].data, p + rw_at[b], d.rw_buffers[b].size);
-      SDL_UnmapGPUTransferBuffer(dev_, db);
+      return;
+    }
+    Landing w;
+    w.cap = Uint32(rw.size());
+    for (size_t i = 0; i < download_pool_.size(); i++) {
+      if (download_pool_[i].cap < w.cap) continue;
+      w = download_pool_[i];
+      download_pool_.erase(download_pool_.begin() + i);
+      break;
+    }
+    if (!w.tb) w.tb = NewDownload(w.cap);
+    SDL_GPUCopyPass* down = SDL_BeginGPUCopyPass(cmd);
+    SDL_GPUBufferRegion src{crw_, 0, Uint32(rw.size())};
+    SDL_GPUTransferBufferLocation dst{w.tb, 0};
+    SDL_DownloadFromGPUBuffer(down, &src, &dst);
+    SDL_EndGPUCopyPass(down);
+    Submit(cmd);
+    w.submission = submitted_;
+    for (uint32_t b = 0; b < st.rw_buffers; b++)
+      if (d.rw_buffers[b].data && (!d.rw_buffers[b].buffer || d.rw_buffers[b].land))
+        w.out.push_back({d.rw_buffers[b].data, rw_at[b], d.rw_buffers[b].size});
+    w.later = d.land_later;
+    writes_queued_ += w.later;
+    landings_.push_back(std::move(w));
+    if (!d.land_later) Land(landings_.size(), true);
+  }
+
+  uint64_t WritesQueued() override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    return writes_queued_;
+  }
+
+  uint64_t LandWrites(bool wait) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    Land(landings_.size(), wait);
+    return writes_landed_;
+  }
+
+  // Writes back the first n landings_ (or those of them the GPU has run).
+  void Land(size_t n, bool wait) {
+    for (; n && !landings_.empty(); n--) {
+      Landing& w = landings_.front();
+      while (retired_ < w.submission) {
+        if (!wait && !in_flight_.empty() && !SDL_QueryGPUFence(dev_, in_flight_.front().fence))
+          return;
+        Retire();
+      }
+      const auto* p = static_cast<const uint8_t*>(SDL_MapGPUTransferBuffer(dev_, w.tb, false));
+      for (const Landing::Out& o : w.out) std::memcpy(o.data, p + o.at, o.size);
+      SDL_UnmapGPUTransferBuffer(dev_, w.tb);
+      writes_landed_ += w.later;
+      w.out.clear();
+      download_pool_.push_back(std::move(w));
+      landings_.pop_front();
     }
   }
 
@@ -2312,17 +2354,20 @@ void r_color0(inout vec4 c) {
   void Retire() {
     if (in_flight_.empty()) {
       upload_tail_ = upload_head_;
+      retired_ = submitted_;
       return;
     }
     SDL_WaitForGPUFences(dev_, true, &in_flight_.front().fence, 1);
     SDL_ReleaseGPUFence(dev_, in_flight_.front().fence);
     upload_tail_ = in_flight_.front().upload_end;
+    retired_ = in_flight_.front().submission;
     in_flight_.pop_front();
   }
 
   void Drain() {
     while (!in_flight_.empty()) Retire();
     upload_tail_ = upload_head_;
+    retired_ = submitted_;
   }
 
   // Submits cmd, keeping at most kMaxInFlight submissions unfinished:
@@ -2331,7 +2376,7 @@ void r_color0(inout vec4 c) {
   void Submit(SDL_GPUCommandBuffer* cmd) {
     SDL_GPUFence* f = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
     if (!f) FatalF("gfx: SDL_SubmitGPUCommandBuffer: %s", SDL_GetError());
-    in_flight_.push_back({f, upload_head_});
+    in_flight_.push_back({f, upload_head_, ++submitted_});
     while (!in_flight_.empty() &&
            (in_flight_.size() > kMaxInFlight || SDL_QueryGPUFence(dev_, in_flight_.front().fence)))
       Retire();
@@ -3759,10 +3804,28 @@ void r_color0(inout vec4 c) {
   struct InFlight {
     SDL_GPUFence* fence;
     uint64_t upload_end;  // upload_head_ when it was submitted
+    uint64_t submission;
   };
   std::deque<InFlight> in_flight_;  // submitted, not known finished
   uint64_t upload_head_ = 0, upload_tail_ = 0;  // ring positions, not wrapped
   Uint32 upload_at_ = 0;                        // MapUpload's offset
+  uint64_t submitted_ = 0, retired_ = 0;        // submissions, in order
+  // A dispatch's read-write buffers for the host, downloaded by its
+  // submission and written back once that has finished.
+  struct Landing {
+    struct Out {
+      void* data;
+      uint32_t at, size;
+    };
+    SDL_GPUTransferBuffer* tb = nullptr;
+    Uint32 cap = 0;
+    uint64_t submission = 0;
+    bool later = false;  // land_later
+    std::vector<Out> out;
+  };
+  std::deque<Landing> landings_;
+  std::vector<Landing> download_pool_;  // their transfer buffers, free
+  uint64_t writes_queued_ = 0, writes_landed_ = 0;
   SDL_GPUTransferBuffer* download_tb_ = nullptr;
   std::map<uint32_t, Read> reads_;  // StartReadBack tickets
   uint32_t next_read_ = 1;

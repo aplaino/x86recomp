@@ -106,6 +106,15 @@ void WriteMem(gaddr a, uint32_t sel, uint64_t data) {
   }
 }
 
+// The bytes WriteMem writes for data select sel, and their dwords if they
+// are known before it runs (not the clocks').
+uint64_t MemBytes(uint32_t sel) { return sel == 0 ? 0 : sel == 1 ? 4 : 8; }
+std::vector<uint32_t> MemWords(uint32_t sel, uint32_t lo, uint32_t hi) {
+  if (sel == 1) return {lo};
+  if (sel == 2) return {lo, hi};
+  return {};
+}
+
 bool Compare(uint32_t func, uint32_t v, uint32_t ref) {
   switch (func) {
     case 0: return true;
@@ -127,6 +136,7 @@ void SetRegs(uint32_t* space, const char* name, uint32_t off, const uint32_t* v,
 // Runs one packet of s; false if it must wait (the stream stays on it).
 // ce: s is the constant engine's.
 bool Step(Engines& e, Stream& s, bool ce) {
+  Settle(false);
   Stream::Frame& f = s.stack.back();
   if (f.p >= f.end) {
     s.stack.pop_back();
@@ -193,31 +203,46 @@ bool Step(Engines& e, Stream& s, bool ce) {
       const uint32_t dst = (d[0] >> 8) & 0xF;
       if (dst != 1 && dst != 2 && dst != 5) FatalF("GPU: WRITE_DATA to destination %u", dst);
       const gaddr a = d[1] | uint64_t(d[2]) << 32;
-      for (uint32_t i = 3; i < n; i++) Wr32(a + 4 * uint64_t(i - 3), d[i]);
+      std::vector<uint32_t> w(d.begin() + 3, d.end());
+      Signal(a, 4 * w.size(), [a, w] {
+        for (size_t i = 0; i < w.size(); i++) Wr32(a + 4 * i, w[i]);
+      }, w);
       break;
     }
     case kWaitRegMem: {
       if (!(d[0] & 0x10)) FatalF("GPU: WAIT_REG_MEM on a register not implemented yet");
       const gaddr a = (d[1] & ~3u) | uint64_t(d[2] & 0xFFFF) << 32;
-      if (!Compare(d[0] & 7, Rd32(a) & d[4], d[3])) return false;
+      uint32_t v;
+      if (!SignalValue(a, &v)) {
+        BeforeRead(a, 4);
+        v = Rd32(a);
+      }
+      if (!Compare(d[0] & 7, v & d[4], d[3])) return false;
       break;
     }
     case kEventWriteEop: {
       const gaddr a = (d[1] & ~3u) | uint64_t(d[2] & 0xFFFF) << 32;
-      WriteMem(a, d[2] >> 29, d[3] | uint64_t(d[4]) << 32);
-      if ((d[2] >> 24) & 3) kernel::TriggerEvent(kEqEventGfxEop, kFilterGraphicsCore, kEqEventGfxEop);
+      const uint32_t sel = d[2] >> 29;
+      Signal(a, MemBytes(sel), [a, sel, v = d[3] | uint64_t(d[4]) << 32, irq = (d[2] >> 24) & 3] {
+        WriteMem(a, sel, v);
+        if (irq) kernel::TriggerEvent(kEqEventGfxEop, kFilterGraphicsCore, kEqEventGfxEop);
+      }, MemWords(sel, d[3], d[4]));
       break;
     }
     case kReleaseMem: {
       const gaddr a = (d[2] & ~3u) | uint64_t(d[3] & 0xFFFF) << 32;
-      WriteMem(a, d[1] >> 29, d[4] | uint64_t(d[5]) << 32);
-      if ((d[1] >> 24) & 3) kernel::TriggerEvent(kEqEventGfxEop, kFilterGraphicsCore, kEqEventGfxEop);
+      const uint32_t sel = d[1] >> 29;
+      Signal(a, MemBytes(sel), [a, sel, v = d[4] | uint64_t(d[5]) << 32, irq = (d[1] >> 24) & 3] {
+        WriteMem(a, sel, v);
+        if (irq) kernel::TriggerEvent(kEqEventGfxEop, kFilterGraphicsCore, kEqEventGfxEop);
+      }, MemWords(sel, d[4], d[5]));
       break;
     }
     case kEventWriteEos: {
       const uint32_t cmd = d[2] >> 29;
       if (cmd != 2) FatalF("GPU: EVENT_WRITE_EOS command %u not implemented yet", cmd);
-      Wr32((d[1] & ~3u) | uint64_t(d[2] & 0xFFFF) << 32, d[3]);
+      const gaddr a = (d[1] & ~3u) | uint64_t(d[2] & 0xFFFF) << 32;
+      Signal(a, 4, [a, v = d[3]] { Wr32(a, v); }, {d[3]});
       break;
     }
     case kDmaData: {
@@ -238,9 +263,11 @@ bool Step(Engines& e, Stream& s, bool ce) {
       }
       if (dst_sel != 0 || dst_reg || dst_fixed || src_reg || (src_mem && src_fixed))
         FatalF("GPU: DMA_DATA %08X %08X not implemented yet", d[0], d[5]);
+      BeforeRead(dst, bytes);
       if (src_sel == 2) {
         for (uint32_t i = 0; i + 4 <= bytes; i += 4) Wr32(dst + i, d[1]);
       } else if (src_mem) {
+        BeforeRead(d[1] | uint64_t(d[2]) << 32, bytes);
         std::memmove(GPtr(dst), GPtr(d[1] | uint64_t(d[2]) << 32), bytes);
       } else {
         FatalF("GPU: DMA_DATA from GDS not implemented yet");
@@ -252,6 +279,7 @@ bool Step(Engines& e, Stream& s, bool ce) {
       if ((op == kIndirectBufferConst) != ce) FatalF("GPU: indirect buffer %02X on the wrong engine", op);
       const gaddr a = (d[0] & ~3u) | uint64_t(d[1] & 0xFFFF) << 32;
       next();
+      BeforeRead(a, 4 * uint64_t(d[2] & 0xFFFFF));
       s.stack.push_back({a, a + 4 * uint64_t(d[2] & 0xFFFFF)});
       return true;
     }
@@ -259,6 +287,7 @@ bool Step(Engines& e, Stream& s, bool ce) {
       const gaddr a = d[0] | uint64_t(d[1]) << 32;
       const uint32_t bytes = 4 * (d[2] & 0x7FFF), at = d[3] & 0xFFFF;
       if (at + bytes > sizeof e.ce_ram) FatalF("GPU: LOAD_CONST_RAM past the CE RAM");
+      BeforeRead(a, bytes);
       std::memcpy(e.ce_ram + at, GPtr(a), bytes);
       break;
     }
@@ -271,6 +300,7 @@ bool Step(Engines& e, Stream& s, bool ce) {
     case kDumpConstRam: {
       const uint32_t at = d[0] & 0xFFFF, bytes = 4 * (d[1] & 0x7FFF);
       if (at + bytes > sizeof e.ce_ram) FatalF("GPU: DUMP_CONST_RAM past the CE RAM");
+      BeforeRead(d[2] | uint64_t(d[3]) << 32, bytes);
       std::memcpy(GPtr(d[2] | uint64_t(d[3]) << 32), e.ce_ram + at, bytes);
       break;
     }
@@ -298,10 +328,12 @@ void Run(Engines& e, Stream& de, Stream& ce) {
     while (!ce.done() && Step(e, ce, true)) moved = true;
     while (!de.done() && Step(e, de, false)) moved = true;
     if (!moved) {
+      Settle(true);
       GuestSyncFence();
       std::this_thread::sleep_for(std::chrono::microseconds(50));
     }
   }
+  Settle(true);
   GuestSyncFence();
 }
 

@@ -15,6 +15,7 @@
 #include <unordered_map>
 
 #include "orbis/gpu/gcn.h"
+#include "orbis/gpu/renderer.h"
 #include "x86/runtime.h"
 
 namespace recomp::orbis::gpu {
@@ -45,9 +46,12 @@ struct Code {
 
 constexpr uint32_t kMaxInstructions = 1 << 16;
 
-// Whether n bytes at a are guest memory (draws can point anywhere).
+// Whether n bytes at a are guest memory (draws can point anywhere); the
+// dispatch results still to land there land first.
 bool Readable(gaddr a, uint64_t n) {
-  return g_proc->vm.mem().IsCommitted(a) && g_proc->vm.mem().IsCommitted(a + n - 1);
+  if (!g_proc->vm.mem().IsCommitted(a) || !g_proc->vm.mem().IsCommitted(a + n - 1)) return false;
+  BeforeRead(a, n);
+  return true;
 }
 
 int64_t Simm16(const Instr& i) { return int16_t(i.w0 & 0xFFFF); }

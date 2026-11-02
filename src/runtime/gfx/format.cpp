@@ -28,6 +28,8 @@ void Device::ClearDepth(DepthId, float, int, int) {}
 void Device::CopyDepth(DepthId, DepthId, const Rect&) {}
 void Device::DrawProgram(const ProgramDraw&) {}
 void Device::DispatchProgram(const ProgramDispatch&) {}
+uint64_t Device::WritesQueued() { return 0; }
+uint64_t Device::LandWrites(bool) { return 0; }
 void Device::DrawImage(TextureId, const Rect&) {}
 
 uint32_t BitsPerPixel(Format f) {
