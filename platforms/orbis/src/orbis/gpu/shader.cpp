@@ -42,6 +42,9 @@ struct Code {
   std::vector<Run> runs;
   // The words of `at` in order, as a number (CodeId; 0: not yet).
   mutable uint32_t id = 0;
+  // The instructions Resolver::Step acts on (Steps), in address order:
+  // the stage's own, and the fetch shader's (Index).
+  std::vector<std::pair<gaddr, Instr>> steps, fetch_steps;
 };
 
 constexpr uint32_t kMaxInstructions = 1 << 16;
@@ -153,6 +156,32 @@ void KeepWalk(gaddr entry, gaddr fetch, std::shared_ptr<const Code> c) {
 
 // ---- the scalar evaluation (Resolve)
 
+// Whether Resolver::Step does anything for in: the scalar and memory
+// instructions, and the vector ones that write SGPRs (VCC, a
+// v_readfirstlane, a VOP3 with a scalar destination).
+bool Steps(const Instr& in) {
+  switch (in.fmt) {
+    case Fmt::Sop1: case Fmt::Sopk: case Fmt::Sop2: case Fmt::Smrd: case Fmt::Mubuf: case Fmt::Mtbuf:
+    case Fmt::Mimg: case Fmt::Vopc:
+      return true;
+    case Fmt::Vop1: return in.op == 2;
+    case Fmt::Vop2: return in.op == 1 || (in.op >= 37 && in.op <= 42);
+    case Fmt::Vop3:
+      return in.op < 256 || in.op == 257 || in.op == 365 || in.op == 366 || (in.op >= 293 && in.op <= 298);
+    default: return false;
+  }
+}
+
+// Fills c's steps and fetch_steps from its instructions: draws resolve
+// the same code over and over, and going through all of `at` for each
+// was most of Resolve's time.
+void Index(Code& c) {
+  c.steps.clear();
+  c.fetch_steps.clear();
+  for (auto& [pc, in] : c.at)
+    if (Steps(in)) (c.fetch.count(pc) ? c.fetch_steps : c.steps).emplace_back(pc, in);
+}
+
 // SGPRs 0-103, VCC 106-107, M0 124 and EXEC 126-127, and whether each is
 // known.
 struct Scalars {
@@ -200,9 +229,20 @@ struct Resolver {
   const Code& code() const { return *walked; }
   Resolved r;
   Scalars s;
-  std::map<gaddr, Site> sites;
+  std::vector<std::pair<gaddr, Site>> sites;  // by address once Run is done
 
   explicit Resolver(const StageState& st) : st(st) {}
+
+  Site& NewSite(gaddr pc) {
+    for (auto& [at, site] : sites)
+      if (at == pc) return site;
+    return sites.emplace_back(pc, Site{}).second;
+  }
+  const std::pair<gaddr, Site>* SiteAt(gaddr pc) const {
+    auto it = std::lower_bound(sites.begin(), sites.end(), pc,
+                               [](const auto& e, gaddr a) { return e.first < a; });
+    return it != sites.end() && it->first == pc ? &*it : nullptr;
+  }
 
   int Buffer(gaddr base, uint32_t size, bool written, const uint32_t* vsharp = nullptr) {
     for (size_t i = 0; i < r.buffers.size(); i++)
@@ -300,11 +340,12 @@ struct Resolver {
               merged->base[1] = target;
               merged->leaders.insert(target);
               merged->runs.insert(merged->runs.end(), fc.runs.begin(), fc.runs.end());
+              Index(*merged);
               KeepWalk(st.code, target, merged);
               walked = std::move(merged);
             }
-            for (gaddr a : code().fetch)
-              if (!Step(a, code().at.at(a))) return false;
+            for (auto& [a, i] : code().fetch_steps)
+              if (!Step(a, i)) return false;
             return true;
           }
           case 32: return true;  // s_setpc_b64 (the fetch shader's return)
@@ -367,7 +408,7 @@ struct Resolver {
         else if (in.literal_used) off = in.literal * 4;
         else if (!s.Get(w & 0xFF, &off)) return Fail(pc, "a scalar load at an unknown offset");
         gaddr a;
-        Site& site = sites[pc];
+        Site& site = NewSite(pc);
         if (in.op >= 8) {  // s_buffer_load: from a V#
           uint32_t v[4];
           if (!Vsharp(base, v)) return Fail(pc, "a scalar buffer load from an unknown V#");
@@ -401,7 +442,7 @@ struct Resolver {
         gaddr base;
         uint32_t size;
         Range(v, &base, &size);
-        Site& site = sites[pc];
+        Site& site = NewSite(pc);
         site.buffer = Buffer(base, size, store, v);
         std::memcpy(site.vsharp, v, sizeof v);
         return true;
@@ -426,7 +467,7 @@ struct Resolver {
           r.images.push_back(ref);
           at = int(r.images.size() - 1);
         }
-        sites[pc].image = at;
+        NewSite(pc).image = at;
         return true;
       }
       case Fmt::Vop1:
@@ -460,6 +501,7 @@ struct Resolver {
       c->base[0] = st.code;
       walked = c;
       if (!Walk(st.code, *c, &r.error)) return false;
+      Index(*c);
       KeepWalk(st.code, 0, c);
     }
     const std::shared_ptr<const Code> own = walked;  // Step may swap in the fetch shader's
@@ -469,8 +511,9 @@ struct Resolver {
     s.Set(gcn::kExecHi, 0);
     // Program order: the stage's code by address, a call running the
     // fetch shader where it is.
-    for (auto& [pc, in] : own->at)
+    for (auto& [pc, in] : own->steps)
       if (!Step(pc, in)) return false;
+    std::sort(sites.begin(), sites.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     return true;
   }
 };
@@ -1409,7 +1452,7 @@ struct Translator {
   }
 
   void Instruction(gaddr pc, const Instr& in, gaddr next) {
-    auto site = res.sites.find(pc);
+    const auto* site = res.SiteAt(pc);
     switch (in.fmt) {
       case Fmt::Sopp: {
         switch (in.op) {

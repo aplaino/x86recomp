@@ -1733,13 +1733,14 @@ void r_color0(inout vec4 c) {
     } else if (d.indices) {
       c.indexed = true;
       c.first = uint32_t(indices_.size());
-      indices_.resize(indices_.size() + d.vertex_count);
+      const uint32_t n = d.vertex_count;  // a local: the stores below may alias d
+      indices_.resize(indices_.size() + n);
       uint32_t* to = indices_.data() + c.first;
       if (d.index_size == 4) {
-        std::memcpy(to, d.indices, size_t(d.vertex_count) * 4);
+        std::memcpy(to, d.indices, size_t(n) * 4);
       } else {
         const auto* from = static_cast<const uint16_t*>(d.indices);
-        for (uint32_t i = 0; i < d.vertex_count; i++) to[i] = from[i];
+        for (uint32_t i = 0; i < n; i++) to[i] = from[i];
       }
       c.base = d.base_vertex;
     } else {
@@ -3785,7 +3786,7 @@ void r_color0(inout vec4 c) {
   std::vector<VsUniforms> vs_list_;
   std::vector<FsUniforms> fs_list_;
   std::vector<uint8_t> verts_;
-  std::vector<uint32_t> indices_;
+  std::vector<uint32_t, NoZero<uint32_t>> indices_;
   std::vector<Upload> uploads_;
   std::vector<uint8_t> upload_bytes_;
   std::vector<BlitTex> blit_pool_;
