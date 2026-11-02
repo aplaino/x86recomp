@@ -7,8 +7,8 @@ repository's CLAUDE.md) hold here too.
 
 ## Build and test
 - The Xbox 360 alone: `cmake --preset xbox360 && cmake --build --preset xbox360 && ctest --test-dir out/build/xbox360`
-  (RECOMP_X86 off, RECOMP_PLATFORM_XBOX360 on); it builds and runs the
-  PowerPC core's tests too.
+  (RECOMP_X86 and RECOMP_PLATFORM_WIN32 off, RECOMP_PLATFORM_XBOX360
+  on); it builds and runs the PowerPC core's tests too.
 - Changes to the top-level CMakeLists.txt or anything shared with the
   other guests (src/text_hash.h, the host layer): also build and test the
   default preset and the other guests' presets.

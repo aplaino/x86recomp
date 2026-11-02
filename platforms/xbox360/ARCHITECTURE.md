@@ -7,9 +7,9 @@ library (xam) and the GPU (Xenos) it calls. Nothing here is specific to
 one game: game projects hold that (manifest, symbols, game hooks) and use
 this tree as a library.
 
-It is a console platform on x86recomp's shared core (the top-level
-ARCHITECTURE.md, "Console platforms"), built only with
-`RECOMP_PLATFORM_XBOX360`:
+It is a console platform on x86recomp's PowerPC core (the top-level
+ARCHITECTURE.md, "Layout: base, CPU cores, platform modules"), built
+only with `RECOMP_PLATFORM_XBOX360`:
 - Core, shared by every PowerPC guest: the lifter `recomp_lift_ppc`
   (`tools/lifter_ppc`: decoder, function discovery, jump tables, the
   emitter) and the CPU model and dispatcher it targets (`src/ppc`, library
@@ -21,10 +21,11 @@ ARCHITECTURE.md, "Console platforms"), built only with
   drawing to come; libraries `recomp_xbox360_*`), with their tests and
   docs.
 Paths below are relative to `platforms/xbox360` unless they start with
-`src/ppc` or `tools/lifter_ppc`. An Xbox 360 game project turns
-`RECOMP_X86` off and keeps the host layer every guest shares.
+`src/ppc` or `tools/lifter_ppc`. An Xbox 360 game project turns the
+x86 core and Win32 off (`RECOMP_X86`, `RECOMP_PLATFORM_WIN32`) and keeps
+the host layer every guest shares.
 
-The module keeps the x86 path's and the Switch's shape: one C++ function
+The module keeps the x86 core's and the Switch's shape: one C++ function
 per guest function, registers cached in locals, a dispatcher for indirect
 calls, an HLE registry that is fatal on anything unhandled, exact
 arithmetic as the reference for hand-written replacements, and a game
@@ -98,7 +99,7 @@ A program is a directory of files, each of which can be replaced alone:
   holds the tables of every loaded module, and the loader refuses a XEX
   whose code hash matches none of them.
 - The runtime, the HLE modules and recomp_ppc are shared libraries as on
-  the x86 path; nothing refers to an HLE module's or a lifted module's
+  the x86 core; nothing refers to an HLE module's or a lifted module's
   symbols, so programs link them --no-as-needed.
 - The game project's executable holds `main()` and little else: it fills
   a `GameConfig` (xbox360/process.h) and calls `RunProcess`.

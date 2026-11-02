@@ -1,4 +1,4 @@
-# The Xbox 360 platform module (ARCHITECTURE.md, "Console platforms"): built
+# The Xbox 360 platform module (ARCHITECTURE.md, "Layout"): built
 # only with RECOMP_PLATFORM_XBOX360, on the PowerPC lifter and CPU model
 # (recomp_lift_ppc, recomp_ppc).
 
