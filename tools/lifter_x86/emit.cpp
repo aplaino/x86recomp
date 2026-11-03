@@ -3537,6 +3537,7 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
   }
 
   auto runs = FindX87Runs(f, labels);
+  const std::set<uint64_t> poll = FindPollLoops(f);
 
   for (auto it = f.insns.begin(); it != f.insns.end(); ++it) {
     const Insn& in = it->second;
@@ -3560,6 +3561,13 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
         o += Fmt("    LIFT_SPILL; ::recomp::Unimplemented(c, 0x%llXu, \"undecodable\");\n",
                  U(in.va));
         stats->unimplemented["(undecodable)"]++;
+      } else if (poll.count(in.va)) {
+        std::string body;
+        InsnEmitter(p_, f, in, &body, refs, stats).Emit();
+        static const std::string kRd = "::recomp::lift::Rd<", kPoll = "::recomp::lift::RdPoll<";
+        for (size_t at = 0; (at = body.find(kRd, at)) != std::string::npos; at += kPoll.size())
+          body.replace(at, kRd.size(), kPoll);
+        o += body;
       } else {
         InsnEmitter(p_, f, in, &o, refs, stats).Emit();
       }
@@ -3593,6 +3601,55 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
          "    return;\n"
          "  }\n";
   o += "}\n\n";
+}
+
+// Polling loops (ARCHITECTURE.md, "Polling loops"): up to 8 instructions
+// laid out in a row, from a branch target to a conditional branch back to
+// it, that only load into registers, compare, test and pause, at addresses
+// whose registers the loop does not write. Only another thread can end
+// such a loop; C++ lets the compiler assume a loop of plain loads ends
+// (and hoist them), so their loads are emitted as RdPoll. Returns the
+// addresses of the loops' instructions.
+std::set<uint64_t> Emitter::FindPollLoops(const Function& f) const {
+  const ZydisMachineMode mode =
+      p_.x64 ? ZYDIS_MACHINE_MODE_LONG_64 : ZYDIS_MACHINE_MODE_LEGACY_32;
+  auto big = [mode](ZydisRegister r) { return ZydisRegisterGetLargestEnclosing(mode, r); };
+  std::set<uint64_t> out;
+  for (uint64_t head : f.labels) {
+    auto it = f.insns.find(head);
+    std::set<ZydisRegister> written, addressed;
+    bool loads = false;
+    std::vector<uint64_t> body;
+    for (int n = 0; it != f.insns.end() && n < 8; n++, ++it) {
+      const Insn& in = it->second;
+      if (!in.ok || (n && it->first != std::prev(it)->second.next())) break;
+      body.push_back(in.va);
+      if (in.d.meta.category == ZYDIS_CATEGORY_COND_BR) {
+        uint64_t t;
+        if (Classify(p_, f, in, &t) == Flow::Branch && t == head && loads) {
+          bool disjoint = true;
+          for (ZydisRegister r : written) disjoint = disjoint && !addressed.count(r);
+          if (disjoint) out.insert(body.begin(), body.end());
+        }
+        break;
+      }
+      const ZydisMnemonic m = in.d.mnemonic;
+      const bool mov = m == ZYDIS_MNEMONIC_MOV || m == ZYDIS_MNEMONIC_MOVZX ||
+                       m == ZYDIS_MNEMONIC_MOVSX || m == ZYDIS_MNEMONIC_MOVSXD;
+      if (m == ZYDIS_MNEMONIC_PAUSE || m == ZYDIS_MNEMONIC_NOP) continue;
+      if (!mov && m != ZYDIS_MNEMONIC_CMP && m != ZYDIS_MNEMONIC_TEST) break;
+      if (mov && in.ops[0].type != ZYDIS_OPERAND_TYPE_REGISTER) break;
+      if (mov) written.insert(big(in.ops[0].reg.value));
+      for (int i = 0; i < in.d.operand_count_visible; i++) {
+        const ZydisDecodedOperand& o = in.ops[i];
+        if (o.type != ZYDIS_OPERAND_TYPE_MEMORY) continue;
+        loads = true;
+        if (o.mem.base != ZYDIS_REGISTER_NONE) addressed.insert(big(o.mem.base));
+        if (o.mem.index != ZYDIS_REGISTER_NONE) addressed.insert(big(o.mem.index));
+      }
+    }
+  }
+  return out;
 }
 
 // Non-x87 instructions that may sit inside an x87 run: anything straight-

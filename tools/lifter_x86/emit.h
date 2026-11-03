@@ -31,6 +31,7 @@ class Emitter {
  private:
   std::map<uint64_t, uint64_t> FindX87Runs(const Function& f,
                                            const std::set<uint64_t>& labels) const;
+  std::set<uint64_t> FindPollLoops(const Function& f) const;
   void EmitX87Run(const Function& f, std::map<uint64_t, Insn>::const_iterator first,
                   std::map<uint64_t, Insn>::const_iterator last, std::string* out,
                   std::set<uint64_t>* refs, EmitStats* stats) const;

@@ -978,9 +978,27 @@ lock would be correct on x86-64 hosts and racy on Apple Silicon.
   the user32 queue mutex: acquire/release, so a message's payload
   written before posting is visible to the receiver.
 
-Still open: a lock-free hand-off in a game's own threads (a plain flag
-polled without any of the calls above) needs explicit barriers via the
-manifest once one is found.
+A lock-free hand-off in a game's own threads (a plain flag polled
+without any of the calls above) is a polling loop, below.
+
+### Polling loops
+A loop that waits for another thread to change memory, polling it with
+plain loads (`mov al, [flag]; cmp al, 2; jnz` back to the load), is
+lifted to a loop the C++ compiler may assume ends: a loop with no side
+effects, volatile access or atomic operation must terminate, so it may
+hoist the load out (and spin forever) or, where the loop is entered only
+when the flag has not changed yet, treat the path into it as unreachable
+and drop it, on any host. The lifter (FindPollLoops) finds such loops by
+their shape, needing no manifest: up to 8 instructions in a row, from a
+branch target to a conditional branch back to it, that only load into
+registers, compare, test and pause, at addresses whose registers the
+loop does not write. Their loads are acquire atomics (lift::RdPoll),
+which is what an x86 load is under TSO: one plain load on x86-64, `ldar`
+on ARM64. Loops that also store or call are not matched: a call is
+opaque to the compiler, and a waiting loop that stores has not been seen
+yet (one would need the same treatment). orbis_process's check 63 is
+such a loop in a test program; without RdPoll the path into it is
+dropped.
 
 ### 64-bit guests (x86-64, PE32+) — in progress
 A mode of the same lifter, runtime and HLE, not a second codebase. The

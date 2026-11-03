@@ -127,6 +127,15 @@ static void* with_specific(void* arg) {
 }
 
 static void once_init(void) { once_runs++; }
+// A byte another thread sets, polled with plain loads (63).
+static volatile unsigned char poll_flag;
+static void* release_poll(void* arg) {
+  (void)arg;
+  sceKernelUsleep(2000);
+  poll_flag = 2;
+  return 0;
+}
+
 static void* call_once(void* arg) {
   (void)arg;
   scePthreadOnce(&once, once_init);
@@ -193,6 +202,19 @@ int kernel_checks(void) {
   scePthreadMutexUnlock(&cv_mu);
   for (int i = 0; i < 4; i++) scePthreadJoin(t[i], 0);
   failed += test_check(62, overlap, 0);
+
+  // 63: a polling loop, which lifted code must keep looping until the
+  // other thread's store (a compiler may assume a loop of plain loads
+  // ends, and drop the path into it).
+  scePthreadCreate(&t[0], 0, release_poll, 0, "poll");
+  long spun = 0;
+  if (poll_flag != 2) {
+    spun = 1;
+    while (poll_flag != 2) {
+    }
+  }
+  scePthreadJoin(t[0], 0);
+  failed += test_check(63, spun, 1);
 
   // 47-50: a semaphore and an event flag set by another thread, and a
   // semaphore wait that times out.

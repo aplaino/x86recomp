@@ -95,6 +95,17 @@ template <typename T>
 inline void Wr(uint8_t* b, uint64_t a, T v) {
   std::memcpy(b + a, &v, sizeof(T));
 }
+// Loads in polling loops (ARCHITECTURE.md, "Polling loops"): acquire
+// atomics, which the compiler can neither drop nor hoist out of the loop,
+// as an x86 load is under TSO. A misaligned one (no atomic load on ARM64)
+// is a plain load after an acquire fence, which also keeps it in the loop.
+template <typename T>
+inline T RdPoll(const uint8_t* b, uint64_t a) {
+  if (a % sizeof(T) == 0)
+    return __atomic_load_n(reinterpret_cast<const T*>(b + a), __ATOMIC_ACQUIRE);
+  __atomic_thread_fence(__ATOMIC_ACQUIRE);
+  return Rd<T>(b, a);
+}
 inline x87::F80 RdF80(const uint8_t* b, uint64_t a) {
   x87::F80 v;
   std::memcpy(&v.sig, b + a, 8);
