@@ -534,10 +534,29 @@ static int ngs2_checks(void) {
   sceNgs2VoiceGetState(sv, st, 0x30);
   failed += test_check(187, st[0], 0);
 
+  // ATRAC9 setups on a sampler rack with one ATRAC9 decoder of its own and
+  // no AJM ones (flag 1 asks for those).
+  unsigned opt[0xA8 / 4] = {0xA8};
+  opt[0x1c / 4] = 256, opt[0x20 / 4] = 1, opt[0x28 / 4] = 1, opt[0x2c / 4] = 1;
+  opt[0x80 / 4] = 1, opt[0x88 / 4] = 4, opt[0x94 / 4] = 1, opt[0x98 / 4] = 2, opt[0xa0 / 4] = 8;
+  unsigned long a9rack = 0, a9v = 0;
+  failed += test_check(195, sceNgs2RackCreateWithAllocator(sys, 0x1000, opt, &a, &a9rack), 0);
+  sceNgs2RackGetVoiceHandle(a9rack, 0, &a9v);
+  // Stereo (channel config 2), 48 kHz, 4 frames of 0x100 bytes per superframe.
+  Ngs2Setup a9 = {{40, 0, 0x10000000}, 0x40, 2, 48000, 0xFE741FF0, 0, 0, 1, 0};
+  failed += test_check(196, (unsigned)sceNgs2VoiceControl(a9v, &a9), 0x804A0402);
+  a9.flags = 0, a9.config = 0x12345678;
+  failed += test_check(197, (unsigned)sceNgs2VoiceControl(a9v, &a9), 0x804A0403);
+  a9.config = 0xFE741FF0, a9.channels = 1;
+  failed += test_check(198, (unsigned)sceNgs2VoiceControl(a9v, &a9), 0x804A0052);
+  a9.channels = 2;
+  failed += test_check(199, sceNgs2VoiceControl(a9v, &a9), 0);
+  failed += test_check(200, sceNgs2RackDestroy(a9rack, 0), 0);
+
   failed += test_check(188, sceNgs2RackDestroy(sampler, 0), 0);
   failed += test_check(189, sceNgs2RackDestroy(master, 0), 0);
   failed += test_check(190, sceNgs2SystemDestroy(sys, 0), 0);
-  failed += test_check(191, ngs2_frees, 3);
+  failed += test_check(191, ngs2_frees, 4);
   return failed;
 }
 

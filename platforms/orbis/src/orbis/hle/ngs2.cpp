@@ -17,6 +17,10 @@
 #include <mutex>
 #include <vector>
 
+extern "C" {
+#include <libavcodec/avcodec.h>
+}
+
 #include "orbis/hle.h"
 #include "orbis/hle/ngs2_dsp.h"
 #include "orbis/process.h"
@@ -59,6 +63,7 @@ constexpr uint32_t kErrInvalidMaxGrain = 0x804A0050, kErrInvalidNumGrain = 0x804
                    kErrInvalidControl = 0x804A0308, kErrInvalidParamSize = 0x804A030A,
                    kErrCircularControl = 0x804A030B, kErrNoCallbacks = 0x804A030C,
                    kErrInvalidWaveformType = 0x804A0402,
+                   kErrInvalidWaveformConfig = 0x804A0403,
                    kErrInvalidWaveformRate = 0x804A0404,
                    kErrInvalidWaveformFrame = 0x804A0405,
                    kErrInvalidWaveformAddress = 0x804A0406,
@@ -139,6 +144,18 @@ struct Filter {
   Biquad q;
 };
 
+// A voice's ATRAC9 decoder: ffmpeg's, a superframe at a time.
+struct Atrac9 {
+  AVCodecContext* ctx = nullptr;
+  AVPacket* pkt = nullptr;
+  AVFrame* frame = nullptr;
+  ~Atrac9() {
+    av_frame_free(&frame);
+    av_packet_free(&pkt);
+    avcodec_free_context(&ctx);
+  }
+};
+
 struct Voice {
   Rack* rack;
   uint32_t index;
@@ -182,6 +199,13 @@ struct Voice {
   uint32_t step = 0x4000, frac = 0;
   std::vector<float> fifo[kMaxChannels];
   uint32_t tail_zeros = 0;
+  // ATRAC9: the config word, the decoder (restarted at the next superframe
+  // when a9_restart), and the frames of the superframe decoded last still
+  // to be played.
+  uint32_t a9_config = 0;
+  std::unique_ptr<Atrac9> a9;
+  bool a9_restart = true;
+  uint32_t a9_next = 0, a9_frames = 0;
 
   // Reverb.
   std::unique_ptr<Reverb> reverb;
@@ -207,6 +231,7 @@ struct Rack {
   uint32_t flags, max_grain, max_voices, max_delay_blocks, max_matrices, max_ports;
   uint32_t max_channels = 8, max_env_points = 0, max_filters = 0, max_inputs = 0,
            meter_blocks = 8, max_wave_blocks = 0, reverb_size = 0;
+  uint32_t atrac9_decoders = 0, ajm_decoders = 0;
   uint32_t state_size;
   std::vector<std::unique_ptr<Voice>> voices;
   std::vector<Voice*> active;  // sources being played, in play order
@@ -292,6 +317,7 @@ struct RackConfig {
            max_ports = 8;
   uint32_t max_channels = 8, max_env_points = 0, max_filters = 0, max_inputs = 0,
            meter_blocks = 8, max_wave_blocks = 0, reverb_size = 0;
+  uint32_t atrac9_decoders = 0, ajm_decoders = 0;
 };
 
 int RackKind(uint32_t id) {
@@ -347,6 +373,7 @@ uint32_t ParseRackOption(uint32_t id, gaddr opt, RackConfig& r) {
       if (!in(r.meter_blocks, 1, 256)) return kErrInvalidPeakMeterBlocks;
       if (a9 && !in(Rd32(opt + 0x98), a9, a9 * 8)) return kErrInvalidMaxAtrac9ChannelWorks;
       if (ajm && !in(Rd32(opt + 0x84), 10, ajm * 8)) return kErrInvalidMaxCodecCaches;
+      r.atrac9_decoders = a9, r.ajm_decoders = ajm;
       break;
     }
     case kRackSubmixer:
@@ -419,6 +446,7 @@ void ResetModules(Voice& v) {
   for (int c = 0; c < kMaxChannels; c++) v.fifo[c].assign(4, 0.0f);
   v.tail_zeros = 0, v.frac = 0;
   v.have_block = v.starved = v.ended = false;
+  v.a9_restart = true, v.a9_next = v.a9_frames = 0;
   std::memcpy(v.mprev, v.mmatrix, sizeof v.mprev);
   std::memcpy(v.gain_prev, v.gain, sizeof v.gain);
 }
@@ -558,8 +586,21 @@ uint32_t SamplerParam(Voice& v, const Param& q) {
       if (ch - 1 >= 8) return kErrInvalidChannels;
       if (rate - 1 >= 192000) return kErrInvalidWaveformRate;
       if (offset > margin || margin > 0xFFFF) return kErrInvalidWaveformFrame;
+      if (type == 0x40) {
+        // The config word holds the 4 config bytes of an ATRAC9 file, the
+        // 0xFE first, as a big-endian word; flag 1 picks the AJM decoders
+        // over the library's own.
+        const uint32_t config = Rd32(p + 0x14);
+        const uint32_t decoders = Rd32(p + 0x20) & 1 ? r.ajm_decoders : r.atrac9_decoders;
+        if (!decoders) return kErrInvalidWaveformType;
+        if (config >> 24 != 0xFE) return kErrInvalidWaveformConfig;
+        static const uint8_t kChannels[8] = {1, 2, 2, 6, 8, 4, 0, 0};
+        if (ch != kChannels[config >> 17 & 7]) return kErrInvalidChannels;
+        if (v.a9_config != config) v.a9.reset();
+        v.a9_config = config;
+        v.a9_restart = true, v.a9_next = v.a9_frames = 0;
+      }
       if (type == 0x1c) recomp::FatalF("libSceNgs2: VAG waveforms are not implemented yet");
-      if (type == 0x40) recomp::FatalF("libSceNgs2: ATRAC9 waveforms are not implemented yet");
       if (type >= 0x80) recomp::FatalF("libSceNgs2: oscillator waveforms are not implemented yet");
       v.wtype = type, v.wch = ch, v.wrate = rate, v.frame_offset = offset, v.frame_margin = margin;
       v.wave_set = true;
@@ -580,6 +621,7 @@ uint32_t SamplerParam(Voice& v, const Param& q) {
         v.terminated = false, v.exit_loops = 0, v.have_block = false;
         for (auto& f : v.fifo) f.assign(4, 0.0f);
         v.tail_zeros = 0, v.frac = 0;
+        v.a9_next = v.a9_frames = 0;
       } else if (v.terminated) {
         return kErrWaveformBlocks;
       }
@@ -1067,9 +1109,136 @@ void EndBlock(Voice& v) {
   v.have_block = false;
 }
 
+// The voice's ATRAC9 superframe size in bytes (the config's frame size
+// times its frames) and frames per superframe.
+uint32_t Atrac9Frames(const Voice& v) { return 1u << (v.a9_config >> 3 & 3); }
+uint32_t Atrac9Bytes(const Voice& v) {
+  return (((v.a9_config & 0xFFFF) >> 5) + 1) << (v.a9_config >> 3 & 3);
+}
+
+std::unique_ptr<Atrac9> OpenAtrac9(const Voice& v) {
+  const AVCodec* codec = avcodec_find_decoder(AV_CODEC_ID_ATRAC9);
+  if (!codec) recomp::FatalF("libSceNgs2: the host's ffmpeg has no ATRAC9 decoder");
+  auto d = std::make_unique<Atrac9>();
+  d->ctx = avcodec_alloc_context3(codec);
+  d->pkt = av_packet_alloc();
+  d->frame = av_frame_alloc();
+  if (!d->ctx || !d->pkt || !d->frame) recomp::FatalF("libSceNgs2: out of memory");
+  // ffmpeg's extradata: a version word, then the config bytes as an
+  // ATRAC9 file stores them.
+  uint8_t* x = static_cast<uint8_t*>(av_mallocz(12 + AV_INPUT_BUFFER_PADDING_SIZE));
+  for (int i = 0; i < 4; i++) x[4 + i] = uint8_t(v.a9_config >> (24 - 8 * i));
+  x[0] = 2;
+  d->ctx->extradata = x;
+  d->ctx->extradata_size = 12;
+  d->ctx->block_align = int(Atrac9Bytes(v));
+  if (avcodec_open2(d->ctx, codec, nullptr) < 0)
+    recomp::FatalF("libSceNgs2: ATRAC9 config %08X is not implemented yet (ffmpeg refuses it)",
+                   v.a9_config);
+  return d;
+}
+
+// Decodes the superframe at `src` into the decoder's frame.
+void DecodeSuperframe(Voice& v, const uint8_t* src, uint32_t size) {
+  Atrac9& d = *v.a9;
+  if (av_new_packet(d.pkt, int(size)) < 0) recomp::FatalF("libSceNgs2: out of memory");
+  std::memcpy(d.pkt->data, src, size);
+  const int err = avcodec_send_packet(d.ctx, d.pkt);
+  av_packet_unref(d.pkt);
+  if (err < 0 || avcodec_receive_frame(d.ctx, d.frame) < 0 ||
+      d.frame->ch_layout.nb_channels != int(v.wch))
+    recomp::FatalF("libSceNgs2: ATRAC9 superframe at %llX (config %08X) did not decode",
+                   (unsigned long long)v.read_addr, v.a9_config);
+}
+
+// Decode() for ATRAC9. The waveform is a sequence of units, a superframe
+// and the frame margin each, the superframe at the frame offset in its
+// unit; a unit may span a block's stream continuations. As 11.00 does: the
+// decoder restarts at a block's start when it skips samples (else blocks
+// play on gaplessly), a frame's samples before the block's skip count are
+// dropped, and the rest of the superframe is dropped when the block ends
+// in it. 11.00 decodes a frame at a time; ffmpeg decodes the whole
+// superframe, so a block ending inside one and followed by a block that
+// does not restart the decoder carries the decoder state after the
+// superframe, not after the block's last frame.
+void DecodeAtrac9(Voice& v, uint32_t want) {
+  const uint32_t frames = Atrac9Frames(v), bytes = Atrac9Bytes(v), unit = bytes + v.frame_margin;
+  thread_local std::vector<uint8_t> buf;
+  v.starved = false;
+  uint32_t got = 0;
+  while (got < want) {
+    if (!v.have_block && !NextBlock(v)) {
+      if (v.terminated) v.ended = true;
+      else v.starved = true;
+      break;
+    }
+    const Block& head = v.blocks.front();
+    bool played = v.pos >= v.end;
+    if (v.a9_next == v.a9_frames && !played) {
+      // The next unit, gathered from this span and its continuations.
+      uint32_t have = 0;
+      for (size_t i = v.span; i < v.blocks.size() && (i == v.span || v.blocks[i].stream); i++)
+        have += v.blocks[i].size - (i == v.span ? std::min(v.byte, v.blocks[i].size) : 0);
+      if (have < unit) {
+        if (v.end == ~uint64_t(0) && !v.terminated) {
+          v.starved = true;
+          break;
+        }
+        played = true;  // no whole unit left: the block ends here
+      } else {
+        buf.resize(unit);
+        for (uint32_t at = 0; at < unit;) {
+          const Block& b = v.blocks[v.span];
+          const uint32_t k = std::min(unit - at, b.size - v.byte);
+          std::memcpy(buf.data() + at, recomp::GPtr(b.base + b.offset + v.byte), k);
+          at += k, v.byte += k;
+          if (v.byte == b.size && at < unit) v.span++, v.byte = 0;
+        }
+        if (!v.a9) v.a9 = OpenAtrac9(v);
+        if (v.a9_restart || (v.pos == 0 && head.skip)) avcodec_flush_buffers(v.a9->ctx);
+        v.a9_restart = false;
+        DecodeSuperframe(v, buf.data() + v.frame_offset, bytes);
+        v.a9_next = 0, v.a9_frames = frames;
+        v.decoded_bytes += unit;
+        const Block& b = v.blocks[v.span];
+        v.read_addr = b.base + b.offset + v.byte;
+      }
+    }
+    if (!played) {
+      const uint32_t len = uint32_t(v.a9->frame->nb_samples) / frames;
+      const uint64_t drop = v.pos < head.skip ? std::min<uint64_t>(head.skip - v.pos, len) : 0;
+      const uint32_t k = uint32_t(std::min<uint64_t>(len - drop, v.end - v.pos - drop));
+      const size_t at = size_t(v.a9_next) * len + drop;
+      for (uint32_t c = 0; c < v.wch; c++) {
+        const float* x = reinterpret_cast<const float*>(v.a9->frame->extended_data[c]) + at;
+        v.fifo[c].insert(v.fifo[c].end(), x, x + k);
+      }
+      v.pos += drop + k, got += k, v.decoded_samples += k;
+      v.a9_next++;
+      if (v.pos >= v.end) v.a9_next = v.a9_frames;
+      continue;
+    }
+    // The block's samples are played.
+    const bool empty = v.pos == 0;  // no whole unit: never loops
+    if (!empty && (head.repeats == kForever || v.repeat < head.repeats)) {
+      if (v.exit_loops) {
+        v.exit_loops--;
+      } else {
+        v.repeat++, v.pos = 0, v.span = 0, v.byte = 0;
+        continue;
+      }
+    }
+    EndBlock(v);
+  }
+  const uint32_t zeros = want - std::min(got, want);
+  for (uint32_t c = 0; c < v.wch; c++) v.fifo[c].insert(v.fifo[c].end(), zeros, 0.0f);
+  if (v.ended) v.tail_zeros += zeros;
+}
+
 // Appends `want` decoded frames per channel to the voice's FIFO, zeros
 // past the end of the waveform or while it is starved.
 void Decode(Voice& v, uint32_t want) {
+  if (v.wtype == 0x40) return DecodeAtrac9(v, want);
   const uint32_t bps = BytesPerSample(v.wtype), stride = v.wch * bps + v.frame_margin;
   float frame[kMaxChannels];
   v.starved = false;
@@ -1563,6 +1732,7 @@ uint32_t CreateRack(gaddr sys, uint32_t id, const RackConfig& cfg, const uint8_t
   r->max_env_points = cfg.max_env_points, r->max_filters = cfg.max_filters;
   r->max_inputs = cfg.max_inputs, r->meter_blocks = cfg.meter_blocks;
   r->max_wave_blocks = cfg.max_wave_blocks, r->reverb_size = cfg.reverb_size;
+  r->atrac9_decoders = cfg.atrac9_decoders, r->ajm_decoders = cfg.ajm_decoders;
   for (uint32_t i = 0; i < cfg.max_voices; i++) {
     auto v = std::make_unique<Voice>();
     v->rack = r.get(), v->index = i, v->handle = obj + kRackObject + i * kVoiceObject;

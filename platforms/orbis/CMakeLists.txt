@@ -39,9 +39,10 @@ target_link_libraries(recomp_orbis_fiber PUBLIC recomp_orbis)
 # libSceAudioOut (and the audio libraries on it).
 add_library(recomp_orbis_audio SHARED src/orbis/hle/audioout.cpp)
 target_link_libraries(recomp_orbis_audio PUBLIC recomp_orbis recomp_audio)
-# libSceNgs2: renders into the game's buffers, which it gives libSceAudioOut.
+# libSceNgs2: renders into the game's buffers, which it gives libSceAudioOut;
+# ATRAC9 through ffmpeg.
 add_library(recomp_orbis_ngs2 SHARED src/orbis/hle/ngs2.cpp src/orbis/hle/ngs2_dsp.cpp)
-target_link_libraries(recomp_orbis_ngs2 PUBLIC recomp_orbis)
+target_link_libraries(recomp_orbis_ngs2 PUBLIC recomp_orbis PRIVATE PkgConfig::FFMPEG)
 add_library(recomp_orbis_savedata SHARED src/orbis/hle/savedata.cpp)
 target_link_libraries(recomp_orbis_savedata PUBLIC recomp_orbis_kernel)
 # libScePad on SDL gamepads and the keyboard.

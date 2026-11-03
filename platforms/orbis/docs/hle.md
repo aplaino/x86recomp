@@ -128,7 +128,17 @@ library.
   render order (sources, then the other voices depth-first from each
   mastering voice; buffers no voice wrote are zeroed). The sampler reads
   PCM in place from the game's memory through its block ring (repeats,
-  exit loop, stream continuations, termination), with a 4-tap
+  exit loop, stream continuations, termination), and ATRAC9 through
+  ffmpeg's decoder as 11.00 walks it: units of a superframe plus the frame
+  margin, the superframe at the frame offset, a block's skip dropped from
+  its first frames, the decoder restarted at a block that skips (blocks
+  without a skip play on gaplessly), the setup's checks (decoders of the
+  kind flag 1 picks, the 0xFE config byte, its channel count). Ours: the
+  library's and AJM's decoders are both ffmpeg's; it decodes a whole
+  superframe at once, where 11.00 decodes a frame at a time (the decoder
+  state differs only when a block ends inside a superframe and the next
+  does not skip); a superframe ffmpeg cannot decode or a config it refuses
+  (an odd superframe index) is fatal. Both resample through a 4-tap
   Hann-windowed sinc resampler (512 phases, 3 samples of start-up
   history); envelopes, RBJ biquads, the compressor/limiter, distortion
   and peak meters follow 11.00's formulas; the mastering rack's matrix,
@@ -139,7 +149,7 @@ library.
   surrounds at -3/-6 dB, no LFE); the I3DL2 reverb's delay lengths,
   reflection patterns and comb routing (the structure, the property
   mapping and clamps are 11.00's); the curve and coefficient tables
-  (computed). Not implemented yet, each fatal: ATRAC9, VAG and
+  (computed). Not implemented yet, each fatal: VAG and
   oscillator waveforms, voice callbacks, user effects, custom racks and
   reverb parameters, the alternative default matrices, and reading
   parameters back (the 0x8000 ids).
