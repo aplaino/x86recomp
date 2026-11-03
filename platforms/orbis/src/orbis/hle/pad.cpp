@@ -9,10 +9,12 @@
 #include <SDL3/SDL.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include "orbis/hle.h"
@@ -58,18 +60,21 @@ struct State {
 // <ID>_TEST_PAD=<file>: background runs' presses, one per line:
 // "<seconds> <button>...", each held 0.2 s from that many seconds after
 // scePadInit; buttons cross, circle, square, triangle, up, down, left,
-// right, l1, r1, options, touchpad; '#' starts a comment.
+// right, l1, r1, options, touchpad; '#' starts a comment. Also on a line:
+// lx=, ly=, rx=, ry= a stick's axis, -1 (left, up) to 1 (right, down);
+// for=<seconds> holds the line that long. The file is read as it grows:
+// "+<seconds>" times a line appended during the run from when it is read.
 struct Press {
-  double t;
-  uint32_t buttons;
+  double t, hold = 0.2;
+  uint32_t buttons = 0;
+  int8_t axis[4] = {};  // which sticks' axes the line sets
+  uint8_t stick[4] = {};
 };
 
-std::vector<Press> LoadScript() {
-  std::vector<Press> v;
-  const char* path = recomp::Env("TEST_PAD");
-  if (!path) return v;
-  FILE* f = std::fopen(path, "r");
-  if (!f) recomp::FatalF("TEST_PAD: cannot open %s", path);
+Press ParseLine(char* line, double now) {
+  char* save = nullptr;
+  char* tok = strtok_r(line, " \t\r\n", &save);
+  Press p{tok[0] == '+' ? now + std::atof(tok + 1) : std::atof(tok)};
   static const struct {
     const char* name;
     uint32_t bit;
@@ -78,33 +83,59 @@ std::vector<Press> LoadScript() {
       {"up", kUp},       {"down", kDown},     {"left", kLeft},     {"right", kRight},
       {"l1", kL1},       {"r1", kR1},         {"options", kOptions}, {"touchpad", kTouchPad},
   };
-  char line[256];
-  while (std::fgets(line, sizeof line, f)) {
-    if (char* h = std::strchr(line, '#')) *h = 0;
-    char* save = nullptr;
-    char* tok = strtok_r(line, " \t\r\n", &save);
-    if (!tok) continue;
-    Press p{std::atof(tok), 0};
-    while ((tok = strtok_r(nullptr, " \t\r\n", &save))) {
-      uint32_t bit = 0;
-      for (const auto& n : kNames)
-        if (!std::strcmp(tok, n.name)) bit = n.bit;
-      if (!bit) recomp::FatalF("TEST_PAD: unknown button %s", tok);
-      p.buttons |= bit;
+  static const char* const kAxes[4] = {"lx=", "ly=", "rx=", "ry="};
+  while ((tok = strtok_r(nullptr, " \t\r\n", &save))) {
+    bool known = false;
+    for (int i = 0; i < 4; i++)
+      if (!std::strncmp(tok, kAxes[i], 3)) {
+        const double v = std::atof(tok + 3);
+        if (v < -1 || v > 1) recomp::FatalF("TEST_PAD: %s is outside -1 to 1", tok);
+        p.axis[i] = 1;
+        p.stick[i] = uint8_t(std::lround(127.5 + v * 127.5));
+        known = true;
+      }
+    if (!std::strncmp(tok, "for=", 4)) {
+      p.hold = std::atof(tok + 4);
+      known = true;
     }
-    v.push_back(p);
+    for (const auto& n : kNames)
+      if (!std::strcmp(tok, n.name)) {
+        p.buttons |= n.bit;
+        known = true;
+      }
+    if (!known) recomp::FatalF("TEST_PAD: unknown button %s", tok);
   }
-  std::fclose(f);
-  return v;
+  return p;
 }
 
 State Script() {
-  static const std::vector<Press> presses = LoadScript();
   static const auto t0 = std::chrono::steady_clock::now();
+  static FILE* f = [] {
+    const char* path = recomp::Env("TEST_PAD");
+    FILE* f = path ? std::fopen(path, "r") : nullptr;
+    if (path && !f) recomp::FatalF("TEST_PAD: cannot open %s", path);
+    return f;
+  }();
+  static std::vector<Press> presses;
+  static std::string partial;
   const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  char buf[256];
+  while (f && std::fgets(buf, sizeof buf, f)) {
+    partial += buf;
+    if (partial.back() != '\n') continue;  // the rest is still being written
+    if (size_t h = partial.find('#'); h != std::string::npos) partial.resize(h);
+    if (partial.find_first_not_of(" \t\r\n") != std::string::npos)
+      presses.push_back(ParseLine(partial.data(), t));
+    partial.clear();
+  }
+  if (f) std::clearerr(f);  // past the end: read what is appended later
   State s;
   for (const Press& p : presses)
-    if (t >= p.t && t < p.t + 0.2) s.buttons |= p.buttons;
+    if (t >= p.t && t < p.t + p.hold) {
+      s.buttons |= p.buttons;
+      for (int i = 0; i < 4; i++)
+        if (p.axis[i]) s.stick[i] = p.stick[i];
+    }
   return s;
 }
 

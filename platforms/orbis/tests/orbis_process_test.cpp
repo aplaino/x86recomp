@@ -72,8 +72,14 @@ int main(int argc, char** argv) {
   std::ofstream(dir / "sub" / "a.txt") << "a";
   // The per-user data (save data) in a directory of its own.
   setenv("XDG_DATA_HOME", (dir / "data").c_str(), 1);
+  // The pad as a background run's script holds it (the e2e pad checks).
+  const auto pad = dir.string() + "_pad.txt";
+  std::ofstream(pad) << "0 cross lx=-1 ry=1 for=1000\n+0 circle for=1000\n";
+  setenv("ORBIS_TEST_BACKGROUND", "1", 1);
+  setenv("ORBIS_TEST_TEST_PAD", pad.c_str(), 1);
   const int r = recomp::orbis::RunProcess(game, dir.string(), config);
   std::filesystem::remove_all(dir);
+  std::filesystem::remove(pad);
   constexpr int kChecks = 23 + 24 + 27 + 18 + 7 + 6 + 7 + 38 + 3;
   std::printf("%d checks, %d failed, _start returned %d\n", g_checks, g_failed, r);
   const bool ok = r == 0 && g_failed == 0 && g_checks == kChecks;

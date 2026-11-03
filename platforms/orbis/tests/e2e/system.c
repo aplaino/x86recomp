@@ -370,7 +370,9 @@ static int audio_checks(void) {
   return failed;
 }
 
-// ---- the pad: the user's controller, at rest with no host input.
+// ---- the pad: the user's controller, as the test's pad script holds it
+// (orbis_process_test.cpp): cross and circle, the left stick left and the
+// right stick down.
 
 static int pad_checks(void) {
   int failed = 0;
@@ -381,9 +383,10 @@ static int pad_checks(void) {
   failed += test_check(142, (unsigned)scePadOpen(USER, 0, 0, 0), 0x80920004);  // opened already
   failed += test_check(143, (unsigned)scePadRead(h, data, 0), 0x80920001);
   failed += test_check(144, scePadRead(h, data, 2), 1);
-  failed += test_check(145, *(unsigned*)data[0] == 0 && data[0][4] == 0x80 && data[0][7] == 0x80 &&
+  failed += test_check(145, *(unsigned*)data[0] == 0x6000 && data[0][4] == 0 &&
+                                data[0][5] == 0x80 && data[0][6] == 0x80 && data[0][7] == 0xFF &&
                                 data[0][0x4C] == 1,
-                       1);  // no buttons, sticks centred, connected
+                       1);  // connected
   return failed;
 }
 
