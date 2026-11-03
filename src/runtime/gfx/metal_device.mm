@@ -1388,7 +1388,8 @@ class MetalDevice final : public Device {
     if (vit == shaders_.end() || pit == shaders_.end()) return;
     const Shader& vs = vit->second;
     const Shader& ps = pit->second;
-    const ShaderId ps_id = (ps.varyings & ~vs.varyings) ? PixelShaderFor(d.ps, pit->second, vs.varyings) : d.ps;
+    ShaderId ps_id = (ps.varyings & ~vs.varyings) ? PixelShaderFor(d.ps, pit->second, vs.varyings) : d.ps;
+    if (!pass_.depth) ps_id = PixelShaderWithoutDepth(ps_id);
     const uint32_t count = d.primitives;
     MTLPrimitiveType type;
     uint32_t n;  // vertices or indices used
@@ -2381,6 +2382,7 @@ void main() {
     size_t inputs = 0;
     std::array<hlsl::ParamType, 16> sampler_type{};  // per register; Void if unused
     uint32_t samplers = 0;  // highest register used + 1
+    ShaderId without_depth = 0;  // (PixelShaderWithoutDepth)
     uint32_t float_regs = 0;
     uint64_t hash = 0;  // of its translation: the same from run to run (0: the device's own)
     uint32_t varyings = 0;  // locations written (vertex) or read (pixel): hlsl::VaryingMask
@@ -2410,6 +2412,28 @@ void main() {
     });
     ShaderId vid = CreateShader(v);  // ps stays valid: shaders_ is node-based
     ps.variants[written] = vid;
+    return vid;
+  }
+
+  // A pixel shader writing depth for a pass without a depth buffer: D3D9
+  // ignores what it writes, a Metal pipeline cannot be made with it.
+  ShaderId PixelShaderWithoutDepth(ShaderId sid) {
+    Shader& ps = shaders_.find(sid)->second;
+    if (!ps.program || !ps.program->writes_depth) return sid;
+    if (ps.without_depth) return ps.without_depth;
+    hlsl::Program v = *ps.program;
+    v.writes_depth = false;
+    std::string glsl;
+    size_t at = 0;
+    while (at < v.glsl.size()) {
+      size_t end = v.glsl.find('\n', at);
+      end = end == std::string::npos ? v.glsl.size() : end + 1;
+      if (v.glsl.find("gl_FragDepth", at) >= end) glsl.append(v.glsl, at, end - at);
+      at = end;
+    }
+    v.glsl = std::move(glsl);
+    const ShaderId vid = CreateShader(v);  // ps stays valid: shaders_ is node-based
+    ps.without_depth = vid;
     return vid;
   }
 
