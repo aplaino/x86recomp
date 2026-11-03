@@ -695,6 +695,7 @@ uint32_t CreateShader(Ctx& c, bool pixel) {
   s->device = Arg(c, 0);
   s->pixel = pixel;
   s->tokens = ReadFunction(Arg(c, 1));
+  if (const auto fix = recomp::Game().shader_tokens) fix(s->tokens);
   s->program = ReadTranslated(s->tokens);
   if (!s->program) {
     // Compiled bytecode: translated here.
