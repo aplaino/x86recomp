@@ -1,0 +1,19 @@
+# Tells the project site (JTM-rootstorm/SwARc.site) to rebuild after a
+# push, so its "Updated" dates and recent-commits lists follow this
+# repository. Needs SITE_DISPATCH_TOKEN, a token with Contents: Read and
+# write on SwARc.site; without it the step is skipped.
+name: Site
+
+on:
+  push:
+    branches: [main, ps4, x360, horizon]
+
+jobs:
+  site:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rebuild the site
+        if: env.GH_TOKEN != ''
+        run: gh api repos/JTM-rootstorm/SwARc.site/dispatches -f event_type=commits
+        env:
+          GH_TOKEN: ${{ secrets.SITE_DISPATCH_TOKEN }}
