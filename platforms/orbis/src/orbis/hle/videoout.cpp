@@ -79,6 +79,7 @@ struct Port {
 
 std::mutex g_mu;
 Port g_port;
+std::shared_ptr<const ui::Canvas> g_overlay;
 
 Attr ReadAttr(gaddr a) {
   return {Rd32(a), Rd32(a + 4), Rd32(a + 8), Rd32(a + 12), Rd32(a + 16), Rd32(a + 20)};
@@ -104,6 +105,16 @@ void OpenWindow(Port& p, int w, int h) {
   p.dev->ResetSwapChain(w, h, false);
 }
 
+// Draws the system's overlay over the frame in the back buffer.
+void DrawOverlay(gfx::Device& dev, int w, int h) {
+  std::shared_ptr<const ui::Canvas> o;
+  {
+    std::lock_guard<std::mutex> l(g_mu);
+    o = g_overlay;
+  }
+  if (o) dev.BlitBlend(o->px.data(), uint32_t(o->w * 4), {0, 0, o->w, o->h}, {0, 0, w, h});
+}
+
 // Shows a flip's buffer (host thread).
 void Show(Port& p, const Flip& f) {
   std::vector<uint8_t> px;
@@ -125,6 +136,7 @@ void Show(Port& p, const Flip& f) {
         gpu::Exclusive([&] {
           p.dev->SetRenderTarget(0, 0);
           p.dev->DrawImage(t, {0, 0, w, h});
+          DrawOverlay(*p.dev, w, h);
           hle::PresentFrame(*p.dev, w, h);
         });
         return;
@@ -150,6 +162,7 @@ show:
   p.dev->SetRenderTarget(0, 0);
   const gfx::Rect r{0, 0, w, h};
   p.dev->Blit(px.data(), uint32_t(w * 4), gfx::Format::X8R8G8B8, r, r, false, 0);
+  DrawOverlay(*p.dev, w, h);
   hle::PresentFrame(*p.dev, w, h);
 }
 
@@ -200,6 +213,11 @@ int32_t SubmitFlip(int handle, int index, uint32_t mode, int64_t arg, uint64_t a
   if (index >= 0) Wr64(g_port.labels + 8 * uint64_t(index), 1);
   g_port.queue.push_back({index, arg, after});
   return 0;
+}
+
+void SetOverlay(std::shared_ptr<const ui::Canvas> c) {
+  std::lock_guard<std::mutex> l(g_mu);
+  g_overlay = std::move(c);
 }
 
 }  // namespace recomp::orbis::videoout

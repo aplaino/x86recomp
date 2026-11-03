@@ -2,7 +2,9 @@
 // else the keyboard (arrows, Z/X/A/S for cross/circle/square/triangle,
 // Q/W L1/R1, 1/2 L2/R2, Enter options). It is always connected, as a
 // DualShock 4 is to its user; <ID>_BACKGROUND=1 runs see it at rest, or
-// pressed as <ID>_TEST_PAD's file says (Script below). The motion sensors report the controller lying still. ScePadData's layout,
+// pressed as <ID>_TEST_PAD's file says (Script below). The motion
+// sensors report the controller lying still. While a system dialog has
+// it (pad.h), the game reads it intercepted. ScePadData's layout,
 // the argument checks and codes are libScePad 11.00's; one state is read
 // per call (the newest).
 
@@ -17,6 +19,8 @@
 #include <string>
 #include <vector>
 
+#include "orbis/hle/pad.h"
+
 #include "orbis/hle.h"
 #include "orbis/host.h"
 #include "x86/runtime.h"
@@ -24,6 +28,7 @@
 namespace {
 
 using recomp::gaddr;
+using namespace recomp::orbis::pad;
 
 constexpr uint32_t kErrInvalidArg = 0x80920001, kErrInvalidHandle = 0x80920003,
                    kErrAlreadyOpened = 0x80920004, kErrNotInitialized = 0x80920005;
@@ -31,14 +36,9 @@ constexpr int32_t kHandle = 1;  // the user's standard controller
 constexpr int32_t kUser = 0x10000000;  // the one user (libSceUserService)
 constexpr size_t kDataSize = 0x80;
 
-enum : uint32_t {
-  kL3 = 0x2, kR3 = 0x4, kOptions = 0x8, kUp = 0x10, kRight = 0x20, kDown = 0x40, kLeft = 0x80,
-  kL2 = 0x100, kR2 = 0x200, kL1 = 0x400, kR1 = 0x800, kTriangle = 0x1000, kCircle = 0x2000,
-  kCross = 0x4000, kSquare = 0x8000, kTouchPad = 0x100000,
-};
-
 std::mutex g_mu;
 bool g_init = false, g_open = false;
+bool g_intercepted = false;
 SDL_Gamepad* g_pad = nullptr;  // host thread
 const auto g_start = std::chrono::steady_clock::now();
 
@@ -192,7 +192,11 @@ void PutF(gaddr p, float f) {
   recomp::Wr32(p, v);
 }
 
-void PutData(gaddr d, const State& s) {
+void PutData(gaddr d, State s) {
+  {
+    std::lock_guard<std::mutex> l(g_mu);
+    if (g_intercepted) s = State{kIntercepted};
+  }
   std::memset(recomp::GPtr(d), 0, kDataSize);
   recomp::Wr32(d, s.buttons);
   std::memcpy(recomp::GPtr(d + 4), s.stick, 4);
@@ -211,6 +215,21 @@ uint32_t Check(int32_t h) {
 }
 
 }  // namespace
+
+namespace recomp::orbis::pad {
+
+void SetIntercepted(bool on) {
+  std::lock_guard<std::mutex> l(g_mu);
+  g_intercepted = on;
+}
+
+uint32_t Buttons() {
+  State s;
+  RunOnHost([&] { s = Poll(); });
+  return s.buttons;
+}
+
+}  // namespace recomp::orbis::pad
 
 using recomp::hle::Arg;
 

@@ -192,11 +192,27 @@ library.
   gamepad or the keyboard, always connected; in background runs at rest
   or pressed as <ID>_TEST_PAD's file says (timed presses and stick
   positions, for tests; read as it grows, so a driver can append to it);
-  one state per read; the motion sensors report it lying still.
+  one state per read; the motion sensors report it lying still. While a
+  system dialog is open the game reads it intercepted
+  (SCE_PAD_BUTTON_INTERCEPTED alone, sticks centred).
 - libSceNpTrophy (recomp_orbis_np): contexts and handles from 1,
   unlocks kept below DataDir()/trophies; what needs the trophy pack
   (outside the game's files) is not implemented.
 - libSceCommonDialog (in recomp_orbis_system): initialisation.
+- recomp_orbis_savedata_dialog: libSceSaveDataDialog. The library's side
+  is 11.00's: the states, the checks of the parameter and everything it
+  points to (the common dialog base's size and magic included; some
+  checks depend on the game's SDK version), the codes (libSceSaveData's
+  that it turns into its own included) and the result's layout. The
+  system's side is the runtime's own: a dialog drawn over the game's
+  frames (runtime/ui, in the host's sans-serif font) while it has the
+  controller. The list for loading shows the listed directories that
+  exist, in the game's order, each with its icon, title, subtitle, time
+  (the newest file's, also given as the param's mtime) and size, and the
+  focused one's details; up and down move, cross picks, circle backs
+  out. The progress message shows the first listed directory that
+  exists and the work going on until the game closes it. Other modes,
+  messages and list types are not implemented.
 - libkernel also: signal masks (kept per thread; nothing delivers
   signals to the guest) and libScePosix's clock_gettime.
 - The loader (orbis/process.cpp) provides __tls_get_addr.
@@ -224,6 +240,13 @@ noted:
 
 ## Not measured on hardware yet
 - The user's name.
+- What the save data dialog's result holds when the game closes the
+  dialog (the HLE: result 0, button 0, no directory) and the button of a
+  list's answer (0); whether the list keeps the game's order.
+- The system message types' meaning: 5 is taken to be the progress
+  message (the library's checks fit the SDK's numbering: 1 no data, 3
+  overwrite, 4 and 8 no space, saving only).
+- That a system dialog's game pad reads carry only the intercepted bit.
 - The flip event's data below bit 12 (it varies on the console; the HLE
   gives 0).
 - The handles' values (the console's video out and pad handles are not

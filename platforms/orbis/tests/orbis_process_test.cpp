@@ -80,7 +80,7 @@ int main(int argc, char** argv) {
   const int r = recomp::orbis::RunProcess(game, dir.string(), config);
   std::filesystem::remove_all(dir);
   std::filesystem::remove(pad);
-  constexpr int kChecks = 27 + 24 + 27 + 18 + 7 + 6 + 7 + 38 + 3;
+  constexpr int kChecks = 27 + 24 + 27 + 18 + 7 + 6 + 7 + 38 + 3 + 24;
   std::printf("%d checks, %d failed, _start returned %d\n", g_checks, g_failed, r);
   const bool ok = r == 0 && g_failed == 0 && g_checks == kChecks;
   std::printf("%s\n", ok ? "orbis_process: ok" : "orbis_process: FAILED");

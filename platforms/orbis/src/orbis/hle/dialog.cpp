@@ -1,5 +1,7 @@
 // The system dialogs' HLE: libSceCommonDialog (what every dialog library
-// needs initialised first), then each dialog library. Codes are 11.00's.
+// needs initialised first). Codes are 11.00's.
+
+#include "orbis/hle/dialog.h"
 
 #include <mutex>
 
@@ -14,6 +16,11 @@ std::mutex g_mu;
 bool g_common = false;
 
 }  // namespace
+
+bool recomp::orbis::dialog::CommonInitialized() {
+  std::lock_guard<std::mutex> l(g_mu);
+  return g_common;
+}
 
 ORBIS_HLE("libSceCommonDialog", sceCommonDialogInitialize, 0) {
   std::lock_guard<std::mutex> l(g_mu);

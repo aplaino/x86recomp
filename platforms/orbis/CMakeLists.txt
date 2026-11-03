@@ -8,7 +8,7 @@
 # nothing that links it.
 set(CMAKE_LINK_DEPENDS_NO_SHARED ON)
 recomp_bundle(recomp_base recomp_x87 recomp_x86 recomp_log recomp_gfx recomp_hlsl
-              recomp_audio)
+              recomp_audio recomp_ui)
 
 # Orbis ELF mapping and NIDs, for the lifter and the runtime.
 add_library(recomp_orbis_image SHARED
@@ -62,7 +62,7 @@ add_library(recomp_orbis_np SHARED src/orbis/hle/np_manager.cpp src/orbis/hle/np
             src/orbis/hle/np_trophy.cpp)
 target_link_libraries(recomp_orbis_np PUBLIC recomp_orbis)
 add_library(recomp_orbis_videoout SHARED src/orbis/hle/videoout.cpp)
-target_link_libraries(recomp_orbis_videoout PUBLIC recomp_orbis_kernel recomp_orbis_gpu)
+target_link_libraries(recomp_orbis_videoout PUBLIC recomp_orbis_kernel recomp_orbis_gpu recomp_ui)
 # The GPU (orbis/gpu): the command processor, beside the CPU, and its
 # shaders' instructions.
 add_library(recomp_orbis_gpu SHARED src/orbis/gpu/cp.cpp src/orbis/gpu/gcn.cpp
@@ -72,11 +72,15 @@ target_link_libraries(recomp_orbis_gpu PUBLIC recomp_orbis_kernel recomp_gfx)
 # libSceGnmDriver, which submits to the GPU.
 add_library(recomp_orbis_gnm SHARED src/orbis/hle/gnm_driver.cpp)
 target_link_libraries(recomp_orbis_gnm PUBLIC recomp_orbis_videoout recomp_orbis_gpu)
+# libSceSaveDataDialog: the system's dialog, drawn over the game's frames.
+add_library(recomp_orbis_savedata_dialog SHARED src/orbis/hle/savedata_dialog.cpp)
+target_link_libraries(recomp_orbis_savedata_dialog PUBLIC recomp_orbis_system
+  recomp_orbis_savedata recomp_orbis_pad recomp_orbis_videoout recomp_ui)
 recomp_bundle(recomp_orbis_image recomp_orbis recomp_orbis_kernel recomp_orbis_libc_internal
               recomp_orbis_system recomp_orbis_fiber recomp_orbis_audio recomp_orbis_ngs2
               recomp_orbis_savedata recomp_orbis_pad recomp_orbis_font recomp_orbis_avplayer
               recomp_orbis_net recomp_orbis_np recomp_orbis_videoout recomp_orbis_gpu
-              recomp_orbis_gnm)
+              recomp_orbis_gnm recomp_orbis_savedata_dialog)
 
 # recomp_lift reads Orbis ELFs.
 target_sources(recomp_lift PRIVATE lifter/orbis_reader.cpp)
@@ -134,7 +138,7 @@ if(RECOMP_LD_LLD AND Python3_FOUND AND CMAKE_C_COMPILER_ID MATCHES "Clang")
   target_link_libraries(orbis_process_test PRIVATE orbis_process_lifted recomp_orbis
                         recomp_orbis_kernel recomp_orbis_fiber recomp_orbis_gnm
                         recomp_orbis_savedata recomp_orbis_audio recomp_orbis_pad recomp_orbis_np
-                        recomp_orbis_ngs2)
+                        recomp_orbis_ngs2 recomp_orbis_savedata_dialog)
   recomp_bundle(orbis_process_test)
   add_test(NAME orbis_process COMMAND orbis_process_test "${_e2e}/eboot.elf" "${_e2e}/prx.elf")
   set_tests_properties(orbis_process PROPERTIES TIMEOUT 60)  # a hang is a failure

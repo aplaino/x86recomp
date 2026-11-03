@@ -1216,8 +1216,11 @@ only those below it.
 - The base (src/runtime, cmake/host.cmake): what any guest's program
   needs on its host. The host layer (RECOMP_HOST, on by default): SDL3,
   ffmpeg, LLVM's demanglers, gfx::Device on Vulkan or Metal with the
-  shader compilers, HLSL, the software mixer and logging (recomp_log,
-  recomp_gfx, recomp_hlsl, recomp_audio). The guest address space
+  shader compilers, HLSL, the software mixer, pictures the runtime
+  draws itself over a game's frames (runtime/ui: a console's system
+  dialogs, text in the host's font through fontconfig and FreeType) and
+  logging (recomp_log, recomp_gfx, recomp_hlsl, recomp_audio,
+  recomp_ui). The guest address space
   (guest_memory, guest_alloc, lazy_mem), the host platform layer
   (platform.h) and frame pacing (recomp_base). OpenGL's state machine
   (gl/), which a graphics API front end drives. SoftFloat

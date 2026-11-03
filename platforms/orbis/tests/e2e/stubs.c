@@ -51,6 +51,20 @@ STUB(sceAudioOutInit) STUB(sceAudioOutOpen) STUB(sceAudioOutOutput) STUB(sceAudi
 STUB(scePadInit) STUB(scePadOpen) STUB(scePadRead)
 #endif
 
+#ifdef LIB_COMMONDIALOG
+#define STUB(name) \
+  void name(void) {}
+STUB(sceCommonDialogInitialize)
+#endif
+
+#ifdef LIB_SAVEDATADIALOG
+#define STUB(name) \
+  void name(void) {}
+STUB(sceSaveDataDialogInitialize) STUB(sceSaveDataDialogOpen) STUB(sceSaveDataDialogUpdateStatus)
+STUB(sceSaveDataDialogIsReadyToDisplay) STUB(sceSaveDataDialogClose)
+STUB(sceSaveDataDialogGetResult) STUB(sceSaveDataDialogTerminate)
+#endif
+
 #ifdef LIB_TROPHY
 #define STUB(name) \
   void name(void) {}

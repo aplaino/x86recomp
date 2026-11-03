@@ -17,6 +17,10 @@
 #include <string>
 #include <vector>
 
+#include "orbis/hle/savedata.h"
+
+#include <chrono>
+
 #include "orbis/hle.h"
 #include "orbis/hle/kernel.h"
 #include "runtime/log.h"
@@ -35,7 +39,7 @@ constexpr uint32_t kModeRdOnly = 1, kModeRdWr = 2, kModeCreate = 4, kModeCopyIco
 constexpr uint32_t kMountCreated = 1;
 constexpr int kMaxMounts = 16;
 constexpr uint64_t kMinBlocks = 96;
-constexpr size_t kParamSize = 0x530;  // SceSaveDataParam
+using recomp::orbis::savedata::kParamSize;
 constexpr uint32_t kUser = 0x10000000;  // the one user (libSceUserService)
 
 struct Mounted {
@@ -117,6 +121,28 @@ bool ValidMountPoint(recomp::gaddr p) {
 }
 
 }  // namespace
+
+namespace recomp::orbis::savedata {
+
+bool Find(const std::string& dir, Entry* e) {
+  std::lock_guard<std::mutex> l(g_mu);
+  if (!ValidDirName(dir, false) || !fs::is_directory(Root() + "/" + dir)) return false;
+  Meta meta;
+  ReadMeta(dir, &meta);
+  std::memcpy(e->param, meta.param, kParamSize);
+  e->blocks = meta.blocks;
+  auto t = fs::last_write_time(Root() + "/" + dir);
+  for (const auto& f : fs::recursive_directory_iterator(Root() + "/" + dir))
+    t = std::max(t, f.last_write_time());
+  e->mtime = std::chrono::duration_cast<std::chrono::seconds>(
+                 std::chrono::clock_cast<std::chrono::system_clock>(t).time_since_epoch())
+                 .count();
+  std::memcpy(e->param + 0x508, &e->mtime, 8);
+  e->icon = fs::exists(Root() + "/" + dir + ".png") ? Root() + "/" + dir + ".png" : "";
+  return true;
+}
+
+}  // namespace recomp::orbis::savedata
 
 using recomp::hle::Arg;
 using recomp::gaddr;

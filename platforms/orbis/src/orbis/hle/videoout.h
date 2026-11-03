@@ -3,8 +3,10 @@
 // uses of it need.
 
 #include <cstdint>
+#include <memory>
 
 #include "runtime/guest_memory.h"
+#include "runtime/ui/canvas.h"
 
 namespace recomp::orbis::videoout {
 
@@ -17,5 +19,9 @@ gaddr LabelAddress(int handle);
 // (sceGnmSubmitAndFlipCommandBuffers); returns its result.
 // `after`: the number of graphics submissions the GPU finishes first.
 int32_t SubmitFlip(int handle, int index, uint32_t mode, int64_t arg, uint64_t after = 0);
+
+// What the system shows over the game's frames (its dialogs), scaled to
+// the frame, from the next flip on; null: nothing.
+void SetOverlay(std::shared_ptr<const ui::Canvas> c);
 
 }  // namespace recomp::orbis::videoout

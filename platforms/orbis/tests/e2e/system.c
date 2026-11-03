@@ -55,6 +55,15 @@ int scePadInit(void);
 int scePadOpen(int user, int type, int index, const void* param);
 int scePadRead(int handle, void* data, int n);
 
+int sceCommonDialogInitialize(void);
+int sceSaveDataDialogInitialize(void);
+int sceSaveDataDialogOpen(const void* param);
+int sceSaveDataDialogUpdateStatus(void);
+int sceSaveDataDialogIsReadyToDisplay(void);
+int sceSaveDataDialogClose(const void* param);
+int sceSaveDataDialogGetResult(void* result);
+int sceSaveDataDialogTerminate(void);
+
 int sceNpTrophyCreateContext(int* ctx, int user, unsigned label, unsigned long options);
 int sceNpTrophyCreateHandle(int* handle);
 int sceNpTrophyRegisterContext(int ctx, int handle, unsigned long options);
@@ -390,6 +399,126 @@ static int pad_checks(void) {
   return failed;
 }
 
+// ---- the save data dialog: the system's list and messages, which take
+// the controller while open. The pad script holds its buttons from the
+// start, so the list stays open (a button counts only once released)
+// until the game closes it.
+
+typedef struct {
+  unsigned long size;  // SceCommonDialogBaseParam: 48
+  char reserved[36];
+  unsigned magic;  // 0xC0D1A109 + the low 32 bits of its address
+  unsigned param_size, mode, type, pad;
+  void* anim;
+  void* items;
+  void* user_msg;
+  void* sys_msg;
+  void* error_code;
+  void* progress;
+  unsigned long user_data;
+  void* option;
+  void* mode67;
+  char reserved2[16];
+} DialogParam;
+typedef struct {
+  int user, pad;
+  const char* title;
+  const char (*dirs)[32];
+  unsigned dir_count, pad2;
+  void* new_item;
+  unsigned focus, pad3;
+  const char* focus_dir;
+  unsigned style;
+  char reserved[36];
+} DialogItems;
+typedef struct {
+  unsigned type, pad;
+  unsigned long value;
+  char reserved[32];
+} DialogSysMsg;
+typedef struct {
+  unsigned mode;
+  int result;
+  unsigned button, pad;
+  char* dir;
+  unsigned char* param;
+  unsigned long user_data;
+  char reserved[32];
+} DialogResult;
+
+static void dialog_param(DialogParam* p, unsigned mode, unsigned type, DialogItems* items) {
+  char* b = (char*)p;
+  for (unsigned long i = 0; i < sizeof *p; i++) b[i] = 0;
+  p->size = 48;
+  p->magic = 0xC0D1A109u + (unsigned)(unsigned long)p;
+  p->param_size = 152;
+  p->mode = mode, p->type = type, p->items = items, p->user_data = 77;
+}
+
+static int dialog_checks(void) {
+  int failed = 0;
+  static const char dirs[2][32] = {"NOSUCHDIR", "SAVE0002"};
+  SaveMount m = {USER, 0, 0, "SAVE0002", 0, 96, 2 | 4};
+  SaveMountResult mr = {0};
+  sceSaveDataMount(&m, &mr);
+  sceSaveDataSetParam("/savedata0", 1, "A save", 7);
+  sceSaveDataUmount("/savedata0");
+  DialogItems items = {USER, 0, 0, dirs, 2};
+  DialogParam p;
+  dialog_param(&p, 1, 2, &items);  // a list for loading
+  failed += test_check(210, (unsigned)sceSaveDataDialogOpen(&p), 0x80B80003);  // not initialised
+  failed += test_check(211, sceCommonDialogInitialize(), 0);
+  failed += test_check(212, sceSaveDataDialogInitialize(), 0);
+  failed += test_check(213, (unsigned)sceSaveDataDialogInitialize(), 0x80B80004);
+  failed += test_check(214, (unsigned)sceSaveDataDialogOpen(0), 0x80B8000D);
+  p.magic++;
+  failed += test_check(215, (unsigned)sceSaveDataDialogOpen(&p), 0x80B8000A);
+  p.magic--;
+  items.focus_dir = "SAVE0002";  // a directory to focus, at the head of the list
+  failed += test_check(216, (unsigned)sceSaveDataDialogOpen(&p), 0x80B8000A);
+  items.focus_dir = 0;
+  DialogSysMsg msg = {5};  // progress
+  p.sys_msg = &msg;  // not the list's
+  failed += test_check(217, (unsigned)sceSaveDataDialogOpen(&p), 0x80B8000A);
+  p.sys_msg = 0;
+  unsigned close[9] = {0};
+  failed += test_check(218, (unsigned)sceSaveDataDialogClose(close), 0x80B8000B);  // none open
+  failed += test_check(219, sceSaveDataDialogOpen(&p), 0);
+  failed += test_check(220, sceSaveDataDialogUpdateStatus(), 2);  // running
+  failed += test_check(221, sceSaveDataDialogIsReadyToDisplay(), 1);
+  DialogResult r = {0};
+  failed += test_check(222, (unsigned)sceSaveDataDialogGetResult(&r), 0x80B80005);
+  unsigned char data[0x80];
+  scePadRead(1, data, 1);
+  failed += test_check(223, *(unsigned*)data == 0x80000000 && data[4] == 0x80, 1);  // intercepted
+  failed += test_check(224, sceSaveDataDialogClose(close), 0);
+  failed += test_check(225, sceSaveDataDialogUpdateStatus(), 3);  // finished
+  char dir[32] = "x";
+  r.dir = dir;
+  failed += test_check(226, sceSaveDataDialogGetResult(&r), 0);
+  failed += test_check(227, r.mode == 1 && r.result == 0 && dir[0] == 0 && r.user_data == 77, 1);
+  scePadRead(1, data, 1);
+  failed += test_check(228, *(unsigned*)data, 0x6000);  // the game's again
+  // The progress message, about the one directory that exists.
+  dialog_param(&p, 3, 2, &items);
+  p.sys_msg = &msg;
+  failed += test_check(229, sceSaveDataDialogOpen(&p), 0);
+  failed += test_check(230, sceSaveDataDialogClose(close), 0);
+  r.dir = 0;
+  failed += test_check(231, sceSaveDataDialogGetResult(&r) == 0 && r.mode == 3 && r.result == 0, 1);
+  failed += test_check(232, sceSaveDataDialogTerminate(), 0);
+  failed += test_check(233, (unsigned)sceSaveDataDialogTerminate(), 0x80B80003);
+  struct {
+    int user, pad;
+    const char* title;
+    const char* dir;
+    unsigned unused;
+    char reserved[32];
+  } del = {USER, 0, 0, "SAVE0002"};
+  sceSaveDataDelete(&del);
+  return failed;
+}
+
 // ---- trophies, kept per service label.
 
 static int trophy_checks(void) {
@@ -565,5 +694,5 @@ static int ngs2_checks(void) {
 
 int system_checks(void) {
   return fiber_checks() + dir_checks() + gpu_checks() + save_checks() + audio_checks() +
-         pad_checks() + trophy_checks() + ngs2_checks();
+         pad_checks() + dialog_checks() + trophy_checks() + ngs2_checks();
 }
