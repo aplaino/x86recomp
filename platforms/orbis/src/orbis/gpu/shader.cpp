@@ -1792,6 +1792,8 @@ struct Translator {
           std::snprintf(b, sizeof b, "  s%u = 0u;\n", s++);
           g += b;
         }
+        // Waves take a group's invocations in order, 64 at a time.
+        g += "  r_lane = gl_LocalInvocationIndex % 64u;\n";
         const uint32_t comps = (st.rsrc2 >> 11) & 3;
         vg(0, "gl_LocalInvocationID.x");
         if (comps >= 1) vg(1, "gl_LocalInvocationID.y");

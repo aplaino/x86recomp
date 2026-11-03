@@ -78,7 +78,10 @@ library.
   there, blending such an alpha-only target uses the colour equation); a
   swap of three components is not modelled.
   Compute image stores write such a target at the image's address (2D,
-  level 0), so draws sample what compute stored. CLEAR_STATE loads the Sea
+  level 0), so draws sample what compute stored. A compute group's waves
+  take its invocations 64 at a time in order: an invocation's lane (what
+  ADD_TID_ENABLE adds to a buffer index) is its place in the group modulo
+  64. CLEAR_STATE loads the Sea
   Islands clear state's scissors, masks and depth ranges (AMD's published
   values), not the console's driver's, which are not measured. A draw with
   an ES, a GS and a copy shader runs the ES and the GS as compute passes
