@@ -635,17 +635,29 @@ void DrawCounted(Device& d, gfx::ShaderDraw& sd, const char* what) {
   sd.inputs = inputs.data();
   sd.input_count = uint32_t(inputs.size());
 
+  // Instancing (SetStreamSourceFreq, indexed draws only): stream 0 has
+  // INDEXEDDATA | the number of instances, the others INSTANCEDATA | how
+  // many instances share an element. Drawn once per instance, those streams
+  // at the instance's element with a stride of 0 (every vertex reads it).
+  constexpr uint32_t kIndexedData = 0x40000000, kInstanceData = 0x80000000;
+  const uint32_t freq0 = d.streams[0].freq;
+  const bool instanced = sd.indices && !sd.streams[0].data && (freq0 & kIndexedData);
+  const uint32_t instances = instanced ? std::max<uint32_t>(freq0 & 0x3FFFFFFF, 1) : 1;
+  gfx::VertexStream per_instance[16];
   for (int s = 0; s < 16; s++) {
     const Device::Stream& st = d.streams[s];
-    if (st.freq != 1 && st.buffer.guest)
-      FatalF("d3d9: %s with stream %d frequency %08X (instancing is not supported yet)", what, s,
-             st.freq);
+    if (st.freq != 1 && st.buffer.guest && !(st.freq & (kIndexedData | kInstanceData)))
+      FatalF("d3d9: %s with stream %d frequency %08X (not supported)", what, s, st.freq);
     if (sd.streams[s].data) continue;  // given by the caller (UP draws)
     Buffer* b = st.buffer.obj;
     if (!b || st.offset >= b->length) continue;
     sd.streams[s] = {static_cast<const uint8_t*>(GPtr(b->mem)) + st.offset, b->length - st.offset,
                      st.stride};
     NoteBufferUse(d, b);
+    if (instanced && (st.freq & kInstanceData)) {
+      per_instance[s] = sd.streams[s];
+      sd.streams[s].stride = 0;
+    }
   }
 
   sd.vs = ff ? ff->id : vs->id;
@@ -674,6 +686,20 @@ void DrawCounted(Device& d, gfx::ShaderDraw& sd, const char* what) {
   sd.viewport = changes.has_viewport ? &changes.viewport : nullptr;
   sd.scissor = changes.has_scissor ? &changes.scissor : nullptr;
   d.gfx->DrawShader(sd);
+  sd.states = nullptr;  // (applied by the first instance)
+  sd.state_count = 0;
+  sd.viewport = nullptr;
+  sd.scissor = nullptr;
+  for (uint32_t i = 1; i < instances; i++) {
+    for (int s = 0; s < 16; s++) {
+      const gfx::VertexStream& first = per_instance[s];
+      if (!first.data) continue;
+      const uint32_t at = i / std::max<uint32_t>(d.streams[s].freq & 0x3FFFFFFF, 1) * first.stride;
+      if (at >= first.size) continue;  // past the buffer: the last one that fits
+      sd.streams[s] = {first.data + at, first.size - at, 0};
+    }
+    d.gfx->DrawShader(sd);
+  }
 }
 
 }  // namespace
