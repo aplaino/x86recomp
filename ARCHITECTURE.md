@@ -548,9 +548,11 @@ live in Ctx and are used in place (never cached in locals).
   one NaN operand is returned quieted, two give the first source, SNaN
   raises IE; invalid operations give the default NaN. Rounding control,
   every sticky flag (IE DE ZE OE UE PE) and precedence (a zero divisor
-  suppresses DE for a denormal dividend) match the hardware.
+  suppresses DE for a denormal dividend) match the hardware. Under FTZ
+  (underflow masked) a denormal result is the zero of its sign, with UE
+  and PE.
 - Not modelled, fatal if reached: unmasked SIMD exceptions (#XM), and
-  FTZ/DAZ actually changing a result.
+  DAZ actually changing a result.
 - Integer and data-movement forms are plain portable C++.
 - tests/x86/lift_sse_test runs every SSE form in a game EXE lifted and
   natively from random states rich in special values (for a game whose

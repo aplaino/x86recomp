@@ -360,6 +360,7 @@ int main(int argc, char** argv) {
       in.mxcsr = 0x1F80;
 #ifdef LIFT_X64_SSE
       in.mxcsr |= uint32_t(g() % 4) << 13 | (g() % 4 == 0 ? uint32_t(g()) & 0x3F : 0);
+      if (g() % 4 == 0) in.mxcsr |= 0x8000;  // FTZ
       for (int i = 0; i < 16; i++) Fill16(g, in.xmm[i]);
       for (int i = 0; i < 16; i++) Fill16(g, in.ymm_hi[i]);
       for (uint32_t o = 0; o < kBufSize; o += 16) Fill16(g, &init[o]);

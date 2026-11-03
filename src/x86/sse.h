@@ -5,9 +5,9 @@
 // x87 ones), so results and MXCSR flags match the hardware bit for bit on
 // any host. Integer and data-movement operations are plain portable C++.
 //
-// Not modelled, fatal if reached: unmasked SIMD exceptions (#XM), and FTZ
-// or DAZ actually changing a result (a tiny result or a denormal operand
-// while they are set).
+// FTZ flushes denormal results to zero. Not modelled, fatal if reached:
+// unmasked SIMD exceptions (#XM), and DAZ actually changing a result (a
+// denormal operand while it is set).
 //
 // RSQRTPS and RCPPS have no architectural result, only an error bound
 // (|rel. error| <= 1.5 * 2^-12), and CPUs differ: here they are the

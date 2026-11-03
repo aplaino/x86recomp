@@ -76,7 +76,6 @@ struct Scope {
   Ctx& c;
   uint64_t va;
   uint32_t flags = 0;
-  bool tiny = false;  // a result was tiny (matters only under FTZ)
 
   Scope(Ctx& cc, uint64_t v) : c(cc), va(v) {
     softfloat_roundingMode = RoundingMode(c.mxcsr);
@@ -91,16 +90,23 @@ struct Scope {
     flags |= kDE;
   }
   void Begin() { softfloat_exceptionFlags = 0; }
-  void End() {
-    uint_fast8_t f = softfloat_exceptionFlags;
-    if (f & softfloat_flag_underflow) tiny = true;
-    flags |= FromSf(f);
+  void End() { flags |= FromSf(softfloat_exceptionFlags); }
+  // A lane's floating-point result. A denormal one is tiny (exact or not):
+  // underflow when that is unmasked; with it masked and FTZ set, the zero
+  // of its sign, with UE and PE (SDM vol. 1, 10.2.3.3).
+  template <bool D>
+  typename Fmt<D>::U Result(typename Fmt<D>::U r) {
+    if (!IsDenormal<D>(r)) return r;
+    if (!(c.mxcsr & kUE << 7)) {
+      flags |= kUE;
+    } else if (c.mxcsr & kFTZ) {
+      flags |= kUE | kPE;
+      r &= ~(Fmt<D>::kExp | Fmt<D>::kFrac);
+    }
+    return r;
   }
   // Commits the flags; an unmasked one would have raised #XM instead.
   void Finish() {
-    if (tiny && (c.mxcsr & kFTZ))
-      FatalF("sse: FTZ with a tiny result at %08llX (not modelled)",
-             (unsigned long long)va);
     uint32_t unmasked = flags & ~(c.mxcsr >> 7) & 0x3F;
     if (unmasked)
       FatalF("sse: unmasked SIMD exception %02X at %08llX (#XM not modelled)",
@@ -141,7 +147,7 @@ typename Fmt<D>::U ArithLane(Scope& sc, Op op, typename Fmt<D>::U a,
     }
   }
   sc.End();
-  return r;
+  return sc.Result<D>(r);
 }
 
 template <bool D>
@@ -294,7 +300,7 @@ typename Fmt<!FromDbl>::U CvtLane(Scope& sc, typename Fmt<FromDbl>::U a) {
   else
     r = f32_to_f64(float32_t{a}).v;
   sc.End();
-  return r;
+  return sc.Result<!FromDbl>(r);
 }
 
 template <bool D>

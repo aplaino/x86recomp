@@ -242,6 +242,7 @@ int main(int argc, char** argv) {
       if (f.base >= 0) in.r[f.base] = kBuf + 0x1000;
       in.flags = 0x2 | (g() & 0x8D5);
       in.mxcsr = 0x1F80 | uint32_t(g() % 4) << 13 | (g() % 4 == 0 ? uint32_t(g()) & 0x3F : 0);
+      if (g() % 4 == 0) in.mxcsr |= 0x8000;  // FTZ
       for (int i = 0; i < 8; i++) Fill16(g, in.xmm[i]);
       for (uint32_t o = 0; o < kBufSize; o += 16) Fill16(g, &init[o]);
 

@@ -27,6 +27,15 @@ target_compile_options(sse_rsqrt_test PRIVATE -O2)
 add_test(NAME sse_rsqrt COMMAND sse_rsqrt_test)
 set_tests_properties(sse_rsqrt PROPERTIES TIMEOUT 300)
 
+# sse_ftz_test: FTZ flushing against the host (x86-64 hosts only).
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+  add_executable(sse_ftz_test sse_ftz_test.cpp)
+  target_include_directories(sse_ftz_test PRIVATE "${RECOMP_ROOT}/src")
+  target_link_libraries(sse_ftz_test PRIVATE recomp_x87)
+  target_compile_options(sse_ftz_test PRIVATE -O2)
+  add_test(NAME sse_ftz COMMAND sse_ftz_test)
+endif()
+
 # hle_abi_test: HLE argument order under the Win64 and System V ABIs.
 add_executable(hle_abi_test hle_abi_test.cpp)
 target_link_libraries(hle_abi_test PRIVATE recomp_x86)
