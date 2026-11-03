@@ -70,15 +70,22 @@ endif()
 # The host layer (cmake/host.cmake): what a native program needs on its
 # host, whatever its guest CPU. SDL3 (windows, input, audio output),
 # ffmpeg (movies, compressed audio), FreeType (console font libraries),
-# fontconfig (the host's font for what the runtime draws itself),
 # LLVM's demanglers (Microsoft and Itanium names), gfx::Device on Vulkan or Metal with the shader
 # compilers, the software mixer and logging; the guests' libraries and
 # platform modules link what they use. Off leaves a CPU-only build (a
 # lifter's tests cross built for a host whose sysroot has none of those
 # libraries); no product builds without it.
-option(RECOMP_HOST "Host layer: SDL3, ffmpeg, FreeType, fontconfig, LLVM demangling, gfx::Device, audio" ON)
+option(RECOMP_HOST "Host layer: SDL3, ffmpeg, FreeType, LLVM demangling, gfx::Device, audio" ON)
 if(RECOMP_X86 AND NOT RECOMP_HOST)
   message(FATAL_ERROR "RECOMP_X86 needs RECOMP_HOST")
+endif()
+# Pictures the runtime draws itself over a game's frames (runtime/ui: a
+# console's system dialogs), with text in the host's font through
+# fontconfig: part of the host layer, built only for the platforms that
+# draw them, so other games do not need fontconfig.
+set(RECOMP_UI OFF)
+if(RECOMP_PLATFORM_ORBIS)
+  set(RECOMP_UI ON)
 endif()
 if(RECOMP_HOST)
   include(cmake/host.cmake)

@@ -13,9 +13,6 @@ pkg_check_modules(FFMPEG IMPORTED_TARGET
 # FreeType (FTL, linked dynamically): the font engine of consoles whose
 # font libraries are built on it (the PS4's libSceFontFt).
 find_package(Freetype REQUIRED)
-# fontconfig (MIT, linked dynamically): the host's user interface font
-# for what the runtime draws itself (runtime/ui).
-find_package(Fontconfig REQUIRED)
 if(APPLE)
   set(_llvm_default "/opt/homebrew/opt/llvm@22")  # Homebrew
 else()
@@ -123,14 +120,18 @@ if(DXVK_NATIVE_DIR)
     COMPILE_DEFINITIONS "DXVK_WSI_SDL3")
 endif()
 
-# Pictures the runtime draws itself (runtime/ui/canvas.h): system dialogs
-# over a game's frames.
-add_library(recomp_ui SHARED src/runtime/ui/canvas.cpp)
-target_include_directories(recomp_ui PUBLIC src)
-target_compile_features(recomp_ui PUBLIC cxx_std_20)
-target_link_libraries(recomp_ui PRIVATE recomp_log Freetype::Freetype Fontconfig::Fontconfig)
-set_source_files_properties(src/runtime/ui/canvas.cpp
-  TARGET_DIRECTORY recomp_ui PROPERTIES COMPILE_OPTIONS "-O2")
+if(RECOMP_UI)
+  # Pictures the runtime draws itself (runtime/ui/canvas.h): system
+  # dialogs over a game's frames. fontconfig (MIT, linked dynamically)
+  # finds the host's user interface font.
+  find_package(Fontconfig REQUIRED)
+  add_library(recomp_ui SHARED src/runtime/ui/canvas.cpp)
+  target_include_directories(recomp_ui PUBLIC src)
+  target_compile_features(recomp_ui PUBLIC cxx_std_20)
+  target_link_libraries(recomp_ui PRIVATE recomp_log Freetype::Freetype Fontconfig::Fontconfig)
+  set_source_files_properties(src/runtime/ui/canvas.cpp
+    TARGET_DIRECTORY recomp_ui PROPERTIES COMPILE_OPTIONS "-O2")
+endif()
 
 if(FFMPEG_FOUND)
   # The software mixer, its sources, the EAX model and the reverb; no HLE

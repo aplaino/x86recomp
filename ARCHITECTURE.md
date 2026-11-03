@@ -1218,7 +1218,8 @@ only those below it.
   ffmpeg, LLVM's demanglers, gfx::Device on Vulkan or Metal with the
   shader compilers, HLSL, the software mixer, pictures the runtime
   draws itself over a game's frames (runtime/ui: a console's system
-  dialogs, text in the host's font through fontconfig and FreeType) and
+  dialogs, text in the host's font through fontconfig and FreeType;
+  built only for the platforms that draw them, RECOMP_UI) and
   logging (recomp_log, recomp_gfx, recomp_hlsl, recomp_audio,
   recomp_ui). The guest address space
   (guest_memory, guest_alloc, lazy_mem), the host platform layer
