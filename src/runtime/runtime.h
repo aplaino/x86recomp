@@ -120,6 +120,10 @@ struct GameConfig {
   // prompt images swapped for a pad's while one is connected.
   std::string (*read_redirect)(const std::string& guest_path) = nullptr;
 
+  // Optional: a Direct3D 9 shader's bytecode before it is translated, to
+  // correct a bug in the game's own shaders.
+  void (*shader_tokens)(std::vector<uint32_t>& tokens) = nullptr;
+
   // Video memory DirectDraw reports, in MB. Games pick detail settings
   // from it; a game's best profile may need more than the default.
   uint32_t video_memory_mb = 64;
