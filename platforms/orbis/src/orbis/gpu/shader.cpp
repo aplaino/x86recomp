@@ -1066,6 +1066,9 @@ struct Translator {
     if (compare) {
       const std::string sv = n == 2 ? "vec3(" + vec + ", " + ref_z + ")" : "vec4(" + vec + ", " + ref_z + ")";
       if (mode == 4) return Fail(pc, "a compare sample with a level not translated yet");
+      // A sampler comparing with NEVER fails every texel: the result is 0
+      // (its texture is declared without the comparison).
+      if (((ref.s[0] >> 12) & 7) == 0) return write("floatBitsToUint(vec4(0.0))");
       call = mode == 7 || st.stage != Stage::Pixel ? "textureLod(" + t + ", " + sv + ", 0.0)" : "texture(" + t + ", " + sv + ")";
       write("floatBitsToUint(vec4(" + call + "))");
       return;
