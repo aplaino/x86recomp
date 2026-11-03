@@ -790,8 +790,10 @@ KeptRange* Kept(State& s, gaddr base, uint32_t size, gaddr* at) {
     lo = std::min(lo, it->first);
     hi = std::max<gaddr>(hi, it->first + it->second.size);
   }
+  // Readable lands the dispatch results still to come there first, or
+  // the comparison below would see the memory before them.
+  if (hi - lo > (64u << 20) || !Readable(lo, hi - lo)) return nullptr;
   if (first == it || first->first != lo || first->first + first->second.size != hi) {
-    if (hi - lo > (64u << 20) || !Readable(lo, hi - lo)) return nullptr;
     for (auto e = first; e != it; ++e) s.retired.push_back(e->second.buffer);
     s.kept.erase(first, it);
     KeptRange& k = s.kept.try_emplace(lo).first->second;

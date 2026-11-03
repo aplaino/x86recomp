@@ -1,7 +1,8 @@
 // orbis/gpu's dispatches on the SDL_GPU backend, from hand-assembled GFX7
 // code in guest memory: a wave's stores through a swizzled V# with
 // ADD_TID_ENABLE (a geometry shader's ring) land where the ISA's swizzled
-// addressing puts them. Needs a Vulkan device (lavapipe will do); exits 77
+// addressing puts them; a buffer kept on the GPU is read with what an
+// earlier dispatch stored there. Needs a Vulkan device (lavapipe will do); exits 77
 // (skipped) without one.
 
 #include <SDL3/SDL.h>
@@ -32,7 +33,7 @@ void Check(bool ok, const char* what) {
 // PGM_RSRC1, PGM_RSRC2, USER_DATA_0.
 constexpr uint32_t kThreadX = 0x207, kPgmLo = 0x20C, kRsrc1 = 0x212, kUser = 0x240;
 
-constexpr gaddr kCode = 0x100000, kRing = 0x110000;
+constexpr gaddr kCode = 0x100000, kRing = 0x110000, kKept = 0x120000, kCopy = 0x130000;
 
 }  // namespace
 
@@ -43,7 +44,7 @@ int main() {
     return 1;
   }
   p.vm.Init(&p.mem, 0x10000, uint64_t(1) << 36);
-  if (!p.vm.Reserve(kCode, 0x20000) || !p.vm.Commit(kCode, 0x20000, Prot::RW)) {
+  if (!p.vm.Reserve(kCode, 0x40000) || !p.vm.Commit(kCode, 0x40000, Prot::RW)) {
     std::printf("cannot commit guest memory\n");
     return 1;
   }
@@ -99,6 +100,45 @@ int main() {
   bool rest = true;
   for (uint32_t at = 512; at < 0x1000; at += 4) rest &= Rd32(kRing + at) == ~0u;
   Check(rest, "nothing is stored past the 64 lanes' elements");
+
+  // A copy of a 64 KiB buffer's first dwords (large enough to be kept in
+  // a GPU buffer), then a store into it, then the copy again: the second
+  // copy reads the store.
+  static const uint32_t kCopyCode[] = {
+      0xE0300000, 0x80000100,  // buffer_load_dword v1, s[0:3], 0
+      0xBF8C0F70,              // s_waitcnt vmcnt(0)
+      0xE0700000, 0x80010100,  // buffer_store_dword v1, s[4:7], 0
+      0xBF810000,              // s_endpgm
+  };
+  static const uint32_t kStore[] = {
+      0xE0700000, 0x80000000,  // buffer_store_dword v0, s[0:3], 0
+      0xBF810000,              // s_endpgm
+  };
+  constexpr gaddr kCopyAt = kCode + 0x100, kStoreAt = kCode + 0x200;
+  std::memcpy(GPtr(kCopyAt), kCopyCode, sizeof kCopyCode);
+  std::memcpy(GPtr(kStoreAt), kStore, sizeof kStore);
+  std::memset(GPtr(kKept), 0xFF, 0x10000);
+  // V#s of 4-byte records with ADD_TID_ENABLE: 16384 of them over the
+  // kept buffer, 64 over the copy.
+  const uint32_t w3 = 0xFACu | 4u << 15 | 1u << 23;
+  const uint32_t kept[4] = {uint32_t(kKept), 4u << 16, 16384, w3};
+  const uint32_t copy[4] = {uint32_t(kCopy), 4u << 16, 64, w3};
+  Regs c;
+  c.sh[kThreadX] = 64;
+  c.sh[kPgmLo] = uint32_t(kCopyAt >> 8);
+  c.sh[kRsrc1 + 1] = 8 << 1;
+  std::memcpy(c.sh + kUser, kept, sizeof kept);
+  std::memcpy(c.sh + kUser + 4, copy, sizeof copy);
+  Regs st = r;
+  st.sh[kPgmLo] = uint32_t(kStoreAt >> 8);
+  std::memcpy(st.sh + kUser, kept, sizeof kept);
+  Dispatch(c, groups);
+  Dispatch(st, groups);
+  Dispatch(c, groups);
+  Settle(true);
+  bool copied = true;
+  for (uint32_t t = 0; t < 64; t++) copied &= Rd32(kCopy + 4 * t) == t;
+  Check(copied, "a kept buffer is read after a dispatch's stores into it");
 
   SetDevice(nullptr);
   dev.reset();
