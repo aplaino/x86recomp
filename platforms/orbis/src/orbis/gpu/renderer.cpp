@@ -980,7 +980,7 @@ gfx::ProgramId StripProgram(State& s) {
       "    if ((e & 1u) == 0u) break;\n"
       "    if ((e & 2u) != 0u) m = 0u;\n"
       "    uint o = 4u * j;\n"
-      "    uint v = ((p / 64u) * wave_bytes + ((t / is) * stride + o / es) * es * is +\n"
+      "    uint v = ((p / 64u) * wave_bytes + ((t / is) * stride + (o / es) * es) * is +\n"
       "              (t % is) * es + o % es) / 4u;\n"
       "    m++;\n"
       "    if (topo == 0u) {\n"

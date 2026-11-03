@@ -824,7 +824,9 @@ struct Translator {
   // A buffer instruction's byte address (low 32 bits) for element index
   // and offset VGPRs, its V# in SGPRs (v: as resolved). ADD_TID_ENABLE
   // adds the lane to the index; SWIZZLE_ENABLE interleaves the lanes'
-  // elements (of ELEMENT_SIZE bytes, INDEX_STRIDE lanes in a row).
+  // elements (of ELEMENT_SIZE bytes, INDEX_STRIDE lanes in a row): index i
+  // and offset o at ((i / is) * stride + (o / es) * es) * is + (i % is) * es
+  // + o % es, the stride in bytes per run of is indices' elements.
   std::string BufAddr(const Instr& in, gaddr pc, const uint32_t v[4], uint32_t* stride_out) {
     const uint32_t w0 = in.w0, w1 = in.w1;
     const uint32_t vaddr = w1 & 0xFF, srsrc = ((w1 >> 16) & 0x1F) * 4, soff = w1 >> 24;
@@ -843,7 +845,7 @@ struct Translator {
       if (!swizzle) return "(" + a + " + (" + index + ") * " + stride + " + " + offset + ")";
       const std::string es = U(2u << ((v[3] >> 19) & 3)), is = U(8u << ((v[3] >> 21) & 3));
       Line("r_i = " + index + "; r_o = " + offset + ";");
-      return "(" + a + " + ((r_i / " + is + ") * " + stride + " + r_o / " + es + ") * " + es + " * " + is +
+      return "(" + a + " + ((r_i / " + is + ") * " + stride + " + (r_o / " + es + ") * " + es + ") * " + is +
              " + (r_i % " + is + ") * " + es + " + r_o % " + es + ")";
     }
     uint32_t next = vaddr;

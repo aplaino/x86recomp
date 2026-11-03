@@ -98,6 +98,15 @@ target_link_libraries(orbis_tiling_test PRIVATE recomp_orbis_gpu)
 recomp_bundle(orbis_tiling_test)
 add_test(NAME orbis_tiling COMMAND orbis_tiling_test)
 
+# orbis_gpu_test: dispatches on SDL_GPU; needs a Vulkan device (lavapipe
+# will do), skipped without one.
+add_executable(orbis_gpu_test tests/orbis_gpu_test.cpp)
+target_link_libraries(orbis_gpu_test PRIVATE recomp_orbis_gpu recomp_gfx)
+recomp_bundle(orbis_gpu_test)
+add_test(NAME orbis_gpu COMMAND orbis_gpu_test)
+set_tests_properties(orbis_gpu PROPERTIES SKIP_RETURN_CODE 77
+                     ENVIRONMENT "SDL_VIDEO_DRIVER=offscreen;SDL_GPU_DRIVER=vulkan")
+
 # orbis_process_test: tests/e2e (C for FreeBSD x86-64, linked by ld.lld
 # and made SCE ELFs) lifted at build time and run through the loader.
 # Needs clang and ld.lld.
