@@ -2697,6 +2697,22 @@ void InsnEmitter::Emit64() {
   bool locked = (d_.attributes & ZYDIS_ATTRIB_HAS_LOCK) && Nvis() && IsMem(0) &&
                 m != ZYDIS_MNEMONIC_XCHG;
 
+  if ((m == ZYDIS_MNEMONIC_RET || m == ZYDIS_MNEMONIC_JMP) && p_.resume_sites.count(in_.va)) {
+    // longjmp's return (or jump) to a setjmp return point, with that
+    // caller's registers and stack restored: unwind the host stack to the
+    // lifted function owning the frame, keyed by the rsp it continues with.
+    if (m == ZYDIS_MNEMONIC_RET) {
+      if (Nvis()) return Unimpl();
+      L("const uint64_t t = Rd<uint64_t>(B, rsp);");
+      L("rsp += 8;");
+    } else {
+      if (!PrepareMem()) return Unimpl();
+      L("const uint64_t t = " + Read(0) + ";");
+    }
+    L(Fmt("LIFT_SPILL; throw ::recomp::GuestResume{t, rsp, %s};", va.c_str()));
+    return;
+  }
+
   switch (m) {
     case ZYDIS_MNEMONIC_CALL: {
       if (IsImm(0)) {
@@ -2709,6 +2725,9 @@ void InsnEmitter::Emit64() {
         }
         refs_.insert(t);
         L(Fmt("LIFT_SPILL; %s(c); LIFT_RELOAD;", FnName(t).c_str()));
+        // A setjmp caller's frame, for longjmp's GuestResume: the rsp it
+        // has once setjmp returns.
+        if (p_.setjmps.count(t)) L("SJ = rsp;");
       } else {
         if (!PrepareMem()) return Unimpl();
         L("const uint64_t t = " + Read(0) + ";");
@@ -3514,6 +3533,8 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
   }
   t_in_try = resumable;
   if (eh != p_.eh_frames.end()) o += "  uint64_t EF = 0;\n";
+  const bool sj = p_.x64 && !f.setjmp_returns.empty();
+  if (sj) o += "  uint64_t SJ = 0;\n";
   if (resumable) o += "  try {\n";
   // Instructions are emitted in address order, so if the function also
   // reaches code below its entry (shared tails, e.g. strstr jumping into
@@ -3595,8 +3616,10 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
   }
   if (resumable)
     o += std::string("  } catch (const ::recomp::GuestResume& r) {\n") +
-         (p_.x64 ? "    if (r.ebp != EF) throw;  // another activation's frame\n"
-                 : "    if (r.ebp != ebp) throw;  // another activation's frame\n") +
+         (!p_.x64 ? "    if (r.ebp != ebp) throw;  // another activation's frame\n"
+          : eh == p_.eh_frames.end() ? "    if (r.ebp != SJ) throw;  // another activation's frame\n"
+          : sj ? "    if (r.ebp != EF && r.ebp != SJ) throw;  // another activation's frame\n"
+               : "    if (r.ebp != EF) throw;  // another activation's frame\n") +
          "    ::recomp::Resume(c, r);\n"
          "    return;\n"
          "  }\n";

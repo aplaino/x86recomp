@@ -281,7 +281,11 @@ lifter is tractable (rexglue-style: one C++ function per guest function).
     is the setjmp caller's. Matching by EBP assumes the setjmp caller has
     a frame of its own or that no deeper function with the same EBP also
     catches; an FPO setjmp caller inherits its caller's EBP. Calls to
-    setjmp through a pointer are not recognised.
+    setjmp through a pointer are not recognised. In x64 images the
+    `resume` site may also be longjmp's final `ret` (to the return
+    address it stored at the restored rsp), and the key is the rsp the
+    setjmp caller has once setjmp returns: the caller keeps it after each
+    setjmp call, and the site throws the rsp it would continue with.
 - Oracle tests (dev-time only): every x87 and integer instruction form
   found in a game EXE is run lifted and natively from the same random
   state (tests/lift_*_test.cpp, `recomp_add_lift_tests`).

@@ -34,7 +34,8 @@ void RegisterLiftedFunctions(const LiftedFn* fns, uint32_t count);
 // __except blocks, longjmp to a setjmp return point). Caught by the lifted
 // function owning that frame, which continues there with Resume(). In x64
 // guests `ebp` is the frame's establisher frame (ARCHITECTURE.md, "64-bit
-// guests"), thrown by the unwinder at the end of an exception's unwind.
+// guests"), thrown by the unwinder at the end of an exception's unwind, or
+// for longjmp the rsp a setjmp caller has once setjmp returns.
 struct GuestResume {
   uint64_t target, ebp, from;
 };

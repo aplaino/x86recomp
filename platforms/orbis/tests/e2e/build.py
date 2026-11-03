@@ -4,6 +4,7 @@
 usage: build.py OUTDIR CLANG LD_LLD
 """
 import os
+import struct
 import subprocess
 import sys
 
@@ -50,3 +51,26 @@ run(sys.executable, sce, o("eboot.so"), o("eboot.elf"), "--name", "eboot",
     "--lib", "libTest=" + o("libTest.so"), "--lib", "libTestPrx=" + o("prx.so"),
     "--lib", "libkernel=" + o("libkernel.so"),
     *[a for lib, _ in LIBS for a in ("--lib", lib + "=" + o(lib + ".so"))])
+
+
+def symbols(path):
+    """The ELF's .symtab: name -> value."""
+    b = open(path, "rb").read()
+    shoff, = struct.unpack_from("<Q", b, 0x28)
+    shentsize, shnum = struct.unpack_from("<HH", b, 0x3A)
+    sh = [struct.unpack_from("<IIQQQQIIQQ", b, shoff + i * shentsize) for i in range(shnum)]
+    out = {}
+    for _, typ, _, _, off, size, link, _, _, entsize in sh:
+        if typ != 2:  # SHT_SYMTAB
+            continue
+        stroff = sh[link][4]
+        for k in range(off, off + size, entsize):
+            name, _, _, _, value, _ = struct.unpack_from("<IBBHQQ", b, k)
+            out[b[stroff + name:b.index(b"\0", stroff + name)].decode()] = value
+    return out
+
+
+# The eboot's manifest: its setjmp and longjmp's ret (eboot.c).
+sym = symbols(o("eboot.so"))
+with open(o("eboot.manifest"), "w") as f:
+    f.write("setjmp 0x%x\nresume 0x%x\n" % (sym["test_setjmp"], sym["test_longjmp_ret"]))

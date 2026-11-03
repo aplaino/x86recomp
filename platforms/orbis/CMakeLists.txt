@@ -115,7 +115,7 @@ find_package(Python3 COMPONENTS Interpreter)
 if(RECOMP_LD_LLD AND Python3_FOUND AND CMAKE_C_COMPILER_ID MATCHES "Clang")
   set(_e2e "${CMAKE_CURRENT_BINARY_DIR}/e2e")
   set(_src "${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e")
-  add_custom_command(OUTPUT "${_e2e}/eboot.elf" "${_e2e}/prx.elf"
+  add_custom_command(OUTPUT "${_e2e}/eboot.elf" "${_e2e}/prx.elf" "${_e2e}/eboot.manifest"
     COMMAND Python3::Interpreter "${_src}/build.py" "${_e2e}" "${CMAKE_C_COMPILER}"
             "${RECOMP_LD_LLD}"
     DEPENDS "${_src}/build.py" "${_src}/eboot.c" "${_src}/kernel.c" "${_src}/system.c"
@@ -124,10 +124,10 @@ if(RECOMP_LD_LLD AND Python3_FOUND AND CMAKE_C_COMPILER_ID MATCHES "Clang")
     VERBATIM)
   set(_gen "${_e2e}/gen/gen_000.cpp" "${_e2e}/gen/gen_prx_000.cpp" "${_e2e}/gen/table.cpp")
   add_custom_command(OUTPUT ${_gen}
-    COMMAND recomp_lift --exe "${_e2e}/eboot.elf" --symbols "" --manifest ""
+    COMMAND recomp_lift --exe "${_e2e}/eboot.elf" --symbols "" --manifest "${_e2e}/eboot.manifest"
             --module "${_e2e}/prx.elf" --symbols "" --base 800000000 --out "${_e2e}/gen"
     COMMAND ${CMAKE_COMMAND} -E touch ${_gen}
-    DEPENDS recomp_lift "${_e2e}/eboot.elf" "${_e2e}/prx.elf"
+    DEPENDS recomp_lift "${_e2e}/eboot.elf" "${_e2e}/prx.elf" "${_e2e}/eboot.manifest"
     VERBATIM)
   recomp_add_lifted_files(orbis_process_lifted ${_gen} LINK recomp_orbis)
   add_executable(orbis_process_test tests/orbis_process_test.cpp)
