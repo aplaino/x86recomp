@@ -412,7 +412,8 @@ Device* DeviceOf(uint32_t self) {
 
 int SamplerIndex(uint32_t s) {
   if (s < 16) return int(s);
-  if (s >= 256 && s < 260) return int(s - 240);
+  // D3DVERTEXTEXTURESAMPLER0-3 (D3DDMAPSAMPLER, 256, is the one before them).
+  if (s >= 257 && s <= 260) return int(s - 241);
   return -1;
 }
 
@@ -553,9 +554,13 @@ HLE_NAMED("d3d9.dll", "IDirect3D9::CheckDeviceFormat", D3D9_CheckDeviceFormat, 7
   else if (ok && (usage & D3DUSAGE_DEPTHSTENCIL))
     ok = false;
   if (ok && (usage & D3DUSAGE_RENDERTARGET)) ok = IsRenderTargetFormat(fmt);
-  if (ok && (usage & (D3DUSAGE_QUERY_SRGBREAD | D3DUSAGE_QUERY_SRGBWRITE |
-                      D3DUSAGE_QUERY_VERTEXTEXTURE)))
+  if (ok && (usage & (D3DUSAGE_QUERY_SRGBREAD | D3DUSAGE_QUERY_SRGBWRITE)))
     ok = false;
+  // Vertex shaders sample textures through the same translation as pixel
+  // shaders (GTA IV's vehicle deformation reads its damage from an
+  // A32B32G32R32F target this way and is off without it). Not the block
+  // compressed ones, as on D3D9 hardware.
+  if (ok && (usage & D3DUSAGE_QUERY_VERTEXTEXTURE) && gfx::IsCompressed(f)) ok = false;
   if (ok && rtype != D3DRTYPE_SURFACE && rtype != D3DRTYPE_TEXTURE &&
       rtype != D3DRTYPE_CUBETEXTURE)
     ok = false;

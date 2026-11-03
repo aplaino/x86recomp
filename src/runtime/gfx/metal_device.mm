@@ -1523,10 +1523,12 @@ class MetalDevice final : public Device {
       const VertexStream& vsm = d.streams[in.stream];
       Copy& c = copies[in.stream];
       c.start = first * vsm.stride;
-      c.end = std::min<int64_t>(c.start + int64_t(nverts) * vsm.stride, vsm.size);
+      // (A stride of 0, an instance's data: one element, of unknown size.)
+      const size_t span = vsm.stride ? size_t(nverts) * vsm.stride : std::min<size_t>(vsm.size, 256);
+      c.end = std::min<int64_t>(c.start + int64_t(span), vsm.size);
       c.pos = total;
       // Room for a whole last vertex and the shader's unaligned reads.
-      total += (size_t(nverts) * vsm.stride + 8 + 3) & ~size_t(3);
+      total += (span + 8 + 3) & ~size_t(3);
       used[in.stream] = true;
     }
     Slice vb = Alloc(std::max<size_t>(total, 16), 4);
