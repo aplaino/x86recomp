@@ -9,9 +9,10 @@ int test_double(int id, double d, long n);  // d in xmm0, n in rsi
 extern int test_value;                      // a data export: 1234
 
 // kernel.c: the libkernel HLE's checks (40 on); system.c: the other
-// libraries' (70 on).
+// libraries' (70 on); libc.c: the C library's and the clock's (300 on).
 int kernel_checks(void);
 int system_checks(void);
+int libc_checks(void);
 
 // libTestPrx (prx.c)
 int prx_add(int a, int b);
@@ -112,5 +113,5 @@ long _start(struct args* a, void (*cleanup)(void)) {
   int (*mul)(int, int) = 0;
   failed += test_check(30, sceKernelDlsym(h, "load_mul", (void**)&mul), 0);
   failed += test_check(31, mul(6, 7), 46);
-  return failed + kernel_checks() + system_checks();
+  return failed + kernel_checks() + system_checks() + libc_checks();
 }

@@ -34,6 +34,7 @@ using recomp::Rd32;
 using recomp::Rd64;
 using recomp::Wr32;
 using recomp::Wr64;
+using recomp::orbis::SdkVersion;
 using namespace recomp::orbis::ngs2;
 
 constexpr uint32_t kErrInvalidMaxGrain = 0x804A0050, kErrInvalidNumGrain = 0x804A0051,
@@ -98,16 +99,6 @@ void WrF(gaddr va, float f) {
   uint32_t u;
   std::memcpy(&u, &f, 4);
   Wr32(va, u);
-}
-
-// The game's compiled SDK version (its process parameters'): some checks
-// and defaults depend on it.
-uint32_t SdkVersion() {
-  static const uint32_t v = [] {
-    const gaddr p = recomp::orbis::ProcParam();
-    return p ? Rd32(p + 0x10) : 0u;
-  }();
-  return v;
 }
 
 struct System;

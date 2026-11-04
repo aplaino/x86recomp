@@ -692,7 +692,121 @@ static int ngs2_checks(void) {
   return failed;
 }
 
+// ---- the message dialog (the test's ELFs carry no SDK version: the
+// library's checks and answers for SDKs before 1.50)
+
+typedef struct {
+  unsigned long size;  // SceCommonDialogBaseParam
+  char reserved[36];
+  unsigned magic;
+  unsigned long param_size;  // 0x88
+  int mode, pad;
+  void* user;
+  void* bar;
+  void* sys;
+  int user_id;
+  char reserved2[40];
+  int pad2;
+} MsgParam;
+typedef struct {
+  unsigned type, pad;
+  const char* msg;
+  void* buttons;
+  char reserved[24];
+} MsgUser;
+typedef struct {
+  unsigned type, pad;
+  const char* msg;
+  char reserved[64];
+} MsgBar;
+typedef struct {
+  int mode, result, button;
+  char reserved[32];
+} MsgResult;
+int sceMsgDialogInitialize(void);
+int sceMsgDialogOpen(const MsgParam* p);
+int sceMsgDialogUpdateStatus(void);
+int sceMsgDialogGetStatus(void);
+int sceMsgDialogGetResult(MsgResult* r);
+int sceMsgDialogClose(void);
+int sceMsgDialogTerminate(void);
+int sceMsgDialogProgressBarSetValue(int target, unsigned rate);
+int sceMsgDialogProgressBarInc(int target, unsigned delta);
+
+static void msg_param(MsgParam* p, int mode, void* user, void* bar) {
+  char* b = (char*)p;
+  for (unsigned long i = 0; i < sizeof *p; i++) b[i] = 0;
+  p->size = 48;
+  p->magic = 0xC0D1A109u + (unsigned)(unsigned long)p;
+  p->param_size = 0x88;
+  p->mode = mode, p->user = user, p->bar = bar;
+}
+
+static int msg_dialog_checks(void) {
+  int failed = 0;
+  MsgUser u = {0, 0, "Saved."};  // OK
+  MsgParam p;
+  msg_param(&p, 1, &u, 0);
+  failed += test_check(240, (unsigned)sceMsgDialogOpen(0), 0x80B8000D);
+  failed += test_check(241, (unsigned)sceMsgDialogOpen(&p), 0x80B80003);  // params first
+  failed += test_check(242, sceMsgDialogInitialize(), 0);
+  failed += test_check(243, (unsigned)sceMsgDialogInitialize(), 0x80B80004);
+  p.magic++;
+  failed += test_check(244, (unsigned)sceMsgDialogOpen(&p), 0x80B8000A);
+  p.magic--;
+  MsgBar bar = {0, 0, "Saving"};
+  p.bar = &bar;  // not the mode's
+  failed += test_check(245, (unsigned)sceMsgDialogOpen(&p), 0x80B8000A);
+  p.bar = 0;
+  failed += test_check(246, sceMsgDialogOpen(&p), 0);
+  failed += test_check(247, (unsigned)sceMsgDialogOpen(&p), 0x80B80006);  // running
+  failed += test_check(248, sceMsgDialogUpdateStatus(), 2);
+  failed += test_check(249, (unsigned)sceMsgDialogProgressBarSetValue(0, 50), 0x80B8000F);
+  MsgResult r = {0};
+  failed += test_check(250, (unsigned)sceMsgDialogGetResult(&r), 0x80B80005);
+  failed += test_check(251, sceMsgDialogClose(), 0);
+  failed += test_check(252, (unsigned)sceMsgDialogClose(), 0x80B8000C);
+  failed += test_check(253, sceMsgDialogGetStatus(), 2);  // until UpdateStatus sees it
+  failed += test_check(254, sceMsgDialogUpdateStatus(), 3);
+  // Closed by the game: backed out of (no SDK 3.00 fix-up here).
+  failed += test_check(255, sceMsgDialogGetResult(&r) == 0 && r.mode == 1 && r.result == 1 &&
+                                r.button == 0, 1);
+  // A progress bar, opened again from finished.
+  msg_param(&p, 2, 0, &bar);
+  failed += test_check(256, sceMsgDialogOpen(&p), 0);
+  failed += test_check(257, sceMsgDialogProgressBarInc(0, 250) * 10 +
+                                (unsigned)sceMsgDialogProgressBarSetValue(1, 5), 0x80B8000A);
+  failed += test_check(258, sceMsgDialogTerminate(), 0);  // also while open
+  failed += test_check(259, (unsigned)sceMsgDialogTerminate(), 0x80B80003);
+  return failed;
+}
+
+// ---- add-on content and temporary data: a game installed in full, with
+// none.
+
+int sceAppContentInitialize(const void* init, void* boot);
+int sceAppContentAppParamGetInt(unsigned id, int* value);
+int sceAppContentGetAddcontInfoList(unsigned label, void* list, unsigned num, unsigned* hits);
+int sceAppContentTemporaryDataMount2(unsigned option, char* mount_point);
+
+static int appcontent_checks(void) {
+  int failed = 0;
+  int v = 0;
+  failed += test_check(270, (unsigned)sceAppContentAppParamGetInt(0, &v), 0x80D90001);
+  char init[32] = {0}, boot[40];
+  for (int i = 0; i < 40; i++) boot[i] = 1;
+  failed += test_check(271, sceAppContentInitialize(init, boot) * 10 + boot[4], 0);  // attr 0
+  failed += test_check(272, sceAppContentAppParamGetInt(0, &v) * 10 + v, 3);  // the full SKU
+  unsigned hits = 9;
+  failed += test_check(273, sceAppContentGetAddcontInfoList(0, 0, 0, &hits) * 10 + hits, 0);
+  char mp[16];
+  failed += test_check(274, sceAppContentTemporaryDataMount2(0, mp), 0);
+  failed += test_check(275, streq(mp, "/temp0"), 1);
+  return failed;
+}
+
 int system_checks(void) {
   return fiber_checks() + dir_checks() + gpu_checks() + save_checks() + audio_checks() +
-         pad_checks() + dialog_checks() + trophy_checks() + ngs2_checks();
+         pad_checks() + dialog_checks() + msg_dialog_checks() + trophy_checks() + ngs2_checks() +
+         appcontent_checks();
 }

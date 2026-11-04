@@ -40,7 +40,8 @@ add_library(recomp_orbis_libc_internal SHARED src/orbis/hle/libc_internal.cpp)
 target_link_libraries(recomp_orbis_libc_internal PUBLIC recomp_orbis_kernel)
 # libSceSystemService, libSceUserService, libSceSysmodule, libScePlayGo, libSceDiscMap, the dialogs.
 add_library(recomp_orbis_system SHARED src/orbis/hle/system.cpp src/orbis/hle/playgo.cpp
-            src/orbis/hle/discmap.cpp src/orbis/hle/dialog.cpp)
+            src/orbis/hle/discmap.cpp src/orbis/hle/dialog.cpp src/orbis/hle/rtc.cpp
+            src/orbis/hle/appcontent.cpp)
 target_link_libraries(recomp_orbis_system PUBLIC recomp_orbis)
 add_library(recomp_orbis_fiber SHARED src/orbis/hle/fiber.cpp)
 target_link_libraries(recomp_orbis_fiber PUBLIC recomp_orbis)
@@ -80,8 +81,10 @@ target_link_libraries(recomp_orbis_gpu PUBLIC recomp_orbis_kernel recomp_gfx)
 # libSceGnmDriver, which submits to the GPU.
 add_library(recomp_orbis_gnm SHARED src/orbis/hle/gnm_driver.cpp)
 target_link_libraries(recomp_orbis_gnm PUBLIC recomp_orbis_videoout recomp_orbis_gpu)
-# libSceSaveDataDialog: the system's dialog, drawn over the game's frames.
-add_library(recomp_orbis_savedata_dialog SHARED src/orbis/hle/savedata_dialog.cpp)
+# libSceSaveDataDialog and libSceMsgDialog: the system's dialogs, drawn over
+# the game's frames.
+add_library(recomp_orbis_savedata_dialog SHARED src/orbis/hle/savedata_dialog.cpp
+            src/orbis/hle/msg_dialog.cpp src/orbis/hle/dialog_ui.cpp)
 target_link_libraries(recomp_orbis_savedata_dialog PUBLIC recomp_orbis_system
   recomp_orbis_savedata recomp_orbis_pad recomp_orbis_videoout recomp_ui)
 recomp_bundle(recomp_orbis_image recomp_orbis recomp_orbis_kernel recomp_orbis_libc_internal
@@ -148,7 +151,7 @@ if(RECOMP_LD_LLD AND Python3_FOUND AND CMAKE_C_COMPILER_ID MATCHES "Clang")
     COMMAND Python3::Interpreter "${_src}/build.py" "${_e2e}" "${CMAKE_C_COMPILER}"
             "${RECOMP_LD_LLD}"
     DEPENDS "${_src}/build.py" "${_src}/eboot.c" "${_src}/kernel.c" "${_src}/system.c"
-            "${_src}/prx.c" "${_src}/load.c" "${_src}/stubs.c"
+            "${_src}/libc.c" "${_src}/prx.c" "${_src}/load.c" "${_src}/stubs.c"
             "${RECOMP_ROOT}/tools/orbis_sce_elf.py"
     VERBATIM)
   set(_gen "${_e2e}/gen/gen_000.cpp" "${_e2e}/gen/gen_prx_000.cpp" "${_e2e}/gen/gen_load_000.cpp"
@@ -165,7 +168,7 @@ if(RECOMP_LD_LLD AND Python3_FOUND AND CMAKE_C_COMPILER_ID MATCHES "Clang")
   target_link_libraries(orbis_process_test PRIVATE orbis_process_lifted recomp_orbis
                         recomp_orbis_kernel recomp_orbis_fiber recomp_orbis_gnm
                         recomp_orbis_savedata recomp_orbis_audio recomp_orbis_pad recomp_orbis_np
-                        recomp_orbis_ngs2 recomp_orbis_savedata_dialog)
+                        recomp_orbis_ngs2 recomp_orbis_savedata_dialog recomp_orbis_libc_internal)
   recomp_bundle(orbis_process_test)
   add_test(NAME orbis_process COMMAND orbis_process_test "${_e2e}/eboot.elf" "${_e2e}/prx.elf"
            "${_e2e}/app0/sce_module/libTestLoad.prx")

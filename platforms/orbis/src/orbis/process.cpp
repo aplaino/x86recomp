@@ -146,6 +146,22 @@ gaddr ArgBlock(const std::vector<std::string>& args) {
 
 gaddr ProcParam() { return g_modules.empty() ? 0 : g_modules[0].img.proc_param; }
 
+uint32_t SdkVersion() {
+  const gaddr p = ProcParam();
+  return p ? Rd32(p + 0x10) : 0u;
+}
+
+bool SameModule(gaddr va, gaddr in) {
+  std::lock_guard<std::mutex> l(g_load_mu);
+  auto holds = [](const Loaded& m, gaddr a) {
+    return std::any_of(m.img.segments.begin(), m.img.segments.end(),
+                       [&](const ElfSegment& s) { return a - s.va < s.size; });
+  };
+  for (const Loaded& m : g_modules)
+    if (holds(m, in)) return holds(m, va);
+  return false;
+}
+
 const ParamSfo& AppParam() { return g_param; }
 
 NidName::NidName(const char* library, const char* name) {

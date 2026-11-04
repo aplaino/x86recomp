@@ -37,6 +37,15 @@ struct Config {
 // The eboot's process parameters (PT_SCE_PROCPARAM), 0 if it has none.
 gaddr ProcParam();
 
+// The SDK version the game was compiled with (its process parameters';
+// 0 without them), as sceKernelGetCompiledSdkVersion gives it: some
+// libraries' checks and defaults depend on it.
+uint32_t SdkVersion();
+
+// Whether va lies in a loadable segment of the module that holds `in`
+// (libc's __elf_phdr_match_addr on the module found by address).
+bool SameModule(gaddr va, gaddr in);
+
 // The application's param.sfo (Config::param).
 const ParamSfo& AppParam();
 

@@ -33,7 +33,9 @@ run(lld, "-shared", "-soname", "libkernel", o("kernel_stub.o"), "-o", o("libkern
 LIBS = (("libSceFiber", "LIB_FIBER"), ("libSceGnmDriver", "LIB_GNM"),
         ("libSceSaveData", "LIB_SAVEDATA"), ("libSceAudioOut", "LIB_AUDIOOUT"),
         ("libScePad", "LIB_PAD"), ("libSceNpTrophy", "LIB_TROPHY"), ("libSceNgs2", "LIB_NGS2"),
-        ("libSceCommonDialog", "LIB_COMMONDIALOG"), ("libSceSaveDataDialog", "LIB_SAVEDATADIALOG"))
+        ("libSceCommonDialog", "LIB_COMMONDIALOG"), ("libSceSaveDataDialog", "LIB_SAVEDATADIALOG"),
+        ("libSceLibcInternal", "LIB_LIBC"), ("libSceRtc", "LIB_RTC"),
+        ("libSceMsgDialog", "LIB_MSGDIALOG"), ("libSceAppContent", "LIB_APPCONTENT"))
 for lib, define in LIBS:
     run(clang, *cflags, "-D" + define, os.path.join(here, "stubs.c"), "-o", o(lib + "_stub.o"))
     run(lld, "-shared", "-soname", lib, o(lib + "_stub.o"), "-o", o(lib + ".so"))
@@ -51,8 +53,9 @@ run(sys.executable, sce, o("load.so"), o("load.elf"), "--prx", "--name", "libTes
 run(clang, *cflags, os.path.join(here, "eboot.c"), "-o", o("eboot.o"))
 run(clang, *cflags, os.path.join(here, "kernel.c"), "-o", o("kernel.o"))
 run(clang, *cflags, os.path.join(here, "system.c"), "-o", o("system.o"))
+run(clang, *cflags, os.path.join(here, "libc.c"), "-o", o("libc.o"))
 run(lld, "-pie", "--no-dynamic-linker", "--eh-frame-hdr", "-e", "_start", o("eboot.o"),
-    o("kernel.o"), o("system.o"), o("libTest.so"), o("prx.so"), o("libkernel.so"),
+    o("kernel.o"), o("system.o"), o("libc.o"), o("libTest.so"), o("prx.so"), o("libkernel.so"),
     *[o(lib + ".so") for lib, _ in LIBS], "-o", o("eboot.so"))
 run(sys.executable, sce, o("eboot.so"), o("eboot.elf"), "--name", "eboot",
     "--lib", "libTest=" + o("libTest.so"), "--lib", "libTestPrx=" + o("prx.so"),

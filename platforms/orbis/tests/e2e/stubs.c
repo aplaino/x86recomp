@@ -80,6 +80,39 @@ STUB(sceGnmSetVsShader) STUB(sceGnmInsertPushMarker) STUB(sceGnmDrawInitDefaultH
 STUB(sceGnmSubmitCommandBuffers) STUB(sceGnmAddEqEvent)
 #endif
 
+#ifdef LIB_LIBC
+#define STUB(name) \
+  void name(void) {}
+STUB(strlen) STUB(strcmp) STUB(memmove) STUB(vsnprintf) STUB(memcpy_s) STUB(rand) STUB(srand)
+STUB(gmtime_s) STUB(mktime) STUB(__cxa_guard_acquire) STUB(__cxa_guard_release) STUB(__cxa_atexit)
+STUB(__cxa_finalize) STUB(_Dtest) STUB(_FExp) STUB(_FSin) STUB(_Znwm) STUB(_ZdlPv) STUB(powf)
+STUB(ldexp)
+float _FInf[4];
+#endif
+
+#ifdef LIB_RTC
+#define STUB(name) \
+  void name(void) {}
+STUB(sceRtcGetTick) STUB(sceRtcSetTick) STUB(sceRtcCheckValid) STUB(sceRtcParseRFC3339)
+STUB(sceRtcParseDateTime) STUB(sceRtcFormatRFC3339) STUB(sceRtcFormatRFC2822)
+STUB(sceRtcGetDayOfWeek) STUB(sceRtcTickAddMonths) STUB(sceRtcGetDosTime)
+#endif
+
+#ifdef LIB_MSGDIALOG
+#define STUB(name) \
+  void name(void) {}
+STUB(sceMsgDialogInitialize) STUB(sceMsgDialogOpen) STUB(sceMsgDialogUpdateStatus)
+STUB(sceMsgDialogGetStatus) STUB(sceMsgDialogGetResult) STUB(sceMsgDialogClose)
+STUB(sceMsgDialogTerminate) STUB(sceMsgDialogProgressBarSetValue) STUB(sceMsgDialogProgressBarInc)
+#endif
+
+#ifdef LIB_APPCONTENT
+#define STUB(name) \
+  void name(void) {}
+STUB(sceAppContentInitialize) STUB(sceAppContentAppParamGetInt) STUB(sceAppContentGetAddcontInfoList)
+STUB(sceAppContentTemporaryDataMount2)
+#endif
+
 #ifdef LIB_NGS2
 #define STUB(name) \
   void name(void) {}

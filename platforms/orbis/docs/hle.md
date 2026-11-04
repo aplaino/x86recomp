@@ -38,8 +38,24 @@ library.
   event is returned once per trigger (EV_CLEAR) with its last data.
   Directories: getdents/getdirentries return FreeBSD 9's struct dirent
   records, sorted by name.
-- recomp_orbis_libc_internal: also the memory functions (memcpy,
-  memset, malloc and free on a heap of its own).
+- recomp_orbis_libc_internal: also what the system's middleware PRXs
+  import, as 11.00 has it: the memory and string functions (malloc,
+  free, new and delete on a heap of its own; memcpy_s's checks and codes),
+  printf's family to the host's stdout and stderr (the library's
+  conversions: an unknown one printed as itself, %n; vsnprintf's C99
+  truncation; puts returns 0), rand's generator and global seed, time
+  and struct tm (nine ints; local time is UTC), __cxa_atexit and
+  __cxa_finalize (one list, newest first, by module), the static
+  initialisation guards, and Dinkumware's internals (_Dtest, _FExp, _FLog,
+  _FSin, _FInf, _FNan, _Stderr). The math functions are the host's libm,
+  so results may differ from the console's in the last bit; the
+  floating-point flags the internals raise are not modelled. Not
+  implemented (fatal): C++ exceptions (bad_alloc, the _X* throws), wide
+  characters and positional arguments in printf, long double, streams
+  other than stdout and stderr, std::_Syserror_map's texts (the
+  library's own), and the standard streams (ios_base::Init and _Winit
+  only count). qsort has no handler yet: its comparator calls must come
+  in the library's (Dinkumware's introsort) order.
 - recomp_orbis_fiber: libSceFiber, fibers as host coroutines on the
   game's context memory, or, without one, on the stack of the thread
   that first runs them (below its call, as 11.00 does). The SceFiber
@@ -200,6 +216,21 @@ library.
   unlocks kept below DataDir()/trophies; what needs the trophy pack
   (outside the game's files) is not implemented.
 - libSceCommonDialog (in recomp_orbis_system): initialisation.
+- recomp_orbis_system also: libSceRtc as 11.00 has it (ticks in
+  microseconds since 0001-01-01, its checks in their order and codes, the
+  RFC 3339 and RFC 2822 parsers and formatters with their quirks, the
+  checks that depend on the SDK version). Local time is UTC; the network
+  clocks read the host's clock; setting a clock is not implemented. Of
+  the time zone names the RFC 2822 parser knows, RFC 2822's own (GMT and
+  the North American ones) are implemented; the others are fatal.
+- recomp_orbis_system also: libSceAppContent. The library's checks (and
+  their SDK versions) are 11.00's; the system service it asks is
+  modelled as a game installed in full: not a trial, the full SKU (3),
+  param.sfo's USER_DEFINED_PARAM_1-4, no add-on content (its info: not
+  found), temporary data at /temp0 (cleared when mounted with the format
+  option). Mounting add-on content, entitlement keys, download progress,
+  free space and a USER_DEFINED_PARAM_n param.sfo does not have are not
+  implemented.
 - recomp_orbis_savedata_dialog: libSceSaveDataDialog. The library's side
   is 11.00's: the states, the checks of the parameter and everything it
   points to (the common dialog base's size and magic included; some
@@ -214,6 +245,17 @@ library.
   out. The progress message shows the first listed directory that
   exists and the work going on until the game closes it. Other modes,
   messages and list types are not implemented.
+- recomp_orbis_savedata_dialog also: libSceMsgDialog. The library's side
+  is 11.00's: the checks of SceMsgDialogParam and what it points to (in
+  its order: every parameter before the library's state), the states
+  (FINISHED seen only through UpdateStatus; a finished dialog opens
+  again), the codes, the result and its fix-up for SDK 3.00 on (backing
+  out of an OK dialog reads as OK, of a yes/no one as no), and the
+  progress bar's value (Inc stops at 100, SetValue does not). The system's
+  side is the runtime's own: the message and its buttons (or bar) in a
+  box over the game's frames; left and right move, cross chooses, circle
+  backs out where the dialog has a cancel. System messages and button
+  type 4 are not implemented.
 - libkernel also: signal masks (kept per thread; nothing delivers
   signals to the guest) and libScePosix's clock_gettime.
 - The loader (orbis/process.cpp) provides __tls_get_addr,
@@ -249,6 +291,13 @@ noted:
   message (the library's checks fit the SDK's numbering: 1 no data, 3
   overwrite, 4 and 8 no space, saving only).
 - That a system dialog's game pad reads carry only the intercepted bit.
+- The message dialog's answers: a choice's result and button id (OK and
+  yes 1, no and the second button 2, cancel: user canceled with none), a
+  dialog the game closes (user canceled, none), and whether the dialog
+  libraries refuse each other while one is initialised
+  (sceCommonDialogIsUsed: not modelled).
+- The add-on content service's answers (the SKU, the boot param's attr,
+  an empty list, "not found" for an add-on's info).
 - The flip event's data below bit 12 (it varies on the console; the HLE
   gives 0).
 - The handles' values (the console's video out and pad handles are not

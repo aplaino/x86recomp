@@ -27,6 +27,7 @@
 
 #include "orbis/hle.h"
 #include "orbis/hle/dialog.h"
+#include "orbis/hle/dialog_ui.h"
 #include "orbis/hle/pad.h"
 #include "orbis/hle/savedata.h"
 #include "orbis/hle/videoout.h"
@@ -39,6 +40,7 @@ namespace {
 using recomp::gaddr;
 using recomp::Rd32;
 using recomp::Rd64;
+using recomp::orbis::SdkVersion;
 namespace pad = recomp::orbis::pad;
 namespace savedata = recomp::orbis::savedata;
 
@@ -62,15 +64,6 @@ enum : uint32_t {
 enum : uint32_t { kStyleDateSizeSubtitle, kStyleSubtitleDateSize, kStyleDateSize };
 // Results.
 constexpr int32_t kResultOk = 0, kResultCanceled = 1;
-
-// The game's compiled SDK version (its process parameters').
-uint32_t SdkVersion() {
-  static const uint32_t v = [] {
-    const gaddr p = recomp::orbis::ProcParam();
-    return p ? Rd32(p + 0x10) : 0u;
-  }();
-  return v;
-}
 
 struct Item {
   std::string dir;
@@ -280,34 +273,6 @@ std::string Size(uint64_t blocks) {
   return b;
 }
 
-// Lines of text no wider than w, at the newlines and spaces.
-std::vector<std::string> Wrap(const std::string& s, int size, int w) {
-  std::vector<std::string> out;
-  size_t start = 0;
-  while (start <= s.size()) {
-    size_t nl = s.find('\n', start);
-    if (nl == std::string::npos) nl = s.size();
-    const std::string para = s.substr(start, nl - start);
-    std::string line;
-    for (size_t i = 0; i <= para.size();) {
-      size_t sp = para.find(' ', i);
-      if (sp == std::string::npos) sp = para.size();
-      const std::string word = para.substr(i, sp - i);
-      const std::string next = line.empty() ? word : line + " " + word;
-      if (!line.empty() && recomp::ui::TextWidth(size, next) > w) {
-        out.push_back(line);
-        line = word;
-      } else {
-        line = next;
-      }
-      i = sp + 1;
-    }
-    out.push_back(line);
-    start = nl + 1;
-  }
-  return out;
-}
-
 // An item's icon and lines (title, then the date and size and the
 // subtitle in the order of the style) from (x, y).
 void DrawItem(recomp::ui::Canvas& c, const Item& it, uint32_t style, int x, int y, int right) {
@@ -346,7 +311,7 @@ std::shared_ptr<recomp::ui::Canvas> DrawList(const Dialog& d) {
   const Item& f = d.items[d.focus];
   const int dx = kListX + kListW + 60, dw = kW - kListX - dx;
   int y = kListY + 40;
-  for (const std::string& l : Wrap(Field(f.e.param + 0x100, 0x400), 30, dw)) {
+  for (const std::string& l : recomp::orbis::dialog::Wrap(Field(f.e.param + 0x100, 0x400), 30, dw)) {
     c->Text(dx, y, 30, l, kDim, dw);
     y += 42;
   }
