@@ -153,7 +153,7 @@ library.
   its first frames, the decoder restarted at a block that skips (blocks
   without a skip play on gaplessly), the setup's checks (decoders of the
   kind flag 1 picks, the 0xFE config byte, its channel count). Ours: the
-  library's and AJM's decoders are both ffmpeg's; it decodes a whole
+  decoder is libSceAjm's (ffmpeg's, as below); it decodes a whole
   superframe at once, where 11.00 decodes a frame at a time (the decoder
   state differs only when a block ends inside a superframe and the next
   does not skip); a superframe ffmpeg cannot decode or a config it refuses
@@ -172,6 +172,43 @@ library.
   oscillator waveforms, voice callbacks, user effects, custom racks and
   reverb parameters, the alternative default matrices, and reading
   parameters back (the 0x8000 ids).
+- recomp_orbis_ajm: libSceAjm, the library and the kernel driver behind
+  it as 11.00 has them: the library's checks and the words its job
+  builders write (the bits they keep of what was there included), the
+  codecs a game may register, instance ids (slot | codec << 14, slots
+  from a FIFO starting at 1, the pseudo-instance 0x80000), batch ids (the
+  games' FIFO 0-190), priorities 10-90 and the priority-violation rule,
+  the batch's two-pass validation with the error block (the job, the
+  command's offset and the job's return address; the error code
+  returned as malformed batch), busy instances until their batch is
+  waited for, cancelling, the SDK 5.00 zeroing of the error block,
+  sceAjmDecAt9ParseConfigData and sceAjmDecMp3ParseFrame (Xing/Info with
+  LAME's delay and padding, VBRI, the 0xB4 tag and its CRC). A batch's
+  inputs are read at its start and its jobs run when it is waited for.
+  The jobs run on the audio coprocessor in 11.00, whose firmware decides
+  what they do: that is ours, on ffmpeg's ATRAC9 and MP3 decoders.
+  Initialisation takes ATRAC9's 4 config bytes (MP3: no parameters); a
+  run decodes a frame, or with MULTIPLE_FRAMES as many as the input and
+  output hold, into the instance's format (flags bits 7-9: S16 rounded to
+  nearest, S32, float), the output buffers filled one after the other.
+  An ATRAC9 superframe decodes at its first frame, which needs all of it;
+  each frame consumes its share (the config's frame size). The sideband
+  records, in order: the result (0, 0), STREAM (bytes consumed, bytes
+  written, samples output since the stream's start), MULTIPLE_FRAMES
+  (frames), FORMAT (channels, WAVE speaker mask, rate, the instance's
+  format, bitrate), GAPLESS (samples to output, to skip, skipped). Gapless
+  decoding skips the first samples and stops output after the total
+  (frames are still consumed); RESET restarts the stream and the skip.
+  Contexts are small numbers of the HLE's own (11.00's are the
+  descriptors of /dev/ajm); memory registration keeps 11.00's limits but
+  takes any memory (11.00 wants direct memory); sceAjmStrError's texts
+  are the codes' SDK names; sceAjmBatchErrorDump logs the error block.
+  Not implemented yet, each fatal: codecs other than ATRAC9 and MP3,
+  multi-codec instances (Extend, Switch), jobs on 0x80000, FLUSH and
+  jobs with other than one CONTROL or RUN command, codec-specific
+  sideband records, codec info, resampling, a run that decodes no frame,
+  a sideband buffer too small for its records, and anything the decoder
+  rejects (the coprocessor's error results are not measured).
 - recomp_orbis_avplayer: libSceAvPlayer on ffmpeg, reading through the
   game's file callbacks on a guest service thread; video as NV12 in the
   game's texture memory (pitch: the width rounded up to 64), released
@@ -296,6 +333,12 @@ noted:
   dialog the game closes (user canceled, none), and whether the dialog
   libraries refuse each other while one is initialised
   (sceCommonDialogIsUsed: not modelled).
+- Everything libSceAjm's jobs do on the audio coprocessor: the sideband
+  records' values (the layouts follow the SDK's record sizes; field
+  meanings are the community's), how much input a frame consumes, the
+  speaker masks, gapless decoding's details, what MP3 initialisation
+  takes, and the coprocessor's error results. A console run of the same
+  batches would measure them.
 - The add-on content service's answers (the SKU, the boot param's attr,
   an empty list, "not found" for an add-on's info).
 - The flip event's data below bit 12 (it varies on the console; the HLE

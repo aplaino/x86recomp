@@ -48,10 +48,13 @@ target_link_libraries(recomp_orbis_fiber PUBLIC recomp_orbis)
 # libSceAudioOut (and the audio libraries on it).
 add_library(recomp_orbis_audio SHARED src/orbis/hle/audioout.cpp)
 target_link_libraries(recomp_orbis_audio PUBLIC recomp_orbis recomp_audio)
+# libSceAjm: the audio coprocessor's codecs on ffmpeg.
+add_library(recomp_orbis_ajm SHARED src/orbis/hle/ajm.cpp src/orbis/hle/audio_decoder.cpp)
+target_link_libraries(recomp_orbis_ajm PUBLIC recomp_orbis PRIVATE PkgConfig::FFMPEG)
 # libSceNgs2: renders into the game's buffers, which it gives libSceAudioOut;
-# ATRAC9 through ffmpeg.
+# ATRAC9 through the coprocessor's decoders (libSceAjm's).
 add_library(recomp_orbis_ngs2 SHARED src/orbis/hle/ngs2.cpp src/orbis/hle/ngs2_dsp.cpp)
-target_link_libraries(recomp_orbis_ngs2 PUBLIC recomp_orbis PRIVATE PkgConfig::FFMPEG)
+target_link_libraries(recomp_orbis_ngs2 PUBLIC recomp_orbis recomp_orbis_ajm)
 add_library(recomp_orbis_savedata SHARED src/orbis/hle/savedata.cpp)
 target_link_libraries(recomp_orbis_savedata PUBLIC recomp_orbis_kernel)
 # libScePad on SDL gamepads and the keyboard.
@@ -88,8 +91,8 @@ add_library(recomp_orbis_savedata_dialog SHARED src/orbis/hle/savedata_dialog.cp
 target_link_libraries(recomp_orbis_savedata_dialog PUBLIC recomp_orbis_system
   recomp_orbis_savedata recomp_orbis_pad recomp_orbis_videoout recomp_ui)
 recomp_bundle(recomp_orbis_image recomp_orbis recomp_orbis_kernel recomp_orbis_libc_internal
-              recomp_orbis_system recomp_orbis_fiber recomp_orbis_audio recomp_orbis_ngs2
-              recomp_orbis_savedata recomp_orbis_pad recomp_orbis_font recomp_orbis_avplayer
+              recomp_orbis_system recomp_orbis_fiber recomp_orbis_audio recomp_orbis_ajm
+              recomp_orbis_ngs2 recomp_orbis_savedata recomp_orbis_pad recomp_orbis_font recomp_orbis_avplayer
               recomp_orbis_net recomp_orbis_np recomp_orbis_videoout recomp_orbis_gpu
               recomp_orbis_gnm recomp_orbis_savedata_dialog)
 
@@ -98,7 +101,7 @@ recomp_bundle(recomp_orbis_image recomp_orbis recomp_orbis_kernel recomp_orbis_l
 add_library(recomp_orbis_hle INTERFACE)
 target_link_libraries(recomp_orbis_hle INTERFACE recomp_orbis recomp_orbis_kernel
   recomp_orbis_libc_internal recomp_orbis_system recomp_orbis_fiber recomp_orbis_audio
-  recomp_orbis_ngs2 recomp_orbis_savedata recomp_orbis_pad recomp_orbis_font
+  recomp_orbis_ajm recomp_orbis_ngs2 recomp_orbis_savedata recomp_orbis_pad recomp_orbis_font
   recomp_orbis_avplayer recomp_orbis_net recomp_orbis_np recomp_orbis_videoout
   recomp_orbis_gnm recomp_orbis_savedata_dialog)
 
@@ -151,7 +154,7 @@ if(RECOMP_LD_LLD AND Python3_FOUND AND CMAKE_C_COMPILER_ID MATCHES "Clang")
     COMMAND Python3::Interpreter "${_src}/build.py" "${_e2e}" "${CMAKE_C_COMPILER}"
             "${RECOMP_LD_LLD}"
     DEPENDS "${_src}/build.py" "${_src}/eboot.c" "${_src}/kernel.c" "${_src}/system.c"
-            "${_src}/libc.c" "${_src}/prx.c" "${_src}/load.c" "${_src}/stubs.c"
+            "${_src}/libc.c" "${_src}/ajm.c" "${_src}/prx.c" "${_src}/load.c" "${_src}/stubs.c"
             "${RECOMP_ROOT}/tools/orbis_sce_elf.py"
     VERBATIM)
   set(_gen "${_e2e}/gen/gen_000.cpp" "${_e2e}/gen/gen_prx_000.cpp" "${_e2e}/gen/gen_load_000.cpp"
@@ -168,7 +171,8 @@ if(RECOMP_LD_LLD AND Python3_FOUND AND CMAKE_C_COMPILER_ID MATCHES "Clang")
   target_link_libraries(orbis_process_test PRIVATE orbis_process_lifted recomp_orbis
                         recomp_orbis_kernel recomp_orbis_fiber recomp_orbis_gnm
                         recomp_orbis_savedata recomp_orbis_audio recomp_orbis_pad recomp_orbis_np
-                        recomp_orbis_ngs2 recomp_orbis_savedata_dialog recomp_orbis_libc_internal)
+                        recomp_orbis_ngs2 recomp_orbis_ajm recomp_orbis_savedata_dialog
+                        recomp_orbis_libc_internal)
   recomp_bundle(orbis_process_test)
   add_test(NAME orbis_process COMMAND orbis_process_test "${_e2e}/eboot.elf" "${_e2e}/prx.elf"
            "${_e2e}/app0/sce_module/libTestLoad.prx")

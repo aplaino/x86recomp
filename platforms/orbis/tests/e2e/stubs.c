@@ -106,6 +106,18 @@ STUB(sceMsgDialogGetStatus) STUB(sceMsgDialogGetResult) STUB(sceMsgDialogClose)
 STUB(sceMsgDialogTerminate) STUB(sceMsgDialogProgressBarSetValue) STUB(sceMsgDialogProgressBarInc)
 #endif
 
+#ifdef LIB_AJM
+#define STUB(name) \
+  void name(void) {}
+STUB(sceAjmInitialize) STUB(sceAjmFinalize) STUB(sceAjmMemoryRegister) STUB(sceAjmModuleRegister)
+STUB(sceAjmModuleUnregister) STUB(sceAjmInstanceCreate) STUB(sceAjmInstanceDestroy)
+STUB(sceAjmInstanceCodecType) STUB(sceAjmBatchStartBuffer) STUB(sceAjmBatchWait)
+STUB(sceAjmBatchCancel) STUB(sceAjmBatchJobControlBufferRa) STUB(sceAjmBatchJobRunBufferRa)
+STUB(sceAjmBatchJobRunSplitBufferRa)
+STUB(sceAjmBatchJobInlineBuffer) STUB(sceAjmDecAt9ParseConfigData) STUB(sceAjmDecMp3ParseFrame)
+STUB(sceAjmStrError)
+#endif
+
 #ifdef LIB_APPCONTENT
 #define STUB(name) \
   void name(void) {}

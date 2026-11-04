@@ -13,6 +13,7 @@ extern int test_value;                      // a data export: 1234
 int kernel_checks(void);
 int system_checks(void);
 int libc_checks(void);
+int ajm_checks(void);
 
 // libTestPrx (prx.c)
 int prx_add(int a, int b);
@@ -113,5 +114,5 @@ long _start(struct args* a, void (*cleanup)(void)) {
   int (*mul)(int, int) = 0;
   failed += test_check(30, sceKernelDlsym(h, "load_mul", (void**)&mul), 0);
   failed += test_check(31, mul(6, 7), 46);
-  return failed + kernel_checks() + system_checks() + libc_checks();
+  return failed + kernel_checks() + system_checks() + libc_checks() + ajm_checks();
 }

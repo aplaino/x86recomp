@@ -17,11 +17,8 @@
 #include <mutex>
 #include <vector>
 
-extern "C" {
-#include <libavcodec/avcodec.h>
-}
-
 #include "orbis/hle.h"
+#include "orbis/hle/audio_decoder.h"
 #include "orbis/hle/ngs2_dsp.h"
 #include "orbis/process.h"
 #include "runtime/log.h"
@@ -135,18 +132,6 @@ struct Filter {
   Biquad q;
 };
 
-// A voice's ATRAC9 decoder: ffmpeg's, a superframe at a time.
-struct Atrac9 {
-  AVCodecContext* ctx = nullptr;
-  AVPacket* pkt = nullptr;
-  AVFrame* frame = nullptr;
-  ~Atrac9() {
-    av_frame_free(&frame);
-    av_packet_free(&pkt);
-    avcodec_free_context(&ctx);
-  }
-};
-
 struct Voice {
   Rack* rack;
   uint32_t index;
@@ -194,7 +179,7 @@ struct Voice {
   // when a9_restart), and the frames of the superframe decoded last still
   // to be played.
   uint32_t a9_config = 0;
-  std::unique_ptr<Atrac9> a9;
+  std::unique_ptr<recomp::orbis::AudioDecoder> a9;
   bool a9_restart = true;
   uint32_t a9_next = 0, a9_frames = 0;
 
@@ -1107,37 +1092,9 @@ uint32_t Atrac9Bytes(const Voice& v) {
   return (((v.a9_config & 0xFFFF) >> 5) + 1) << (v.a9_config >> 3 & 3);
 }
 
-std::unique_ptr<Atrac9> OpenAtrac9(const Voice& v) {
-  const AVCodec* codec = avcodec_find_decoder(AV_CODEC_ID_ATRAC9);
-  if (!codec) recomp::FatalF("libSceNgs2: the host's ffmpeg has no ATRAC9 decoder");
-  auto d = std::make_unique<Atrac9>();
-  d->ctx = avcodec_alloc_context3(codec);
-  d->pkt = av_packet_alloc();
-  d->frame = av_frame_alloc();
-  if (!d->ctx || !d->pkt || !d->frame) recomp::FatalF("libSceNgs2: out of memory");
-  // ffmpeg's extradata: a version word, then the config bytes as an
-  // ATRAC9 file stores them.
-  uint8_t* x = static_cast<uint8_t*>(av_mallocz(12 + AV_INPUT_BUFFER_PADDING_SIZE));
-  for (int i = 0; i < 4; i++) x[4 + i] = uint8_t(v.a9_config >> (24 - 8 * i));
-  x[0] = 2;
-  d->ctx->extradata = x;
-  d->ctx->extradata_size = 12;
-  d->ctx->block_align = int(Atrac9Bytes(v));
-  if (avcodec_open2(d->ctx, codec, nullptr) < 0)
-    recomp::FatalF("libSceNgs2: ATRAC9 config %08X is not implemented yet (ffmpeg refuses it)",
-                   v.a9_config);
-  return d;
-}
-
-// Decodes the superframe at `src` into the decoder's frame.
+// Decodes the superframe at `src`.
 void DecodeSuperframe(Voice& v, const uint8_t* src, uint32_t size) {
-  Atrac9& d = *v.a9;
-  if (av_new_packet(d.pkt, int(size)) < 0) recomp::FatalF("libSceNgs2: out of memory");
-  std::memcpy(d.pkt->data, src, size);
-  const int err = avcodec_send_packet(d.ctx, d.pkt);
-  av_packet_unref(d.pkt);
-  if (err < 0 || avcodec_receive_frame(d.ctx, d.frame) < 0 ||
-      d.frame->ch_layout.nb_channels != int(v.wch))
+  if (!v.a9->Decode(src, size) || v.a9->channels() != v.wch)
     recomp::FatalF("libSceNgs2: ATRAC9 superframe at %llX (config %08X) did not decode",
                    (unsigned long long)v.read_addr, v.a9_config);
 }
@@ -1185,8 +1142,14 @@ void DecodeAtrac9(Voice& v, uint32_t want) {
           at += k, v.byte += k;
           if (v.byte == b.size && at < unit) v.span++, v.byte = 0;
         }
-        if (!v.a9) v.a9 = OpenAtrac9(v);
-        if (v.a9_restart || (v.pos == 0 && head.skip)) avcodec_flush_buffers(v.a9->ctx);
+        if (!v.a9) {
+          v.a9 = recomp::orbis::AudioDecoder::Atrac9(v.a9_config);
+          if (!v.a9)
+            recomp::FatalF("libSceNgs2: ATRAC9 config %08X is not implemented yet (ffmpeg "
+                           "refuses it)",
+                           v.a9_config);
+        }
+        if (v.a9_restart || (v.pos == 0 && head.skip)) v.a9->Flush();
         v.a9_restart = false;
         DecodeSuperframe(v, buf.data() + v.frame_offset, bytes);
         v.a9_next = 0, v.a9_frames = frames;
@@ -1196,12 +1159,12 @@ void DecodeAtrac9(Voice& v, uint32_t want) {
       }
     }
     if (!played) {
-      const uint32_t len = uint32_t(v.a9->frame->nb_samples) / frames;
+      const uint32_t len = v.a9->samples() / frames;
       const uint64_t drop = v.pos < head.skip ? std::min<uint64_t>(head.skip - v.pos, len) : 0;
       const uint32_t k = uint32_t(std::min<uint64_t>(len - drop, v.end - v.pos - drop));
       const size_t at = size_t(v.a9_next) * len + drop;
       for (uint32_t c = 0; c < v.wch; c++) {
-        const float* x = reinterpret_cast<const float*>(v.a9->frame->extended_data[c]) + at;
+        const float* x = v.a9->channel(c) + at;
         v.fifo[c].insert(v.fifo[c].end(), x, x + k);
       }
       v.pos += drop + k, got += k, v.decoded_samples += k;
