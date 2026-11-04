@@ -85,6 +85,18 @@ void Refresh() {
       p = Pad{};
     }
   }
+  // The pads move down into a freed slot: a game can read only the first
+  // (an iPad's touch controls leave it when a real pad connects).
+  int to = 0;
+  for (Pad& p : g_pads) {
+    if (!p.gp) continue;
+    if (&p != &g_pads[to]) {
+      g_pads[to] = p;
+      p = Pad{};
+      std::fprintf(stderr, "xinput: pad %d: %s\n", to, SDL_GetGamepadName(g_pads[to].gp));
+    }
+    to++;
+  }
   int n = 0;
   SDL_JoystickID* ids = SDL_GetGamepads(&n);
   {  // Joysticks SDL has no gamepad mapping for are not pads here: say so.
