@@ -35,12 +35,13 @@ int Main(const GameConfig& game, int argc, char** argv) {
   Config config;
   std::vector<AppModule> modules;
   std::string err;
-  if (!StartModules(game_dir, &modules, &err)) {
+  if (!AppModules(game_dir, &modules, &err)) {
     std::fprintf(stderr, "%s: %s\n", argv[0], err.c_str());
     return 2;
   }
   config.eboot = modules[0].path;
-  for (size_t i = 1; i < modules.size(); i++) config.prxs.push_back({modules[i].path, modules[i].base});
+  for (size_t i = 1; i < modules.size(); i++)
+    (modules[i].start ? config.prxs : config.loadable).push_back({modules[i].path, modules[i].base});
   struct stat st;
   if (sfo.empty() && stat((game_dir + "/sce_sys/param.sfo").c_str(), &st) == 0)
     sfo = game_dir + "/sce_sys/param.sfo";

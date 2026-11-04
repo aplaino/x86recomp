@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <mutex>
 
@@ -21,9 +22,13 @@ struct Loaded {
   ElfImage img;
 };
 
-// The process's modules: the eboot first, then the PRXs.
-std::vector<Loaded> g_modules;
+// The process's modules: the eboot first, then the PRXs it starts with,
+// then those the game loaded; a module's handle is its index. Once guest
+// code runs, g_modules and g_exports change under g_load_mu.
+std::deque<Loaded> g_modules;
 std::map<std::pair<std::string, std::string>, gaddr> g_exports;  // (library, NID)
+std::mutex g_load_mu;
+std::vector<Prx> g_loadable;  // Config::loadable
 
 ParamSfo g_param;
 
@@ -56,6 +61,7 @@ void ThreadInit(Thread* t) {
   Wr64(tp + 8, dtv);  // tcb_dtv
   Wr64(dtv, 1);       // generation
   Wr64(dtv + 8, g_tls_modules);
+  std::lock_guard<std::mutex> l(g_load_mu);
   for (const Loaded& m : g_modules) {
     const ElfTls& tls = m.img.tls;
     if (!m.img.has_tls) continue;
@@ -97,6 +103,26 @@ gaddr Bind(const ElfImport& imp, const std::string& module) {
     FatalF("%s imports data %s!%s (module %s), which nothing defines", module.c_str(),
            imp.library.c_str(), shown.c_str(), imp.module.c_str());
   return hle::BindImport(imp.library, shown);  // fatal when called
+}
+
+Loaded& MapModule(const std::string& path, gaddr base) {
+  Process& p = *g_proc;
+  std::string err;
+  Loaded& m = g_modules.emplace_back();
+  m.name = path.substr(path.find_last_of('/') + 1);
+  if (!m.img.Map(path, p.mem, &err, base)) FatalF("%s: %s", path.c_str(), err.c_str());
+  for (const ElfSegment& s : m.img.segments) {
+    const gaddr lo = s.va & ~gaddr(GuestMemory::kPageSize - 1);
+    p.vm.MarkReserved(lo, (s.va + s.size - lo + GuestMemory::kPageSize - 1) &
+                              ~uint64_t(GuestMemory::kPageSize - 1));
+  }
+  return m;
+}
+
+void LinkModule(Loaded& m) {
+  std::string err;
+  if (!m.img.Link(g_proc->mem, &err, [&](const ElfImport& imp) { return Bind(imp, m.name); }))
+    FatalF("%s: %s", m.name.c_str(), err.c_str());
 }
 
 // argc, argv[], NULL, an empty environment and auxv, then the strings.
@@ -142,19 +168,8 @@ int RunProcess(const GameConfig& game, const std::string& game_dir, const Config
   p.thread_init = ThreadInit;
   p.vm.Init(&p.mem, kUserLo64, kUserHi64);
 
-  std::string err;
-  auto map = [&](const std::string& path, gaddr base) {
-    Loaded& m = g_modules.emplace_back();
-    m.name = path.substr(path.find_last_of('/') + 1);
-    if (!m.img.Map(path, p.mem, &err, base)) FatalF("%s: %s", path.c_str(), err.c_str());
-    for (const ElfSegment& s : m.img.segments) {
-      const gaddr lo = s.va & ~gaddr(GuestMemory::kPageSize - 1);
-      p.vm.MarkReserved(lo, (s.va + s.size - lo + GuestMemory::kPageSize - 1) &
-                                ~uint64_t(GuestMemory::kPageSize - 1));
-    }
-  };
-  map(config.eboot, 0);
-  for (const Prx& prx : config.prxs) map(prx.path, prx.base);
+  MapModule(config.eboot, 0);
+  for (const Prx& prx : config.prxs) MapModule(prx.path, prx.base);
 
   // TLS slots in load order, the eboot's (if any) first and right below
   // the thread pointer.
@@ -169,9 +184,18 @@ int RunProcess(const GameConfig& game, const std::string& game_dir, const Config
   for (const Loaded& m : g_modules)
     for (const ElfExport& e : m.img.exports) g_exports.emplace(std::make_pair(e.library, e.nid), e.va);
   for (Loaded& m : g_modules) {
-    if (!m.img.Link(p.mem, &err, [&](const ElfImport& imp) { return Bind(imp, m.name); }))
-      FatalF("%s: %s", m.name.c_str(), err.c_str());
+    LinkModule(m);
     p.code.push_back({m.img.text_lo, m.img.text_hi - m.img.text_lo});
+  }
+  // The PRXs the game may load: their range of the dispatch tables is
+  // set up now, as the tables do not change once guest code runs.
+  g_loadable = config.loadable;
+  for (const Prx& prx : g_loadable) {
+    ElfImage img;
+    std::string err;
+    if (!img.Read(prx.path, &err, prx.base)) FatalF("%s: %s", prx.path.c_str(), err.c_str());
+    for (const ElfSegment& s : img.segments)
+      if (s.flags & 1) p.code.push_back({s.va, s.size});
   }
 
   InitDispatch();
@@ -205,4 +229,70 @@ ORBIS_HLE("libkernel", __tls_get_addr, 1) {
     ::recomp::FatalF("__tls_get_addr: TLS module %llu of %llu", (unsigned long long)module,
                      (unsigned long long)::recomp::Rd64(dtv + 8));
   return ::recomp::Rd64(dtv + 8 * (1 + module)) + ::recomp::Rd64(ti + 8);
+}
+
+// int sceKernelLoadStartModule(const char* path, size_t argc,
+// const void* argv, uint32_t flags, const void* opt, int* result): maps
+// one of the PRXs the game ships (named by its file name, at the base it
+// was lifted at), binds its imports, then runs its initialiser with argc
+// and argv (module_start's, as at process start), whose return value goes
+// to *result. Returns the module's handle.
+ORBIS_HLE("libkernel", sceKernelLoadStartModule, 6) {
+  using namespace ::recomp::orbis;
+  using ::recomp::hle::Arg;
+  const std::string path = ::recomp::GStr(Arg(c, 0));
+  const std::string file = path.substr(path.find_last_of('/') + 1);
+  if (Arg(c, 3) || Arg(c, 4))
+    ::recomp::FatalF("sceKernelLoadStartModule %s: flags %llx, options %llx: not implemented",
+                     path.c_str(), (unsigned long long)Arg(c, 3), (unsigned long long)Arg(c, 4));
+  uint64_t handle;
+  ::recomp::gaddr init;
+  {
+    std::lock_guard<std::mutex> l(g_load_mu);
+    for (const Loaded& m : g_modules)
+      if (m.name == file)
+        ::recomp::FatalF("sceKernelLoadStartModule %s: already loaded (not implemented)",
+                         path.c_str());
+    auto it = std::find_if(g_loadable.begin(), g_loadable.end(), [&](const Prx& p) {
+      return p.path.substr(p.path.find_last_of('/') + 1) == file;
+    });
+    if (it == g_loadable.end())
+      ::recomp::FatalF("sceKernelLoadStartModule %s: not a PRX the game ships (system "
+                       "libraries: not implemented)",
+                       path.c_str());
+    Loaded& m = MapModule(it->path, it->base);
+    if (m.img.has_tls)
+      ::recomp::FatalF("sceKernelLoadStartModule %s: TLS in a module loaded later: not "
+                       "implemented",
+                       path.c_str());
+    for (const ElfExport& e : m.img.exports)
+      g_exports.emplace(std::make_pair(e.library, e.nid), e.va);
+    LinkModule(m);
+    handle = g_modules.size() - 1;
+    init = m.img.init;
+  }
+  const uint64_t r = init ? ::recomp::CallGuest(c, init, {Arg(c, 1), Arg(c, 2), 0}) : 0;
+  if (const ::recomp::gaddr result = Arg(c, 5)) ::recomp::Wr32(result, uint32_t(r));
+  return handle;
+}
+
+// int sceKernelDlsym(int handle, const char* symbol, void** address):
+// the address the module exports symbol at (by its NID).
+ORBIS_HLE("libkernel", sceKernelDlsym, 3) {
+  using namespace ::recomp::orbis;
+  using ::recomp::hle::Arg;
+  const uint64_t handle = uint32_t(Arg(c, 0));
+  const std::string symbol = ::recomp::GStr(Arg(c, 1)), nid = Nid(symbol);
+  std::lock_guard<std::mutex> l(g_load_mu);
+  if (handle >= g_modules.size())
+    ::recomp::FatalF("sceKernelDlsym %s: no module %llu", symbol.c_str(),
+                     (unsigned long long)handle);
+  const Loaded& m = g_modules[handle];
+  for (const ElfExport& e : m.img.exports)
+    if (e.nid == nid) {
+      ::recomp::Wr64(Arg(c, 2), e.va);
+      return 0;
+    }
+  ::recomp::FatalF("sceKernelDlsym: %s does not export %s (not implemented)", m.name.c_str(),
+                   symbol.c_str());
 }

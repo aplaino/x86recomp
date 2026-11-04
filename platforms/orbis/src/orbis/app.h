@@ -21,17 +21,17 @@ struct AppModule {
   std::string path;  // host path
   std::string name;  // its module name ("eboot" for the eboot)
   gaddr base;        // 0 for the eboot (its own address)
+  bool start;        // started with the eboot, else loaded when the game asks
 };
 
 // The eboot (app0/eboot.bin), then the PRXs the game ships in
 // app0/sce_module that it needs at start (DT_SCE_NEEDED_MODULE, directly
 // or through each other), in initialisation order: each after the modules
 // it needs, else in the order they are first named. Needed modules the
-// game does not ship are system libraries (the HLE). `shipped` (if
-// given) gets every PRX in sce_module by module name, those not started
-// too.
-bool StartModules(const std::string& app0, std::vector<AppModule>* out, std::string* err,
-                  std::map<std::string, std::string>* shipped = nullptr);
+// game does not ship are system libraries (the HLE). Then the other
+// shipped PRXs, by module name: the game loads those itself
+// (sceKernelLoadStartModule), so each is lifted at a base of its own too.
+bool AppModules(const std::string& app0, std::vector<AppModule>* out, std::string* err);
 
 // param.sfo: the application's parameters (TITLE_ID, APP_VER, ...), as
 // UTF-8 strings and integers.

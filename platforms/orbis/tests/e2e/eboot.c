@@ -18,6 +18,11 @@ int prx_add(int a, int b);
 int prx_tls_bump(void);
 extern int prx_inited;
 
+// libkernel's module loading (the eboot loads libTestLoad, load.c).
+int sceKernelLoadStartModule(const char* path, unsigned long args, const void* argp,
+                             unsigned flags, const void* opt, int* result);
+int sceKernelDlsym(int handle, const char* symbol, void** address);
+
 static __thread int tls_counter = 5;
 static __thread long tls_zero;
 
@@ -98,5 +103,14 @@ long _start(struct args* a, void (*cleanup)(void)) {
   failed += test_check(25, protected_call(0, 0, 0), -1);  // no longjmp
   failed += test_check(26, protected_call(9, 0, 1), 9);   // after an inner one returned
   failed += test_check(27, protected_call(0x80000000, 1, 0), (int)0x80000000);
+
+  // 28-31: a PRX loaded and started here, and a function found in it.
+  int arg = 7, started = 0;
+  int h = sceKernelLoadStartModule("/app0/sce_module/libTestLoad.prx", 4, &arg, 0, 0, &started);
+  failed += test_check(28, h > 1, 1);  // after the eboot and libTestPrx
+  failed += test_check(29, started, 11);  // its _init's result
+  int (*mul)(int, int) = 0;
+  failed += test_check(30, sceKernelDlsym(h, "load_mul", (void**)&mul), 0);
+  failed += test_check(31, mul(6, 7), 46);
   return failed + kernel_checks() + system_checks();
 }

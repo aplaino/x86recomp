@@ -3,11 +3,12 @@
 // the Orbis loader: imports bound by NID to the HLE and across modules,
 // data imports both ways, static TLS and the TCB through fs, general-
 // dynamic TLS (__tls_get_addr), the PRX's _init before _start, _start's
-// arguments, a switch table and System V argument order; then libkernel's
+// arguments, a switch table and System V argument order, a PRX the eboot
+// loads itself (sceKernelLoadStartModule, sceKernelDlsym); then libkernel's
 // HLE (e2e/kernel.c) and other libraries' (e2e/system.c). Here is libTest,
 // the HLE the eboot imports.
 //
-// usage: orbis_process_test eboot.elf prx.elf
+// usage: orbis_process_test eboot.elf prx.elf libTestLoad.prx
 
 #include <cstdio>
 #include <cstdlib>
@@ -53,8 +54,8 @@ ORBIS_HLE("libTest", test_double, 3) {
 ORBIS_DATA("libTest", "test_value", test_value, 4, InitTestValue);
 
 int main(int argc, char** argv) {
-  if (argc != 3) {
-    std::printf("usage: orbis_process_test eboot.elf prx.elf\n");
+  if (argc != 4) {
+    std::printf("usage: orbis_process_test eboot.elf prx.elf libTestLoad.prx\n");
     return 2;
   }
   recomp::GameConfig game;
@@ -62,6 +63,7 @@ int main(int argc, char** argv) {
   recomp::orbis::Config config;
   config.eboot = argv[1];
   config.prxs = {{argv[2], 0x800000000}};
+  config.loadable = {{argv[3], 0x810000000}};
   config.args = {"eboot", "hello"};
   // The game directory (/app0): a file, and a directory of two.
   const auto dir = std::filesystem::temp_directory_path() / "orbis_process_test";
@@ -80,7 +82,7 @@ int main(int argc, char** argv) {
   const int r = recomp::orbis::RunProcess(game, dir.string(), config);
   std::filesystem::remove_all(dir);
   std::filesystem::remove(pad);
-  constexpr int kChecks = 27 + 24 + 27 + 18 + 7 + 6 + 7 + 38 + 3 + 24;
+  constexpr int kChecks = 31 + 24 + 27 + 18 + 7 + 6 + 7 + 38 + 3 + 24;
   std::printf("%d checks, %d failed, _start returned %d\n", g_checks, g_failed, r);
   const bool ok = r == 0 && g_failed == 0 && g_checks == kChecks;
   std::printf("%s\n", ok ? "orbis_process: ok" : "orbis_process: FAILED");

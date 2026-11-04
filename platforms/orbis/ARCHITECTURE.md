@@ -18,9 +18,10 @@ bounded by them and the PLT, since the executable segment also holds
 
 ## Address space
 Executables are mapped at 0x400000. The PRXs a game starts with
-(orbis/app.h) go from 0x800000000 up in initialisation order, each at the
-next 256 MiB boundary past the one before; tools/lift.sh lifts them at
-the same bases (recomp_lift's --base), since both take them from there. The guest allocator hands out the range above 4 GiB, below the
+(orbis/app.h) go from 0x800000000 up in initialisation order, then the
+other PRXs it ships (by module name), each at the next 256 MiB boundary
+past the one before; tools/lift.sh lifts them all at the same bases
+(recomp_lift's --base), since both take them from there. The guest allocator hands out the range above 4 GiB, below the
 top 64 MiB of the arena, where the core's thunk region is.
 
 ## Process bring-up
@@ -43,6 +44,15 @@ top 64 MiB of the arena, where the core's thunk region is.
   the DTV, which __tls_get_addr reads. Before the eboot's
   _start(argument block, cleanup), each PRX's _init(0, 0, 0) runs its
   constructors and its module_start.
+- The PRXs the game ships but no module needs at start are its to load
+  (sceKernelLoadStartModule, by path; the loader matches the file name).
+  Their part of the dispatch tables is set up with the rest, before
+  guest code runs; loading maps one at its base, adds its exports, binds
+  its imports as above and runs _init(args, argp, 0), whose result the
+  caller gets. A module's handle is its index in load order (the eboot
+  0), and sceKernelDlsym finds a symbol in one by its NID. Loading a
+  module twice, unloading, TLS in a loaded module and paths outside the
+  game's PRXs (system libraries) are fatal until a game needs them.
 - The process is a System V one (Process::sysv: HLE arguments and
   CallGuest), new threads start with FreeBSD's x87 control word
   (Process::fpu_control 0x037F), and the guest has no UI thread of its

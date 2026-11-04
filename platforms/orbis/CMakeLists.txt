@@ -142,20 +142,23 @@ find_package(Python3 COMPONENTS Interpreter)
 if(RECOMP_LD_LLD AND Python3_FOUND AND CMAKE_C_COMPILER_ID MATCHES "Clang")
   set(_e2e "${CMAKE_CURRENT_BINARY_DIR}/e2e")
   set(_src "${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e")
-  add_custom_command(OUTPUT "${_e2e}/eboot.elf" "${_e2e}/prx.elf"
+  add_custom_command(OUTPUT "${_e2e}/eboot.elf" "${_e2e}/prx.elf" "${_e2e}/load.elf"
                             "${_e2e}/app0/eboot.bin" "${_e2e}/app0/sce_module/libTestPrx.prx"
+                            "${_e2e}/app0/sce_module/libTestLoad.prx"
     COMMAND Python3::Interpreter "${_src}/build.py" "${_e2e}" "${CMAKE_C_COMPILER}"
             "${RECOMP_LD_LLD}"
     DEPENDS "${_src}/build.py" "${_src}/eboot.c" "${_src}/kernel.c" "${_src}/system.c"
-            "${_src}/prx.c" "${_src}/stubs.c"
+            "${_src}/prx.c" "${_src}/load.c" "${_src}/stubs.c"
             "${RECOMP_ROOT}/tools/orbis_sce_elf.py"
     VERBATIM)
-  set(_gen "${_e2e}/gen/gen_000.cpp" "${_e2e}/gen/gen_prx_000.cpp" "${_e2e}/gen/table.cpp")
+  set(_gen "${_e2e}/gen/gen_000.cpp" "${_e2e}/gen/gen_prx_000.cpp" "${_e2e}/gen/gen_load_000.cpp"
+           "${_e2e}/gen/table.cpp")
   add_custom_command(OUTPUT ${_gen}
     COMMAND recomp_lift --exe "${_e2e}/eboot.elf" --symbols "" --manifest ""
-            --module "${_e2e}/prx.elf" --symbols "" --base 800000000 --out "${_e2e}/gen"
+            --module "${_e2e}/prx.elf" --symbols "" --base 800000000
+            --module "${_e2e}/load.elf" --symbols "" --base 810000000 --out "${_e2e}/gen"
     COMMAND ${CMAKE_COMMAND} -E touch ${_gen}
-    DEPENDS recomp_lift "${_e2e}/eboot.elf" "${_e2e}/prx.elf"
+    DEPENDS recomp_lift "${_e2e}/eboot.elf" "${_e2e}/prx.elf" "${_e2e}/load.elf"
     VERBATIM)
   recomp_add_lifted_files(orbis_process_lifted ${_gen} LINK recomp_orbis)
   add_executable(orbis_process_test tests/orbis_process_test.cpp)
@@ -164,16 +167,20 @@ if(RECOMP_LD_LLD AND Python3_FOUND AND CMAKE_C_COMPILER_ID MATCHES "Clang")
                         recomp_orbis_savedata recomp_orbis_audio recomp_orbis_pad recomp_orbis_np
                         recomp_orbis_ngs2 recomp_orbis_savedata_dialog)
   recomp_bundle(orbis_process_test)
-  add_test(NAME orbis_process COMMAND orbis_process_test "${_e2e}/eboot.elf" "${_e2e}/prx.elf")
+  add_test(NAME orbis_process COMMAND orbis_process_test "${_e2e}/eboot.elf" "${_e2e}/prx.elf"
+           "${_e2e}/app0/sce_module/libTestLoad.prx")
+  add_dependencies(orbis_process_test orbis_e2e_app0)
   set_tests_properties(orbis_process PROPERTIES TIMEOUT 60)  # a hang is a failure
-  # orbis_app on the same programs laid out as an app0: the PRX found by
-  # its module name and placed at the first PRX base; its imports bound to
-  # it, the test-only library's left missing, libkernel's handled.
+  # orbis_app on the same programs laid out as an app0: the PRXs found by
+  # their module names, the one the eboot needs at the first PRX base, the
+  # one it loads itself next; the imports bound to the first, the
+  # test-only library's left missing, libkernel's handled.
   add_custom_target(orbis_e2e_app0 ALL DEPENDS "${_e2e}/app0/eboot.bin"
-                    "${_e2e}/app0/sce_module/libTestPrx.prx")
+                    "${_e2e}/app0/sce_module/libTestPrx.prx"
+                    "${_e2e}/app0/sce_module/libTestLoad.prx")
   add_test(NAME orbis_app_modules COMMAND orbis_app modules "${_e2e}/app0")
   set_tests_properties(orbis_app_modules PROPERTIES PASS_REGULAR_EXPRESSION
-    "^0\teboot\t[^\n]*/eboot.bin\n800000000\tlibTestPrx\t[^\n]*/libTestPrx.prx\n$")
+    "^0\teboot\t[^\n]*/eboot.bin\tstart\n800000000\tlibTestPrx\t[^\n]*/libTestPrx.prx\tstart\n810000000\tlibTestLoad\t[^\n]*/libTestLoad.prx\tload\n$")
   add_test(NAME orbis_app_imports COMMAND orbis_app imports "${_e2e}/app0")
   set_tests_properties(orbis_app_imports PROPERTIES PASS_REGULAR_EXPRESSION
     "\nlibTest +[0-9]+ +0 +0 +[1-9][0-9]*\nlibTestPrx +[0-9]+ +[1-9][0-9]* +0 +0\n(.*\n)?libkernel +[0-9]+ +0 +[1-9][0-9]* +0\n")

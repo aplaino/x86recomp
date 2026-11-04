@@ -1,10 +1,12 @@
 #pragma once
 // An Orbis (PS4) process: what the kernel and libkernel's dynamic linker
 // do before a game's code runs, for lifted modules. Maps the eboot and the
-// PRXs the game ships (each where the lifter put it), binds every import
-// to another module's export or else to the HLE (orbis/hle.h), lays out
-// static TLS, gives each thread a TCB (through fs), runs the PRXs'
-// initialisers and calls the eboot's entry point.
+// PRXs the game starts with (each where the lifter put it), binds every
+// import to another module's export or else to the HLE (orbis/hle.h),
+// lays out static TLS, gives each thread a TCB (through fs), runs the
+// PRXs' initialisers and calls the eboot's entry point. The other PRXs
+// the game ships are mapped and started when it loads them
+// (sceKernelLoadStartModule), and found symbols in by sceKernelDlsym.
 
 #include <string>
 #include <vector>
@@ -26,6 +28,7 @@ struct Prx {
 struct Config {
   std::string eboot;              // host path
   std::vector<Prx> prxs;          // in initialisation order
+  std::vector<Prx> loadable;      // the PRXs the game may load itself
   std::vector<std::string> args;  // argv, argv[0] first
   uint64_t main_stack = 8u << 20;
   ParamSfo param;  // the application's param.sfo (empty without one)
@@ -37,7 +40,7 @@ gaddr ProcParam();
 // The application's param.sfo (Config::param).
 const ParamSfo& AppParam();
 
-// main() of a game's executable: the eboot and the PRXs it starts with
+// main() of a game's executable: the eboot and the PRXs it ships
 // from its app0 (orbis/app.h, as the lifter's lift script took them),
 // then RunProcess. Usage:
 //   <program> --game-dir APP0 [--param-sfo FILE] [-- GAME ARGS...]

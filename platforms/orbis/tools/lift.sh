@@ -1,7 +1,7 @@
 #!/bin/sh
-# Lifts a game's eboot and the PRXs it starts with into OUT, each PRX at
-# the base the loader maps it at (both from `orbis_app modules`,
-# orbis/app.h). MANIFESTS/<module>.manifest goes with each module that
+# Lifts a game's eboot and the PRXs it ships into OUT, each PRX at the
+# base the loader maps it at (both from `orbis_app modules`, orbis/app.h),
+# whether the game starts with it or loads it later. MANIFESTS/<module>.manifest goes with each module that
 # has one ("eboot" for the eboot), and the platform's
 # lifter/middleware/<SHA-256>.manifest with each module file of that hash
 # (fixes to a middleware build, ARCHITECTURE.md).
@@ -22,7 +22,7 @@ trap 'rm -rf "$tmp"' EXIT
 modules=$("$app" modules "$app0")
 tab=$(printf '\t')
 set --
-while IFS=$tab read -r base name path; do
+while IFS=$tab read -r base name path _; do
   if [ "$base" = 0 ]; then set -- "$@" --exe "$path"; else set -- "$@" --module "$path"; fi
   set -- "$@" --symbols ""
   own=$manifests/$name.manifest

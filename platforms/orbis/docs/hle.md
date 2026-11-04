@@ -216,7 +216,8 @@ library.
   messages and list types are not implemented.
 - libkernel also: signal masks (kept per thread; nothing delivers
   signals to the guest) and libScePosix's clock_gettime.
-- The loader (orbis/process.cpp) provides __tls_get_addr.
+- The loader (orbis/process.cpp) provides __tls_get_addr,
+  sceKernelLoadStartModule and sceKernelDlsym (ARCHITECTURE.md).
 
 ## Measured on hardware
 Firmware 11.00, a base (not Neo) console, in a game's process unless

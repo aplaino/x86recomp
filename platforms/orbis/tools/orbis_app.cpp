@@ -1,18 +1,20 @@
 // orbis_app: what the platform makes of a game's app0, without running it.
 //
 //   orbis_app modules APP0
-//     The modules the game starts with, in initialisation order, one per
-//     line: base (hex, 0 for the eboot), module name, path
-//     (orbis/app.h; tools/lift.sh lifts them at these bases).
+//     The game's modules (orbis/app.h): those it starts with, in
+//     initialisation order, then those it may load. One per line: base
+//     (hex, 0 for the eboot), module name, path, and "start" or "load"
+//     (tools/lift.sh lifts them all at these bases).
 //   orbis_app imports APP0 [--nid-names FILE] [--all]
 //     Every import of those modules and where the loader binds it: to a
 //     module's export, to an HLE handler, or to nothing (fatal when
-//     called). Per library: imports, bound to modules, handled, missing;
+//     called). Per library: imports, bound to modules, handled, missing
+//     (and the module exporting it, if only one the game loads exports it:
+//     the modules it starts with are bound before, so not to it);
 //     then each missing one (named from FILE, symbol names one per line,
 //     else by NID) and the modules importing it. --all lists the handled
 //     ones too. Exit code 1 if any is missing.
 
-#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -37,8 +39,7 @@ int Usage() {
   return 2;
 }
 
-int Imports(const std::vector<AppModule>& modules, const std::map<std::string, std::string>& shipped,
-            const std::string& names_file, bool all) {
+int Imports(const std::vector<AppModule>& modules, const std::string& names_file, bool all) {
   std::map<std::string, std::string> names;  // NID -> name
   if (!names_file.empty()) {
     std::ifstream f(names_file);
@@ -53,25 +54,30 @@ int Imports(const std::vector<AppModule>& modules, const std::map<std::string, s
   }
 
   std::vector<ElfImage> images(modules.size());
-  std::set<std::pair<std::string, std::string>> exported;  // (library, NID)
+  // (library, NID) exported by the modules started, and by any. The
+  // loader binds the started modules' imports before the game loads
+  // others, and never again.
+  std::set<std::pair<std::string, std::string>> exported_start, exported;
+  // Libraries only modules the game loads export.
+  std::map<std::string, std::string> later;  // library -> module
+  std::set<std::string> now;
   std::string err;
   for (size_t i = 0; i < modules.size(); i++) {
     if (!images[i].Read(modules[i].path, &err, modules[i].base)) {
       std::fprintf(stderr, "orbis_app: %s: %s\n", modules[i].path.c_str(), err.c_str());
       return 2;
     }
-    for (const ElfExport& e : images[i].exports) exported.insert({e.library, e.nid});
+    for (const ElfExport& e : images[i].exports) {
+      exported.insert({e.library, e.nid});
+      if (modules[i].start) {
+        exported_start.insert({e.library, e.nid});
+        now.insert(e.library);
+      } else {
+        later.emplace(e.library, modules[i].name);
+      }
+    }
   }
-  // Libraries the PRXs not started export: imports of them stay unbound
-  // until the game loads that PRX itself.
-  std::map<std::string, std::string> later;  // library -> module
-  for (const auto& [name, path] : shipped) {
-    if (std::any_of(modules.begin(), modules.end(), [&](const AppModule& m) { return m.name == name; }))
-      continue;
-    ElfImage img;
-    if (!img.Read(path, &err)) continue;
-    for (const ElfExport& e : img.exports) later.emplace(e.library, name);
-  }
+  for (const std::string& l : now) later.erase(l);
 
   struct Lib {
     int imports = 0, modules = 0, handled = 0, missing = 0;
@@ -85,7 +91,7 @@ int Imports(const std::vector<AppModule>& modules, const std::map<std::string, s
       const auto key = std::make_pair(imp.library, imp.nid);
       Lib& l = libs[imp.library];
       l.imports++;
-      if (exported.count(key)) {
+      if ((modules[i].start ? exported_start : exported).count(key)) {
         l.modules++;
       } else if (NameOfNid(imp.library, imp.nid)) {
         l.handled++;
@@ -101,7 +107,7 @@ int Imports(const std::vector<AppModule>& modules, const std::map<std::string, s
   std::printf("%-32s %7s %7s %7s %7s\n", "library", "imports", "modules", "handled", "missing");
   for (const auto& [name, l] : libs) {
     std::printf("%-32s %7d %7d %7d %7d%s\n", name.c_str(), l.imports, l.modules, l.handled,
-                l.missing, later.count(name) ? ("  (exported by " + later[name] + ".prx, not started)").c_str() : "");
+                l.missing, later.count(name) ? ("  (exported by " + later[name] + ", loaded by the game)").c_str() : "");
     total[0] += l.imports, total[1] += l.modules, total[2] += l.handled, total[3] += l.missing;
   }
   std::printf("%-32s %7d %7d %7d %7d\n", "total", total[0], total[1], total[2], total[3]);
@@ -122,13 +128,6 @@ int Imports(const std::vector<AppModule>& modules, const std::map<std::string, s
   };
   list("missing", missing);
   if (all) list("handled", handled);
-  if (shipped.size() + 1 > modules.size()) {
-    std::printf("\nshipped, not started:");
-    for (const auto& [name, path] : shipped)
-      if (std::none_of(modules.begin(), modules.end(), [&](const AppModule& m) { return m.name == name; }))
-        std::printf(" %s", name.c_str());
-    std::printf("\n");
-  }
   return total[3] ? 1 : 0;
 }
 
@@ -148,17 +147,17 @@ int main(int argc, char** argv) {
       return Usage();
   }
   std::vector<AppModule> modules;
-  std::map<std::string, std::string> shipped;
   std::string err;
-  if (!StartModules(app0, &modules, &err, &shipped)) {
+  if (!AppModules(app0, &modules, &err)) {
     std::fprintf(stderr, "orbis_app: %s\n", err.c_str());
     return 2;
   }
   if (cmd == "modules") {
     for (const AppModule& m : modules)
-      std::printf("%llx\t%s\t%s\n", (unsigned long long)m.base, m.name.c_str(), m.path.c_str());
+      std::printf("%llx\t%s\t%s\t%s\n", (unsigned long long)m.base, m.name.c_str(), m.path.c_str(),
+                  m.start ? "start" : "load");
     return 0;
   }
-  if (cmd == "imports") return Imports(modules, shipped, names, all);
+  if (cmd == "imports") return Imports(modules, names, all);
   return Usage();
 }

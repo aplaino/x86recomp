@@ -11,8 +11,7 @@
 
 namespace recomp::orbis {
 
-bool StartModules(const std::string& app0, std::vector<AppModule>* out, std::string* err,
-                  std::map<std::string, std::string>* shipped) {
+bool AppModules(const std::string& app0, std::vector<AppModule>* out, std::string* err) {
   out->clear();
   ElfImage eboot;
   const std::string eboot_path = app0 + "/eboot.bin";
@@ -42,9 +41,7 @@ bool StartModules(const std::string& app0, std::vector<AppModule>* out, std::str
     prxs[name] = e.path().string();
     images[name] = std::move(img);
   }
-  if (shipped) *shipped = prxs;
-
-  out->push_back({eboot_path, "eboot", 0});
+  out->push_back({eboot_path, "eboot", 0, true});
   std::set<std::string> seen;
   std::vector<std::string> order;
   std::function<void(const ElfImage&)> visit = [&](const ElfImage& img) {
@@ -55,9 +52,13 @@ bool StartModules(const std::string& app0, std::vector<AppModule>* out, std::str
     }
   };
   visit(eboot);
+  const size_t started = order.size();
+  for (const auto& [n, path] : prxs)
+    if (!seen.count(n)) order.push_back(n);
   gaddr base = kPrxBase;
-  for (const std::string& n : order) {
-    out->push_back({prxs[n], n, base});
+  for (size_t i = 0; i < order.size(); i++) {
+    const std::string& n = order[i];
+    out->push_back({prxs[n], n, base, i < started});
     const ElfImage& img = images[n];
     const gaddr end = base + img.Size();
     base = (end + kPrxAlign - 1) / kPrxAlign * kPrxAlign;
