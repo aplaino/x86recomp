@@ -312,6 +312,180 @@ ORBIS_HLE("libSceGnmDriver", sceGnmDispatchInitDefaultHardwareState, 2) {
   return 0x100;
 }
 
+// ---- draws and dispatches. Each takes the dwords it fills and pads them
+// with a NOP; bit 0 of the flags is the packet's predication bit (bits
+// 3-4 of a dispatch's go to its initiator).
+
+// int sceGnmDrawIndexAuto(uint32_t* cmd, uint32_t dwords, uint32_t count,
+// uint32_t flags)
+ORBIS_HLE("libSceGnmDriver", sceGnmDrawIndexAuto, 4) {
+  const uint32_t flags = uint32_t(Arg(c, 3));
+  if (!Arg(c, 0) || uint32_t(Arg(c, 1)) != 7 || (flags & 0x1FFFFFFE)) return 0xFFFFFFFF;
+  Out o{Arg(c, 0)};
+  o({Pm4(0x2D, 2) | (flags & 1), uint32_t(Arg(c, 2)), 2});
+  PadNop(o, 3);
+  return 0;
+}
+// int sceGnmDrawOpaqueAuto(uint32_t* cmd, uint32_t dwords, uint32_t flags):
+// the count is the stream-out buffer's filled size.
+ORBIS_HLE("libSceGnmDriver", sceGnmDrawOpaqueAuto, 3) {
+  const uint32_t flags = uint32_t(Arg(c, 2));
+  if (!Arg(c, 0) || uint32_t(Arg(c, 1)) != 7 || (flags & 0x1FFFFFFE)) return 0xFFFFFFFF;
+  Out o{Arg(c, 0)};
+  o({Pm4(0x2D, 2) | (flags & 1), 0x10, 0x42});
+  PadNop(o, 3);
+  return 0;
+}
+// int sceGnmDrawIndex(uint32_t* cmd, uint32_t dwords, uint32_t count, const
+// void* indices, uint32_t flags)
+ORBIS_HLE("libSceGnmDriver", sceGnmDrawIndex, 5) {
+  const uint64_t indices = Arg(c, 3);
+  const uint32_t count = uint32_t(Arg(c, 2)), flags = uint32_t(Arg(c, 4));
+  if (!Arg(c, 0) || uint32_t(Arg(c, 1)) != 10 || !indices || (indices & 1) ||
+      (flags & 0x1FFFFFFE))
+    return 0xFFFFFFFF;
+  Out o{Arg(c, 0)};
+  o({Pm4(0x27, 5) | (flags & 1), count, uint32_t(indices), uint32_t(indices >> 32), count, 0});
+  PadNop(o, 3);
+  return 0;
+}
+// int sceGnmDrawIndexOffset(uint32_t* cmd, uint32_t dwords, uint32_t
+// first_index, uint32_t count, uint32_t flags)
+ORBIS_HLE("libSceGnmDriver", sceGnmDrawIndexOffset, 5) {
+  if (!Arg(c, 0) || uint32_t(Arg(c, 1)) != 9) return 0xFFFFFFFF;
+  const uint32_t count = uint32_t(Arg(c, 3));
+  Out o{Arg(c, 0)};
+  o({Pm4(0x35, 4) | (uint32_t(Arg(c, 4)) & 1), count, uint32_t(Arg(c, 2)), count, 0});
+  PadNop(o, 3);
+  return 0;
+}
+// int sceGnmDrawIndexMultiInstanced(uint32_t* cmd, uint32_t dwords, ...,
+// const void* indices, const void* objects): 11.00's writes only a NOP
+// over the 13 dwords (the indices and objects must be set, the indices
+// even, the objects 256-byte aligned).
+ORBIS_HLE("libSceGnmDriver", sceGnmDrawIndexMultiInstanced, 6) {
+  const uint64_t indices = Arg(c, 4), objects = Arg(c, 5);
+  if (!Arg(c, 0) || uint32_t(Arg(c, 1)) != 13 || !indices || (indices & 1) || !objects ||
+      (objects & 0xFF))
+    return 0xFFFFFFFF;
+  Out o{Arg(c, 0)};
+  PadNop(o, 12);
+  return 0;
+}
+// int sceGnmDispatchDirect(uint32_t* cmd, uint32_t dwords, uint32_t x,
+// uint32_t y, uint32_t z, uint32_t flags): each count below 2^31.
+ORBIS_HLE("libSceGnmDriver", sceGnmDispatchDirect, 6) {
+  const uint32_t x = uint32_t(Arg(c, 2)), y = uint32_t(Arg(c, 3)), z = uint32_t(Arg(c, 4));
+  const uint32_t flags = uint32_t(Arg(c, 5));
+  if (!Arg(c, 0) || uint32_t(Arg(c, 1)) != 9 || int32_t(x | y | z) < 0) return 0xFFFFFFFF;
+  Out o{Arg(c, 0)};
+  o({Pm4(0x15, 4, true) | (flags & 1), x, y, z, (flags & 0x18) | 1});
+  PadNop(o, 3);
+  return 0;
+}
+
+// An indirect draw's register location for a stage's user SGPR (0: none):
+// SPI_SHADER_USER_DATA_VS_0, _ES_0 or _LS_0 on; false for another stage
+// (stages 2, 4, 6 only) or an SGPR past 15.
+static bool IndirectLocs(uint32_t stage, uint32_t vtx_sgpr, uint32_t inst_sgpr, uint32_t* vtx,
+                         uint32_t* inst) {
+  static const uint32_t kBase[7] = {0, 0, 0x4C, 0, 0xCC, 0, 0x14C};
+  if (vtx_sgpr > 15 || inst_sgpr > 15 || stage > 6 || !kBase[stage]) return false;
+  *vtx = vtx_sgpr ? (kBase[stage] + vtx_sgpr) & 0xFFFF : 0;
+  *inst = inst_sgpr ? (kBase[stage] + inst_sgpr) & 0xFFFF : 0;
+  return true;
+}
+
+// int sceGnmDrawIndirect(uint32_t* cmd, uint32_t dwords, uint32_t
+// data_offset, uint32_t stage, uint32_t vertex_sgpr, uint32_t
+// instance_sgpr, uint32_t flags); sceGnmDrawIndexIndirect the same.
+static uint64_t DrawIndirect(recomp::Ctx& c, uint32_t op, uint32_t initiator) {
+  uint32_t vtx, inst;
+  if (!Arg(c, 0) || uint32_t(Arg(c, 1)) != 9 ||
+      !IndirectLocs(uint32_t(Arg(c, 3)), uint32_t(Arg(c, 4)), uint32_t(Arg(c, 5)), &vtx, &inst))
+    return 0xFFFFFFFF;
+  Out o{Arg(c, 0)};
+  o({Pm4(op, 4) | (uint32_t(Arg(c, 6)) & 1), uint32_t(Arg(c, 2)), vtx, inst, initiator});
+  PadNop(o, 3);
+  return 0;
+}
+ORBIS_HLE("libSceGnmDriver", sceGnmDrawIndirect, 7) { return DrawIndirect(c, 0x24, 2); }
+ORBIS_HLE("libSceGnmDriver", sceGnmDrawIndexIndirect, 7) { return DrawIndirect(c, 0x25, 0); }
+
+// int sceGnmDrawIndirectMulti(uint32_t* cmd, uint32_t dwords, uint32_t
+// data_offset, uint32_t count, uint32_t stage, uint32_t vertex_sgpr,
+// uint32_t instance_sgpr, uint32_t flags): arguments 16 bytes apart (20
+// indexed).
+static uint64_t DrawIndirectMulti(recomp::Ctx& c, uint32_t op, uint32_t stride,
+                                  uint32_t initiator) {
+  uint32_t vtx, inst;
+  if (!Arg(c, 0) || uint32_t(Arg(c, 1)) != 11 ||
+      !IndirectLocs(uint32_t(Arg(c, 4)), uint32_t(Arg(c, 5)), uint32_t(Arg(c, 6)), &vtx, &inst))
+    return 0xFFFFFFFF;
+  Out o{Arg(c, 0)};
+  o({Pm4(op, 6) | (uint32_t(Arg(c, 7)) & 1), uint32_t(Arg(c, 2)), vtx, inst, uint32_t(Arg(c, 3)),
+     stride, initiator});
+  PadNop(o, 3);
+  return 0;
+}
+ORBIS_HLE("libSceGnmDriver", sceGnmDrawIndirectMulti, 8) {
+  return DrawIndirectMulti(c, 0x2C, 0x10, 2);
+}
+ORBIS_HLE("libSceGnmDriver", sceGnmDrawIndexIndirectMulti, 8) {
+  return DrawIndirectMulti(c, 0x38, 0x14, 0);
+}
+
+// int sceGnmDrawIndirectCountMulti(uint32_t* cmd, uint32_t dwords, uint32_t
+// data_offset, uint32_t count, const uint32_t* count_address, uint32_t
+// stage, uint32_t vertex_sgpr, uint32_t instance_sgpr, uint32_t flags): a
+// NOP of 3 dwords first; the count at count_address (if set) limits the
+// draws.
+static uint64_t DrawIndirectCountMulti(recomp::Ctx& c, uint32_t op, uint32_t stride,
+                                       uint32_t initiator) {
+  uint32_t vtx, inst;
+  if (!Arg(c, 0) || uint32_t(Arg(c, 1)) != 16 ||
+      !IndirectLocs(uint32_t(Arg(c, 5)), uint32_t(Arg(c, 6)), uint32_t(Arg(c, 7)), &vtx, &inst))
+    return 0xFFFFFFFF;
+  const uint64_t count_at = Arg(c, 4);
+  Out o{Arg(c, 0)};
+  PadNop(o, 2);
+  o = Out{Arg(c, 0) + 12};
+  o({Pm4(op, 9) | (uint32_t(Arg(c, 8)) & 1), uint32_t(Arg(c, 2)), vtx, inst,
+     uint32_t(count_at != 0) << 30, uint32_t(Arg(c, 3)), uint32_t(count_at),
+     uint32_t(count_at >> 32), stride, initiator});
+  PadNop(o, 2);
+  return 0;
+}
+ORBIS_HLE("libSceGnmDriver", sceGnmDrawIndirectCountMulti, 9) {
+  return DrawIndirectCountMulti(c, 0x9C, 0x10, 2);
+}
+ORBIS_HLE("libSceGnmDriver", sceGnmDrawIndexIndirectCountMulti, 9) {
+  return DrawIndirectCountMulti(c, 0x9D, 0x14, 0);
+}
+
+// int sceGnmDispatchIndirect(uint32_t* cmd, uint32_t dwords, uint32_t
+// data_offset, uint32_t flags)
+ORBIS_HLE("libSceGnmDriver", sceGnmDispatchIndirect, 4) {
+  const uint32_t flags = uint32_t(Arg(c, 3));
+  if (!Arg(c, 0) || uint32_t(Arg(c, 1)) != 7) return 0xFFFFFFFF;
+  Out o{Arg(c, 0)};
+  o({Pm4(0x16, 2, true) | (flags & 1), uint32_t(Arg(c, 2)), (flags & 0x18) | 1});
+  PadNop(o, 3);
+  return 0;
+}
+// int sceGnmDispatchIndirectOnMec(uint32_t* cmd, uint32_t dwords, const
+// void* args, uint32_t flags): for a compute queue, the groups' address
+// (4-byte aligned).
+ORBIS_HLE("libSceGnmDriver", sceGnmDispatchIndirectOnMec, 4) {
+  const uint64_t args = Arg(c, 2);
+  const uint32_t flags = uint32_t(Arg(c, 3));
+  if (!Arg(c, 0) || uint32_t(Arg(c, 1)) != 8 || !args || (args & 3)) return 0xFFFFFFFF;
+  Out o{Arg(c, 0)};
+  o({Pm4(0x16, 3, true) | (flags & 1), uint32_t(args), uint32_t(args >> 32), (flags & 0x18) | 1});
+  PadNop(o, 3);
+  return 0;
+}
+
 // int sceGnmInsertWaitFlipDone(uint32_t* cmd, uint32_t dwords, int
 // video_handle, uint32_t buffer): 7 dwords, a WAIT_REG_MEM for the
 // buffer's label to be 0.
@@ -404,34 +578,26 @@ ORBIS_HLE("libSceGnmDriver", sceGnmSubmitCommandBuffers, 5) {
   return 0;
 }
 
-// int sceGnmSubmitAndFlipCommandBuffers(count, dcbs, dcb_sizes, ccbs,
-// ccb_sizes, int video_handle, int buffer, int flip_mode, int64_t
-// flip_arg): the last DCB ends in the 64 dwords the game's Gnm library
-// reserved for the flip (a NOP of 0x68750777, 778, 780 or 781 and its
-// operands), which the driver rewrites: a WRITE_DATA of 1 to the buffer's
-// label, then per kind nothing, a WRITE_DATA of the game's, or an
-// end-of-pipe event. The flip runs once the GPU has finished the
-// submission.
-ORBIS_HLE("libSceGnmDriver", sceGnmSubmitAndFlipCommandBuffers, 9) {
+// Submits dcbs (and ccbs) with a flip: the last DCB ends in the 64 dwords
+// the game's Gnm library reserved for the flip (a NOP of 0x68750777, 778,
+// 780 or 781 and its operands), which the driver rewrites: a WRITE_DATA of
+// 1 to the buffer's label, then per kind nothing, a WRITE_DATA of the
+// game's, or an end-of-pipe event. The flip runs once the GPU has finished
+// the submission.
+static uint32_t SubmitWithFlip(const char* fn, std::vector<gpu::CmdBuffer> dcbs,
+                               std::vector<gpu::CmdBuffer> ccbs, int handle, int index,
+                               uint32_t mode, int64_t arg) {
   using recomp::Rd32;
-  const uint32_t count = uint32_t(Arg(c, 0));
-  const int handle = int(Arg(c, 5)), index = int(Arg(c, 6));
-  const uint32_t mode = uint32_t(Arg(c, 7));
-  const int64_t arg = int64_t(Arg(c, 8));
-  std::vector<gpu::CmdBuffer> dcbs, ccbs;
-  if (uint32_t e = ReadSubmission(count, Arg(c, 1), Arg(c, 2), Arg(c, 3), Arg(c, 4), dcbs, ccbs))
-    return e;
-  if (!count) recomp::FatalF("sceGnmSubmitAndFlipCommandBuffers: no command buffers");
   const gaddr p = dcbs.back().addr + 4 * uint64_t(dcbs.back().dwords - 64);
   const uint32_t kind = Rd32(p + 4);
   const bool known = kind == 0x68750777 || kind == 0x68750778 || kind == 0x68750780 ||
                      kind == 0x68750781;
   if (Rd32(p) != 0xC03E1000 || !known || (kind == 0x68750778 && Rd32(p + 8) & 3)) {
-    recomp::WarnF("sceGnmSubmitAndFlipCommandBuffers: no flip packet at the end of the DCB\n");
+    recomp::WarnF("%s: no flip packet at the end of the DCB\n", fn);
     return kErrNoFlipPacket;
   }
   if (index == -1) {
-    recomp::WarnF("sceGnmSubmitAndFlipCommandBuffers: invalid buffer index\n");
+    recomp::WarnF("%s: invalid buffer index\n", fn);
     return kErrFlipIndex;
   }
   uint32_t op[5];
@@ -458,11 +624,38 @@ ORBIS_HLE("libSceGnmDriver", sceGnmSubmitAndFlipCommandBuffers, 9) {
         o({op[0] & ~3u, (op[1] & 0xFFFF) | 0x22000000, op[2], 0});
       break;
   }
-  gpu::SubmitGraphics(std::move(dcbs), std::move(ccbs), [handle, index, mode, arg] {
+  gpu::SubmitGraphics(std::move(dcbs), std::move(ccbs), [fn, handle, index, mode, arg] {
     const int32_t r = recomp::orbis::videoout::SubmitFlip(handle, index, mode, arg);
-    if (r) recomp::FatalF("sceGnmSubmitAndFlipCommandBuffers: the flip failed (%08X)", uint32_t(r));
+    if (r) recomp::FatalF("%s: the flip failed (%08X)", fn, uint32_t(r));
   });
   return 0;
+}
+
+// int sceGnmSubmitAndFlipCommandBuffers(count, dcbs, dcb_sizes, ccbs,
+// ccb_sizes, int video_handle, int buffer, int flip_mode, int64_t
+// flip_arg)
+ORBIS_HLE("libSceGnmDriver", sceGnmSubmitAndFlipCommandBuffers, 9) {
+  const uint32_t count = uint32_t(Arg(c, 0));
+  std::vector<gpu::CmdBuffer> dcbs, ccbs;
+  if (uint32_t e = ReadSubmission(count, Arg(c, 1), Arg(c, 2), Arg(c, 3), Arg(c, 4), dcbs, ccbs))
+    return e;
+  if (!count) recomp::FatalF("sceGnmSubmitAndFlipCommandBuffers: no command buffers");
+  return SubmitWithFlip("sceGnmSubmitAndFlipCommandBuffers", std::move(dcbs), std::move(ccbs),
+                        int(Arg(c, 5)), int(Arg(c, 6)), uint32_t(Arg(c, 7)), int64_t(Arg(c, 8)));
+}
+
+// int sceGnmRequestFlipAndSubmitDone(uint32_t* cmd, uint32_t dwords, int
+// video_handle, int buffer, int flip_mode, int64_t flip_arg): a flip on
+// its own. The driver writes a flip packet (0x68750777) into the first 64
+// of the dwords (256 at least), submits them and ends the frame's
+// submissions (sceGnmSubmitDone).
+ORBIS_HLE("libSceGnmDriver", sceGnmRequestFlipAndSubmitDone, 6) {
+  const gaddr cmd = Arg(c, 0);
+  if (uint32_t(Arg(c, 1)) < 0x100) return 0x80D11001;
+  Out o{cmd};
+  o({0xC03E1000, 0x68750777});
+  return SubmitWithFlip("sceGnmRequestFlipAndSubmitDone", {{cmd, 64}}, {{0, 0}}, int(Arg(c, 2)),
+                        int(Arg(c, 3)), uint32_t(Arg(c, 4)), int64_t(Arg(c, 5)));
 }
 
 // The frame's submissions are done (the system may suspend the GPU now).

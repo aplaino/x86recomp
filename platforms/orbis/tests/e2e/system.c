@@ -35,6 +35,32 @@ unsigned sceGnmDrawInitDefaultHardwareState200(unsigned* cmd, unsigned dw);
 int sceGnmSubmitCommandBuffers(unsigned n, void** dcbs, unsigned* sizes, void** ccbs,
                                unsigned* ccb_sizes);
 int sceGnmAddEqEvent(long eq, int id, void* udata);
+int sceGnmDrawIndexAuto(unsigned* cmd, unsigned dw, unsigned count, unsigned flags);
+int sceGnmDrawOpaqueAuto(unsigned* cmd, unsigned dw, unsigned flags);
+int sceGnmDrawIndex(unsigned* cmd, unsigned dw, unsigned count, const void* indices, unsigned flags);
+int sceGnmDrawIndexOffset(unsigned* cmd, unsigned dw, unsigned first, unsigned count, unsigned flags);
+int sceGnmDrawIndexMultiInstanced(unsigned* cmd, unsigned dw, unsigned a, unsigned b,
+                                  const void* indices, const void* objects);
+int sceGnmDispatchDirect(unsigned* cmd, unsigned dw, unsigned x, unsigned y, unsigned z,
+                         unsigned flags);
+int sceGnmDrawIndirect(unsigned* cmd, unsigned dw, unsigned off, unsigned stage, unsigned vtx,
+                       unsigned inst, unsigned flags);
+int sceGnmDrawIndexIndirect(unsigned* cmd, unsigned dw, unsigned off, unsigned stage, unsigned vtx,
+                            unsigned inst, unsigned flags);
+int sceGnmDrawIndirectMulti(unsigned* cmd, unsigned dw, unsigned off, unsigned count, unsigned stage,
+                            unsigned vtx, unsigned inst, unsigned flags);
+int sceGnmDrawIndexIndirectMulti(unsigned* cmd, unsigned dw, unsigned off, unsigned count,
+                                 unsigned stage, unsigned vtx, unsigned inst, unsigned flags);
+int sceGnmDrawIndirectCountMulti(unsigned* cmd, unsigned dw, unsigned off, unsigned count,
+                                 const void* count_at, unsigned stage, unsigned vtx, unsigned inst,
+                                 unsigned flags);
+int sceGnmDrawIndexIndirectCountMulti(unsigned* cmd, unsigned dw, unsigned off, unsigned count,
+                                      const void* count_at, unsigned stage, unsigned vtx,
+                                      unsigned inst, unsigned flags);
+int sceGnmDispatchIndirect(unsigned* cmd, unsigned dw, unsigned off, unsigned flags);
+int sceGnmDispatchIndirectOnMec(unsigned* cmd, unsigned dw, const void* args, unsigned flags);
+int sceGnmRequestFlipAndSubmitDone(unsigned* cmd, unsigned dw, int handle, int index, int mode,
+                                   long arg);
 
 int sceSaveDataInitialize(const void* reserved);
 int sceSaveDataMount(const void* mount, void* result);
@@ -224,6 +250,87 @@ static int dir_checks(void) {
 static unsigned dcb[0x200];
 static volatile unsigned long eop_value;
 static volatile unsigned written[2];
+
+// The first n dwords of dcb are want's.
+static int words(const unsigned* want, int n) {
+  int same = 1;
+  for (int i = 0; i < n; i++) same &= dcb[i] == want[i];
+  return same;
+}
+
+// The draw and dispatch packets, as 11.00's driver writes them.
+static int packet_checks(void) {
+  int failed = 0;
+  static unsigned short indices[8];
+  static unsigned args[8], count;
+  static unsigned objects[64] __attribute__((aligned(256)));
+  const unsigned lo = (unsigned)(unsigned long)indices, hi = (unsigned)((unsigned long)indices >> 32);
+  failed += test_check(400, sceGnmDrawIndexAuto(dcb, 7, 36, 1), 0);
+  const unsigned auto_[5] = {0xC0012D01, 36, 2, 0xC0021000, 0};
+  failed += test_check(401, words(auto_, 5), 1);
+  failed += test_check(402, sceGnmDrawIndexAuto(dcb, 7, 36, 2), -1);  // flags past bit 0
+  sceGnmDrawOpaqueAuto(dcb, 7, 0);
+  const unsigned opaque[5] = {0xC0012D00, 0x10, 0x42, 0xC0021000, 0};
+  failed += test_check(403, words(opaque, 5), 1);
+  sceGnmDrawIndex(dcb, 10, 6, indices, 0);
+  const unsigned index[8] = {0xC0042700, 6, lo, hi, 6, 0, 0xC0021000, 0};
+  failed += test_check(404, words(index, 8), 1);
+  failed += test_check(405, sceGnmDrawIndex(dcb, 10, 6, (char*)indices + 1, 0), -1);  // odd
+  sceGnmDrawIndexOffset(dcb, 9, 10, 6, 1);
+  const unsigned offset[7] = {0xC0033501, 6, 10, 6, 0, 0xC0021000, 0};
+  failed += test_check(406, words(offset, 7), 1);
+  failed += test_check(407, sceGnmDrawIndexMultiInstanced(dcb, 13, 6, 2, indices, objects) == 0 &&
+                                dcb[0] == 0xC00B1000 && dcb[1] == 0 &&
+                                sceGnmDrawIndexMultiInstanced(dcb, 13, 6, 2, indices, objects + 1) == -1,
+                       1);
+  sceGnmDispatchDirect(dcb, 9, 4, 2, 1, 0x19);
+  const unsigned dispatch[7] = {0xC0031503, 4, 2, 1, 0x19, 0xC0021000, 0};
+  failed += test_check(408, words(dispatch, 7), 1);
+  failed += test_check(409, sceGnmDispatchDirect(dcb, 9, 0x80000000u, 1, 1, 0), -1);
+  // Indirect draws: the stage's user data registers (VS 0x4C, ES 0xCC,
+  // LS 0x14C) plus the SGPR, 0 for SGPR 0.
+  sceGnmDrawIndirect(dcb, 9, 0x40, 2, 4, 5, 0);
+  const unsigned indirect[7] = {0xC0032400, 0x40, 0x50, 0x51, 2, 0xC0021000, 0};
+  failed += test_check(410, words(indirect, 7), 1);
+  failed += test_check(411, sceGnmDrawIndirect(dcb, 9, 0x40, 0, 4, 5, 0) == -1 &&
+                                sceGnmDrawIndirect(dcb, 9, 0x40, 2, 16, 5, 0) == -1,
+                       1);
+  sceGnmDrawIndexIndirect(dcb, 9, 0x40, 4, 0, 5, 0);
+  const unsigned index_indirect[7] = {0xC0032500, 0x40, 0, 0xD1, 0, 0xC0021000, 0};
+  failed += test_check(412, words(index_indirect, 7), 1);
+  sceGnmDrawIndirectMulti(dcb, 11, 0x40, 3, 6, 1, 2, 1);
+  const unsigned multi[9] = {0xC0052C01, 0x40, 0x14D, 0x14E, 3, 0x10, 2, 0xC0021000, 0};
+  failed += test_check(413, words(multi, 9), 1);
+  sceGnmDrawIndexIndirectMulti(dcb, 11, 0x40, 3, 2, 1, 2, 0);
+  const unsigned index_multi[9] = {0xC0053800, 0x40, 0x4D, 0x4E, 3, 0x14, 0, 0xC0021000, 0};
+  failed += test_check(414, words(index_multi, 9), 1);
+  // Count multi: a NOP of 3 dwords first (its last left alone), then the
+  // count's address and its enable (bit 30).
+  dcb[2] = 0x12345678;
+  sceGnmDrawIndirectCountMulti(dcb, 16, 0x40, 3, &count, 2, 4, 5, 0);
+  const unsigned clo = (unsigned)(unsigned long)&count, chi = (unsigned)((unsigned long)&count >> 32);
+  const unsigned count_multi[15] = {0xC0011000, 0,   0x12345678, 0xC0089C00, 0x40,
+                                    0x50,       0x51, 1u << 30,  3,          clo,
+                                    chi,        0x10, 2,         0xC0011000, 0};
+  failed += test_check(415, words(count_multi, 15), 1);
+  sceGnmDrawIndexIndirectCountMulti(dcb, 16, 0x40, 3, 0, 2, 4, 5, 0);
+  failed += test_check(416, dcb[3] == 0xC0089D00 && dcb[7] == 0 && dcb[11] == 0x14 && dcb[12] == 0, 1);
+  sceGnmDispatchIndirect(dcb, 7, 0x20, 0x8);
+  const unsigned dispatch_indirect[5] = {0xC0011602, 0x20, 0x9, 0xC0021000, 0};
+  failed += test_check(417, words(dispatch_indirect, 5), 1);
+  sceGnmDispatchIndirectOnMec(dcb, 8, args, 0);
+  const unsigned alo = (unsigned)(unsigned long)args, ahi = (unsigned)((unsigned long)args >> 32);
+  const unsigned on_mec[6] = {0xC0021602, alo, ahi, 1, 0xC0021000, 0};
+  failed += test_check(418, words(on_mec, 6), 1);
+  failed += test_check(419, sceGnmDispatchIndirectOnMec(dcb, 8, (char*)args + 2, 0), -1);
+  // A flip on its own: 256 dwords at least; the flip packet written into
+  // the first 64, then the driver's checks.
+  failed += test_check(420, (unsigned)sceGnmRequestFlipAndSubmitDone(dcb, 0xFF, 1, 0, 1, 0), 0x80D11001);
+  failed += test_check(421, (unsigned)sceGnmRequestFlipAndSubmitDone(dcb, 0x100, 1, -1, 1, 0) == 0x80D11082 &&
+                                dcb[0] == 0xC03E1000 && dcb[1] == 0x68750777,
+                       1);
+  return failed;
+}
 
 static int gpu_checks(void) {
   int failed = 0;
@@ -806,7 +913,7 @@ static int appcontent_checks(void) {
 }
 
 int system_checks(void) {
-  return fiber_checks() + dir_checks() + gpu_checks() + save_checks() + audio_checks() +
+  return fiber_checks() + dir_checks() + gpu_checks() + packet_checks() + save_checks() + audio_checks() +
          pad_checks() + dialog_checks() + msg_dialog_checks() + trophy_checks() + ngs2_checks() +
          appcontent_checks();
 }

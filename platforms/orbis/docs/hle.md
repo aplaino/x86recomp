@@ -71,11 +71,20 @@ library.
 - recomp_orbis_gnm: libSceGnmDriver. Its packet builders write what
   11.00's do (the same dwords; a padding NOP's body is left alone, the
   NOP-wrapped context registers of the Update*Shader functions included,
-  which the command processor applies as SET_CONTEXT_REG). Submissions
-  run on the command processor (orbis/gpu/cp.h, the library
-  recomp_orbis_gpu); submit-and-flip
-  rewrites the game's flip packet as 11.00 does and flips once the
-  submission is done. Only the graphics end-of-pipe event (0x40) exists;
+  which the command processor applies as SET_CONTEXT_REG; the draw and
+  dispatch builders, direct, indirect, multi and count-multi, with their
+  argument checks; sceGnmDrawIndexMultiInstanced writes only a NOP, as
+  11.00's does). Submissions run on the command processor (orbis/gpu/cp.h,
+  the library recomp_orbis_gpu); submit-and-flip, and
+  sceGnmRequestFlipAndSubmitDone (a flip packet written into its buffer
+  and submitted alone), rewrite the flip packet as 11.00 does and flip
+  once the submission is done. The command processor's indirect draws
+  write the first (or base) vertex and first instance to the SH registers
+  the packet names and draw from vertex 0, as AMD documents the packets
+  (the vertex shader adds the register); their arguments are read from
+  SET_BASE's base 1 (other bases are fatal), a compute queue's indirect
+  dispatches from the packet's address. Draws of the stream-out buffer's
+  filled size (USE_OPAQUE) are fatal. Only the graphics end-of-pipe event (0x40) exists;
   its data is the id (a timestamp of 0). Mip statistics are accepted and
   never written.
 - recomp_orbis_gpu draws on gfx::Device (orbis/gpu/renderer.h): its
@@ -86,8 +95,17 @@ library.
   a T# describes less of them; a T# at a depth target's
   DB_STENCIL_READ_BASE samples its stencil, resolved into an R8 image;
   a depth target drawn one DB_DEPTH_VIEW slice at a time, or sampled
-  through an array T#, becomes a 2D array of as many slices as used),
-  textures read from guest memory once a submission when they change.
+  through an array T#, becomes a 2D array of as many slices as used; a
+  2D T# of several levels over colour targets takes each level from the
+  target at its address, else from memory), textures read from guest
+  memory once a submission when they change: every level from BASE_LEVEL
+  to LAST_LEVEL and every slice (a 2D array's from 0 to LAST_ARRAY, a
+  cube's six faces, a 3D texture's depth), laid out as the firmware's
+  (11.00) GL library lays out a T#'s levels and slices (orbis/gpu/tiling.h:
+  the levels after one another, each with its slices; past level 0 a
+  level as wide as the level-0 pitch halved; POW2_PAD; a 2D level smaller
+  than a macro tile in its micro tiles' 1D mode; an array slice's banks
+  rotated). The T#'s MIN_LOD clamps the sampler's.
   A colour target of four components holds them in the shader's order
   and a T# of it reads them through its COMP_SWAP; one of one or two holds
   them in memory order (the pixel shader exports what COMP_SWAP puts
@@ -106,23 +124,36 @@ library.
   (shared vertices again for each primitive), each part of the draw as
   many primitives as the rings hold; the copy shader then draws the
   vertices the GS emitted on stream 0, its strips as lists. V# base
-  addresses are 40 bits (the ring V#s set bits above them). Not drawn yet:
-  tessellation stages, on-chip and instanced GS, GS streams 1-3, fans,
-  rectangle and quad lists, indirect draws and dispatches, cross-lane
-  instructions (ds_swizzle's bit-mask mode, lane counts; its quad mode is
-  a subgroup quad broadcast), cube, 3D and array textures other than
-  depth targets, draws into several slices at once, mip levels past the
-  first, and textures in rotated, thick and PRT tile modes (read as
-  black). The tile mode table (GB_TILE_MODE0-31, GB_MACROTILE_MODE0-15) is
+  addresses are 40 bits (the ring V#s set bits above them). Fans and
+  polygons are drawn as triangles (0, i, i + 1), quads as (0 1 2, 0 2 3),
+  quad strips as (2i 2i+1 2i+3, 2i 2i+3 2i+2), line loops as lines;
+  rectangle lists as two triangles a rectangle (corners 0 1 2, 1 3 2), the
+  fourth corner's position and parameters the second's and third's less
+  the first's, as AMD describes the hardware's. Cube maps sample the
+  direction the face coordinates and face (the v_cube* instructions'
+  results, 1 to 2 across a face) point to. Not drawn yet, each fatal:
+  tessellation stages, on-chip and instanced GS, GS streams 1-3, indexed
+  rectangle lists, adjacency primitive types, cross-lane instructions
+  (ds_swizzle's bit-mask mode, lane counts; its quad mode is a subgroup
+  quad broadcast), 1D and multisampled textures, cube arrays, arrays
+  from a slice other than 0, colour targets sampled as other than 2D or
+  from a level past 0, depth targets sampled with levels, samples with a
+  level clamp, offsets into a texture of several levels at a level not
+  known (implicit, explicit, derivatives), cube image loads and cube
+  samples with derivatives or offsets, draws into several slices at once,
+  textures in rotated, thick and PRT tile modes and compressed ones in
+  linear modes, CB_COLOR_CONTROL modes other than normal (eliminating
+  fast clears, resolving, decompressing) and targets with CMASK fast
+  clears or FMASK compression. An unmapped texture reads as black. The
+  tile mode table (GB_TILE_MODE0-31, GB_MACROTILE_MODE0-15) is
   the console's, read on firmware 11.00; its GB_ADDR_CONFIG read back 0,
   and the pipe interleave (256 bytes), pipes (8) and row size (1 KiB) are
   the firmware's own addressing's (its GL library). Stencil REPLACE_OP
-  writes the test value, not DB_STENCILREFMASK's op value. Colour fast
-  clears through CMASK are not modelled. A depth target's HTILE (one that
-  tracks depth alone) written in full as cleared, every tile's ZMASK 0,
-  by a dispatch or DMA_DATA, clears the target to DB_DEPTH_CLEAR at its
-  next draw; other HTILE writes are not modelled. The depth clear of
-  DB_RENDER_CONTROL is modelled.
+  writes the test value, not DB_STENCILREFMASK's op value. A depth
+  target's HTILE (one that tracks depth alone) written in full as
+  cleared, every tile's ZMASK 0, by a dispatch or DMA_DATA, clears the
+  target to DB_DEPTH_CLEAR at its next draw; other HTILE writes are
+  fatal. The depth clear of DB_RENDER_CONTROL is modelled.
 - recomp_orbis_system also: libScePlayGo (the game is installed in full:
   every chunk local, nothing to do, ETAs 0) and libSceDiscMap (a disc
   game's file locations from its sce_discmap.plt: MD5 of the path below
@@ -346,6 +377,12 @@ noted:
 - The handles' values (the console's video out and pad handles are not
   small numbers; the HLE's are 1).
 - The GPU's 100 MHz reference clock for timestamps.
+- Which vertex of a fan's, quad's or polygon's triangle is the provoking
+  one (flat-shaded parameters): the HLE's triangles keep the first vertex
+  first. Where the v_cube* instructions put a direction exactly between
+  two faces (the HLE: z, then y, then x, as AMD's instruction description
+  reads), and how a cube's level is chosen near a face's edge (the
+  host's).
 - PlayGo's chunk count (every id below 1000 is accepted; a package's
   count is in its playgo-chunk.dat, package entry 0x1001, which a copy of
   app0 does not hold), what an id past it returns, and the default

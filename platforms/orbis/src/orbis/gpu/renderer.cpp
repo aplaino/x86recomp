@@ -54,12 +54,6 @@ float AsFloat(uint32_t v) {
   return f;
 }
 
-std::once_flag g_warn_flags[32];
-// One warning per kind for what is not drawn yet.
-void WarnOnce(int kind, const char* what) {
-  std::call_once(g_warn_flags[kind], [&] { WarnF("GPU: %s\n", what); });
-}
-
 // ---- formats
 
 // A colour target's format from CB_COLORn_INFO (FORMAT, NUMBER_TYPE,
@@ -103,8 +97,7 @@ gfx::BlendFactor Factor(uint32_t f) {
     case 13: case 19: return B::ConstantColor;
     case 14: case 20: return B::OneMinusConstantColor;
   }
-  WarnOnce(0, "a blend factor (dual source) is not drawn as the console does");
-  return B::One;
+  FatalF("GPU: blend factor %u (dual source) is not drawn yet", f);
 }
 gfx::BlendOp Comb(uint32_t c) {
   using O = gfx::BlendOp;
@@ -128,8 +121,7 @@ gfx::StencilOp StencilOp(uint32_t op) {
     case 8: return S::IncrementWrap;
     case 9: return S::DecrementWrap;
   }
-  WarnOnce(1, "a stencil operation is not drawn as the console does");
-  return S::Keep;
+  FatalF("GPU: stencil operation %u is not drawn yet", op);
 }
 gfx::AddressMode Address(uint32_t clamp) {
   return clamp == 0 ? gfx::AddressMode::Repeat
@@ -175,6 +167,7 @@ struct TargetView {
   uint32_t w, h;
   gfx::TextureId tex;
   gfx::DepthId depth;
+  uint32_t levels = 1;  // a colour target's levels (MippedTarget)
 };
 struct DepthTarget {
   gaddr addr;
@@ -463,7 +456,7 @@ bool HtileCleared(const DepthTarget& d, gaddr base, uint64_t size) {
   const uint8_t* p = GPtr(base);
   bool clear = d.htile == base && !d.htile_stencil;
   for (uint64_t i = 0; clear && i + 4 <= size; i += 4) clear = !(p[i] & 0xF);
-  if (!clear) WarnOnce(17, "an HTILE write other than a full depth clear is not modelled");
+  if (!clear) FatalF("GPU: an HTILE write other than a full depth clear is not modelled yet");
   return clear;
 }
 
@@ -585,7 +578,7 @@ gfx::TextureId SampledTarget(State& s, const Target& tg, uint32_t w, uint32_t h)
   if (w == tg.w && h == tg.h) return tg.tex;
   TargetView* view = nullptr;
   for (TargetView& v : s.views)
-    if (v.addr == tg.addr && v.tex && v.w == w && v.h == h) view = &v;
+    if (v.addr == tg.addr && v.tex && v.w == w && v.h == h && v.levels == 1) view = &v;
   if (!view) {
     gfx::ImageDesc d;
     d.w = int(w);
@@ -599,6 +592,59 @@ gfx::TextureId SampledTarget(State& s, const Target& tg, uint32_t w, uint32_t h)
   }
   const gfx::Rect r{0, 0, int32_t(w), int32_t(h)};
   s.dev->StretchRect({tg.tex, 0}, r, {view->tex, 0}, r, false);
+  return view->tex;
+}
+
+// A 2D T# of levels 0 to last at addr, colour targets among them (fmt
+// theirs): an image of those levels, each the target at its address in
+// the T#'s layout (the levels the GPU rendered; its top-left, as
+// SampledTarget) or else read from memory, made each time.
+gfx::TextureId MippedTarget(State& s, gaddr addr, Format fmt, const uint32_t t[8], uint32_t last) {
+  const uint32_t w = (t[2] & 0x3FFF) + 1, h = ((t[2] >> 14) & 0x3FFF) + 1;
+  if (gfx::IsCompressed(fmt)) FatalF("GPU: a compressed colour target");
+  TextureLayout lay;
+  lay.index = (t[3] >> 20) & 0x1F;
+  lay.pow2 = (t[3] >> 25) & 1;
+  lay.bpe = gfx::BitsPerPixel(fmt) / 8;
+  lay.w = w;
+  lay.h = h;
+  lay.pitch = ((t[4] >> 13) & 0x3FFF) + 1;
+  const uint32_t dfmt = (t[1] >> 20) & 0x3F;
+  lay.depth_format = dfmt == 2 || dfmt == 4;
+  TargetView* view = nullptr;
+  for (TargetView& v : s.views)
+    if (v.addr == addr && v.tex && v.w == w && v.h == h && v.levels == last + 1) view = &v;
+  if (!view) {
+    gfx::ImageDesc d;
+    d.w = int(w);
+    d.h = int(h);
+    d.levels = int(last + 1);
+    d.fmt = fmt;
+    d.color_target = true;
+    const gfx::TextureId tex = s.dev->CreateImage(d);
+    if (!tex) return 0;
+    s.views.push_back({addr, w, h, tex, 0, last + 1});
+    view = &s.views.back();
+  }
+  std::vector<uint8_t> lin;
+  for (uint32_t i = 0; i <= last; i++) {
+    Level l;
+    if (!LevelOf(lay, i, &l))
+      FatalF("GPU: a colour target's tile mode %u is not read yet", lay.index);
+    const gaddr at = addr + l.offset;
+    const int32_t lw = int32_t(std::max(1u, w >> i)), lh = int32_t(std::max(1u, h >> i));
+    const Target* level = nullptr;
+    for (const Target& o : s.targets)
+      if (o.addr == at) level = &o;
+    if (level) {
+      const gfx::Rect r{0, 0, std::min(lw, int32_t(level->w)), std::min(lh, int32_t(level->h))};
+      s.dev->StretchRect({level->tex, 0}, r, {view->tex, int(i)}, r, false);
+    } else if (Readable(at, l.slice_bytes)) {
+      lin.resize(uint64_t(l.w) * l.h * lay.bpe);
+      DetileSlice(l, lay.bpe, 0, GPtr(at), lin.data(), l.w * lay.bpe);
+      s.dev->UpdateImage(view->tex, int(i), 0, {0, 0, lw, lh}, lin.data(), l.w * lay.bpe);
+    }
+  }
   return view->tex;
 }
 
@@ -629,8 +675,7 @@ gfx::TextureId SampledStencil(State& s, const DepthTarget& dt, const uint32_t t[
                               uint32_t h) {
   Format fmt;
   if (!TextureFormat(t, &fmt) || fmt != Format::R8) {
-    WarnOnce(14, "a stencil sampled in a format other than R8 is not drawn yet (read as black)");
-    return 0;
+    FatalF("GPU: a stencil sampled in a format other than R8 is not drawn yet");
   }
   w = std::min(w, dt.w);
   h = std::min(h, dt.h);
@@ -690,68 +735,116 @@ gfx::TextureId SampledStencil(State& s, const DepthTarget& dt, const uint32_t t[
 }
 
 // A T#'s texture: the colour target at its address, else its texels from
-// guest memory (compared once a submission and uploaded when they change).
-// Level 0 only, in the tile modes tiling.h reads; nothing (black) where
-// memory is not mapped.
+// guest memory (compared once a submission and uploaded when they change):
+// its levels from BASE_LEVEL to LAST_LEVEL and its slices (a 2D array's
+// from slice 0 to LAST_ARRAY, a cube's faces, a 3D texture's depth), as
+// tiling.h lays them out. Nothing (black) where memory is not mapped.
 gfx::TextureId TextureFor(State& s, const ImageRef& ref) {
   const uint32_t* t = ref.t;
   const gaddr addr = ImageBase(t);
   const uint32_t w = (t[2] & 0x3FFF) + 1, h = ((t[2] >> 14) & 0x3FFF) + 1;
-  for (Target& tg : s.targets)
-    if (tg.addr == addr) return SampledTarget(s, tg, w, h);
-  const uint32_t type = t[3] >> 28;
+  const uint32_t type = t[3] >> 28, base = (t[3] >> 12) & 0xF, last = (t[3] >> 16) & 0xF;
+  const uint32_t first_slice = t[5] & 0x1FFF, last_slice = (t[5] >> 13) & 0x1FFF;
+  for (Target& tg : s.targets) {
+    if (tg.addr != addr) continue;
+    if (type != 9 || base)
+      FatalF("GPU: a colour target sampled as a T# of type %u from level %u is not drawn yet", type,
+             base);
+    return last ? MippedTarget(s, addr, tg.fmt, t, last) : SampledTarget(s, tg, w, h);
+  }
   for (DepthTarget& d : s.depths) {
     if (d.addr == addr) {
       // A 2D array (type 13) from BASE_ARRAY to LAST_ARRAY.
-      const uint32_t base = t[5] & 0x1FFF, last = (t[5] >> 13) & 0x1FFF;
-      if (type == 13 && !base) EnsureLayers(s, d, last + 1);
-      if ((type == 13) != (d.layers != 0) || base) {
-        WarnOnce(16, "a depth target sampled other than as all its slices is not drawn yet "
-                     "(read as black)");
-        return 0;
-      }
+      if (type == 13 && !first_slice) EnsureLayers(s, d, last_slice + 1);
+      if ((type == 13) != (d.layers != 0) || first_slice || base || last)
+        FatalF("GPU: a depth target sampled as a T# of type %u, levels %u-%u, slices %u-%u is "
+               "not drawn yet", type, base, last, first_slice, last_slice);
       return SampledDepth(s, d, w, h);
     }
     if (d.stencil && d.stencil == addr) return SampledStencil(s, d, t, w, h);
   }
   if (!Readable(addr, 1)) return 0;
   Format fmt;
-  if (!TextureFormat(t, &fmt)) {
-    WarnOnce(2, "a texture format is not drawn yet (textures read as black)");
-    return 0;
+  const uint32_t dfmt = (t[1] >> 20) & 0x3F;
+  if (!TextureFormat(t, &fmt))
+    FatalF("GPU: texture format %u, number format %u not drawn yet", dfmt, (t[1] >> 26) & 0xF);
+  TextureLayout lay;
+  gfx::ImageDesc desc;
+  uint32_t layers = 1;  // the image's: slices, faces or depth
+  lay.index = (t[3] >> 20) & 0x1F;
+  lay.pow2 = (t[3] >> 25) & 1;
+  lay.w = w;
+  lay.h = h;
+  lay.pitch = ((t[4] >> 13) & 0x3FFF) + 1;
+  switch (type) {
+    case 9: break;
+    case 13:  // memory holds DEPTH + 1 slices
+      if (first_slice)
+        FatalF("GPU: a 2D array texture from slice %u is not drawn yet", first_slice);
+      lay.slices = (t[4] & 0x1FFF) + 1;
+      layers = last_slice + 1;
+      desc.kind = gfx::TextureKind::Tex2DArray;
+      break;
+    case 11:
+      if ((t[4] & 0x1FFF) || first_slice) FatalF("GPU: cube arrays are not drawn yet");
+      lay.slices = layers = 6;
+      desc.kind = gfx::TextureKind::Cube;
+      break;
+    case 10:
+      lay.depth = (t[4] & 0x1FFF) + 1;
+      desc.kind = gfx::TextureKind::Tex3D;
+      break;
+    default: FatalF("GPU: texture type %u (1D, multisampled) is not drawn yet", type);
   }
-  if (type != 9) {
-    WarnOnce(3, "texture types other than 2D are not drawn yet (read as black)");
-    return 0;
-  }
-  const uint32_t tiling = (t[3] >> 20) & 0x1F;
-  const uint32_t pitch = ((t[4] >> 13) & 0x3FFF) + 1;
+  if (last < base || base > 13) FatalF("GPU: a texture's levels %u-%u", base, last);
+  if (layers > lay.slices && type != 10)
+    FatalF("GPU: a texture shows slices 0-%u of %u", layers - 1, lay.slices);
   const bool bc = gfx::IsCompressed(fmt);
-  const uint32_t bpe = bc ? gfx::BitsPerPixel(fmt) * 2 : gfx::BitsPerPixel(fmt) / 8;
-  const uint32_t wel = bc ? (w + 3) / 4 : w, pel = bc ? (pitch + 3) / 4 : pitch;
-  const uint32_t hel = gfx::RowCount(fmt, h);
-  const uint64_t bytes = TiledBytes(tiling, pel, hel, bpe);
-  if (!bytes) {
-    WarnOnce(4, "a texture tile mode (rotated, thick, PRT) is not read yet (read as black)");
-    return 0;
+  lay.bpe = bc ? gfx::BitsPerPixel(fmt) * 2 : gfx::BitsPerPixel(fmt) / 8;
+  lay.blocks = bc;
+  lay.depth_format = (dfmt == 2 || dfmt == 4) && type != 10;
+  Level top;
+  if (!LevelOf(lay, last, &top))
+    FatalF("GPU: a texture's tile mode %u (rotated, thick, PRT, or compressed and linear) is not "
+           "read yet", lay.index);
+  const uint64_t bytes = top.offset + top.slice_bytes * top.depth * lay.slices;
+  // Levels past the first the GPU rendered into.
+  for (const Target& o : s.targets) {
+    if (o.addr <= addr || o.addr >= addr + bytes) continue;
+    if (type != 9 || base || o.fmt != fmt)
+      FatalF("GPU: a colour target inside a texture of type %u from level %u (format %u, the "
+             "target's %u) is not drawn yet", type, base, unsigned(fmt), unsigned(o.fmt));
+    return MippedTarget(s, addr, fmt, t, last);
   }
   if (!Readable(addr, bytes)) return 0;
-  char k[96];
-  std::snprintf(k, sizeof k, "%llx:%u:%u:%u:%u", (unsigned long long)addr, w, h, unsigned(fmt), pitch);
+  char k[128];
+  std::snprintf(k, sizeof k, "%llx:%u:%u:%u:%u:%u:%u:%u:%u:%u", (unsigned long long)addr, w, h,
+                unsigned(fmt), lay.pitch, type, base, last, layers, lay.depth);
   Texture& e = s.textures[k];
   if (!Changed(s, e.cmp, addr, bytes) && e.tex) return e.tex;
   const uint8_t* p = GPtr(addr);
   if (!e.tex) {
-    gfx::ImageDesc d;
-    d.w = int(w);
-    d.h = int(h);
-    d.fmt = fmt;
-    e.tex = s.dev->CreateImage(d);
+    desc.w = int(std::max(1u, w >> base));
+    desc.h = int(std::max(1u, h >> base));
+    desc.layers = type == 10 ? int(std::max(1u, lay.depth >> base)) : int(layers);
+    desc.levels = int(last - base + 1);
+    desc.fmt = fmt;
+    e.tex = s.dev->CreateImage(desc);
   }
   if (!e.tex) return 0;
-  std::vector<uint8_t> lin(uint64_t(wel) * bpe * hel);
-  Detile(tiling, p, lin.data(), wel, hel, pel, bpe, wel * bpe);
-  s.dev->UpdateImage(e.tex, 0, 0, {0, 0, int(w), int(h)}, lin.data(), wel * bpe);
+  std::vector<uint8_t> lin;
+  for (uint32_t i = base; i <= last; i++) {
+    Level l;
+    LevelOf(lay, i, &l);
+    lin.resize(uint64_t(l.w) * l.h * lay.bpe);
+    const uint32_t n = type == 10 ? std::max(1u, lay.depth >> i) : layers;
+    for (uint32_t sl = 0; sl < n; sl++) {
+      DetileSlice(l, lay.bpe, sl, p + l.offset, lin.data(), l.w * lay.bpe);
+      s.dev->UpdateImage(e.tex, int(i - base), int(sl),
+                         {0, 0, int(std::max(1u, w >> i)), int(std::max(1u, h >> i))}, lin.data(),
+                         l.w * lay.bpe);
+    }
+  }
   return e.tex;
 }
 
@@ -765,8 +858,7 @@ gfx::TextureId StorageImage(State& s, const ImageRef& ref) {
   Format fmt;
   if (t[3] >> 28 != 9 || ((t[3] >> 12) & 0xF) != 0 || !TextureFormat(t, &fmt) ||
       !StorageQualifier(fmt)) {
-    WarnOnce(5, "a compute image store is not drawn yet (not 2D, past level 0, or its format)");
-    return 0;
+    FatalF("GPU: a compute image store is not drawn yet (not 2D, past level 0, or its format)");
   }
   return ColorTarget(s, addr, w, h, fmt, 0, true);
 }
@@ -869,6 +961,10 @@ void Bind(State& s, const StageState& st, const Resolved& r, Bound& b,
     }
     b.textures.push_back(TextureFor(s, ref));
     b.samplers.push_back(Sampler(ref.s));
+    // The T#'s MIN_LOD (4.8 fixed point) clamps as the sampler's does.
+    gfx::SamplerDesc& sd = b.samplers.back();
+    sd.min_lod = std::max(sd.min_lod, float((ref.t[1] >> 8) & 0xFFF) / 256.0f);
+    sd.max_lod = std::max(sd.max_lod, sd.min_lod);
   }
   b.uniforms = Uniforms(st, r);
   b.res.textures = b.textures.data();
@@ -1045,8 +1141,7 @@ gfx::ProgramId PassProgram(State& s, const StageState& st, const Resolved& r) {
       pd.local_size[0] = 64;
       pr.id = s.dev->CreateProgram(pd);
     } else {
-      WarnF("GPU: a geometry shader stage is not translated yet (such draws are skipped): %s\n",
-            pr.error.c_str());
+      FatalF("GPU: a geometry shader stage is not translated yet: %s", pr.error.c_str());
     }
   }
   return pr.id;
@@ -1060,21 +1155,24 @@ bool SetUpGeometry(State& s, const Regs& r, const DrawCall& call, Resolved& rv, 
   const uint32_t* cx = r.context;
   if (cx[kVgtShaderStagesEn] != 0xB0 || (cx[kVgtGsMode] & 0x600003) != 3 || (cx[kVgtGsInstanceCnt] & 1) ||
       call.instances > 1) {
-    WarnOnce(6, "draws with tessellation, on-chip or instanced geometry shaders are skipped");
-    return false;
+    FatalF("GPU: draws with tessellation, on-chip or instanced geometry shaders are not drawn yet");
   }
   uint32_t k;
   switch (r.uconfig[kPrimitiveType]) {
     case 1: k = 1; break;
     case 2: k = 2; break;
     case 4: k = 3; break;
-    default: WarnOnce(12, "a geometry shader's input primitive type is not drawn yet"); return false;
+    default:
+      FatalF("GPU: a geometry shader's input primitive type %02X is not drawn yet",
+             r.uconfig[kPrimitiveType]);
   }
   switch (cx[kVgtGsOutPrimType] & 0x3F) {
     case 0: *topology = gfx::Topology::PointList; break;
     case 1: *topology = gfx::Topology::LineList; break;
     case 2: *topology = gfx::Topology::TriangleList; break;
-    default: WarnOnce(12, "a geometry shader's output primitive type is not drawn yet"); return false;
+    default:
+      FatalF("GPU: a geometry shader's output primitive type %u is not drawn yet",
+             cx[kVgtGsOutPrimType] & 0x3F);
   }
   g->es = ShaderState(r, Stage::Export, kPgmLoEs);
   g->gs = ShaderState(r, Stage::Geometry, kPgmLoGs);
@@ -1084,8 +1182,7 @@ bool SetUpGeometry(State& s, const Regs& r, const DrawCall& call, Resolved& rv, 
   TargetSelects(s, g->rg);
   const std::string& err = !g->re.error.empty() ? g->re.error : g->rg.error;
   if (!err.empty()) {
-    WarnOnce(13, ("a geometry shader stage cannot run yet (draws skipped): " + err).c_str());
-    return false;
+    FatalF("GPU: a geometry shader stage cannot run yet: %s", err.c_str());
   }
   // The rings: what the ES writes, what the GS writes (stream 0 alone).
   auto written = [](const Resolved& res, BufferRange* out) {
@@ -1096,8 +1193,7 @@ bool SetUpGeometry(State& s, const Regs& r, const DrawCall& call, Resolved& rv, 
   };
   BufferRange esgs, gsvs;
   if (!written(g->re, &esgs) || !written(g->rg, &gsvs) || !(gsvs.vsharp[1] >> 31)) {
-    WarnOnce(13, "a geometry shader's rings are not drawn yet (not one each, or GSVS not swizzled)");
-    return false;
+    FatalF("GPU: a geometry shader's rings are not drawn yet (not one each, or GSVS not swizzled)");
   }
   // Their sizes: the V#s the GS and the copy shader read them with.
   auto capacity = [](const Resolved& res, gaddr base) {
@@ -1108,12 +1204,13 @@ bool SetUpGeometry(State& s, const Regs& r, const DrawCall& call, Resolved& rv, 
   };
   const uint32_t es_wave = cx[kVgtEsgsRingItemsize] * 256, gs_wave = cx[kVgtGsvsRingItemsize] * 256;
   const uint32_t max_vert = cx[kVgtGsMaxVertOut] & 0x7FF;
-  if (!es_wave || !gs_wave || !max_vert) return false;
+  if (!es_wave || !gs_wave || !max_vert)
+    FatalF("GPU: a geometry shader draw with ring item sizes %u, %u and %u vertices out", es_wave,
+           gs_wave, max_vert);
   uint32_t waves =
       std::min(capacity(g->rg, esgs.base) / (es_wave * k), capacity(rv, gsvs.base) / gs_wave);
   if (!waves) {
-    WarnOnce(13, "a geometry shader's rings are not drawn yet (smaller than a wave)");
-    return false;
+    FatalF("GPU: a geometry shader's rings are not drawn yet (smaller than a wave)");
   }
   // No more than the draw's primitives fill: each pass copies its rings
   // into its arenas and back, whole rings for a draw of a few waves.
@@ -1268,6 +1365,35 @@ void Exclusive(const std::function<void()>& fn) {
   fn();
 }
 
+namespace {
+
+// A primitive type the device has no topology for as a list of the
+// device's, by vertex: fans and polygons (0 i i+1), quads (0 1 2, 0 2 3)
+// and quad strips (2i 2i+1 2i+3, 2i 2i+3 2i+2) as triangles, line loops as
+// lines.
+std::vector<uint32_t> Expand(uint32_t prim, uint32_t n) {
+  std::vector<uint32_t> v;
+  const auto tri = [&](uint32_t a, uint32_t b, uint32_t c) { v.insert(v.end(), {a, b, c}); };
+  switch (prim) {
+    case 5: case 0x15:
+      for (uint32_t i = 1; i + 1 < n; i++) tri(0, i, i + 1);
+      break;
+    case 0x13:
+      for (uint32_t q = 0; q + 4 <= n; q += 4) tri(q, q + 1, q + 2), tri(q, q + 2, q + 3);
+      break;
+    case 0x14:
+      for (uint32_t q = 0; q + 4 <= n; q += 2) tri(q, q + 1, q + 3), tri(q, q + 3, q + 2);
+      break;
+    case 0x12:
+      for (uint32_t i = 0; i + 1 < n; i++) v.insert(v.end(), {i, i + 1});
+      if (n >= 2) v.insert(v.end(), {n - 1, 0});
+      break;
+  }
+  return v;
+}
+
+}  // namespace
+
 void Draw(const Regs& r, const DrawCall& call) {
   State& s = G();
   std::lock_guard<std::mutex> l(s.mu);
@@ -1278,14 +1404,21 @@ void Draw(const Regs& r, const DrawCall& call) {
   // CB_COLOR_CONTROL's MODE is CB_DISABLE), the depth.
   gfx::ProgramDraw d;
   int ntargets = 0;
-  const bool cb_on = (cx[kCbColorControl] >> 4) & 7;
-  for (int i = 0; i < 4 && cb_on; i++) {
+  // CB_COLOR_CONTROL's MODE: 0 disabled, 1 normal; the others (eliminating
+  // fast clears, resolving, decompressing) and targets with CMASK fast
+  // clears (CB_COLORn_INFO.FAST_CLEAR) or FMASK compression are not drawn.
+  const uint32_t cb_mode = (cx[kCbColorControl] >> 4) & 7;
+  if (cb_mode > 1) FatalF("GPU: CB_COLOR_CONTROL mode %u is not drawn yet", cb_mode);
+  for (int i = 0; i < 4 && cb_mode; i++) {
     const uint32_t* cb = cx + kCbColor0Base + 0xF * i;
     if (((cb[4] >> 2) & 0x1F) == 0) break;
+    if (cb[4] & (3u << 13))
+      FatalF("GPU: colour target %d with fast clears or compression (CB_COLOR_INFO %08X) is not "
+             "drawn yet", i, cb[4]);
     Format fmt;
     if (!ColorFormat(cb[4], &fmt)) {
-      WarnOnce(7, "a colour target format is not drawn yet (the draw is skipped)");
-      return;
+      FatalF("GPU: colour target format %u, number type %u is not drawn yet", (cb[4] >> 2) & 0x1F,
+             (cb[4] >> 8) & 7);
     }
     const uint32_t pitch = ((cb[1] & 0x7FF) + 1) * 8;
     const uint32_t height = uint32_t((uint64_t(cb[2] & 0x3FFFFF) + 1) * 64 / pitch);
@@ -1295,7 +1428,7 @@ void Draw(const Regs& r, const DrawCall& call) {
     const uint32_t swap = (cb[4] >> 11) & 3, cf = (cb[4] >> 2) & 0x1F;
     const bool four = cf == 9 || cf == 10 || cf == 12 || cf == 14;
     if (swap && cf == 7)
-      WarnOnce(18, "a colour target's component swap is not drawn yet (three components)");
+      FatalF("GPU: a colour target's component swap is not drawn yet (three components)");
     d.targets[i] = {ColorTarget(s, uint64_t(cb[0]) << 8, pitch, height, fmt, four ? swap : 0), 0};
     ntargets++;
   }
@@ -1331,20 +1464,21 @@ void Draw(const Regs& r, const DrawCall& call) {
                           (cx[kDbRenderControl] & 2) ? int(cx[kDbStencilClear] & 0xFF) : -1, int(i));
       return;
     }
-    if (last != first) WarnOnce(15, "a draw into several depth slices is drawn into the first only");
+    if (last != first) FatalF("GPU: a draw into several depth slices is not drawn yet");
     d.depth_layer = dt->layers ? int(first) : 0;
   }
   if (!ntargets && !d.depth) return;
 
   // Shaders.
+  const bool gs = cx[kVgtShaderStagesEn] & 0x3F;
+  const uint32_t prim = r.uconfig[kPrimitiveType];
   StageState vs = ShaderState(r, Stage::Vertex, kPgmLoVs), ps = PixelState(r);
+  vs.rects = !gs && prim == 0x11;
   Resolved rv = Resolve(vs);
   TargetSelects(s, rv);
   if (!rv.error.empty()) {
-    WarnOnce(8, ("a vertex shader cannot run yet (draws skipped): " + rv.error).c_str());
-    return;
+    FatalF("GPU: a vertex shader cannot run yet: %s", rv.error.c_str());
   }
-  const bool gs = cx[kVgtShaderStagesEn] & 0x3F;
   Geometry geo;
   gfx::Topology gs_topology = gfx::Topology::TriangleList;
   if (gs && !SetUpGeometry(s, r, call, rv, &geo, &gs_topology)) return;
@@ -1353,8 +1487,7 @@ void Draw(const Regs& r, const DrawCall& call) {
     rp = Resolve(ps);
     TargetSelects(s, rp);
     if (!rp.error.empty()) {
-      WarnOnce(9, ("a pixel shader cannot run yet (draws skipped): " + rp.error).c_str());
-      return;
+      FatalF("GPU: a pixel shader cannot run yet: %s", rp.error.c_str());
     }
   }
   const std::string key = rv.key + '|' + rp.key;
@@ -1370,24 +1503,23 @@ void Draw(const Regs& r, const DrawCall& call) {
       pd.fs = pr.ps.stage;
       pr.id = s.dev->CreateProgram(pd);
     } else {
-      WarnF("GPU: a draw's shader is not translated yet (such draws are skipped): %s\n",
-            pr.error.c_str());
+      FatalF("GPU: a draw's shader is not translated yet: %s", pr.error.c_str());
     }
   }
   if (!pr.id) return;
 
   // Fixed state.
   gfx::PipelineState& ps_ = d.state;
-  switch (gs ? ~0u : r.uconfig[kPrimitiveType]) {
+  switch (gs ? ~0u : prim) {
     case ~0u: ps_.topology = gs_topology; break;
     case 1: ps_.topology = gfx::Topology::PointList; break;
-    case 2: ps_.topology = gfx::Topology::LineList; break;
+    case 2: case 0x12: ps_.topology = gfx::Topology::LineList; break;
     case 3: ps_.topology = gfx::Topology::LineStrip; break;
-    case 4: ps_.topology = gfx::Topology::TriangleList; break;
+    case 4: case 5: case 0x11: case 0x13: case 0x14: case 0x15:
+      ps_.topology = gfx::Topology::TriangleList;
+      break;
     case 6: ps_.topology = gfx::Topology::TriangleStrip; break;
-    default:
-      WarnOnce(10, "a primitive type is not drawn yet (fans, rectangles, quads: skipped)");
-      return;
+    default: FatalF("GPU: primitive type %02X is not drawn yet", prim);
   }
   const uint32_t mode = cx[kPaSuScModeCntl];
   ps_.cull = (mode & 3) == 3 ? gfx::CullMode::None
@@ -1450,7 +1582,7 @@ void Draw(const Regs& r, const DrawCall& call) {
     for (int c = 0; c < 4; c++) b.write_mask |= ((mask >> (4 * i + from[c])) & 1) << c;
     if (!(pr.ps.mrt_mask & (1u << i))) b.write_mask = 0;
     if (b.enable && from[0] == 3 && (bc & (1u << 29)))
-      WarnOnce(19, "blending into an alpha-only target is not drawn as the console does");
+      FatalF("GPU: blending into an alpha-only target is not drawn yet");
   }
   ps_.blend_constant = {AsFloat(cx[kCbBlendRed]), AsFloat(cx[kCbBlendRed + 1]),
                         AsFloat(cx[kCbBlendRed + 2]), AsFloat(cx[kCbBlendRed + 3])};
@@ -1487,7 +1619,22 @@ void Draw(const Regs& r, const DrawCall& call) {
   if (gs) return DrawGeometry(s, call, d, geo);
   d.vertex_count = call.count;
   d.instance_count = std::max(call.instances, 1u);
-  if (call.indices) {
+  std::vector<uint32_t> expanded;
+  if (prim == 0x11) {
+    if (call.indices) FatalF("GPU: indexed rectangle lists are not drawn yet");
+    d.vertex_count = call.count / 3 * 6;
+  } else if (prim == 5 || prim >= 0x12) {
+    expanded = Expand(prim, call.count);
+    if (call.indices) {
+      if (!Readable(call.indices, uint64_t(call.count) * call.index_size)) return;
+      for (uint32_t& i : expanded)
+        i = call.index_size == 4 ? Rd32(call.indices + 4 * uint64_t(i))
+                                 : Rd16(call.indices + 2 * uint64_t(i));
+    }
+    d.vertex_count = uint32_t(expanded.size());
+    d.indices = expanded.data();
+    d.index_size = 4;
+  } else if (call.indices) {
     // Kept like large ranges: a scene's draws use a few hundred index
     // ranges, each over and over.
     const uint32_t bytes = call.count * call.index_size;
@@ -1519,8 +1666,7 @@ void Dispatch(const Regs& r, const uint32_t groups[3]) {
   Resolved rc = Resolve(cs);
   TargetSelects(s, rc);
   if (!rc.error.empty()) {
-    WarnOnce(11, ("a compute shader cannot run yet (dispatches skipped): " + rc.error).c_str());
-    return;
+    FatalF("GPU: a compute shader cannot run yet: %s", rc.error.c_str());
   }
   Program& pr = s.compute[rc.key];
   if (!pr.id && pr.error.empty()) {
@@ -1532,8 +1678,7 @@ void Dispatch(const Regs& r, const uint32_t groups[3]) {
       for (int i = 0; i < 3; i++) pd.local_size[i] = std::max(cs.threads[i], 1u);
       pr.id = s.dev->CreateProgram(pd);
     } else {
-      WarnF("GPU: a compute shader is not translated yet (such dispatches are skipped): %s\n",
-            pr.error.c_str());
+      FatalF("GPU: a compute shader is not translated yet: %s", pr.error.c_str());
     }
   }
   if (!pr.id) return;

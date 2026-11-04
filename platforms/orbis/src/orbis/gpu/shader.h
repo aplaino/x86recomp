@@ -57,6 +57,10 @@ struct StageState {
   // output vertices. They reach the code as uniforms (not in the key).
   uint32_t invocations = 0, es_wave_bytes = 0, gs_wave_bytes = 0, prim_verts = 0, first_prim = 0,
            max_vert = 0;
+  // Vertex: the draw is a rectangle list, drawn as two triangles a
+  // rectangle (six vertices, corners 0 1 2 and 1 3 2): the fourth corner's
+  // outputs are the second's and third's less the first's.
+  bool rects = false;
 };
 
 // A guest range a stage reads or writes, and a texture with its sampler.

@@ -77,7 +77,12 @@ STUB(sceNpTrophyUnlockTrophy)
 #define STUB(name) \
   void name(void) {}
 STUB(sceGnmSetVsShader) STUB(sceGnmInsertPushMarker) STUB(sceGnmDrawInitDefaultHardwareState200)
-STUB(sceGnmSubmitCommandBuffers) STUB(sceGnmAddEqEvent)
+STUB(sceGnmSubmitCommandBuffers) STUB(sceGnmAddEqEvent) STUB(sceGnmDrawIndexAuto)
+STUB(sceGnmDrawOpaqueAuto) STUB(sceGnmDrawIndex) STUB(sceGnmDrawIndexOffset)
+STUB(sceGnmDrawIndexMultiInstanced) STUB(sceGnmDispatchDirect) STUB(sceGnmDrawIndirect)
+STUB(sceGnmDrawIndexIndirect) STUB(sceGnmDrawIndirectMulti) STUB(sceGnmDrawIndexIndirectMulti)
+STUB(sceGnmDrawIndirectCountMulti) STUB(sceGnmDrawIndexIndirectCountMulti)
+STUB(sceGnmDispatchIndirect) STUB(sceGnmDispatchIndirectOnMec) STUB(sceGnmRequestFlipAndSubmitDone)
 #endif
 
 #ifdef LIB_LIBC

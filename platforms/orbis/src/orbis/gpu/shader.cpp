@@ -713,6 +713,13 @@ struct Translator {
       case 321: fo(f(0) + " * " + f(1) + " + " + f(2)); return true;
       case 322: io("uint(((" + si(0) + " << 8) >> 8) * ((" + si(1) + " << 8) >> 8) + " + si(2) + ")"); return true;
       case 323: io("(" + s[0] + " & 0xFFFFFFu) * (" + s[1] + " & 0xFFFFFFu) + " + s[2]); return true;
+      // The cube map instructions: the face of direction (s0, s1, s2) its
+      // major axis selects (z, then y, then x on ties), the face's
+      // coordinates and twice the major axis component.
+      case 324: fo("r_cubeid(" + f(0) + ", " + f(1) + ", " + f(2) + ")"); return true;
+      case 325: fo("r_cubesc(" + f(0) + ", " + f(1) + ", " + f(2) + ")"); return true;
+      case 326: fo("r_cubetc(" + f(0) + ", " + f(1) + ", " + f(2) + ")"); return true;
+      case 327: fo("r_cubema(" + f(0) + ", " + f(1) + ", " + f(2) + ")"); return true;
       case 328: io("bitfieldExtract(" + s[0] + ", int(" + s[1] + " & 31u), int(" + s[2] + " & 31u))"); return true;
       case 329: io("uint(bitfieldExtract(" + si(0) + ", int(" + s[1] + " & 31u), int(" + s[2] + " & 31u)))"); return true;
       case 330: io("(" + s[0] + " & " + s[1] + ") | (~" + s[0] + " & " + s[2] + ")"); return true;
@@ -1006,12 +1013,12 @@ struct Translator {
       write("uvec4(" + size + ", uint(textureQueryLevels(" + t + ")))");
       return;
     }
-    if (in.op == 1) {  // image_load_mip
+    if (in.op == 0 || in.op == 1) {  // image_load, image_load_mip
+      if (kind == gfx::TextureKind::Cube) return Fail(pc, "a cube image load not translated yet");
       std::string c = dims == 2 ? "ivec2(int(" + V(vaddr) + "), int(" + V(vaddr + 1) + "))"
                                 : "ivec3(int(" + V(vaddr) + "), int(" + V(vaddr + 1) + "), int(" + V(vaddr + 2) + "))";
-      if (kind == gfx::TextureKind::Cube) return Fail(pc, "a cube image load not translated yet");
       // Out of the image or its levels: zeros, as the GPU returns.
-      const std::string lod = "int(" + V(vaddr + uint32_t(dims)) + ")";
+      const std::string lod = in.op == 1 ? "int(" + V(vaddr + uint32_t(dims)) + ")" : "0";
       Line("r_v4 = uvec4(0u);");
       Line("if (" + lod + " < textureQueryLevels(" + t + ") && all(lessThan(uvec" + std::to_string(dims) +
            "(" + c + "), uvec" + std::to_string(dims) + "(textureSize(" + t + ", " + lod + "))))) r_v4 = " + cast +
@@ -1035,49 +1042,79 @@ struct Translator {
       return;
     }
     if (in.op < 32 || in.op > 63) return Fail(pc, "an image instruction not translated yet");
-    // Samples: [offset] [bias] [compare] coordinates [lod].
+    // Samples: [offset] [bias] [compare] [derivatives] coordinates [lod].
     const uint32_t v = in.op - 32;
     const bool offset = v >= 16, compare = (v & 8) != 0;
     const uint32_t mode = v & 7;  // 0 plain, 1 cl, 2 d, 3 d_cl, 4 l, 5 b, 6 b_cl, 7 lz
-    if (mode == 1 || mode == 2 || mode == 3 || mode == 6) return Fail(pc, "a sample mode not translated yet");
+    if (mode == 1 || mode == 3 || mode == 6) return Fail(pc, "a sample with a level clamp not translated yet");
+    const bool cube = kind == gfx::TextureKind::Cube, volume = kind == gfx::TextureKind::Tex3D;
+    // Derivatives and offsets in the coordinates of a face, a slice or the volume.
+    const int n = kind == gfx::TextureKind::Tex2D ? 2 : 3, nd = volume ? 3 : 2;
     uint32_t at = vaddr;
-    std::string off, bias, ref_z;
+    std::string off, bias, ref_z, dx, dy;
     if (offset) off = V(at++);
     if (mode == 5) bias = F(V(at++));
     if (compare) ref_z = F(V(at++));
-    std::string coord;
-    const int n = kind == gfx::TextureKind::Tex2D ? 2 : 3;
-    for (int i = 0; i < n; i++) coord += (i ? ", " : "") + F(V(at + uint32_t(i)));
-    at += uint32_t(n);
-    if (kind == gfx::TextureKind::Tex2DArray) {
-      coord = F(V(at - 3)) + ", " + F(V(at - 2)) + ", roundEven(" + F(V(at - 1)) + ")";
+    if (mode == 2) {
+      if (cube) return Fail(pc, "a cube sample with derivatives not translated yet");
+      std::string g[6];
+      for (int i = 0; i < 2 * nd; i++) g[i] = F(V(at++));
+      dx = nd == 2 ? "vec2(" + g[0] + ", " + g[1] + ")" : "vec3(" + g[0] + ", " + g[1] + ", " + g[2] + ")";
+      dy = nd == 2 ? "vec2(" + g[2] + ", " + g[3] + ")" : "vec3(" + g[3] + ", " + g[4] + ", " + g[5] + ")";
     }
-    if (kind == gfx::TextureKind::Cube) return Fail(pc, "cube sampling not translated yet");
+    std::string c[3];
+    for (int i = 0; i < n; i++) c[i] = F(V(at + uint32_t(i)));
+    at += uint32_t(n);
+    const std::string lod = mode == 4 ? F(V(at)) : "0.0";
     // Offsets (6 bits, signed, per coordinate, in the VGPR) are in texels
     // of the level sampled: added to the coordinates here, as GLSL takes
-    // only constant ones.
-    std::string lod = mode == 4 ? F(V(at)) : "0.0";
+    // only constant ones; so only where that level is known.
     if (offset) {
-      const std::string o = "vec2(bitfieldExtract(int(" + off + "), 0, 6), bitfieldExtract(int(" + off + "), 8, 6))";
-      const std::string size = "vec2(textureSize(" + t + ", " + (mode == 4 ? "int(" + lod + ")" : std::string("0")) + ").xy)";
-      if (n == 2) coord = "vec2(" + coord + ") + " + o + " / " + size;
-      else coord = "vec3(vec2(" + F(V(at - 3)) + ", " + F(V(at - 2)) + ") + " + o + " / " + size + ", " + coord.substr(coord.rfind(", ") + 2) + ")";
+      const uint32_t base = (ref.t[3] >> 12) & 0xF, last = (ref.t[3] >> 16) & 0xF;
+      if (cube) return Fail(pc, "a cube sample with offsets not translated yet");
+      if (base != last && mode != 7) return Fail(pc, "offsets into a texture of several levels, its level not known, not translated yet");
+      const std::string size = "vec" + std::to_string(nd) + "(textureSize(" + t + ", 0)" + (nd == 2 ? ".xy" : "") + ")";
+      for (int i = 0; i < nd; i++)
+        c[i] = "(" + c[i] + " + float(bitfieldExtract(int(" + off + "), " + std::to_string(8 * i) + ", 6)) / " + size + "[" + std::to_string(i) + "])";
     }
-    const std::string vec = n == 2 ? "vec2(" + coord + ")" : "vec3(" + coord + ")";
+    if (kind == gfx::TextureKind::Tex2DArray) c[2] = "roundEven(" + c[2] + ")";
+    const std::string vec = cube ? "r_cubedir(" + c[0] + ", " + c[1] + ", " + c[2] + ")"
+                            : n == 2 ? "vec2(" + c[0] + ", " + c[1] + ")"
+                                     : "vec3(" + c[0] + ", " + c[1] + ", " + c[2] + ")";
+    // Outside a pixel shader there are no derivatives: the level is 0,
+    // biased or not.
+    const bool pixel = st.stage == Stage::Pixel;
     std::string call;
     if (compare) {
-      const std::string sv = n == 2 ? "vec3(" + vec + ", " + ref_z + ")" : "vec4(" + vec + ", " + ref_z + ")";
-      if (mode == 4) return Fail(pc, "a compare sample with a level not translated yet");
+      if (volume) return Fail(pc, "a compare sample of a 3D texture");
       // A sampler comparing with NEVER fails every texel: the result is 0
       // (its texture is declared without the comparison).
       if (((ref.s[0] >> 12) & 7) == 0) return write("floatBitsToUint(vec4(0.0))");
-      call = mode == 7 || st.stage != Stage::Pixel ? "textureLod(" + t + ", " + sv + ", 0.0)" : "texture(" + t + ", " + sv + ")";
+      const std::string sv = n == 2 ? "vec3(" + vec + ", " + ref_z + ")" : "vec4(" + vec + ", " + ref_z + ")";
+      // Shadow arrays and cubes have no explicit level: zero derivatives
+      // sample level 0.
+      const std::string zero = cube ? "vec3(0.0)" : "vec2(0.0)";
+      if (mode == 2) {
+        call = "textureGrad(" + t + ", " + sv + ", " + dx + ", " + dy + ")";
+      } else if (mode == 7 || (!pixel && mode != 4)) {
+        call = n == 2 ? "textureLod(" + t + ", " + sv + ", 0.0)" : "textureGrad(" + t + ", " + sv + ", " + zero + ", " + zero + ")";
+      } else if (mode == 4) {
+        if (n != 2) return Fail(pc, "a compare sample of an array or cube at a level not translated yet");
+        call = "textureLod(" + t + ", " + sv + ", " + lod + ")";
+      } else if (mode == 5) {
+        if (kind == gfx::TextureKind::Tex2DArray)
+          return Fail(pc, "a biased compare sample of an array not translated yet");
+        call = "texture(" + t + ", " + sv + ", " + bias + ")";
+      } else {
+        call = "texture(" + t + ", " + sv + ")";
+      }
       write("floatBitsToUint(vec4(" + call + "))");
       return;
     }
-    if (mode == 7 || mode == 4 || st.stage != Stage::Pixel) call = "textureLod(" + t + ", " + vec + ", " + lod + ")";
-    else if (mode == 5) call = "texture(" + t + ", " + vec + ", " + bias + ")";
-    else call = "texture(" + t + ", " + vec + ")";
+    if (mode == 2) call = "textureGrad(" + t + ", " + vec + ", " + dx + ", " + dy + ")";
+    else if (mode == 4 || mode == 7) call = "textureLod(" + t + ", " + vec + ", " + lod + ")";
+    else if (mode == 5 && pixel) call = "texture(" + t + ", " + vec + ", " + bias + ")";
+    else call = pixel ? "texture(" + t + ", " + vec + ")" : "textureLod(" + t + ", " + vec + ", 0.0)";
     write(cast + "(" + call + ")");
   }
 
@@ -1617,6 +1654,35 @@ struct Translator {
          "uint r_mulhi_u(uint a, uint b) { uint hi, lo; umulExtended(a, b, hi, lo); return hi; }\n"
          "uint r_mulhi_i(uint a, uint b) { int hi, lo; imulExtended(int(a), int(b), hi, lo); return uint(hi); }\n"
          "uint r_alignbit(uint a, uint b, uint c) { c &= 31u; return c == 0u ? b : (b >> c) | (a << (32u - c)); }\n"
+         "float r_cubeid(float x, float y, float z) {\n"
+         "  if (abs(z) >= abs(x) && abs(z) >= abs(y)) return z < 0.0 ? 5.0 : 4.0;\n"
+         "  if (abs(y) >= abs(x)) return y < 0.0 ? 3.0 : 2.0;\n"
+         "  return x < 0.0 ? 1.0 : 0.0;\n}\n"
+         "float r_cubesc(float x, float y, float z) {\n"
+         "  if (abs(z) >= abs(x) && abs(z) >= abs(y)) return z < 0.0 ? -x : x;\n"
+         "  if (abs(y) >= abs(x)) return x;\n"
+         "  return x < 0.0 ? z : -z;\n}\n"
+         "float r_cubetc(float x, float y, float z) {\n"
+         "  if (abs(z) >= abs(x) && abs(z) >= abs(y)) return -y;\n"
+         "  if (abs(y) >= abs(x)) return y < 0.0 ? -z : z;\n"
+         "  return -y;\n}\n"
+         "float r_cubema(float x, float y, float z) {\n"
+         "  if (abs(z) >= abs(x) && abs(z) >= abs(y)) return 2.0 * z;\n"
+         "  if (abs(y) >= abs(x)) return 2.0 * y;\n"
+         "  return 2.0 * x;\n}\n"
+         // A cube sample's face coordinates (1 to 2 across a face, as
+         // r_cubesc / |r_cubema| + 1.5 gives them) and face back to a
+         // direction.
+         "vec3 r_cubedir(float s, float t, float face) {\n"
+         "  float u = 2.0 * s - 3.0, v = 2.0 * t - 3.0;\n"
+         "  switch (int(roundEven(face))) {\n"
+         "    case 0: return vec3(1.0, -v, -u);\n"
+         "    case 1: return vec3(-1.0, -v, u);\n"
+         "    case 2: return vec3(u, 1.0, v);\n"
+         "    case 3: return vec3(u, -1.0, -v);\n"
+         "    case 4: return vec3(u, -v, 1.0);\n"
+         "    default: return vec3(-u, -v, -1.0);\n"
+         "  }\n}\n"
          "uint r_wqm(uint m) { m |= (m >> 1) & 0x55555555u; m |= (m << 1) & 0xAAAAAAAAu;\n"
          "  m |= (m >> 2) & 0x33333333u; m |= (m << 2) & 0xCCCCCCCCu; return m; }\n";
     // Textures and images.
@@ -1664,7 +1730,7 @@ struct Translator {
       g += "uint r_lds_rd(uint a) { return (a >> 2) < uint(r_lds.length()) ? r_lds[a >> 2] : 0u; }\n"
            "void r_lds_wr(uint a, uint v) { if ((a >> 2) < uint(r_lds.length())) r_lds[a >> 2] = v; }\n";
     }
-    g += "void main() {\n";
+    g += st.rects ? "void r_vs(uint r_vid) {\n" : "void main() {\n";
     g += "  uint scc = 0u, m0 = 0u, vcc_lo = 0u, vcc_hi = 0u, exec_lo = 1u, exec_hi = 0u;\n";
     g += "  uint r_t, r_t2, r_a, r_w, r_w1, r_w2, r_w3, r_unused; uvec4 r_v4, r_t4; uint r_c[4], r_d[4], r_q;\n"
          "  uint r_i, r_o, r_lane = 0u;\n";
@@ -1682,6 +1748,22 @@ struct Translator {
     for (uint32_t p : params) g += "  r_param" + std::to_string(p) + " = vec4(0.0);\n";
     g += body;
     g += "}\n";
+    if (st.rects) {
+      g += "void main() {\n"
+           "  uint r_k = uint(gl_VertexIndex) % 6u, r_r = uint(gl_VertexIndex) / 6u * 3u;\n"
+           "  uint r_c = r_k < 3u ? r_k : r_k == 3u ? 1u : r_k == 4u ? 3u : 2u;\n"
+           "  if (r_c < 3u) {\n    r_vs(r_r + r_c);\n    return;\n  }\n"
+           "  r_vs(r_r);\n  vec4 r_p0 = gl_Position;\n";
+      for (uint32_t p : params) g += "  vec4 r_q0_" + std::to_string(p) + " = r_param" + std::to_string(p) + ";\n";
+      g += "  r_vs(r_r + 1u);\n  vec4 r_p1 = gl_Position;\n";
+      for (uint32_t p : params) g += "  vec4 r_q1_" + std::to_string(p) + " = r_param" + std::to_string(p) + ";\n";
+      g += "  r_vs(r_r + 2u);\n  gl_Position += r_p1 - r_p0;\n";
+      for (uint32_t p : params) {
+        const std::string n = std::to_string(p);
+        g += "  r_param" + n + " += r_q1_" + n + " - r_q0_" + n + ";\n";
+      }
+      g += "}\n";
+    }
     return g;
   }
 
@@ -1722,7 +1804,7 @@ struct Translator {
     };
     switch (st.stage) {
       case Stage::Vertex: {
-        vg(0, "uint(gl_VertexIndex)");
+        vg(0, st.rects ? "r_vid" : "uint(gl_VertexIndex)");
         const uint32_t comps = (st.rsrc1 >> 24) & 3;
         if (comps >= 1) vg(1, "uint(gl_InstanceIndex) / max(r_misc2.x, 1u)");
         if (comps >= 2) vg(2, "uint(gl_InstanceIndex) / max(r_misc2.y, 1u)");
@@ -1839,7 +1921,7 @@ Resolved Resolve(const StageState& st) {
   k.reserve(176 + 28 * rv.sites.size() + rv.r.buffers.size());
   const uint32_t head[] = {uint32_t(st.stage), st.rsrc1, st.rsrc2, st.ps_input_addr,
                            st.col_format, st.z_format, st.col_swap, st.threads[0], st.threads[1],
-                           st.threads[2]};
+                           st.threads[2], uint32_t(st.rects)};
   add(head, sizeof head);
   if (st.stage == Stage::Pixel) add(st.ps_input_cntl, sizeof st.ps_input_cntl);
   const uint32_t id = CodeId(rv.code());
@@ -1849,7 +1931,7 @@ Resolved Resolve(const StageState& st) {
     add(site, sizeof site);
     if (s.image >= 0) {
       const ImageRef& ref = rv.r.images[size_t(s.image)];
-      const uint32_t f[3] = {ref.t[1] & (ref.storage ? 0x3FF00000 : 0x3C000000), ref.t[3] & 0xF0000FFF,
+      const uint32_t f[3] = {ref.t[1] & (ref.storage ? 0x3FF00000 : 0x3C000000), ref.t[3] & 0xF00FFFFF,
                              ref.s[0] & 0x7000};
       add(f, sizeof f);
     }

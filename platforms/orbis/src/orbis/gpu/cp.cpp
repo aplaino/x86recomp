@@ -5,6 +5,7 @@
 
 #include "orbis/gpu/cp.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -27,8 +28,10 @@ enum Op : uint32_t {
   kNop = 0x10, kSetBase = 0x11, kClearState = 0x12, kIndexBufferSize = 0x13,
   kDispatchDirect = 0x15, kDispatchIndirect = 0x16, kSetPredication = 0x20,
   kDrawIndirect = 0x24, kDrawIndexIndirect = 0x25, kIndexBase = 0x26, kDrawIndex2 = 0x27,
-  kContextControl = 0x28, kIndexType = 0x2A, kDrawIndexAuto = 0x2D, kNumInstances = 0x2F,
-  kIndirectBufferConst = 0x33, kDrawIndexOffset2 = 0x35, kWriteData = 0x37,
+  kContextControl = 0x28, kIndexType = 0x2A, kDrawIndirectMulti = 0x2C, kDrawIndexAuto = 0x2D,
+  kNumInstances = 0x2F, kIndirectBufferConst = 0x33, kDrawIndexOffset2 = 0x35, kWriteData = 0x37,
+  kDrawIndexIndirectMulti = 0x38, kDrawIndirectCountMulti = 0x9C,
+  kDrawIndexIndirectCountMulti = 0x9D,
   kWaitRegMem = 0x3C, kIndirectBuffer = 0x3F, kSurfaceSync = 0x43, kEventWrite = 0x46,
   kEventWriteEop = 0x47, kEventWriteEos = 0x48, kReleaseMem = 0x49, kDmaData = 0x50,
   kAcquireMem = 0x58, kSetConfigReg = 0x68, kSetContextReg = 0x69, kSetShReg = 0x76,
@@ -77,12 +80,13 @@ void ClearState(uint32_t* cx) {
 struct Engines {
   Engines() { ClearState(regs.context); }
   Regs regs;
-  // The draw packets' state: the index buffer, its index size, instances.
-  gaddr index_base = 0;
+  // The draw packets' state: the index buffer, its index size, instances;
+  // what indirect draws' and dispatches' arguments are found from
+  // (SET_BASE's base 1).
+  gaddr index_base = 0, indirect_base = 0;
   uint32_t index_size = 2, instances = 1;
   uint8_t ce_ram[48 * 1024] = {};
   uint64_t ce_count = 0, de_count = 0;
-  bool warned_draw = false, warned_dispatch = false;
   std::vector<uint32_t> packet;  // Step's, kept: a packet's words
 };
 
@@ -134,6 +138,32 @@ void SetRegs(uint32_t* space, const char* name, uint32_t off, const uint32_t* v,
   std::memcpy(space + off, v, 4 * n);
 }
 
+// An indirect draw's arguments at a (indexed: index count, instances,
+// first index, base vertex, first instance; else vertex count, instances,
+// first vertex, first instance): the first (or base) vertex and the first
+// instance go to the SH registers at vtx_loc and inst_loc (0: none), where
+// the vertex shader reads them; the vertices themselves count from 0.
+void DrawArgs(Engines& e, gaddr a, bool indexed, uint32_t vtx_loc, uint32_t inst_loc) {
+  BeforeRead(a, indexed ? 20 : 16);
+  const uint32_t count = Rd32(a), instances = Rd32(a + 4), first = Rd32(a + 8);
+  const uint32_t vertex = indexed ? Rd32(a + 12) : first, instance = Rd32(a + (indexed ? 16 : 12));
+  if (vtx_loc >= kRegSpace || inst_loc >= kRegSpace)
+    FatalF("GPU: an indirect draw's register locations %X, %X", vtx_loc, inst_loc);
+  if (vtx_loc) e.regs.sh[vtx_loc] = vertex;
+  if (inst_loc) e.regs.sh[inst_loc] = instance;
+  if (indexed)
+    Draw(e.regs, {count, instances, e.index_base + uint64_t(first) * e.index_size, e.index_size});
+  else
+    Draw(e.regs, {count, instances, 0, 2});
+}
+
+// A draw initiator's source: DMA'd indices (0) or auto-generated (2); the
+// stream-out buffer's filled size as the count (USE_OPAQUE) is not drawn.
+void CheckInitiator(uint32_t init, uint32_t source) {
+  if ((init & 3) != source || (init & 0x40))
+    FatalF("GPU: draw initiator %08X not implemented yet", init);
+}
+
 // Runs one packet of s; false if it must wait (the stream stays on it).
 // ce: s is the constant engine's.
 bool Step(Engines& e, Stream& s, bool ce) {
@@ -169,7 +199,11 @@ bool Step(Engines& e, Stream& s, bool ce) {
     case kClearState: ClearState(e.regs.context); break;
     // State and cache control: nothing to do where memory is coherent.
     case kContextControl: case kAcquireMem: case kSurfaceSync: case kIndexBufferSize:
-    case kSetBase: case kSetPredication:
+    case kSetPredication:
+      break;
+    case kSetBase:
+      if ((d[0] & 0xF) != 1) FatalF("GPU: SET_BASE of base %u not implemented yet", d[0] & 0xF);
+      e.indirect_base = (d[1] & ~7u) | uint64_t(d[2] & 0xFFFF) << 32;
       break;
     case kIndexType: e.index_size = (d[0] & 3) == 1 ? 4 : 2; break;
     case kIndexBase: e.index_base = (d[0] & ~1u) | uint64_t(d[1] & 0xFFFF) << 32; break;
@@ -182,25 +216,61 @@ bool Step(Engines& e, Stream& s, bool ce) {
       break;
     }
     case kDrawIndex2:  // max size, index buffer, count, initiator
+      CheckInitiator(d[4], 0);
       Draw(e.regs, {d[3], e.instances, d[1] | uint64_t(d[2] & 0xFFFF) << 32, e.index_size});
       break;
     case kDrawIndexOffset2:  // max size, offset in indices, count, initiator
+      CheckInitiator(d[3], 0);
       Draw(e.regs, {d[2], e.instances, e.index_base + uint64_t(d[1]) * e.index_size, e.index_size});
       break;
     case kDrawIndexAuto:  // count, initiator
+      CheckInitiator(d[1], 2);
       Draw(e.regs, {d[0], e.instances, 0, 2});
       break;
-    case kDrawIndirect: case kDrawIndexIndirect:
-      if (!e.warned_draw) WarnF("GPU: indirect draws are not implemented yet; they are skipped\n");
-      e.warned_draw = true;
+    // Indirect draws: the arguments' offset from the base, the base vertex
+    // and first instance registers, then (multi) the draws, their stride,
+    // (count multi) a flag word, the draws and the address of a count
+    // that limits them (flag bit 30), and the initiator.
+    case kDrawIndirect: case kDrawIndexIndirect: {
+      const bool indexed = op == kDrawIndexIndirect;
+      CheckInitiator(d[3], indexed ? 0 : 2);
+      DrawArgs(e, e.indirect_base + d[0], indexed, d[1] & 0xFFFF, d[2] & 0xFFFF);
       break;
+    }
+    case kDrawIndirectMulti: case kDrawIndexIndirectMulti: {
+      const bool indexed = op == kDrawIndexIndirectMulti;
+      CheckInitiator(d[5], indexed ? 0 : 2);
+      for (uint32_t i = 0; i < d[3]; i++)
+        DrawArgs(e, e.indirect_base + d[0] + uint64_t(i) * d[4], indexed, d[1] & 0xFFFF,
+                 d[2] & 0xFFFF);
+      break;
+    }
+    case kDrawIndirectCountMulti: case kDrawIndexIndirectCountMulti: {
+      const bool indexed = op == kDrawIndexIndirectCountMulti;
+      CheckInitiator(d[8], indexed ? 0 : 2);
+      uint32_t count = d[4];
+      if (d[3] & (1u << 30)) {
+        const gaddr at = (d[5] & ~3u) | uint64_t(d[6]) << 32;
+        BeforeRead(at, 4);
+        count = std::min(count, Rd32(at));
+      }
+      for (uint32_t i = 0; i < count; i++)
+        DrawArgs(e, e.indirect_base + d[0] + uint64_t(i) * d[7], indexed, d[1] & 0xFFFF,
+                 d[2] & 0xFFFF);
+      break;
+    }
     case kDispatchDirect:  // groups x, y, z, initiator
       Dispatch(e.regs, d.data());
       break;
-    case kDispatchIndirect:
-      if (!e.warned_dispatch) WarnF("GPU: indirect dispatches are not implemented yet; they are skipped\n");
-      e.warned_dispatch = true;
+    case kDispatchIndirect: {
+      // The groups' offset from the base and the initiator; on a compute
+      // queue their address instead.
+      const gaddr a = n == 2 ? e.indirect_base + d[0] : d[0] | uint64_t(d[1]) << 32;
+      BeforeRead(a, 12);
+      const uint32_t groups[3] = {Rd32(a), Rd32(a + 4), Rd32(a + 8)};
+      Dispatch(e.regs, groups);
       break;
+    }
     case kWriteData: {
       const uint32_t dst = (d[0] >> 8) & 0xF;
       if (dst != 1 && dst != 2 && dst != 5) FatalF("GPU: WRITE_DATA to destination %u", dst);

@@ -1,6 +1,8 @@
 // orbis/gpu/tiling: every read tile mode maps a padded surface's elements
 // onto its bytes one to one, and a few elements land where the Sea Islands
-// pipe and bank equations (as the firmware's addressing has them) put them.
+// pipe and bank equations (as the firmware's addressing has them) put them;
+// texture levels and slices lie where the firmware's (11.00) GL library
+// puts them.
 
 #include <cstdio>
 #include <cstring>
@@ -63,6 +65,35 @@ void ExpectAt(uint32_t mode, uint32_t pitch, uint32_t h, uint32_t bpe, uint32_t 
   }
 }
 
+// Level `level` of t starts at `offset` and its slices are `bytes` long.
+void ExpectLevel(const TextureLayout& t, uint32_t level, uint64_t offset, uint64_t bytes,
+                 const char* what) {
+  Level l;
+  if (!LevelOf(t, level, &l) || l.offset != offset || l.slice_bytes * l.depth != bytes) {
+    std::printf("FAIL: %s level %u at %llu, %llu bytes; want %llu, %llu\n", what, level,
+                (unsigned long long)l.offset, (unsigned long long)(l.slice_bytes * l.depth),
+                (unsigned long long)offset, (unsigned long long)bytes);
+    failures++;
+  }
+}
+
+// Element (x, y) of slice `slice` of t's level 0 (4-byte elements) is at
+// byte `byte` from the level's start.
+void ExpectSliceAt(const TextureLayout& t, uint32_t slice, uint32_t x, uint32_t y, uint64_t byte) {
+  Level l;
+  LevelOf(t, 0, &l);
+  std::vector<uint32_t> src(l.slice_bytes * t.slices / 4), dst(uint64_t(l.w) * l.h);
+  for (uint32_t i = 0; i < src.size(); i++) src[i] = i;
+  DetileSlice(l, 4, slice, reinterpret_cast<const uint8_t*>(src.data()),
+              reinterpret_cast<uint8_t*>(dst.data()), l.w * 4);
+  const uint64_t got = uint64_t(dst[uint64_t(y) * l.w + x]) * 4;
+  if (got != byte) {
+    std::printf("FAIL: slice %u (%u,%u) at byte %llu, want %llu\n", slice, x, y,
+                (unsigned long long)got, (unsigned long long)byte);
+    failures++;
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -101,6 +132,73 @@ int main() {
     std::printf("FAIL: mode 10 reads 16-byte elements\n");
     failures++;
   }
+  // Levels one after another, each padded on its own: 256x256, 4 bytes,
+  // 2D displayable (10), its macro tiles 128 wide; from 64x64 down 1D
+  // displayable (9), from 8x8 down micro tiles of 256 bytes.
+  TextureLayout t;
+  t.index = 10;
+  t.w = t.h = t.pitch = 256;
+  const uint64_t chain[9][2] = {{0, 262144},      {262144, 65536}, {327680, 16384},
+                                {344064, 4096},   {348160, 1024},  {349184, 256},
+                                {349440, 256},    {349696, 256},   {349952, 256}};
+  for (uint32_t i = 0; i < 9; i++) ExpectLevel(t, i, chain[i][0], chain[i][1], "2D chain");
+  Level l, l2;
+  LevelOf(t, 1, &l);
+  LevelOf(t, 2, &l2);
+  if (l.index != 10 || l2.index != 9) {
+    std::printf("FAIL: levels 1 and 2 in modes %u and %u, want 10 and 9\n", l.index, l2.index);
+    failures++;
+  }
+  // 1D thin (13), 100x60: rows padded to micro tiles.
+  t = {};
+  t.index = 13;
+  t.w = t.pitch = 100;
+  t.h = 60;
+  ExpectLevel(t, 0, 0, 26624, "1D");
+  ExpectLevel(t, 1, 26624, 7168, "1D");
+  ExpectLevel(t, 3, 35840, 512, "1D");
+  // Past level 0 a level is as wide as the level-0 pitch halved, not the
+  // width: 100 texels in a pitch of 160.
+  t.pitch = 160;
+  ExpectLevel(t, 1, 40960, 10240, "1D, pitch 160");
+  ExpectLevel(t, 3, 53760, 768, "1D, pitch 160");
+  // POW2_PAD: 20x20 levels as 32x32, three slices as four.
+  t = {};
+  t.index = 13;
+  t.w = t.h = t.pitch = 20;
+  t.slices = 3;
+  t.pow2 = true;
+  ExpectLevel(t, 0, 0, 4096, "pow2");
+  ExpectLevel(t, 1, 16384, 1024, "pow2");
+  ExpectLevel(t, 2, 20480, 256, "pow2");
+  // A cube's six faces after one another in each level.
+  t = {};
+  t.index = 10;
+  t.w = t.h = t.pitch = 64;
+  t.slices = 6;
+  ExpectLevel(t, 1, 196608, 4096, "cube");
+  ExpectLevel(t, 2, 221184, 1024, "cube");
+  // A 32-bit format in depth micro tiles pads its 1D levels to 256
+  // elements; an 8-bit one to 256 bytes.
+  t = {};
+  t.index = 5;
+  t.w = t.h = t.pitch = 8;
+  t.depth_format = true;
+  ExpectLevel(t, 0, 0, 1024, "depth format");
+  t.depth_format = false;
+  t.bpe = 1;
+  ExpectLevel(t, 0, 0, 256, "8-bit");
+  // An array's slices, 2D thin (14), 128x128, 4 bytes: each a slice's
+  // bytes after the one before, its banks rotated.
+  t = {};
+  t.index = 14;
+  t.w = t.h = t.pitch = 128;
+  t.slices = 4;
+  ExpectSliceAt(t, 0, 9, 9, 16396);
+  ExpectSliceAt(t, 1, 0, 0, 79872);
+  ExpectSliceAt(t, 1, 8, 0, 80128);
+  ExpectSliceAt(t, 2, 0, 0, 159744);
+  ExpectSliceAt(t, 3, 9, 9, 223244);
   if (failures) return 1;
   std::printf("orbis_tiling: ok\n");
   return 0;

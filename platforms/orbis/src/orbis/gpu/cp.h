@@ -4,8 +4,8 @@
 // would beside the CPU. Packets that touch memory the CPU sees (WRITE_DATA,
 // the end-of-pipe and end-of-shader writes, DMA_DATA, the constant
 // engine's dumps) and the waits (WAIT_REG_MEM, the CE/DE counters) are
-// exact; register writes are recorded. Drawing and dispatching are not
-// implemented yet: those packets are skipped (docs/hle.md).
+// exact; register writes are recorded, and draws and dispatches (direct
+// and indirect) go to the renderer (renderer.h) with them.
 
 #include <cstdint>
 #include <functional>

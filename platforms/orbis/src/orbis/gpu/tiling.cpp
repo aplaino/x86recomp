@@ -1,13 +1,16 @@
 // Addressing as AMD's addressing library describes it for Sea Islands
-// (single sample, array slice 0, no pipe or bank swizzle), checked against the
-// firmware's (11.00) own tiled-surface addressing in its GL library: the
-// same pipe and bank equations, tile split and macro tile mode choice, and
-// its fixed 8 pipes, 256-byte pipe interleave and 1 KiB rows. The tile mode
+// (single sample, no pipe or bank swizzle), checked against the firmware's
+// (11.00) own tiled-surface addressing in its GL library: the same pipe and
+// bank equations, tile split and macro tile mode choice, its fixed 8 pipes,
+// 256-byte pipe interleave and 1 KiB rows, and its texture levels' layout
+// (LevelOf: each level's padding and tile mode, the levels after one
+// another, each with all its slices). The tile mode
 // table is the console's: GB_TILE_MODE0-31 and GB_MACROTILE_MODE0-15 read
 // on a console (firmware 11.00) through the kernel's GPU register reads.
 
 #include "orbis/gpu/tiling.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace recomp::orbis::gpu {
@@ -119,12 +122,13 @@ uint32_t PaddedHeight(const Mode& md, uint32_t h) {
 }
 
 // The pipe and bank of element (x, y), P8_32x32_16x16 and 2 to 16 banks;
-// a tile split's further slices rotate the bank.
+// a tile split's further slices rotate the bank, and so do an array's (or a
+// 3D surface's) slices.
 uint32_t Pipe(uint32_t x, uint32_t y) {
   return (Bit(x, 3) ^ Bit(x, 4) ^ Bit(y, 3)) | (Bit(x, 4) ^ Bit(y, 4)) << 1 |
          (Bit(x, 5) ^ Bit(y, 5)) << 2;
 }
-uint32_t Bank(const Macro& m, uint32_t x, uint32_t y, uint32_t slice) {
+uint32_t Bank(const Macro& m, uint32_t x, uint32_t y, uint32_t split, uint32_t slice) {
   const uint32_t tx = x / 8 / (m.bank_w * m.pipes), ty = y / 8 / m.bank_h;
   const uint32_t x3 = Bit(tx, 0), x4 = Bit(tx, 1), x5 = Bit(tx, 2), x6 = Bit(tx, 3);
   const uint32_t y3 = Bit(ty, 0), y4 = Bit(ty, 1), y5 = Bit(ty, 2), y6 = Bit(ty, 3);
@@ -142,34 +146,115 @@ uint32_t Bank(const Macro& m, uint32_t x, uint32_t y, uint32_t slice) {
     default:
       bank = x3 ^ y3;
   }
-  return (bank ^ (m.banks / 2 + 1) * slice) & (m.banks - 1);
+  return (bank ^ (m.banks / 2 + 1) * split ^ (m.banks / 2 - 1) * slice) & (m.banks - 1);
 }
 
-// The byte offset of element (x, y) in a 2D-thin surface of `height`
-// (padded) rows. A micro tile larger than the tile split is cut into
-// slices of split bytes, each slice a whole surface's worth of macro tile
-// rows after the one before. Within a slice, the macro tile's share of each
-// pipe and bank, the micro tile inside that share and the element inside
-// the micro tile make an offset whose low bits (the pipe interleave) stay
-// low and the rest go above the pipe and bank bits.
+// The byte offset of element (x, y) of slice `slice` in a 2D-thin surface
+// of `height` (padded) rows. A micro tile larger than the tile split is cut
+// into parts of split bytes, each part a whole slice's worth of macro tile
+// rows after the one before, and the slices follow each other so. Within a
+// part, the macro tile's share of each pipe and bank, the micro tile inside
+// that share and the element inside the micro tile make an offset whose low
+// bits (the pipe interleave) stay low and the rest go above the pipe and
+// bank bits.
 uint64_t Offset2d(const Mode& md, uint32_t x, uint32_t y, uint32_t pitch, uint32_t height,
-                  uint32_t bpe) {
+                  uint32_t bpe, uint32_t slice) {
   const Macro& m = md.m;
   const uint32_t pipe_bits = Log2(m.pipes), bank_bits = Log2(m.banks);
   const uint32_t tile_bytes = 64 * bpe < m.split ? 64 * bpe : m.split;
   uint32_t elem = MicroIndex(md.micro, bpe, x, y) * bpe;
-  const uint32_t slice = elem / tile_bytes;
+  const uint32_t split = elem / tile_bytes, splits = (64 * bpe + tile_bytes - 1) / tile_bytes;
   elem %= tile_bytes;
   const uint64_t share =
       uint64_t(m.pitch / 8) * (m.height / 8) * tile_bytes >> (pipe_bits + bank_bits);
+  const uint64_t part = uint64_t(slice) * splits + split;
   const uint64_t macro =
-      (uint64_t(slice) * (height / m.height) + y / m.height) * (pitch / m.pitch) + x / m.pitch;
+      (part * (height / m.height) + y / m.height) * (pitch / m.pitch) + x / m.pitch;
   const uint32_t tile = ((y / 8) % m.bank_h) * m.bank_w + ((x / 8) / m.pipes) % m.bank_w;
   const uint64_t total = macro * share + uint64_t(tile) * tile_bytes + elem;
   const uint64_t low = total & ((1u << kPipeInterleaveBits) - 1);
   return low | uint64_t(Pipe(x, y)) << kPipeInterleaveBits |
-         uint64_t(Bank(m, x, y, slice)) << (kPipeInterleaveBits + pipe_bits) |
+         uint64_t(Bank(m, x, y, split, slice)) << (kPipeInterleaveBits + pipe_bits) |
          (total >> kPipeInterleaveBits) << (kPipeInterleaveBits + pipe_bits + bank_bits);
+}
+
+uint32_t Pow2(uint32_t v) {
+  uint32_t p = 1;
+  while (p < v) p <<= 1;
+  return p;
+}
+uint32_t Align(uint32_t v, uint32_t a) { return (v + a - 1) / a * a; }
+
+// The 1D mode of a 2D mode's micro tiles: displayable, thin, depth.
+bool OneD(uint32_t micro, uint32_t* index) {
+  switch (micro) {
+    case kMicroDisplay: *index = 9; return true;
+    case kMicroThin: *index = 13; return true;
+    case kMicroDepth: *index = 5; return true;
+  }
+  return false;
+}
+
+// A level's layout but its offset. Past level 0 its width is the level-0
+// pitch's, halved, not the width's; POW2_PAD rounds the level's sizes up
+// to powers of two. Linear general rows are as long as the surface;
+// linear aligned ones padded to 64 bytes (8 elements at least), and to
+// slices of 256 bytes; 1D ones to micro tiles, the pitch further to
+// slices of 256 bytes (and of 256 elements for a depth format in depth
+// micro tiles); 2D ones to macro tiles (pitch and height). Compressed
+// formats are tiled only (the GL library refuses them linear).
+bool LevelLayout(const TextureLayout& t, uint32_t level, Level* out) {
+  const auto el = [&](uint32_t texels) {
+    const uint32_t e = t.blocks ? (texels + 3) / 4 : texels;
+    return e ? e : 1;
+  };
+  const auto half = [&](uint32_t v) { return v >> level ? v >> level : 1; };
+  uint32_t w = el(level ? half(t.pitch) : t.w), h = el(half(t.h)), d = half(t.depth);
+  uint32_t pitch = level ? w : el(t.pitch);
+  if (t.pow2) w = Pow2(w), h = Pow2(h), d = Pow2(d), pitch = Pow2(pitch);
+  if (level) pitch = w;
+  const uint64_t bits = uint64_t(t.bpe) * 8;
+  uint32_t index = t.index;
+  Mode md;
+  if (!Lookup(index, t.bpe, &md)) return false;
+  if (t.blocks && (md.array == kLinearGeneral || md.array == kLinearAligned)) return false;
+  if (md.array == k2dThin && level && (pitch < md.m.pitch || h < md.m.height)) {
+    if (!OneD(md.micro, &index) || !Lookup(index, t.bpe, &md)) return false;
+  }
+  uint64_t bytes;
+  switch (md.array) {
+    case kLinearGeneral:
+      bytes = (uint64_t(pitch) * h * bits + 7) / 8;
+      break;
+    case kLinearAligned: {
+      const uint32_t a = std::max(8u, 64 / t.bpe), slice = std::max(64u, 256 / t.bpe);
+      pitch = Align(pitch, a);
+      while ((uint64_t(pitch) * h) % slice) pitch += a;
+      bytes = uint64_t(pitch) * h * t.bpe;
+      break;
+    }
+    case k1dThin:
+      pitch = Align(pitch, 8);
+      h = Align(h, 8);
+      while ((uint64_t(pitch) * h * t.bpe) % 256) pitch += 8;
+      if (t.depth_format && md.micro == kMicroDepth)
+        while ((uint64_t(pitch) * h) % 256) pitch += 8;
+      bytes = uint64_t(pitch) * h * t.bpe;
+      break;
+    default:  // 2D thin
+      pitch = Align(pitch, md.m.pitch);
+      h = Align(h, md.m.height);
+      bytes = uint64_t(pitch) * h * t.bpe;
+      break;
+  }
+  out->slice_bytes = bytes;
+  out->index = index;
+  out->pitch = pitch;
+  out->height = h;
+  out->w = el(half(t.w));
+  out->h = el(half(t.h));
+  out->depth = d;
+  return true;
 }
 
 }  // namespace
@@ -196,7 +281,43 @@ bool Detile(uint32_t index, const uint8_t* src, uint8_t* dst, uint32_t w, uint32
       const uint64_t at = md.array == k1dThin
                               ? uint64_t(64 * bpe) * ((y / 8) * (pitch / 8) + x / 8) +
                                     MicroIndex(md.micro, bpe, x, y) * bpe
-                              : Offset2d(md, x, y, pitch, height, bpe);
+                              : Offset2d(md, x, y, pitch, height, bpe, 0);
+      std::memcpy(row + uint64_t(x) * bpe, src + at, bpe);
+    }
+  }
+  return true;
+}
+
+bool LevelOf(const TextureLayout& t, uint32_t level, Level* out) {
+  const uint32_t slices = t.pow2 ? Pow2(t.slices) : t.slices;
+  uint64_t offset = 0;
+  for (uint32_t i = 0; i < level; i++) {
+    Level l;
+    if (!LevelLayout(t, i, &l)) return false;
+    offset += l.slice_bytes * l.depth * slices;
+  }
+  if (!LevelLayout(t, level, out)) return false;
+  out->offset = offset;
+  return true;
+}
+
+bool DetileSlice(const Level& l, uint32_t bpe, uint32_t slice, const uint8_t* src, uint8_t* dst,
+                 uint32_t dst_row) {
+  Mode md;
+  if (!Lookup(l.index, bpe, &md)) return false;
+  for (uint32_t y = 0; y < l.h; y++) {
+    uint8_t* row = dst + uint64_t(y) * dst_row;
+    if (md.array == kLinearGeneral || md.array == kLinearAligned) {
+      std::memcpy(row, src + slice * l.slice_bytes + uint64_t(y) * l.pitch * bpe,
+                  uint64_t(l.w) * bpe);
+      continue;
+    }
+    for (uint32_t x = 0; x < l.w; x++) {
+      const uint64_t at =
+          md.array == k1dThin
+              ? slice * l.slice_bytes + uint64_t(64 * bpe) * ((y / 8) * (l.pitch / 8) + x / 8) +
+                    MicroIndex(md.micro, bpe, x, y) * bpe
+              : Offset2d(md, x, y, l.pitch, l.height, bpe, slice);
       std::memcpy(row + uint64_t(x) * bpe, src + at, bpe);
     }
   }

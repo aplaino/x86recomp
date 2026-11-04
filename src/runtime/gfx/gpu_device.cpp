@@ -1566,13 +1566,16 @@ void r_color0(inout vec4 c) {
     auto it = textures_.find(id);
     if (it == textures_.end() || level < 0 || level >= it->second.levels) return;
     const Tex& t = it->second;
-    if (layer < 0 || layer >= t.layers) return;
+    // A 3D image's layers are its depth, halved per level.
+    const bool volume = t.kind == TextureKind::Tex3D;
+    if (layer < 0 || layer >= (volume ? LevelSize(t.layers, level) : t.layers)) return;
     const Rect c = Clip(r, LevelSize(t.w, level), LevelSize(t.h, level));
     const int w = c.right - c.left, h = c.bottom - c.top;
     if (w <= 0 || h <= 0) return;
     if (Pending(t.tex)) Flush();
     QueueUpload(t.tex, level, c.left, c.top, w, h, src, pitch, RowCount(t.fmt, uint32_t(h)),
-                RowPitch(t.fmt, uint32_t(w)), false, IsCompressed(t.fmt), layer);
+                RowPitch(t.fmt, uint32_t(w)), false, IsCompressed(t.fmt), volume ? 0 : layer);
+    if (volume) uploads_.back().z = uint32_t(layer);
   }
 
   void ReadImage(TextureId id, int level, int layer, const Rect& r, void* dst,
@@ -2012,6 +2015,7 @@ void r_color0(inout vec4 c) {
     uint32_t x, y, w, h;
     uint32_t offset, pixels_per_row, rows;
     bool cycle;
+    uint32_t z = 0;  // a 3D image's slice
   };
   struct Cmd {
     PipelineKey key;
@@ -2445,6 +2449,7 @@ void r_color0(inout vec4 c) {
         dst.mip_level = Uint32(u.level);
         dst.x = u.x;
         dst.y = u.y;
+        dst.z = u.z;
         dst.w = u.w;
         dst.h = u.h;
         dst.d = 1;
