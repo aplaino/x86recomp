@@ -1,6 +1,7 @@
 // recomp_lift's reader for Orbis ELFs (orbis/elf_image.h): function
 // entries from .eh_frame, the entry point, DT_INIT/DT_FINI, exports and
-// PLT stubs (named by library and NID); noreturn imports by NID.
+// PLT stubs (named by library and NID); noreturn imports, setjmp and
+// longjmp by NID.
 
 #include "orbis/elf_image.h"
 #include "orbis/nid.h"
@@ -60,6 +61,26 @@ bool Load(Program& p, Module& m, const std::string& path, uint64_t base, std::st
         p.noreturn_iat.insert(imp.slots.begin(), imp.slots.end());
         if (imp.plt) p.noreturn.insert(imp.plt);
       }
+
+  // setjmp's callers can be resumed by longjmp: those calling the PLT stub
+  // of an imported setjmp and, in the module that defines it (the libc
+  // games ship), those calling it directly. longjmp restores the setjmp
+  // caller's rsp and returns to its return address: its rets
+  // are resume sites.
+  static const char* const kSetjmp[] = {"setjmp", "_setjmp", "sigsetjmp"};
+  static const char* const kLongjmp[] = {"longjmp", "_longjmp", "siglongjmp"};
+  auto is = [](const std::string& nid, const auto& names) {
+    for (const char* name : names)
+      if (nid == recomp::orbis::Nid(name)) return true;
+    return false;
+  };
+  for (const auto& imp : img.imports)
+    if (imp.plt && is(imp.nid, kSetjmp)) p.setjmps.insert(imp.plt);
+  for (const auto& e : img.exports)
+    if (e.type == 2 && in_text(e.va)) {
+      if (is(e.nid, kSetjmp)) p.setjmps.insert(e.va);
+      if (is(e.nid, kLongjmp)) p.longjmps.insert(e.va);
+    }
   return true;
 }
 

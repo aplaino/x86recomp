@@ -94,7 +94,10 @@ top 64 MiB of the arena, where the core's thunk region is.
 A game's lifted code is a lifted module, a shared library of its own
 with hidden symbols (`recomp_add_lifted(<target> <dir> LINK
 recomp_orbis)`), lifted by tools/lift.sh (the eboot and its start PRXs,
-each with the game's manifest named after its module, if any); the
+each with the game's manifest named after its module, if any, and the
+platform's fixes for its middleware build: lifter/middleware/<SHA-256 of
+the file>.manifest, whose `host` lines name functions in src/orbis such
+as the libSceFios2 scheduler kicks in fios2.cpp); the
 executable holds `main()` and little else and links recomp_orbis_hle
 (every system library's HLE: imports bind by name), and
 recomp_bundle() puts both beside the loader, each HLE library, the GPU,
@@ -103,6 +106,12 @@ libraries link with CMAKE_LINK_DEPENDS_NO_SHARED, as the game projects
 do, so a GPU change rebuilds and relinks recomp_orbis_gpu alone, an
 audio fix recomp_orbis_audio or recomp_orbis_ngs2 alone, and a re-lift
 the lifted module alone.
+
+The lifter's reader (lifter/orbis_reader.cpp) marks what a game would
+otherwise list in its manifest: imports that never return, setjmp (the
+PLT stub of an imported one and the export of a shipped libc, whose
+callers longjmp can resume) and longjmp (its rets resume a setjmp
+caller), all by NID.
 
 orbis_app (tools/orbis_app.cpp) shows what the platform makes of an
 app0 without running it: the start modules and their bases (`modules`,

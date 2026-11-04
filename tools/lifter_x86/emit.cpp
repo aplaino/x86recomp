@@ -2697,7 +2697,8 @@ void InsnEmitter::Emit64() {
   bool locked = (d_.attributes & ZYDIS_ATTRIB_HAS_LOCK) && Nvis() && IsMem(0) &&
                 m != ZYDIS_MNEMONIC_XCHG;
 
-  if ((m == ZYDIS_MNEMONIC_RET || m == ZYDIS_MNEMONIC_JMP) && p_.resume_sites.count(in_.va)) {
+  if (((m == ZYDIS_MNEMONIC_RET || m == ZYDIS_MNEMONIC_JMP) && p_.resume_sites.count(in_.va)) ||
+      (m == ZYDIS_MNEMONIC_RET && p_.longjmps.count(f_.entry))) {
     // longjmp's return (or jump) to a setjmp return point, with that
     // caller's registers and stack restored: unwind the host stack to the
     // lifted function owning the frame, keyed by the rsp it continues with.
@@ -3511,7 +3512,14 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
   o += "// " + (nm != p_.names.end() ? nm->second : FnName(f.entry)) + "\n";
   // A replaced function keeps its lifted body under another name, for the
   // replacement to call or be diffed against; every call site still
-  // reaches f_X, which the game project defines.
+  // reaches f_X, which the game project defines (`replace`) or which calls
+  // a host function (`host`).
+  auto host = p_.hosted.find(f.entry);
+  if (host != p_.hosted.end()) {
+    o += "extern \"C\" void " + host->second.symbol + "(::recomp::Ctx& c, uint64_t module_base);\n";
+    o += "void " + FnName(f.entry) + "(::recomp::Ctx& c) { " + host->second.symbol + "(c, " +
+         Hex(host->second.module_base) + "); }\n";
+  }
   o += "void " + FnName(f.entry) + (p_.replaced.count(f.entry) ? "_lifted" : "") +
        "(::recomp::Ctx& c) {\n  LIFT_ENTER\n";
   // Functions that register an SEH frame (32-bit: write fs:[0]) can be

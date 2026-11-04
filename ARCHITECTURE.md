@@ -137,6 +137,15 @@ emit that function's body as `f_<VA>_lifted`; every call site and the
 dispatch table still reach `f_<VA>`, which the game project defines (in
 `recomp::gen`) and which may call the lifted body.
 
+Fixes to middleware a game ships (a race in a library build, not in the
+game) belong to the platform module instead, for every game with that
+build. `host <va> <symbol>` replaces the function the same way, but the
+lifter defines `f_<VA>` itself, calling the platform's
+`extern "C" void <symbol>(Ctx&, uint64_t module_base)`: the module's base
+is where the game's loader put it, so the fix reaches the module's other
+functions by offset (through Dispatch). The platform's lift script picks
+those manifests by the module file's SHA-256.
+
 ## Decisions
 
 ### Guest arena

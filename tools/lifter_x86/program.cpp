@@ -160,6 +160,14 @@ bool Program::LoadManifest(const std::string& path, std::string* err) {
       entries.insert(va);
       replaced.insert(va);
       if (!name.empty()) names[va] = name;
+    } else if (kind == "host") {
+      if (name.empty()) {
+        *err = path + ":" + std::to_string(no) + ": host needs a symbol";
+        return false;
+      }
+      entries.insert(va);
+      replaced.insert(va);
+      hosted[va] = {name, mod.base};
     } else {
       *err = path + ":" + std::to_string(no) + ": unknown directive " + kind;
       return false;

@@ -79,12 +79,24 @@ struct Program {
   std::set<uint64_t> replaced;                // manifest: the game project
                                               // defines f_X; the lifted body
                                               // is emitted as f_X_lifted
+  // manifest `host`: replaced functions whose f_X calls a host function
+  // (an extern "C" void SYMBOL(Ctx&, uint64_t module_base)) instead of one
+  // the game project defines: fixes a platform module carries for
+  // middleware builds.
+  struct Hosted {
+    std::string symbol;
+    uint64_t module_base;
+  };
+  std::map<uint64_t, Hosted> hosted;
   std::set<uint64_t> resume_sites;            // manifest: calls/jmps that
                                               // abandon the stack (SEH,
                                               // longjmp)
-  std::set<uint64_t> setjmps;                 // manifest: setjmp functions
+  std::set<uint64_t> setjmps;                 // manifest or reader: setjmp
                                               // (their callers can be
                                               // resumed by longjmp)
+  std::set<uint64_t> longjmps;                // reader: longjmp functions
+                                              // (each ret of theirs is a
+                                              // resume site)
   // x64 functions with a language handler (their exceptions' unwinds end
   // in them): where the prologue ends and the frame register (0: rsp) and
   // its offset, which give the establisher frame there.
@@ -101,7 +113,7 @@ struct Program {
             std::string* err);
 
   // Applies the manifest of the module loaded last (entry/name/probe/
-  // resume/replace/setjmp lines, VAs at its preferred base).
+  // resume/replace/host/setjmp lines, VAs at its preferred base).
   bool LoadManifest(const std::string& path, std::string* err);
 
   // The module whose .text contains va, or null.

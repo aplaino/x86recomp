@@ -22,7 +22,12 @@ target_link_libraries(recomp_orbis_image PUBLIC recomp_base)
 # The process loader and games' main() (orbis/process.h) and the HLE
 # registration by NID (orbis/hle.h); the system libraries' HLE builds on
 # it.
-add_library(recomp_orbis SHARED src/orbis/process.cpp src/orbis/launcher.cpp src/orbis/host.cpp)
+add_library(recomp_orbis SHARED src/orbis/process.cpp src/orbis/launcher.cpp src/orbis/host.cpp
+            src/orbis/fios2.cpp)
+# Fixes to middleware (lifter/middleware/*.manifest `host` lines) run as
+# lifted code does: guest faults may unwind out of them.
+set_source_files_properties(src/orbis/fios2.cpp PROPERTIES
+                            COMPILE_OPTIONS "-fno-strict-aliasing;-fnon-call-exceptions")
 target_link_libraries(recomp_orbis PUBLIC recomp_x86 recomp_orbis_image)
 
 # System library HLE, one shared library each.
@@ -137,7 +142,7 @@ find_package(Python3 COMPONENTS Interpreter)
 if(RECOMP_LD_LLD AND Python3_FOUND AND CMAKE_C_COMPILER_ID MATCHES "Clang")
   set(_e2e "${CMAKE_CURRENT_BINARY_DIR}/e2e")
   set(_src "${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e")
-  add_custom_command(OUTPUT "${_e2e}/eboot.elf" "${_e2e}/prx.elf" "${_e2e}/eboot.manifest"
+  add_custom_command(OUTPUT "${_e2e}/eboot.elf" "${_e2e}/prx.elf"
                             "${_e2e}/app0/eboot.bin" "${_e2e}/app0/sce_module/libTestPrx.prx"
     COMMAND Python3::Interpreter "${_src}/build.py" "${_e2e}" "${CMAKE_C_COMPILER}"
             "${RECOMP_LD_LLD}"
@@ -147,10 +152,10 @@ if(RECOMP_LD_LLD AND Python3_FOUND AND CMAKE_C_COMPILER_ID MATCHES "Clang")
     VERBATIM)
   set(_gen "${_e2e}/gen/gen_000.cpp" "${_e2e}/gen/gen_prx_000.cpp" "${_e2e}/gen/table.cpp")
   add_custom_command(OUTPUT ${_gen}
-    COMMAND recomp_lift --exe "${_e2e}/eboot.elf" --symbols "" --manifest "${_e2e}/eboot.manifest"
+    COMMAND recomp_lift --exe "${_e2e}/eboot.elf" --symbols "" --manifest ""
             --module "${_e2e}/prx.elf" --symbols "" --base 800000000 --out "${_e2e}/gen"
     COMMAND ${CMAKE_COMMAND} -E touch ${_gen}
-    DEPENDS recomp_lift "${_e2e}/eboot.elf" "${_e2e}/prx.elf" "${_e2e}/eboot.manifest"
+    DEPENDS recomp_lift "${_e2e}/eboot.elf" "${_e2e}/prx.elf"
     VERBATIM)
   recomp_add_lifted_files(orbis_process_lifted ${_gen} LINK recomp_orbis)
   add_executable(orbis_process_test tests/orbis_process_test.cpp)
