@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "orbis/app.h"
 #include "orbis/elf_image.h"
 #include "orbis/nid.h"
 #include "x86/layout.h"
@@ -204,6 +205,40 @@ int main() {
   ElfImage again;
   Check(!again.Load(exe, mem, &err), "overlap refused");
   Check(again.Load(exe, mem, &err, 0x10000000) && again.entry == 0x10000010, "moved");
+
+  Check(img.module_name == "game" && img.needed_modules == std::vector<std::string>{"libc"},
+        "module name, needed modules");
+
+  // Read alone: the same image, nothing mapped.
+  ElfImage read;
+  recomp::GuestMemory empty;
+  Check(empty.Reserve(36), "reserve");
+  Check(read.Read(exe, &err, 0x20000000) && read.entry == 0x20000010 && read.imports.size() == 1 &&
+            read.exports.size() == 1 && read.Size() == img.Size() && !empty.IsCommitted(0x20000000),
+        "Read");
+
+  // param.sfo: a UTF-8 string and an integer.
+  {
+    std::vector<uint8_t> sfo(0x60);
+    auto put = [&](size_t off, uint32_t v, int n) { std::memcpy(&sfo[off], &v, n); };
+    std::memcpy(&sfo[0], "\0PSF", 4);
+    put(4, 0x101, 4);
+    put(8, 0x34, 4);    // keys
+    put(12, 0x48, 4);   // data
+    put(16, 2, 4);
+    put(20, 0, 2), put(22, 0x0204, 2), put(24, 10, 4), put(28, 12, 4), put(32, 0, 4);
+    put(36, 9, 2), put(38, 0x0404, 2), put(40, 4, 4), put(44, 4, 4), put(48, 12, 4);
+    std::memcpy(&sfo[0x34], "TITLE_ID\0APP_TYPE\0", 18);
+    std::memcpy(&sfo[0x48], "ABCD12345\0", 10);
+    put(0x54, 1, 4);
+    const auto path = dir / "param.sfo";
+    std::ofstream(path, std::ios::binary).write(reinterpret_cast<const char*>(sfo.data()), sfo.size());
+    recomp::orbis::ParamSfo param;
+    Check(recomp::orbis::ReadParamSfo(path.string(), &param, &err) &&
+              param.Str("TITLE_ID") == "ABCD12345" && param.ints["APP_TYPE"] == 1 &&
+              param.Str("NONE").empty(),
+          "param.sfo");
+  }
 
   std::filesystem::remove_all(dir);
   std::printf("%s\n", failures ? "orbis_image: FAILED" : "orbis_image: ok");

@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <string>
 
+#include "runtime/guest_memory.h"
+
 namespace recomp::orbis::savedata {
 
 constexpr size_t kParamSize = 0x530;  // SceSaveDataParam
@@ -18,5 +20,9 @@ struct Entry {
 
 // The game's save data directory `dir` of the user, if it exists.
 bool Find(const std::string& dir, Entry* e);
+
+// Whether a title id the game passes (a string; null: the game's own)
+// names the game itself: its param.sfo's TITLE_ID.
+bool OwnTitle(gaddr title);
 
 }  // namespace recomp::orbis::savedata

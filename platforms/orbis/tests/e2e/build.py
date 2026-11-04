@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Builds orbis_process_test's eboot.elf and prx.elf into OUTDIR.
+"""Builds orbis_process_test's eboot.elf and prx.elf into OUTDIR, and the
+same laid out as a game's app0 (OUTDIR/app0: eboot.bin, sce_module/).
 
 usage: build.py OUTDIR CLANG LD_LLD
 """
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -75,3 +77,7 @@ def symbols(path):
 sym = symbols(o("eboot.so"))
 with open(o("eboot.manifest"), "w") as f:
     f.write("setjmp 0x%x\nresume 0x%x\n" % (sym["test_setjmp"], sym["test_longjmp_ret"]))
+
+os.makedirs(o("app0/sce_module"), exist_ok=True)
+shutil.copyfile(o("eboot.elf"), o("app0/eboot.bin"))
+shutil.copyfile(o("prx.elf"), o("app0/sce_module/libTestPrx.prx"))

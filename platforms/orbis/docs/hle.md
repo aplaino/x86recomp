@@ -167,7 +167,8 @@ library.
   its icon .png); a mount maps /savedataN onto it through libkernel's
   files. The library's argument checks and codes are 11.00's, the save
   data service's answers the SDK's error codes. Save data memory is
-  memory.dat beside them.
+  memory.dat beside them. A title id naming the game's own (param.sfo's
+  TITLE_ID) is its own save data; other titles' are not implemented yet.
 - recomp_orbis_net: libSceNet (init, pools, errno, byte order),
   libSceNetCtl, libSceSsl and libSceHttp contexts, for a console with no
   network connection: NetCtl's state is disconnected and never changes.

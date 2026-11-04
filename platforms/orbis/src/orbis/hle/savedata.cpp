@@ -23,6 +23,7 @@
 
 #include "orbis/hle.h"
 #include "orbis/hle/kernel.h"
+#include "orbis/process.h"
 #include "runtime/log.h"
 #include "runtime/write_watch.h"
 #include "x86/runtime.h"
@@ -71,12 +72,14 @@ bool ValidDirName(const std::string& s, bool pattern) {
 }
 
 // The common checks: a signed-in user, the title id (null: the game's
-// own; else 9 characters and zeros up to 16) and the directory name.
+// own; else 9 characters and zeros up to 16; another title's save data is
+// not implemented yet) and the directory name.
 uint32_t CheckUserTitleDir(recomp::gaddr p, bool dir_required, bool pattern) {
   if (recomp::Rd32(p) != kUser) return kErrInvalidLoginUser;
   if (const recomp::gaddr title = recomp::Rd64(p + 8)) {
     if (!Zero(title + 10, 6)) return kErrParameter;
-    recomp::FatalF("save data of title %s not implemented yet", recomp::GStr(title).c_str());
+    if (!recomp::orbis::savedata::OwnTitle(title))
+      recomp::FatalF("save data of title %s not implemented yet", recomp::GStr(title).c_str());
   }
   const recomp::gaddr dir = recomp::Rd64(p + 16);
   if (!dir) return dir_required ? kErrParameter : 0;
@@ -140,6 +143,11 @@ bool Find(const std::string& dir, Entry* e) {
   std::memcpy(e->param + 0x508, &e->mtime, 8);
   e->icon = fs::exists(Root() + "/" + dir + ".png") ? Root() + "/" + dir + ".png" : "";
   return true;
+}
+
+bool OwnTitle(gaddr title) {
+  const std::string own = AppParam().Str("TITLE_ID");
+  return !title || (!own.empty() && GStr(title) == own);
 }
 
 }  // namespace recomp::orbis::savedata

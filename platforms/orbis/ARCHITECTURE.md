@@ -17,13 +17,23 @@ bounded by them and the PLT, since the executable segment also holds
 .rodata and .eh_frame. Ghidra symbols are optional for it.
 
 ## Address space
-Executables are mapped at 0x400000, PRXs where the lifter put them
-(--base). The guest allocator hands out the range above 4 GiB, below the
+Executables are mapped at 0x400000. The PRXs a game starts with
+(orbis/app.h) go from 0x800000000 up in initialisation order, each at the
+next 256 MiB boundary past the one before; tools/lift.sh lifts them at
+the same bases (recomp_lift's --base), since both take them from there. The guest allocator hands out the range above 4 GiB, below the
 top 64 MiB of the arena, where the core's thunk region is.
 
 ## Process bring-up
-- The loader (src/orbis/process.h) maps the eboot and the PRXs the game
-  ships where the lifter put them, gives each module with PT_TLS a slot
+- A game's executable is main() calling orbis::Main (orbis/process.h)
+  with its GameConfig: it takes the app0 directory (--game-dir), finds
+  the modules as the system's loader does (orbis/app.h: the eboot, then
+  each PRX in app0/sce_module that a module needs through
+  DT_SCE_NEEDED_MODULE, found by its module name, after the modules it
+  needs itself; needed modules the game does not ship are system
+  libraries, the HLE) and reads param.sfo (app0/sce_sys/, or
+  --param-sfo; its TITLE_ID is the game's own title for save data).
+- The loader (src/orbis/process.h) maps the eboot and those PRXs at
+  their bases, gives each module with PT_TLS a slot
   in load order (FreeBSD's variant II: the eboot's block right below the
   thread pointer), then binds every import: to another module's export
   of that library and NID, else to the HLE handler registered under the
@@ -83,10 +93,20 @@ top 64 MiB of the arena, where the core's thunk region is.
 ## Programs and libraries
 A game's lifted code is a lifted module, a shared library of its own
 with hidden symbols (`recomp_add_lifted(<target> <dir> LINK
-recomp_orbis)`); the executable holds `main()` and little else, and
+recomp_orbis)`), lifted by tools/lift.sh (the eboot and its start PRXs,
+each with the game's manifest named after its module, if any); the
+executable holds `main()` and little else and links recomp_orbis_hle
+(every system library's HLE: imports bind by name), and
 recomp_bundle() puts both beside the loader, each HLE library, the GPU,
 the x86 core and the host layer under them in one directory. The
 libraries link with CMAKE_LINK_DEPENDS_NO_SHARED, as the game projects
 do, so a GPU change rebuilds and relinks recomp_orbis_gpu alone, an
 audio fix recomp_orbis_audio or recomp_orbis_ngs2 alone, and a re-lift
 the lifted module alone.
+
+orbis_app (tools/orbis_app.cpp) shows what the platform makes of an
+app0 without running it: the start modules and their bases (`modules`,
+what tools/lift.sh lifts), and every import of them with where it binds
+(`imports`: to a module, to an HLE handler, or to nothing yet), by
+library; it names the shipped PRXs that start only when the game loads
+them itself.

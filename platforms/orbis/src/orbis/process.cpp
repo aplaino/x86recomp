@@ -25,6 +25,8 @@ struct Loaded {
 std::vector<Loaded> g_modules;
 std::map<std::pair<std::string, std::string>, gaddr> g_exports;  // (library, NID)
 
+ParamSfo g_param;
+
 // Static TLS (FreeBSD's variant II): every module's block sits below the
 // thread pointer, at tls.offset; the TCB at the thread pointer (process.h)
 // holds its own address, then the DTV ([0] generation, [1] count, [1 + i]
@@ -118,6 +120,8 @@ gaddr ArgBlock(const std::vector<std::string>& args) {
 
 gaddr ProcParam() { return g_modules.empty() ? 0 : g_modules[0].img.proc_param; }
 
+const ParamSfo& AppParam() { return g_param; }
+
 NidName::NidName(const char* library, const char* name) {
   NidNames()[{library, Nid(name)}] = name;
 }
@@ -131,6 +135,8 @@ const std::string* NameOfNid(const std::string& library, const std::string& nid)
 
 int RunProcess(const GameConfig& game, const std::string& game_dir, const Config& config) {
   Process& p = StartProcess(game, game_dir, true);
+  if (const char* t = Env("TRACE")) g_trace = *t && *t != '0';
+  g_param = config.param;
   p.sysv = true;
   p.fpu_control = 0x037F;  // FreeBSD's for new threads
   p.thread_init = ThreadInit;

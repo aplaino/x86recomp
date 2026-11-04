@@ -104,7 +104,7 @@ bool ElfImage::IsElfFile(const std::string& path) {
          h[4] == 2 && h[5] == 1 && (h[18] | h[19] << 8) == 62;
 }
 
-bool ElfImage::Map(const std::string& path, GuestMemory& mem, std::string* err, gaddr base) {
+bool ElfImage::Read(const std::string& path, std::string* err, gaddr base) {
   *this = ElfImage{};
   std::ifstream f(path, std::ios::binary);
   if (!f) {
@@ -157,37 +157,13 @@ bool ElfImage::Map(const std::string& path, GuestMemory& mem, std::string* err, 
   } else if (type == 0xFE10) {
     image_base = base ? base - link_base : kExecBase;
   } else {
-    if (!base) {
-      *err = "a PRX needs a base";
-      return false;
-    }
-    image_base = base - link_base;
+    image_base = base ? base - link_base : 0;
   }
 
   map_lo_ = image_base + link_base;
   map_hi_ = image_base + hi;
-  if (map_hi_ > mem.size()) {
-    *err = "image does not fit in the guest arena";
-    return false;
-  }
-  for (gaddr a = map_lo_; a < map_hi_; a += GuestMemory::kPageSize)
-    if (mem.IsCommitted(a)) {
-      char buf[96];
-      std::snprintf(buf, sizeof buf, "image range %llX-%llX is already in use",
-                    (unsigned long long)map_lo_, (unsigned long long)map_hi_);
-      *err = buf;
-      return false;
-    }
-  // Map everything RW first so relocations can be applied; Link tightens.
   for (const Ph& p : phs_)
-    if (loadable(p) && p.memsz) {
-      if (!mem.Commit(image_base + p.va, p.memsz, Prot::RW)) {
-        *err = "cannot commit a segment";
-        return false;
-      }
-      std::memcpy(mem.ptr(image_base + p.va), d.data() + p.off, p.filesz);
-      segments.push_back({image_base + p.va, p.memsz, p.flags});
-    }
+    if (loadable(p) && p.memsz) segments.push_back({image_base + p.va, p.memsz, p.flags});
   entry = e_entry + image_base;
   for (const Ph& p : phs_)
     if (p.type == kPtSceProcParam) proc_param = image_base + p.va;
@@ -244,10 +220,14 @@ bool ElfImage::Map(const std::string& path, GuestMemory& mem, std::string* err, 
   std::map<uint64_t, std::string> import_libs, needed, export_libs, self;
   for (const auto& [t, v] : tags) {
     if (t == kDtSceImportLib) import_libs[v >> 48] = str(v & 0xFFFFFFFF);
-    if (t == kDtSceNeededModule) needed[v >> 48] = str(v & 0xFFFFFFFF);
+    if (t == kDtSceNeededModule) {
+      needed[v >> 48] = str(v & 0xFFFFFFFF);
+      needed_modules.push_back(needed[v >> 48]);
+    }
     if (t == kDtSceExportLib) export_libs[v >> 48] = str(v & 0xFFFFFFFF);
     if (t == kDtSceModuleInfo) self[v >> 48] = str(v & 0xFFFFFFFF);
   }
+  if (!self.empty()) module_name = self.begin()->second;
 
   // Symbols: defined ones resolve into the image; imported ones (section
   // index 0) are bound by Link.
@@ -275,6 +255,36 @@ bool ElfImage::Map(const std::string& path, GuestMemory& mem, std::string* err, 
     }
     syms_.push_back(s);
   }
+  return true;
+}
+
+bool ElfImage::Map(const std::string& path, GuestMemory& mem, std::string* err, gaddr base) {
+  if (!Read(path, err, base)) return false;
+  if (type == 0xFE18 && !base) {
+    *err = "a PRX needs a base";
+    return false;
+  }
+  if (map_hi_ > mem.size()) {
+    *err = "image does not fit in the guest arena";
+    return false;
+  }
+  for (gaddr a = map_lo_; a < map_hi_; a += GuestMemory::kPageSize)
+    if (mem.IsCommitted(a)) {
+      char buf[96];
+      std::snprintf(buf, sizeof buf, "image range %llX-%llX is already in use",
+                    (unsigned long long)map_lo_, (unsigned long long)map_hi_);
+      *err = buf;
+      return false;
+    }
+  // Map everything RW first so relocations can be applied; Link tightens.
+  for (const Ph& p : phs_)
+    if ((p.type == kPtLoad || p.type == kPtSceRelro) && p.memsz) {
+      if (!mem.Commit(image_base + p.va, p.memsz, Prot::RW)) {
+        *err = "cannot commit a segment";
+        return false;
+      }
+      std::memcpy(mem.ptr(image_base + p.va), file_.data() + p.off, p.filesz);
+    }
   return true;
 }
 

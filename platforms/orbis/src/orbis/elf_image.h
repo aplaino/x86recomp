@@ -85,11 +85,18 @@ struct ElfImage {
   std::vector<ElfFunction> functions;  // in .eh_frame order
   ElfTls tls;
   bool has_tls = false;
+  // Its own module name (DT_SCE_MODULE_INFO; an eboot's is often empty)
+  // and the modules it needs (DT_SCE_NEEDED_MODULE), in the file's order.
+  std::string module_name;
+  std::vector<std::string> needed_modules;
 
   // True if the file is a little-endian x86-64 ELF.
   static bool IsElfFile(const std::string& path);
 
-  // Map reads the file and maps it into mem at `base` (0: the link
+  // Read reads the file alone, mapping nothing: its type, segments, entry
+  // points, TLS template, module names, imports and exports, as Map would
+  // place them at `base` (0: the link address, or kExecBase for
+  // ET_SCE_DYNEXEC). Map reads the file and maps it into mem at `base` (0: the link
   // address, or kExecBase for ET_SCE_DYNEXEC; a PRX needs one), and reads
   // its imports (not yet bound) and exports. It fails if any page of the
   // range is already committed. Link then binds the imports, applies the
@@ -98,6 +105,9 @@ struct ElfImage {
   // tls.offset; Map sets a main executable's: module 1, its block right
   // below the thread pointer). Load does both. Each returns false and
   // fills err on failure.
+  bool Read(const std::string& path, std::string* err, gaddr base = 0);
+  // The bytes the mapped image spans, from its first page.
+  uint64_t Size() const { return map_hi_ - map_lo_; }
   bool Map(const std::string& path, GuestMemory& mem, std::string* err, gaddr base = 0);
   bool Link(GuestMemory& mem, std::string* err, const ElfImportBinder& bind = nullptr);
   bool Load(const std::string& path, GuestMemory& mem, std::string* err,

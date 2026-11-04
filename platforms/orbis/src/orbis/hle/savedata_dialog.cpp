@@ -125,7 +125,7 @@ bool ValidBase(gaddr p) {
 // implemented yet.
 uint32_t CheckItemsCommon(gaddr it, uint32_t type) {
   if (Rd32(it) != kUser) return kErrParam;
-  if (const gaddr title = Rd64(it + 8))
+  if (const gaddr title = Rd64(it + 8); title && !savedata::OwnTitle(title))
     recomp::FatalF("sceSaveDataDialogOpen: save data of title %s not implemented yet",
                    recomp::GStr(title).c_str());
   if (Rd32(it + 24) > 1024) return kErrParam;

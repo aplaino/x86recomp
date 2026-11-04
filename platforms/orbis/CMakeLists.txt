@@ -10,16 +10,19 @@ set(CMAKE_LINK_DEPENDS_NO_SHARED ON)
 recomp_bundle(recomp_base recomp_x87 recomp_x86 recomp_log recomp_gfx recomp_hlsl
               recomp_audio recomp_ui)
 
-# Orbis ELF mapping and NIDs, for the lifter and the runtime.
+# Orbis ELF mapping, NIDs and the application directory, for the lifter
+# and the runtime.
 add_library(recomp_orbis_image SHARED
   src/orbis/elf_image.cpp
-  src/orbis/nid.cpp)
+  src/orbis/nid.cpp
+  src/orbis/app.cpp)
 target_include_directories(recomp_orbis_image PUBLIC src)
 target_link_libraries(recomp_orbis_image PUBLIC recomp_base)
 
-# The process loader (orbis/process.h) and the HLE registration by NID
-# (orbis/hle.h); the system libraries' HLE builds on it.
-add_library(recomp_orbis SHARED src/orbis/process.cpp src/orbis/host.cpp)
+# The process loader and games' main() (orbis/process.h) and the HLE
+# registration by NID (orbis/hle.h); the system libraries' HLE builds on
+# it.
+add_library(recomp_orbis SHARED src/orbis/process.cpp src/orbis/launcher.cpp src/orbis/host.cpp)
 target_link_libraries(recomp_orbis PUBLIC recomp_x86 recomp_orbis_image)
 
 # System library HLE, one shared library each.
@@ -82,6 +85,21 @@ recomp_bundle(recomp_orbis_image recomp_orbis recomp_orbis_kernel recomp_orbis_l
               recomp_orbis_net recomp_orbis_np recomp_orbis_videoout recomp_orbis_gpu
               recomp_orbis_gnm recomp_orbis_savedata_dialog)
 
+# Every system library's HLE, for a game's executable to link: imports
+# bind by name, so a game links them all.
+add_library(recomp_orbis_hle INTERFACE)
+target_link_libraries(recomp_orbis_hle INTERFACE recomp_orbis recomp_orbis_kernel
+  recomp_orbis_libc_internal recomp_orbis_system recomp_orbis_fiber recomp_orbis_audio
+  recomp_orbis_ngs2 recomp_orbis_savedata recomp_orbis_pad recomp_orbis_font
+  recomp_orbis_avplayer recomp_orbis_net recomp_orbis_np recomp_orbis_videoout
+  recomp_orbis_gnm recomp_orbis_savedata_dialog)
+
+# orbis_app (tools/orbis_app.cpp): the modules a game starts with, for
+# tools/lift.sh, and how the HLE covers their imports.
+add_executable(orbis_app tools/orbis_app.cpp)
+target_link_libraries(orbis_app PRIVATE recomp_orbis_hle)
+recomp_bundle(orbis_app)
+
 # recomp_lift reads Orbis ELFs.
 target_sources(recomp_lift PRIVATE lifter/orbis_reader.cpp)
 target_include_directories(recomp_lift PRIVATE ${RECOMP_ROOT}/tools/lifter_x86)
@@ -120,6 +138,7 @@ if(RECOMP_LD_LLD AND Python3_FOUND AND CMAKE_C_COMPILER_ID MATCHES "Clang")
   set(_e2e "${CMAKE_CURRENT_BINARY_DIR}/e2e")
   set(_src "${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e")
   add_custom_command(OUTPUT "${_e2e}/eboot.elf" "${_e2e}/prx.elf" "${_e2e}/eboot.manifest"
+                            "${_e2e}/app0/eboot.bin" "${_e2e}/app0/sce_module/libTestPrx.prx"
     COMMAND Python3::Interpreter "${_src}/build.py" "${_e2e}" "${CMAKE_C_COMPILER}"
             "${RECOMP_LD_LLD}"
     DEPENDS "${_src}/build.py" "${_src}/eboot.c" "${_src}/kernel.c" "${_src}/system.c"
@@ -142,4 +161,15 @@ if(RECOMP_LD_LLD AND Python3_FOUND AND CMAKE_C_COMPILER_ID MATCHES "Clang")
   recomp_bundle(orbis_process_test)
   add_test(NAME orbis_process COMMAND orbis_process_test "${_e2e}/eboot.elf" "${_e2e}/prx.elf")
   set_tests_properties(orbis_process PROPERTIES TIMEOUT 60)  # a hang is a failure
+  # orbis_app on the same programs laid out as an app0: the PRX found by
+  # its module name and placed at the first PRX base; its imports bound to
+  # it, the test-only library's left missing, libkernel's handled.
+  add_custom_target(orbis_e2e_app0 ALL DEPENDS "${_e2e}/app0/eboot.bin"
+                    "${_e2e}/app0/sce_module/libTestPrx.prx")
+  add_test(NAME orbis_app_modules COMMAND orbis_app modules "${_e2e}/app0")
+  set_tests_properties(orbis_app_modules PROPERTIES PASS_REGULAR_EXPRESSION
+    "^0\teboot\t[^\n]*/eboot.bin\n800000000\tlibTestPrx\t[^\n]*/libTestPrx.prx\n$")
+  add_test(NAME orbis_app_imports COMMAND orbis_app imports "${_e2e}/app0")
+  set_tests_properties(orbis_app_imports PROPERTIES PASS_REGULAR_EXPRESSION
+    "\nlibTest +[0-9]+ +0 +0 +[1-9][0-9]*\nlibTestPrx +[0-9]+ +[1-9][0-9]* +0 +0\n(.*\n)?libkernel +[0-9]+ +0 +[1-9][0-9]* +0\n")
 endif()
