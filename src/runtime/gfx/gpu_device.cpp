@@ -721,6 +721,8 @@ class GpuDevice final : public Device {
     std::lock_guard<std::recursive_mutex> l(mu_);
     auto it = depths_.find(id);
     if (it == depths_.end()) return;
+    for (auto& [tid, t] : textures_)
+      if (t.depth == id) return;  // a depth texture's: DestroyTexture lets go of it
     if (pass_depth_ == it->second.tex) Flush();
     if (current_depth_ == id) {
       current_depth_ = 0;
