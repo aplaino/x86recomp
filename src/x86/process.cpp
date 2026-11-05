@@ -339,7 +339,8 @@ uint32_t RunMainThreadBeside(Thread* t, const std::function<uint64_t(Ctx&)>& bod
   return s.exit;
 }
 
-Process& StartProcess(const GameConfig& game, const std::string& game_dir, bool x64) {
+Process& StartProcess(const GameConfig& game, const std::string& game_dir, bool x64,
+                      unsigned arena_bits) {
   g_proc = new Process;
   Process& p = *g_proc;
   p.game = game;
@@ -350,7 +351,7 @@ Process& StartProcess(const GameConfig& game, const std::string& game_dir, bool 
   x87::run::g_doubles = !(doubles && doubles[0] == '0');
   StartWatchdog();
   p.x64 = x64;
-  if (!p.mem.Reserve(p.x64 ? kArenaBits64 : 32)) FatalF("cannot reserve the guest arena");
+  if (!p.mem.Reserve(!p.x64 ? 32 : arena_bits ? arena_bits : kArenaBits64)) FatalF("cannot reserve the guest arena");
   g_guest_base = p.mem.base();
   // Calls to import thunks go to HLE handlers (Dispatch); nothing runs
   // there, but the IAT values point at committed memory as on Windows.

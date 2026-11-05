@@ -40,9 +40,14 @@ uint64_t g_tls_size = 0, g_tls_align = 16;
 uint64_t g_tls_modules = 0;
 constexpr uint64_t kTcbSize = 0x40;
 
-// The allocator's range: above 4 GiB, as Win64's, and below the top
-// 64 MiB of the arena, where the core's thunk region is (x86/layout.h).
-constexpr gaddr kUserHi64 = 0xFFC000000;
+// The arena: 256 GiB. Games place mappings by address hint well above
+// the core's default 64 GiB (a hint of 64 GiB, expected to be honoured,
+// is seen); the console's own limit is higher and not measured, so a
+// mapping beyond this one is fatal (hle/kernel_memory.cpp). The
+// allocator hands out all of it above 4 GiB, as Win64's, except the 64
+// MiB below 64 GiB where the core's thunk region is (x86/layout.h).
+constexpr unsigned kArenaBits = 38;
+constexpr gaddr kThunkZone = 0xFFC000000, kThunkZoneSize = 0x4000000;
 
 std::map<std::pair<std::string, std::string>, std::string>& NidNames() {
   static std::map<std::pair<std::string, std::string>, std::string> m;
@@ -176,13 +181,14 @@ const std::string* NameOfNid(const std::string& library, const std::string& nid)
 }
 
 int RunProcess(const GameConfig& game, const std::string& game_dir, const Config& config) {
-  Process& p = StartProcess(game, game_dir, true);
+  Process& p = StartProcess(game, game_dir, true, kArenaBits);
   if (const char* t = Env("TRACE")) g_trace = *t && *t != '0';
   g_param = config.param;
   p.sysv = true;
   p.fpu_control = 0x037F;  // FreeBSD's for new threads
   p.thread_init = ThreadInit;
-  p.vm.Init(&p.mem, kUserLo64, kUserHi64);
+  p.vm.Init(&p.mem, kUserLo64, p.mem.size());
+  p.vm.MarkReserved(kThunkZone, kThunkZoneSize);
 
   MapModule(config.eboot, 0);
   for (const Prx& prx : config.prxs) MapModule(prx.path, prx.base);

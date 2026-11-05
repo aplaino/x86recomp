@@ -21,8 +21,11 @@ Executables are mapped at 0x400000. The PRXs a game starts with
 (orbis/app.h) go from 0x800000000 up in initialisation order, then the
 other PRXs it ships (by module name), each at the next 256 MiB boundary
 past the one before; tools/lift.sh lifts them all at the same bases
-(recomp_lift's --base), since both take them from there. The guest allocator hands out the range above 4 GiB, below the
-top 64 MiB of the arena, where the core's thunk region is.
+(recomp_lift's --base), since both take them from there. The arena is 256 GiB (games place mappings by address hint
+above the core's default 64 GiB); the guest allocator hands out all of
+it above 4 GiB except the 64 MiB below 64 GiB, where the core's thunk
+region is. A mapping asked for beyond the arena is fatal: the console's
+limit is higher and not measured.
 
 ## Process bring-up
 - A game's executable is main() calling orbis::Main (orbis/process.h)

@@ -40,6 +40,13 @@ gaddr Map(gaddr addr, uint64_t len, int prot, bool fixed, bool no_overwrite) {
   GuestAllocator& vm = g_proc->vm;
   len = RoundUp(len);
   if (!len) return 0;
+  // The console honours addresses past the arena's end (process.cpp);
+  // placing the mapping elsewhere would go unnoticed.
+  if (addr && (addr >= vm.mem().size() || len > vm.mem().size() - addr))
+    recomp::FatalF("mapping of %llX bytes at %llX: beyond the modelled address space "
+                   "(%llX), not supported",
+                   (unsigned long long)len, (unsigned long long)addr,
+                   (unsigned long long)vm.mem().size());
   gaddr at = 0;
   if (fixed) {
     if (addr & (kPage - 1)) return 0;

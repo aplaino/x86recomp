@@ -130,11 +130,13 @@ void Dispatch(Ctx& c, uint64_t target, uint64_t va);
 Thread* CreateGuestThread(uint64_t stack_size);
 
 // A platform's process bring-up (Win32's RunProcess, a console platform's
-// loader). StartProcess creates g_proc with its arena and thunk region;
+// loader). StartProcess creates g_proc with its arena (an x64 one of
+// 2^arena_bits bytes, 0: kArenaBits64) and thunk region;
 // InitDispatch registers Process::code once the images are mapped;
 // RunMainThread runs body (its guest calls) as guest thread t on the
 // process main thread, with a big host stack, and returns its exit code.
-Process& StartProcess(const GameConfig& game, const std::string& game_dir, bool x64);
+Process& StartProcess(const GameConfig& game, const std::string& game_dir, bool x64,
+                      unsigned arena_bits = 0);
 void InitDispatch();
 uint32_t RunMainThread(Thread* t, const std::function<uint64_t(Ctx&)>& body);
 // For platforms whose guest has no UI thread of its own (consoles): body
