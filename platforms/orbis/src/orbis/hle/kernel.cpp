@@ -81,6 +81,13 @@ ORBIS_HLE("libkernel", sceKernelGetProcParam, 0) { return ::recomp::orbis::ProcP
 // libkernel's own allocations, which the HLE does not make.
 ORBIS_HLE("libkernel", _sceKernelRtldSetApplicationHeapAPI, 1) { return 0; }
 
+// The stack protector found its canary overwritten: 11.00's libkernel
+// ends the process (int 0x44, then ud2).
+ORBIS_HLE("libkernel", __stack_chk_fail, 0) {
+  recomp::FatalF("__stack_chk_fail: stack smashing detected (return address %llX)",
+                 (unsigned long long)recomp::Rd64(c.rsp));
+}
+
 // int* __error(void): the calling thread's errno.
 ORBIS_HLE("libkernel", __error, 0) { return ErrnoAddr(c); }
 

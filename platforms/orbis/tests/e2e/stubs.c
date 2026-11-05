@@ -23,7 +23,10 @@ STUB(sceKernelSetEventFlag) STUB(sceKernelWaitEventFlag) STUB(__error) STUB(open
 STUB(sceKernelOpen) STUB(sceKernelRead) STUB(sceKernelClose) STUB(sceKernelStat) STUB(mmap)
 STUB(munmap) STUB(sceKernelUsleep) STUB(sceKernelGetProcessTime) STUB(clock_gettime)
 STUB(sceKernelGetdents) STUB(sceKernelCreateEqueue) STUB(sceKernelWaitEqueue) STUB(sceKernelWrite)
-STUB(sceKernelLoadStartModule) STUB(sceKernelDlsym)
+STUB(sceKernelLoadStartModule) STUB(sceKernelDlsym) STUB(sceKernelAddUserEvent)
+STUB(sceKernelAddUserEventEdge) STUB(sceKernelTriggerUserEvent) STUB(sceKernelDeleteUserEvent)
+STUB(sceKernelGetEventId) STUB(sceKernelGetEventFilter) STUB(sceKernelGetEventData)
+STUB(sceKernelGetEventUserData)
 #endif
 
 #ifdef LIB_FIBER

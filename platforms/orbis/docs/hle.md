@@ -36,6 +36,8 @@ library.
   libSceScreenShot (the system takes none).
   Event queues: small integers, as the kqueue descriptors they are; an
   event is returned once per trigger (EV_CLEAR) with its last data.
+  User events (EVFILT_USER) are per queue, level unless added as edge
+  (EV_CLEAR); a trigger sets their udata, as 11.00's kevent does.
   Directories: getdents/getdirentries return FreeBSD 9's struct dirent
   records, sorted by name.
 - recomp_orbis_libc_internal: also what the system's middleware PRXs

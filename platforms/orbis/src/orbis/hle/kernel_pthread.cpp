@@ -615,6 +615,13 @@ ORBIS_HLE("libkernel", scePthreadAttrSetschedpolicy, 2) {
   a->prio = kDefaultPrio;
   return 0;
 }
+// PTHREAD_CREATE_JOINABLE (0) or PTHREAD_CREATE_DETACHED (1).
+ORBIS_HLE("libkernel", scePthreadAttrGetdetachstate, 2) {
+  ThreadAttr* a = AttrAt(Arg(c, 0));
+  if (!a || !Arg(c, 1)) return SceError(kEINVAL);
+  recomp::Wr32(Arg(c, 1), a->detached ? 1 : 0);
+  return 0;
+}
 ORBIS_HLE("libkernel", scePthreadAttrGetaffinity, 2) {
   ThreadAttr* a = AttrAt(Arg(c, 0));
   if (!a) return SceError(kEINVAL);

@@ -28,6 +28,14 @@ int sceKernelClose(int fd);
 int sceKernelGetdents(int fd, char* buf, int n);
 int sceKernelCreateEqueue(long* eq, const char* name);
 int sceKernelWaitEqueue(long eq, void* ev, int n, int* out, unsigned* timeout_us);
+int sceKernelAddUserEvent(long eq, int id);
+int sceKernelAddUserEventEdge(long eq, int id);
+int sceKernelTriggerUserEvent(long eq, int id, void* udata);
+int sceKernelDeleteUserEvent(long eq, int id);
+long sceKernelGetEventId(const void* ev);
+int sceKernelGetEventFilter(const void* ev);
+long sceKernelGetEventData(const void* ev);
+void* sceKernelGetEventUserData(const void* ev);
 
 int sceGnmSetVsShader(unsigned* cmd, unsigned dw, const unsigned* regs, unsigned modifier);
 int sceGnmInsertPushMarker(unsigned* cmd, unsigned dw, const char* s);
@@ -383,6 +391,40 @@ static int gpu_checks(void) {
   timeout = 1000;
   failed += test_check(103, (unsigned)sceKernelWaitEqueue(eq, ev, 1, &got, &timeout), SCE_ETIMEDOUT);
   failed += test_check(104, (unsigned)sceGnmSubmitCommandBuffers(1, bufs, 0, 0, 0), 0x80D11000);
+  return failed;
+}
+
+// ---- user events: a level one stays triggered across waits, an edge one
+// is reset by the wait that returns it; a trigger carries the udata.
+
+static int user_event_checks(void) {
+  int failed = 0;
+  long eq;
+  sceKernelCreateEqueue(&eq, "user");
+  unsigned long ev[8];
+  int got = 0;
+  unsigned timeout = 1000;
+  failed += test_check(422, sceKernelAddUserEvent(eq, 5), 0);
+  failed += test_check(423, sceKernelAddUserEventEdge(eq, 6), 0);
+  failed += test_check(424, (unsigned)sceKernelTriggerUserEvent(eq, 7, 0), 0x80020002);  // ENOENT
+  failed += test_check(425, (unsigned)sceKernelWaitEqueue(eq, ev, 2, &got, &timeout), SCE_ETIMEDOUT);
+  failed += test_check(426, sceKernelTriggerUserEvent(eq, 5, (void*)0x55), 0);
+  failed += test_check(427, sceKernelTriggerUserEvent(eq, 6, (void*)0x66), 0);
+  failed += test_check(428, sceKernelWaitEqueue(eq, ev, 2, &got, &timeout), 0);
+  failed += test_check(429, got, 2);
+  failed += test_check(430, sceKernelGetEventId(ev) == 5 && sceKernelGetEventFilter(ev) == -11 &&
+                                sceKernelGetEventData(ev) == 0 &&
+                                sceKernelGetEventUserData(ev) == (void*)0x55 && (ev[1] >> 16 & 0xFFFF) == 0,
+                            1);
+  failed += test_check(431, sceKernelGetEventId(ev + 4) == 6 && (ev[5] >> 16 & 0xFFFF) == 0x20 &&
+                                sceKernelGetEventUserData(ev + 4) == (void*)0x66,
+                            1);
+  failed += test_check(432, sceKernelWaitEqueue(eq, ev, 2, &got, &timeout), 0);
+  failed += test_check(433, got == 1 && sceKernelGetEventId(ev) == 5, 1);
+  failed += test_check(434, sceKernelDeleteUserEvent(eq, 5), 0);
+  failed += test_check(435, (unsigned)sceKernelDeleteUserEvent(eq, 5), 0x80020002);
+  failed += test_check(436, (unsigned)sceKernelWaitEqueue(eq, ev, 2, &got, &timeout), SCE_ETIMEDOUT);
+  failed += test_check(437, (unsigned)sceKernelAddUserEvent(eq + 1000, 1), 0x80020009);  // EBADF
   return failed;
 }
 
@@ -913,7 +955,7 @@ static int appcontent_checks(void) {
 }
 
 int system_checks(void) {
-  return fiber_checks() + dir_checks() + gpu_checks() + packet_checks() + save_checks() + audio_checks() +
+  return fiber_checks() + dir_checks() + user_event_checks() + gpu_checks() + packet_checks() + save_checks() + audio_checks() +
          pad_checks() + dialog_checks() + msg_dialog_checks() + trophy_checks() + ngs2_checks() +
          appcontent_checks();
 }

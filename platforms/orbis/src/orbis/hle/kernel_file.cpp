@@ -12,6 +12,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -373,4 +374,28 @@ ORBIS_HLE("libkernel", sceKernelTruncate, 2) {
   if (!m.ok) return SceError(kENOENT);
   if (m.read_only) return SceError(kEROFS);
   return ::truncate(m.host.c_str(), off_t(Arg(c, 1))) == 0 ? 0 : SceError(FromHost(errno));
+}
+
+// int sceKernelUtimes(const char* path, const struct timeval times[2]):
+// FreeBSD's utimes (timeval: seconds and microseconds, 8 bytes each;
+// null: now).
+ORBIS_HLE("libkernel", sceKernelUtimes, 2) {
+  const Mapped m = MapPath(GStr(Arg(c, 0)));
+  if (!m.ok) return SceError(kENOENT);
+  if (m.read_only) return SceError(kEROFS);
+  struct timeval tv[2];
+  const recomp::gaddr t = Arg(c, 1);
+  for (int i = 0; t && i < 2; i++) {
+    tv[i].tv_sec = time_t(recomp::Rd64(t + 16 * i));
+    tv[i].tv_usec = suseconds_t(recomp::Rd64(t + 16 * i + 8));
+  }
+  return ::utimes(m.host.c_str(), t ? tv : nullptr) == 0 ? 0 : SceError(FromHost(errno));
+}
+
+ORBIS_HLE("libScePosix", unlink, 1) { return Posix(c, PathOp(GStr(Arg(c, 0)), ::unlink)); }
+ORBIS_HLE("libScePosix", rename, 2) {
+  const Mapped from = MapPath(GStr(Arg(c, 0))), to = MapPath(GStr(Arg(c, 1)));
+  if (!from.ok || !to.ok) return Posix(c, -kENOENT);
+  if (from.read_only || to.read_only) return Posix(c, -kEROFS);
+  return Posix(c, ::rename(from.host.c_str(), to.host.c_str()) == 0 ? 0 : -FromHost(errno));
 }
