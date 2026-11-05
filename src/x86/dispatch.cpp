@@ -206,6 +206,16 @@ void FaultHandler(int sig, siginfo_t* si, void* uc) {
     return;  // a watched page, writable now: retry the write
   if (guest32 && lazy::HandleFault(uint32_t(a - base)))
     return;  // filled: retry the faulting instruction
+  // A watch another thread disarmed after this fault was raised: the page
+  // is writable now. A page that faults again and again is reported below
+  // instead (host protection the guest's does not explain).
+  static thread_local uintptr_t t_reopened_at = 0;
+  static thread_local int t_reopened_n = 0;
+  if (g_proc && a - base < g_proc->mem.size() && watch::Reopened(g_proc->mem, a - base)) {
+    t_reopened_n = a == t_reopened_at ? t_reopened_n + 1 : 1;
+    t_reopened_at = a;
+    if (t_reopened_n <= 16) return;
+  }
   platform::FaultContext fc = platform::ReadFaultContext(uc);
   if (guest32 && g_proc->guest_fault && CurrentThread() &&
       t_fault_depth < kMaxFaultDepth && hle::t_hle_depth == 0) {

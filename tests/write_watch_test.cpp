@@ -8,7 +8,9 @@
 //   - Release makes a range usable by the kernel (read(2) into it);
 //   - Commit and Decommit over a watched range disarm it;
 //   - a watch destroyed while armed leaves its pages writable;
-//   - threads writing while another arms and checks never lose a write.
+//   - threads writing while another arms and checks never lose a write;
+//   - threads writing one watched page at once all land (one disarms it,
+//     the others' faults are retried).
 
 #include <signal.h>
 #include <unistd.h>
@@ -45,7 +47,8 @@ std::atomic<int> g_failures{0};
 void OnFault(int, siginfo_t* si, void*) {
   uintptr_t a = reinterpret_cast<uintptr_t>(si->si_addr);
   uintptr_t base = reinterpret_cast<uintptr_t>(g_mem.base());
-  if (a - base < g_mem.size() && watch::HandleFault(a - base)) return;
+  if (a - base < g_mem.size() && (watch::HandleFault(a - base) || watch::Reopened(g_mem, a - base)))
+    return;
   const char m[] = "unexpected fault\n";
   (void)!write(2, m, sizeof m - 1);
   _exit(2);
@@ -167,6 +170,34 @@ int main() {
           CHECK(seen == *reinterpret_cast<volatile uint32_t*>(g_mem.ptr(at)) || !ws[size_t(t)]->clean());
       }
     stop = true;
+    for (auto& t : writers) t.join();
+  }
+
+  {
+    // Several threads write one watched page at once: one fault disarms
+    // the watch, the others were raised by it and land after it.
+    constexpr int kThreads = 4, kRounds = 2000;
+    const gaddr at = page(15);
+    std::atomic<int> round{0}, done{0};
+    std::vector<std::thread> writers;
+    for (int t = 0; t < kThreads; t++)
+      writers.emplace_back([&, t] {
+        for (int r = 1; r <= kRounds; r++) {
+          while (round.load() < r) {
+          }
+          Store(at + uint64_t(t), uint8_t(r));
+          done.fetch_add(1);
+        }
+      });
+    watch::Watch w;
+    for (int r = 1; r <= kRounds; r++) {
+      w.Arm(g_mem, at, hp);
+      round.store(r);
+      while (done.load() < r * kThreads) {
+      }
+      CHECK(!w.clean());
+      for (int t = 0; t < kThreads; t++) CHECK(Load(at + uint64_t(t)) == uint8_t(r));
+    }
     for (auto& t : writers) t.join();
   }
 

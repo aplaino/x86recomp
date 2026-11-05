@@ -773,6 +773,12 @@ this range written since" without reading it:
   and the write is retried. Watches overlapping a disarmed one (sharing a
   page with it) are disarmed with it, so read-only pages are always
   exactly the armed watches' pages.
+- A fault can outlive its watch: another thread may disarm it (writing
+  the same page, a Release) between the fault and its handling. Disarms
+  reopen pages while holding the registry lock, so once the handler holds
+  it, a fault on a page no watch covers that the guest may write (its
+  bookkeeping, after the watches and lazy regions had their turn) is
+  retried; one that keeps faulting at the same address is reported.
 - Guest protection is bookkeeping, so watches never conflict with it;
   GuestMemory releases the watches on a range before changing its host
   protection (Commit, Decommit), and HLE handlers that pass a guest

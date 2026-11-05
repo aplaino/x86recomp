@@ -22,6 +22,12 @@ struct Registry {
     }
   }
 
+  bool Watched(gaddr a) const {
+    for (const Watch* w : armed)
+      if (w->lo_ <= a && a < w->hi_) return true;
+    return false;
+  }
+
   // Takes armed[i] off the list; it reads as written from now on.
   Watch* Remove(size_t i) {
     Watch* w = armed[i];
@@ -111,6 +117,13 @@ bool HandleFault(gaddr addr) {
   if (!R().count.load() || t_held) return false;
   Guard g;
   return R().DisarmOverlapping(addr, addr + 1);
+}
+
+bool Reopened(const GuestMemory& mem, gaddr addr) {
+  if (t_held) return false;
+  Guard g;  // a disarm in progress has reopened its pages once this holds
+  if (R().Watched(addr)) return false;
+  return mem.IsCommitted(addr) && (uint8_t(mem.QueryProt(addr)) & uint8_t(Prot::W));
 }
 
 void Release(gaddr va, uint64_t size) {

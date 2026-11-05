@@ -48,6 +48,14 @@ class Watch {
 // writable (retry the access).
 bool HandleFault(gaddr addr);
 
+// Fault handler entry, after HandleFault and any other owner of host
+// protection had their turn: true if `addr` is a page the guest may write
+// (mem's protection) and no watch is armed on it. Such a fault was raised
+// by a watch another thread disarmed between the fault and its handling
+// (two threads writing one watched page, a Release during a write): the
+// page is writable by now, so retry the access.
+bool Reopened(const GuestMemory& mem, gaddr addr);
+
 // Disarms the watches overlapping [va, va + size).
 void Release(gaddr va, uint64_t size);
 
