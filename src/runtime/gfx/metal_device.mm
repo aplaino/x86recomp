@@ -644,7 +644,10 @@ class MetalDevice final : public Device {
     if (encoder_.joinable()) encoder_.join();
     if (last_cb_) [last_cb_ waitUntilCompleted];
     // Lean shader and pipeline prebuild blocks capture this device's state.
-    // Finish them before its maps, mutexes and Metal objects are destroyed.
+    // Finish them before its maps, mutexes and Metal objects are destroyed:
+    // those still queued see closing_ and do nothing, so only the one
+    // running is waited for (quitting while loading, hundreds are queued).
+    closing_ = true;
     dispatch_sync(AheadQueue(), ^{});
     StopDisplayLink();
     if (view_) SDL_Metal_DestroyView(view_);
@@ -1320,7 +1323,9 @@ class MetalDevice final : public Device {
       sh.has_lean = has_lean;
       if (has_lean) {
         NSString* src = @(msl.c_str());
+        std::atomic<bool>* closing = &closing_;
         dispatch_async(AheadQueue(), ^{
+          if (closing->load()) return;
           Lean(hash, src);
         });
       }
@@ -3490,7 +3495,9 @@ void main() {
       std::mutex* mu = &prebuilt_mu_;
       auto* done = &prebuilt_;
       const uint64_t ps_hash = r.ps;
+      std::atomic<bool>* closing = &closing_;
       dispatch_async(AheadQueue(), ^{
+        if (closing->load()) return;
         if (src) {
           id<MTLFunction> ps = Lean(ps_hash, src);
           if (!ps) return;
@@ -4287,6 +4294,7 @@ void main() {
     uint64_t shaders = 0, shader_ns = 0, msl_compiles = 0;
   };
   std::atomic<bool> perf_{false};
+  std::atomic<bool> closing_{false};  // the device is going: prebuild blocks do nothing
   PerfCounts pc_;
   uint64_t perf_t0_ = 0;
   std::atomic<uint64_t> enc_busy_ns_{0}, pipe_compiles_{0}, pipe_ns_{0}, pipe_max_ns_{0},
