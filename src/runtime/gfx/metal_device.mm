@@ -643,6 +643,9 @@ class MetalDevice final : public Device {
     q_cv_.notify_all();
     if (encoder_.joinable()) encoder_.join();
     if (last_cb_) [last_cb_ waitUntilCompleted];
+    // Lean shader and pipeline prebuild blocks capture this device's state.
+    // Finish them before its maps, mutexes and Metal objects are destroyed.
+    dispatch_sync(AheadQueue(), ^{});
     StopDisplayLink();
     if (view_) SDL_Metal_DestroyView(view_);
   }
