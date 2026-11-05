@@ -17,6 +17,8 @@ OS or middleware API goes here, even when a game is where it came up.
   - ~/Documents/Programming/Recomp/KEX/Q2E (Quake II Enhanced, x64)
   - ~/Documents/Programming/Recomp/PS4/GravityRush (Gravity Rush
     Remastered, PS4; the platform module RECOMP_PLATFORM_ORBIS)
+  - ~/Documents/Programming/Recomp/PS4/UnchartedRecharted (Uncharted:
+    The Nathan Drake Collection, PS4)
 - The base is src/runtime (with cmake/host.cmake); the x86 core is
   src/x86, tools/lifter_x86 and tests/x86, the PowerPC core src/ppc,
   tools/lifter_ppc and tests/ppc; each platform module is
