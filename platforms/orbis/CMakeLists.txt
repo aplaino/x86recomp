@@ -41,7 +41,7 @@ target_link_libraries(recomp_orbis_libc_internal PUBLIC recomp_orbis_kernel)
 # libSceSystemService, libSceUserService, libSceSysmodule, libScePlayGo, libSceDiscMap, the dialogs.
 add_library(recomp_orbis_system SHARED src/orbis/hle/system.cpp src/orbis/hle/playgo.cpp
             src/orbis/hle/discmap.cpp src/orbis/hle/dialog.cpp src/orbis/hle/rtc.cpp
-            src/orbis/hle/appcontent.cpp)
+            src/orbis/hle/appcontent.cpp src/orbis/hle/remoteplay.cpp)
 target_link_libraries(recomp_orbis_system PUBLIC recomp_orbis)
 add_library(recomp_orbis_fiber SHARED src/orbis/hle/fiber.cpp)
 target_link_libraries(recomp_orbis_fiber PUBLIC recomp_orbis)

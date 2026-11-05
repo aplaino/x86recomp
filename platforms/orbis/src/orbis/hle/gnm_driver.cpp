@@ -665,11 +665,15 @@ ORBIS_HLE("libSceGnmDriver", sceGnmAreSubmitsAllowed, 0) { return 1; }
 
 // ---- events
 
-// int sceGnmAddEqEvent(SceKernelEqueue eq, int id, void* udata)
+// int sceGnmAddEqEvent(SceKernelEqueue eq, int id, void* udata): in
+// 11.00's library a kevent of the graphics filter with ident id; the
+// driver raises 0x40 at the graphics ring's end-of-pipe interrupts and,
+// as modelled here (not measured), id 0 to 6 at those of the compute rings
+// on that pipe.
 ORBIS_HLE("libSceGnmDriver", sceGnmAddEqEvent, 3) {
   using namespace recomp::orbis::kernel;
   const uint64_t id = uint64_t(int64_t(int32_t(Arg(c, 1))));
-  if (id != gpu::kEqEventGfxEop) recomp::FatalF("sceGnmAddEqEvent: event %llX not implemented yet",
+  if (id != gpu::kEqEventGfxEop && id > 6) recomp::FatalF("sceGnmAddEqEvent: event %llX not implemented yet",
                                                 (unsigned long long)id);
   return AddEvent(uint32_t(Arg(c, 0)), id, gpu::kFilterGraphicsCore, Arg(c, 2)) ? 0
                                                                                 : SceError(kEBADF);
@@ -695,7 +699,7 @@ static uint64_t MapComputeQueue(uint32_t pipe, uint32_t queue, gaddr ring, uint3
   if (ring & 0xFF) return 0x80D17003;
   if (rptr & 3) return 0x80D17004;
   const uint32_t vqid = pipe * 8 + queue + 1;
-  gpu::MapComputeRing(vqid, ring, size_dw, rptr);
+  gpu::MapComputeRing(vqid, pipe, ring, size_dw, rptr);
   return vqid;
 }
 

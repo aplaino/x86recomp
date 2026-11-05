@@ -29,10 +29,12 @@ void SubmitGraphics(std::vector<CmdBuffer> dcbs, std::vector<CmdBuffer> ccbs,
 uint64_t GraphicsSubmitted();
 uint64_t GraphicsCompleted();
 
-// A compute queue's ring (sceGnmMapComputeQueue): the GPU runs what lies
-// between its read pointer and the write pointer Kick moves it to, and
-// keeps the read pointer (in dwords) at rptr_addr.
-void MapComputeRing(uint32_t vqid, gaddr base, uint32_t size_dw, gaddr rptr_addr);
+// A compute queue's ring (sceGnmMapComputeQueue) on pipe 0 to 6: the GPU
+// runs what lies between its read pointer and the write pointer Kick
+// moves it to, and keeps the read pointer (in dwords) at rptr_addr. Its
+// end-of-pipe interrupts raise event `pipe` (kFilterGraphicsCore).
+void MapComputeRing(uint32_t vqid, uint32_t pipe, gaddr base, uint32_t size_dw,
+                    gaddr rptr_addr);
 void UnmapComputeRing(uint32_t vqid);
 void KickComputeRing(uint32_t vqid, uint32_t wptr_dw);
 

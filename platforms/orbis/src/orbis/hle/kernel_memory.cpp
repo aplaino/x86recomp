@@ -177,6 +177,20 @@ ORBIS_HLE("libkernel", sceKernelMprotect, 3) {
 // Locking pages in memory has nothing to do here.
 ORBIS_HLE("libkernel", sceKernelMlock, 2) { return 0; }
 
+// int sceKernelSetVirtualRangeName(void* addr, size_t len, const char*
+// name): in 11.00's libkernel a bare syscall; the name labels the range
+// for debugging tools only. What the kernel answers for a range not
+// mapped is not measured: fatal.
+ORBIS_HLE("libkernel", sceKernelSetVirtualRangeName, 3) {
+  recomp::GuestAllocator::Region r;
+  const recomp::gaddr a = Arg(c, 0);
+  if (!recomp::g_proc->vm.Find(a, &r) || Arg(c, 1) > r.base + r.size - a)
+    recomp::FatalF("sceKernelSetVirtualRangeName(%llX, %llX): a range not mapped, not "
+                   "implemented yet",
+                   (unsigned long long)a, (unsigned long long)Arg(c, 1));
+  return 0;
+}
+
 ORBIS_HLE("libkernel", getpagesize, 0) { return kPage; }
 
 ORBIS_HLE("libkernel", sceKernelGetDirectMemorySize, 0) { return kDirectMemorySize; }

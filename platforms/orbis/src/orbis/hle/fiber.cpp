@@ -35,6 +35,7 @@ constexpr uint32_t kErrNull = 0x80590001, kErrAlignment = 0x80590002, kErrRange 
                    kErrInvalid = 0x80590004, kErrPermission = 0x80590005, kErrState = 0x80590006;
 constexpr uint32_t kMagicStart = 0xDEF1649C, kMagicEnd = 0xB37592A0, kOptMagic = 0xBB40E64D;
 constexpr uint32_t kStateIdle = 2;  // the SceFiber block's
+constexpr size_t kNameMax = 31;     // 11.00 keeps a name's first 31 characters
 enum : int { kIdle, kRunning, kLeaving };
 constexpr size_t kHostStack = 64u << 20;
 
@@ -165,7 +166,7 @@ ORBIS_HLE("libSceFiber", _sceFiberInitializeImpl, 8) {
   fb->arg_init = Arg(c, 3);
   fb->context = context;
   fb->context_size = size;
-  fb->name = recomp::GStr(name);
+  fb->name = recomp::GStr(name).substr(0, kNameMax);
   recomp::Wr32(f, kMagicStart);
   recomp::Wr32(f + 4, kStateIdle);
   recomp::Wr32(f + 0xFC, kMagicEnd);
@@ -238,5 +239,49 @@ ORBIS_HLE("libSceFiber", sceFiberGetSelf, 1) {
   ThreadFibers& t = Mine();
   if (!t.current) return kErrPermission;
   recomp::Wr64(Arg(c, 0), t.current->guest);
+  return 0;
+}
+
+// int sceFiberOptParamInitialize(SceFiberOptParam* opt): 11.00 zeroes
+// its 128 bytes and writes the magic.
+ORBIS_HLE("libSceFiber", sceFiberOptParamInitialize, 1) {
+  const gaddr opt = Arg(c, 0);
+  if (!opt) return kErrNull;
+  if (opt & 7) return kErrAlignment;
+  for (uint32_t i = 0; i < 0x80; i += 8) recomp::Wr64(opt + i, 0);
+  recomp::Wr32(opt, kOptMagic);
+  return 0;
+}
+
+// int sceFiberRename(SceFiber* fiber, const char* name): any state.
+ORBIS_HLE("libSceFiber", sceFiberRename, 2) {
+  if (!Arg(c, 0) || !Arg(c, 1)) return kErrNull;
+  Fiber* f;
+  if (uint32_t e = Lookup(Arg(c, 0), &f)) return e;
+  std::lock_guard<std::mutex> l(g_mu);
+  f->name = recomp::GStr(Arg(c, 1)).substr(0, kNameMax);
+  return 0;
+}
+
+// int sceFiberGetInfo(SceFiber* fiber, SceFiberInfo* info): info's first
+// field is its size, 128. 11.00 fills entry, arg_on_init, the context and
+// its size, the name (32 bytes; here zero past its end) and the context's
+// peak use, measured only under the context-size check (never on here):
+// -1 otherwise. The rest of info is left as it is.
+ORBIS_HLE("libSceFiber", sceFiberGetInfo, 2) {
+  const gaddr fa = Arg(c, 0), info = Arg(c, 1);
+  if (!fa || !info) return kErrNull;
+  if (fa & 7 || info & 7) return kErrAlignment;
+  if (recomp::Rd64(info) != 0x80) return kErrInvalid;
+  Fiber* f;
+  if (uint32_t e = Lookup(fa, &f)) return e;
+  recomp::Wr64(info + 0x08, f->entry);
+  recomp::Wr64(info + 0x10, f->arg_init);
+  recomp::Wr64(info + 0x18, f->context);
+  recomp::Wr64(info + 0x20, f->context_size);
+  std::lock_guard<std::mutex> l(g_mu);
+  for (uint32_t i = 0; i < 32; ++i)
+    recomp::Wr8(info + 0x28 + i, i < f->name.size() ? uint8_t(f->name[i]) : 0);
+  recomp::Wr64(info + 0x48, ~uint64_t(0));
   return 0;
 }

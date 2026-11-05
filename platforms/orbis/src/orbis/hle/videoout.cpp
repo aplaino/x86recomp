@@ -279,6 +279,29 @@ ORBIS_HLE("libSceVideoOut", sceVideoOutSetFlipRate, 2) {
   return 0;
 }
 
+// int sceVideoOutGetResolutionStatus(int handle, SceVideoOutResolutionStatus*
+// status): the output's, from the display driver; measured on a base
+// console with a 1080p display (firmware 11.00): 1920 x 1080 and the same
+// pane, refresh code 3 (59.94 Hz), 32 inches, flags 0. Written: the first
+// 32 bytes (the 12 reserved bytes after them read as zero there too, but
+// whether the driver writes them is not measured).
+ORBIS_HLE("libSceVideoOut", sceVideoOutGetResolutionStatus, 2) {
+  const recomp::gaddr s = Arg(c, 1);
+  if (!s) return uint32_t(kErrInvalidAddress);
+  {
+    std::lock_guard<std::mutex> l(g_mu);
+    if (int(Arg(c, 0)) != kHandle || !g_port.open) return uint32_t(kErrInvalidHandle);
+  }
+  recomp::Wr32(s + 0x00, 1920);
+  recomp::Wr32(s + 0x04, 1080);
+  recomp::Wr32(s + 0x08, 1920);
+  recomp::Wr32(s + 0x0C, 1080);
+  recomp::Wr64(s + 0x10, 3);
+  recomp::Wr32(s + 0x18, 0x42000000);  // 32.0f
+  recomp::Wr32(s + 0x1C, 0);           // flags, reserved
+  return 0;
+}
+
 // int sceVideoOutAddFlipEvent(SceKernelEqueue eq, int handle, void* udata)
 ORBIS_HLE("libSceVideoOut", sceVideoOutAddFlipEvent, 3) {
   {

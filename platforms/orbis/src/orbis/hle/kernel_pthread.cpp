@@ -603,6 +603,18 @@ ORBIS_HLE("libkernel", scePthreadAttrSetschedparam, 2) {
   a->prio = int(recomp::Rd32(Arg(c, 1)));
   return 0;
 }
+// int scePthreadAttrSetschedpolicy(ScePthreadAttr* attr, int policy):
+// SCHED_FIFO (1) or SCHED_RR (3) only, else ENOTSUP; 11.00 also resets
+// the priority to the policy's default (700 for both).
+ORBIS_HLE("libkernel", scePthreadAttrSetschedpolicy, 2) {
+  ThreadAttr* a = AttrAt(Arg(c, 0));
+  if (!a) return SceError(kEINVAL);
+  const int policy = int(Arg(c, 1));
+  if ((policy | 2) != 3) return SceError(kENOTSUP);
+  a->policy = policy;
+  a->prio = kDefaultPrio;
+  return 0;
+}
 ORBIS_HLE("libkernel", scePthreadAttrGetaffinity, 2) {
   ThreadAttr* a = AttrAt(Arg(c, 0));
   if (!a) return SceError(kEINVAL);

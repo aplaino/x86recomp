@@ -88,6 +88,9 @@ struct Engines {
   uint8_t ce_ram[48 * 1024] = {};
   uint64_t ce_count = 0, de_count = 0;
   std::vector<uint32_t> packet;  // Step's, kept: a packet's words
+  // The event an end-of-pipe interrupt raises: the graphics one, or on a
+  // compute ring its pipe's (sceGnmAddEqEvent ids 0 to 6).
+  uint64_t irq_event = kEqEventGfxEop;
 };
 
 uint64_t Ns() {
@@ -295,18 +298,20 @@ bool Step(Engines& e, Stream& s, bool ce) {
     case kEventWriteEop: {
       const gaddr a = (d[1] & ~3u) | uint64_t(d[2] & 0xFFFF) << 32;
       const uint32_t sel = d[2] >> 29;
-      Signal(a, MemBytes(sel), [a, sel, v = d[3] | uint64_t(d[4]) << 32, irq = (d[2] >> 24) & 3] {
+      Signal(a, MemBytes(sel), [a, sel, v = d[3] | uint64_t(d[4]) << 32, irq = (d[2] >> 24) & 3,
+                                 ev = e.irq_event] {
         WriteMem(a, sel, v);
-        if (irq) kernel::TriggerEvent(kEqEventGfxEop, kFilterGraphicsCore, kEqEventGfxEop);
+        if (irq) kernel::TriggerEvent(ev, kFilterGraphicsCore, ev);
       }, MemWords(sel, d[3], d[4]));
       break;
     }
     case kReleaseMem: {
       const gaddr a = (d[2] & ~3u) | uint64_t(d[3] & 0xFFFF) << 32;
       const uint32_t sel = d[1] >> 29;
-      Signal(a, MemBytes(sel), [a, sel, v = d[4] | uint64_t(d[5]) << 32, irq = (d[1] >> 24) & 3] {
+      Signal(a, MemBytes(sel), [a, sel, v = d[4] | uint64_t(d[5]) << 32, irq = (d[1] >> 24) & 3,
+                                 ev = e.irq_event] {
         WriteMem(a, sel, v);
-        if (irq) kernel::TriggerEvent(kEqEventGfxEop, kFilterGraphicsCore, kEqEventGfxEop);
+        if (irq) kernel::TriggerEvent(ev, kFilterGraphicsCore, ev);
       }, MemWords(sel, d[4], d[5]));
       break;
     }
@@ -454,7 +459,7 @@ void GraphicsThread() {
 
 struct Ring {
   gaddr base, rptr_addr;
-  uint32_t size_dw;
+  uint32_t size_dw, pipe;
   std::atomic<uint32_t> wptr{0};
   std::atomic<bool> unmapped{false};
   std::mutex mu;
@@ -466,6 +471,7 @@ struct Ring {
 // the game's own code, which wraps with NOPs).
 void ComputeThread(std::shared_ptr<Ring> r) {
   auto e = std::make_unique<Engines>();
+  e->irq_event = r->pipe;
   uint32_t rptr = 0;
   for (;;) {
     uint32_t w;
@@ -502,9 +508,11 @@ void SubmitGraphics(std::vector<CmdBuffer> dcbs, std::vector<CmdBuffer> ccbs,
 uint64_t GraphicsSubmitted() { return Q().submitted; }
 uint64_t GraphicsCompleted() { return Q().completed; }
 
-void MapComputeRing(uint32_t vqid, gaddr base, uint32_t size_dw, gaddr rptr_addr) {
+void MapComputeRing(uint32_t vqid, uint32_t pipe, gaddr base, uint32_t size_dw,
+                    gaddr rptr_addr) {
   auto r = std::make_shared<Ring>();
   r->base = base;
+  r->pipe = pipe;
   r->size_dw = size_dw;
   r->rptr_addr = rptr_addr;
   Wr32(rptr_addr, 0);

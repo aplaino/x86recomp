@@ -84,8 +84,9 @@ library.
   (the vertex shader adds the register); their arguments are read from
   SET_BASE's base 1 (other bases are fatal), a compute queue's indirect
   dispatches from the packet's address. Draws of the stream-out buffer's
-  filled size (USE_OPAQUE) are fatal. Only the graphics end-of-pipe event (0x40) exists;
-  its data is the id (a timestamp of 0). Mip statistics are accepted and
+  filled size (USE_OPAQUE) are fatal. End-of-pipe interrupts raise the
+  graphics event 0x40, or on a compute ring event 0 to 6 by its pipe;
+  their data is the id (a timestamp of 0). Other ids are fatal. Mip statistics are accepted and
   never written.
 - recomp_orbis_gpu draws on gfx::Device (orbis/gpu/renderer.h): its
   shaders translated to GLSL (orbis/gpu/shader.h), colour and depth
@@ -284,6 +285,8 @@ library.
   unlocks kept below DataDir()/trophies; what needs the trophy pack
   (outside the game's files) is not implemented.
 - libSceCommonDialog (in recomp_orbis_system): initialisation.
+- recomp_orbis_system also: libSceRemoteplay's initialisation (11.00's
+  checks; nobody streams from the console).
 - recomp_orbis_system also: libSceRtc as 11.00 has it (ticks in
   microseconds since 0001-01-01, its checks in their order and codes, the
   RFC 3339 and RFC 2822 parsers and formatters with their quirks, the
@@ -370,6 +373,8 @@ noted:
   speaker masks, gapless decoding's details, what MP3 initialisation
   takes, and the coprocessor's error results. A console run of the same
   batches would measure them.
+- The Remote Play service's answer to sceRemoteplayInitialize (the HLE:
+  success).
 - The add-on content service's answers (the SKU, the boot param's attr,
   an empty list, "not found" for an add-on's info).
 - The flip event's data below bit 12 (it varies on the console; the HLE
@@ -377,6 +382,11 @@ noted:
 - The handles' values (the console's video out and pad handles are not
   small numbers; the HLE's are 1).
 - The GPU's 100 MHz reference clock for timestamps.
+- Which GPU event a compute ring's end-of-pipe interrupt raises: the HLE
+  raises its pipe's (0 to 6), as games register ids 0 to 6 beside 0x40,
+  one per compute pipe.
+- sceVideoOutGetResolutionStatus's 12 reserved bytes (zero on the
+  console, but not known to be written).
 - Which vertex of a fan's, quad's or polygon's triangle is the provoking
   one (flat-shaded parameters): the HLE's triangles keep the first vertex
   first. Where the v_cube* instructions put a direction exactly between
