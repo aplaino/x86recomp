@@ -175,6 +175,18 @@ HLE_NAMED("wbemprox.dll", "IWbemServices::CreateInstanceEnum", Svc_CreateInstanc
   return S_OK;
 }
 
+// (strQueryLanguage, strQuery, lFlags, pCtx, ppEnum): no class is served
+// to queries (the benchmark asks Win32_OperatingSystem and Win32_Processor
+// for its report and goes on without them).
+HLE_NAMED("wbemprox.dll", "IWbemServices::ExecQuery", Svc_ExecQuery, 6) {
+  Self<Services>(c, "IWbemServices");
+  uint32_t out = Arg(c, 5);
+  if (!out) return E_POINTER;
+  Wr32(out, 0);
+  WarnF("wbem: ExecQuery(%s): not available\n", Arg(c, 2) ? win32::Narrow(GWStr(Arg(c, 2))).c_str() : "");
+  return WBEM_E_INVALID_CLASS;
+}
+
 // ---- IEnumWbemClassObject -----------------------------------------------------
 
 HLE_NAMED("wbemprox.dll", "IEnumWbemClassObject::QueryInterface", Enum_QueryInterface, 3) {
