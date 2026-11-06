@@ -187,6 +187,9 @@ void Index(Code& c) {
 struct Scalars {
   uint32_t v[128] = {};
   bool known[128] = {};
+  // SCC, while it is a known carry or borrow (s_add_u32, s_sub_u32 and
+  // their chains): what s_addc_u32 and s_subb_u32 read for 64-bit sums.
+  bool scc = false, scc_known = false;
   bool Get(uint32_t r, uint32_t* out) const {
     if (r >= 128 || !known[r]) return false;
     *out = v[r];
@@ -282,6 +285,10 @@ struct Resolver {
   // Runs the scalar instruction at pc.
   bool Step(gaddr pc, const Instr& in) {
     const uint32_t w = in.w0;
+    // Scalar ALU instructions other than the carries below may write SCC.
+    const bool carry_known = s.scc_known, carry_in = s.scc;
+    if (in.fmt == Fmt::Sop1 || in.fmt == Fmt::Sop2 || in.fmt == Fmt::Sopk || in.fmt == Fmt::Sopc)
+      s.scc_known = false;
     switch (in.fmt) {
       case Fmt::Sop1: {
         const uint32_t d = (w >> 16) & 0x7F;
@@ -378,8 +385,26 @@ struct Resolver {
           return true;
         }
         switch (in.op) {
-          case 0: case 2: s.Set(d, a + b); break;
-          case 1: case 3: s.Set(d, a - b); break;
+          case 0:  // s_add_u32: SCC the carry
+            s.Set(d, a + b);
+            s.scc = a + b < a, s.scc_known = true;
+            break;
+          case 1:  // s_sub_u32: SCC the borrow
+            s.Set(d, a - b);
+            s.scc = b > a, s.scc_known = true;
+            break;
+          case 2: s.Set(d, a + b); break;
+          case 3: s.Set(d, a - b); break;
+          case 4: case 5: {  // s_addc_u32, s_subb_u32: with SCC's carry or borrow
+            if (!carry_known) {
+              s.Forget(d);
+              break;
+            }
+            const uint64_t r = in.op == 4 ? uint64_t(a) + b + carry_in : uint64_t(a) - b - carry_in;
+            s.Set(d, uint32_t(r));
+            s.scc = (r >> 32) != 0, s.scc_known = true;
+            break;
+          }
           case 14: s.Set(d, a & b); break;
           case 16: s.Set(d, a | b); break;
           case 18: s.Set(d, a ^ b); break;
@@ -1075,9 +1100,11 @@ struct Translator {
       Line("imageStore(" + img + ", " + c + ", " + (type == 'f' ? "uintBitsToFloat(" + val + ")" : type == 'i' ? "ivec4(" + val + ")" : val) + ");");
       return;
     }
-    if (in.op < 32 || in.op > 63) return Fail(pc, "an image instruction not translated yet");
-    // Samples: [offset] [bias] [compare] [derivatives] coordinates [lod].
-    const uint32_t v = in.op - 32;
+    if (in.op < 32 || in.op > 95) return Fail(pc, "an image instruction not translated yet");
+    // Samples and gathers: [offset] [bias] [compare] [derivatives]
+    // coordinates [lod].
+    const bool gather = in.op >= 64;
+    const uint32_t v = in.op - (gather ? 64 : 32);
     const bool offset = v >= 16, compare = (v & 8) != 0;
     const uint32_t mode = v & 7;  // 0 plain, 1 cl, 2 d, 3 d_cl, 4 l, 5 b, 6 b_cl, 7 lz
     if (mode == 1 || mode == 3 || mode == 6) return Fail(pc, "a sample with a level clamp not translated yet");
@@ -1118,6 +1145,33 @@ struct Translator {
     // Outside a pixel shader there are no derivatives: the level is 0,
     // biased or not.
     const bool pixel = st.stage == Stage::Pixel;
+    if (gather) {
+      // The 2x2 texels' one component (DMASK's one bit, through the T#'s
+      // destination select), or their comparisons, in the order GLSL's
+      // textureGather returns them, into four VGPRs. GLSL gathers from
+      // the first level: so only at level 0 (lz, or no derivatives) or
+      // from a texture of one level.
+      const uint32_t base = (ref.t[3] >> 12) & 0xF, last = (ref.t[3] >> 16) & 0xF;
+      if (volume) return Fail(pc, "a gather from a 3D texture");
+      if (mode != 7 && base != last && (pixel || mode == 4 || mode == 5))
+        return Fail(pc, "a gather from a texture of several levels, its level not known, not translated yet");
+      std::string value;
+      if (compare) {
+        if (((ref.s[0] >> 12) & 7) == 0) {
+          value = "floatBitsToUint(vec4(0.0))";
+        } else {
+          value = "floatBitsToUint(textureGather(" + t + ", " + vec + ", " + ref_z + "))";
+        }
+      } else {
+        if (dmask == 0 || (dmask & (dmask - 1))) return Fail(pc, "a gather of other than one component");
+        const uint32_t sel = (ref.t[3] >> (3 * uint32_t(std::countr_zero(dmask)))) & 7;
+        if (sel >= 4) value = cast + "(textureGather(" + t + ", " + vec + ", " + std::to_string(sel - 4) + "))";
+        else value = sel == 1 ? (type == 'f' ? "uvec4(0x3F800000u)" : "uvec4(1u)") : "uvec4(0u)";
+      }
+      Line("r_v4 = " + value + ";");
+      for (uint32_t i = 0; i < 4; i++) Line(V(vdata + i) + " = r_v4[" + std::to_string(i) + "];");
+      return;
+    }
     std::string call;
     if (compare) {
       if (volume) return Fail(pc, "a compare sample of a 3D texture");
@@ -1817,7 +1871,7 @@ struct Translator {
     for (auto& [pc, site] : res.sites)
       if (site.image == image) {
         const Instr& in = res.code().at.at(pc);
-        if (in.fmt == Fmt::Mimg && in.op >= 32 && in.op <= 63 && ((in.op - 32) & 8)) return true;
+        if (in.fmt == Fmt::Mimg && in.op >= 32 && in.op <= 95 && ((in.op - 32) & 8)) return true;
       }
     return false;
   }

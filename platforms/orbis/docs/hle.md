@@ -153,9 +153,11 @@ library.
   known (implicit, explicit, derivatives), cube image loads and cube
   samples with derivatives or offsets, draws into several slices at once,
   textures in rotated, thick and PRT tile modes and compressed ones in
-  linear modes, CB_COLOR_CONTROL modes other than normal (eliminating
-  fast clears, resolving, decompressing) and targets with CMASK fast
-  clears or FMASK compression. An unmapped texture reads as black. The
+  linear modes, CB_COLOR_CONTROL modes resolving and decompressing,
+  targets with FMASK compression, gathers from a texture of several
+  levels at a level not known, and fast clears of colour targets in
+  formats other than 16_16_16_16 float and 8_8_8_8 UNORM or with a
+  component swap. An unmapped texture reads as black. The
   tile mode table (GB_TILE_MODE0-31, GB_MACROTILE_MODE0-15) is
   the console's, read on firmware 11.00; its GB_ADDR_CONFIG read back 0,
   and the pipe interleave (256 bytes), pipes (8) and row size (1 KiB) are
@@ -164,7 +166,13 @@ library.
   target's HTILE (one that tracks depth alone) written in full as
   cleared, every tile's ZMASK 0, by a dispatch or DMA_DATA, clears the
   target to DB_DEPTH_CLEAR at its next draw; other HTILE writes are
-  fatal. The depth clear of DB_RENDER_CONTROL is modelled.
+  fatal. A colour target with CMASK fast clears (CB_COLORn_INFO's
+  FAST_CLEAR) is the same: its CMASK written in full as cleared (every
+  tile 0), or found so the first time it is drawn into, fills the
+  target with CB_COLORn_CLEAR_WORD0-1 at its next draw. Clears are
+  applied at once, so a draw eliminating fast clears (CB_COLOR_CONTROL
+  mode 2) draws nothing; one with another clear colour than the one
+  applied is fatal. The depth clear of DB_RENDER_CONTROL is modelled.
 - recomp_orbis_system also: libScePlayGo (the game is installed in full:
   every chunk local, nothing to do, ETAs 0, prefetching succeeds; the
   language mask is the service's answer for a console set to English,

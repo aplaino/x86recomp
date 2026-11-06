@@ -159,7 +159,8 @@ int main() {
     return 1;
   }
   p.vm.Init(&p.mem, 0x10000, uint64_t(1) << 36);
-  if (!p.vm.Reserve(kCode, 0x100000) || !p.vm.Commit(kCode, 0x100000, Prot::RW)) {
+  if (!p.vm.Reserve(kCode, 0x100000) || !p.vm.Commit(kCode, 0x100000, Prot::RW) ||
+      !p.vm.Reserve(0x100000000ull, 0x10000) || !p.vm.Commit(0x100000000ull, 0x10000, Prot::RW)) {
     std::printf("cannot commit guest memory\n");
     return 1;
   }
@@ -421,6 +422,66 @@ int main() {
     Run(kStoreXyAt, user, 16);
     Check(Rd32(kOut) == 0x89ABCDEFu && Rd32(kOut + 4) == 0x7FC00001u,
           "buffer_store_format_xy stores 32-bit components as they are");
+  }
+
+  // image_gather4_lz of component 0 from an 8x8 texture whose texel (x, y)
+  // is 8y + x (linear), at (3/8, 5/8): the 2x2 texels around it, (2, 5),
+  // (3, 5), (3, 4), (2, 4) in that order. The coordinates come from
+  // kOut + 16.
+  static const uint32_t kGather[] = {
+      0xE0340010, 0x80030100,  // buffer_load_dwordx2 v[1:2], off, s[12:15], 0 offset:16
+      0xBF8C0F70,              // s_waitcnt vmcnt(0)
+      0xF11C0100, 0x00400801,  // image_gather4_lz v[8:11], v[1:2], s[0:7], s[8:11] dmask:0x1
+      0xBF8C0F70,              // s_waitcnt vmcnt(0)
+      0xE0780000, 0x80030800,  // buffer_store_dwordx4 v[8:11], off, s[12:15], 0
+      0xBF810000,              // s_endpgm
+  };
+  constexpr gaddr kGatherAt = kCode + 0xC00, kGatherTex = kTex + 0x60000;
+  std::memcpy(GPtr(kGatherAt), kGather, sizeof kGather);
+  {
+    TextureLayout lay;
+    lay.index = 8;
+    lay.w = lay.h = lay.pitch = 8;
+    Level l;
+    LevelOf(lay, 0, &l);
+    for (uint32_t y = 0; y < 8; y++)
+      for (uint32_t x = 0; x < 8; x++) Wr32(kGatherTex + l.offset + 4 * (y * l.pitch + x), 8 * y + x);
+    uint32_t user[16] = {};
+    TSharp(user, kGatherTex, 8, 8, 9, 8, 0, 1);
+    VSharp(user + 12, kOut, 32);
+    const float at[2] = {3.0f / 8, 5.0f / 8};
+    std::memcpy(GPtr(kOut + 16), at, sizeof at);
+    for (uint32_t i = 0; i < 4; i++) Wr32(kOut + 4 * i, ~0u);
+    Run(kGatherAt, user, 16);
+    const uint32_t want[4] = {42, 43, 35, 34};
+    bool ok = true;
+    for (uint32_t i = 0; i < 4; i++) ok &= Rd32(kOut + 4 * i) == want[i];
+    if (!ok)
+      std::printf("  gather: %u %u %u %u\n", Rd32(kOut), Rd32(kOut + 4), Rd32(kOut + 8), Rd32(kOut + 12));
+    Check(ok, "image_gather4 returns the 2x2 texels in order");
+  }
+
+  // A scalar load from an address summed in two halves (s_add_u32, then
+  // s_addc_u32 with its carry): s[0:1] + 0x100 crosses 4 GiB when s0 is
+  // 0xFFFFFF00. The load reads the dword stored there by the test.
+  static const uint32_t kCarry[] = {
+      0x8002FF00, 0x00000100,  // s_add_u32 s2, s0, 0x100
+      0x82038001,              // s_addc_u32 s3, s1, 0
+      0xC0020300,              // s_load_dword s4, s[2:3], 0x0
+      0xBF8C007F,              // s_waitcnt lgkmcnt(0)
+      0x7E020204,              // v_mov_b32 v1, s4
+      0xE0700000, 0x80030100,  // buffer_store_dword v1, off, s[12:15], 0
+      0xBF810000,              // s_endpgm
+  };
+  constexpr gaddr kCarryAt = kCode + 0xD00, kCarryData = 0x100000000ull;
+  std::memcpy(GPtr(kCarryAt), kCarry, sizeof kCarry);
+  {
+    uint32_t user[16] = {0xFFFFFF00u, 0};
+    VSharp(user + 12, kOut, 16);
+    Wr32(kCarryData, 0x13579BDFu);
+    Wr32(kOut, 0);
+    Run(kCarryAt, user, 16);
+    Check(Rd32(kOut) == 0x13579BDFu, "s_addc_u32 adds s_add_u32's carry");
   }
 
   // An 8x8 texture of four levels, level n's texels n + 1 (linear), sampled

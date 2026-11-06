@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <functional>
@@ -151,6 +152,31 @@ gfx::SamplerDesc Sampler(const uint32_t s[4]) {
 
 // ---- state shared by draws and dispatches
 
+// A target's metadata in guest memory: a depth target's HTILE, a colour
+// target's CMASK. A write of all of it, from its start, in which every
+// tile reads as cleared (the bits `mask` picks out of each dword are 0) is
+// the fast clear, applied at the target's next draw; other writes into it
+// are not modelled. Writes the CPU sees are read at that draw (MetaCheck);
+// a dispatch's write of all of it is kept in a GPU buffer and applied
+// there instead (MetaOf, MetaTest), then checked at the next submission.
+struct Meta {
+  gaddr base = 0;      // 0: none
+  uint32_t mask = 0;   // 0: its clears are not modelled
+  bool clear = false;  // it says cleared, not applied yet
+  gaddr written = 0;   // a write into it, checked at the target's next draw
+  uint64_t written_size = 0;
+  gfx::BufferId buf = 0;
+  uint32_t buf_size = 0;
+  bool gpu = false, verify = false;
+};
+// A colour target's CMASK (kept by its address: the target's image may
+// be replaced) and the clear colour (CB_COLORn_CLEAR_WORD0-1) its last
+// fast clear was applied with, while no draw has eliminated it.
+struct Cmask {
+  Meta meta;
+  uint32_t words[2] = {};
+  bool applied = false;
+};
 struct Target {
   gaddr addr;
   uint32_t w, h;
@@ -176,16 +202,9 @@ struct DepthTarget {
   gfx::DepthId depth;
   gaddr stencil;  // DB_STENCIL_READ_BASE (0: no stencil)
   uint32_t layers;  // 0: 2D; else a 2D array of them
-  gaddr htile = 0;  // DB_HTILE_DATA_BASE (0: none)
-  bool htile_stencil = false;  // the HTILE tracks stencil too
-  bool htile_clear = false;  // its HTILE says cleared, not applied yet
-  gaddr written = 0;           // a write into its HTILE, checked at its next draw
-  uint64_t written_size = 0;
-  // A dispatch's write of its HTILE, also kept here: its next draw applies
-  // it on the GPU (HtileClear), and the next submission checks it.
-  gfx::BufferId htile_buf = 0;
-  uint32_t htile_buf_size = 0;
-  bool htile_gpu = false, htile_verify = false;
+  // DB_HTILE_DATA_BASE; its clears are modelled while it tracks depth
+  // alone (ZMASK, bits 0-3).
+  Meta htile;
 };
 // Guest memory a GPU copy is made from, compared once a submission
 // (Changed).
@@ -218,8 +237,10 @@ struct State {
   std::vector<Target> targets;
   std::vector<TargetView> views;
   gfx::ProgramId stencil_program = 0;  // SampledStencil's
-  gfx::ProgramId htile_test = 0, htile_clear = 0;  // HtileClear's
-  gfx::BufferId htile_draw = 0;
+  std::map<uint32_t, gfx::ProgramId> meta_tests;  // MetaTest's, by mask
+  gfx::BufferId meta_draw = 0;
+  gfx::ProgramId htile_clear = 0, color_clear = 0;  // HtileClear's, ColorClear's
+  std::map<gaddr, Cmask> cmasks;
   gfx::ProgramId strip_program = 0;    // StripProgram's
   // Geometry shaders' GPU buffers: the ESGS and GSVS rings, the GS's
   // emits, the copy shader's draw (DrawGeometry); their sizes.
@@ -414,7 +435,7 @@ DepthTarget* DepthTargetAt(State& s, gaddr addr, uint32_t w, uint32_t h, Format 
                                 [&](const DepthTarget& d) {
                                   if (d.addr != addr) return false;
                                   s.dev->DestroyDepth(d.depth);
-                                  if (d.htile_buf) s.dev->DestroyBuffer(d.htile_buf);
+                                  if (d.htile.buf) s.dev->DestroyBuffer(d.htile.buf);
                                   return true;
                                 }),
                  s.depths.end());
@@ -426,73 +447,86 @@ DepthTarget* DepthTargetAt(State& s, gaddr addr, uint32_t w, uint32_t h, Format 
   return &s.depths.back();
 }
 
-// Guest memory a dispatch or a DMA wrote: a depth target's HTILE written
-// from its start with every tile's ZMASK (bits 0-3) 0 is the fast clear
-// (each tile reads as DB_DEPTH_CLEAR), applied at the target's next draw.
-// HTILE that tracks depth alone; other writes into it are not modelled.
-// Read at that draw (HtileCheck); a dispatch's write of a whole HTILE is
-// applied on the GPU instead (HtileOf, HtileClear).
-void HtileWritten(State& s, gaddr base, uint64_t size) {
-  for (DepthTarget& d : s.depths) {
-    if (!d.htile || d.htile < base || d.htile >= base + size) continue;
-    d.written = base;
-    d.written_size = size;
-    d.htile_gpu = d.htile_verify = false;
-  }
+// Every target's metadata (Meta).
+template <typename F>
+void ForEachMeta(State& s, F f) {
+  for (DepthTarget& d : s.depths) f(d.htile);
+  for (auto& [base, c] : s.cmasks) f(c.meta);
 }
 
-// The same, written to the target's HTILE buffer too (HtileOf).
-void HtileGpuWritten(State& s, gaddr base, uint64_t size) {
-  for (DepthTarget& d : s.depths) {
-    if (d.htile != base) continue;
-    d.written = base;
-    d.written_size = size;
-    d.htile_gpu = d.htile_verify = true;
-  }
+// Guest memory a dispatch or a DMA wrote.
+void MetaWritten(State& s, gaddr base, uint64_t size) {
+  ForEachMeta(s, [&](Meta& m) {
+    if (!m.base || m.base < base || m.base >= base + size) return;
+    m.written = base;
+    m.written_size = size;
+    m.gpu = m.verify = false;
+  });
 }
 
-bool HtileCleared(const DepthTarget& d, gaddr base, uint64_t size) {
+// The same, written to the metadata's GPU buffer too (MetaOf).
+void MetaGpuWritten(State& s, gaddr base, uint64_t size) {
+  ForEachMeta(s, [&](Meta& m) {
+    if (m.base != base) return;
+    m.written = base;
+    m.written_size = size;
+    m.gpu = m.verify = true;
+  });
+}
+
+bool MetaCleared(const Meta& m, gaddr base, uint64_t size) {
   BeforeRead(base, size);
   const uint8_t* p = GPtr(base);
-  bool clear = d.htile == base && !d.htile_stencil;
-  for (uint64_t i = 0; clear && i + 4 <= size; i += 4) clear = !(p[i] & 0xF);
-  if (!clear) FatalF("GPU: an HTILE write other than a full depth clear is not modelled yet");
+  bool clear = m.base == base && m.mask;
+  for (uint64_t i = 0; clear && i + 4 <= size; i += 4) {
+    uint32_t w;
+    std::memcpy(&w, p + i, 4);
+    clear = !(w & m.mask);
+  }
+  if (!clear)
+    FatalF("GPU: a write of an HTILE or CMASK (at %llX) other than a full clear is not modelled yet",
+           (unsigned long long)m.base);
   return clear;
 }
 
-void HtileCheck(DepthTarget& d) {
-  if (!d.written_size || d.htile_verify) return;
-  d.htile_clear = HtileCleared(d, d.written, d.written_size);
-  d.written_size = 0;
+void MetaCheck(Meta& m) {
+  if (!m.written_size || m.verify) return;
+  m.clear = MetaCleared(m, m.written, m.written_size);
+  m.written_size = 0;
 }
 
-// The depth target whose whole HTILE a dispatch writes at base, if it
-// tracks depth alone: kept in its GPU buffer too (HtileClear).
-DepthTarget* HtileOf(State& s, gaddr base, uint32_t size) {
-  for (DepthTarget& d : s.depths) {
-    if (d.htile != base || d.htile_stencil) continue;
-    if (d.htile_buf_size < size) {
-      if (d.htile_buf) s.dev->DestroyBuffer(d.htile_buf);
-      d.htile_buf = s.dev->CreateBuffer(size);
-      d.htile_buf_size = d.htile_buf ? size : 0;
-    }
-    return d.htile_buf ? &d : nullptr;
+// The metadata whose whole a dispatch writes at base, if its clears are
+// modelled: kept in its GPU buffer too (MetaTest).
+Meta* MetaOf(State& s, gaddr base, uint32_t size) {
+  Meta* found = nullptr;
+  ForEachMeta(s, [&](Meta& m) {
+    if (!found && m.base == base && m.mask) found = &m;
+  });
+  if (!found) return nullptr;
+  if (found->buf_size < size) {
+    if (found->buf) s.dev->DestroyBuffer(found->buf);
+    found->buf = s.dev->CreateBuffer(size);
+    found->buf_size = found->buf ? size : 0;
   }
-  return nullptr;
+  return found->buf ? found : nullptr;
 }
 
-// Applies a dispatch's write of d's HTILE at its next draw without
-// waiting for it: one program turns the HTILE into an indexed indirect
-// draw of a triangle if every tile's ZMASK is 0 (HtileCleared), of none
-// otherwise, and that triangle writes the clear depth over each layer.
-void HtileClear(State& s, DepthTarget& d, float z) {
-  if (!s.htile_test) {
+// Applies a dispatch's write of m at the target's next draw without
+// waiting for it: one program turns the metadata into an indexed indirect
+// draw (s.meta_draw) of a triangle if every tile reads as cleared
+// (MetaCleared), of none otherwise; that triangle then writes the clear
+// value (HtileClear, ColorClear). False if the device cannot run it.
+bool MetaTest(State& s, const Meta& m) {
+  gfx::ProgramId& test = s.meta_tests[m.mask];
+  if (!test) {
+    char mask[16];
+    std::snprintf(mask, sizeof mask, "0x%Xu", m.mask);
     gfx::ProgramDesc pd;
-    pd.cs.glsl =
+    pd.cs.glsl = std::string(
         "shared uint masks[64];\n"
         "void main() {\n"
         "  uint lane = gl_LocalInvocationID.x, n = r_buf[0].y / 4u, m = 0u;\n"
-        "  for (uint i = lane; i < n; i += 64u) m |= r_ld(0u, i) & 0xFu;\n"
+        "  for (uint i = lane; i < n; i += 64u) m |= r_ld(0u, i) & ") + mask + ";\n"
         "  masks[lane] = m;\n"
         "  barrier();\n"
         "  if (lane != 0u) return;\n"
@@ -508,27 +542,39 @@ void HtileClear(State& s, DepthTarget& d, float z) {
     pd.cs.buffers = 1;
     pd.cs.rw_buffers = 1;
     pd.local_size[0] = 64;
-    s.htile_test = s.dev->CreateProgram(pd);
-    pd = {};
-    pd.vs.glsl =
-        "void main() {\n"
-        "  gl_Position = vec4(float((gl_VertexIndex & 1) * 4 - 1), float((gl_VertexIndex & 2) * 2 - 1), 0.0, 1.0);\n"
-        "}\n";
+    test = s.dev->CreateProgram(pd);
+  }
+  if (!s.meta_draw) s.meta_draw = s.dev->CreateBuffer(64);
+  if (!test || !s.meta_draw) return false;
+  const gfx::BufferData in{nullptr, m.buf_size, m.buf};
+  const gfx::RwBufferData out{nullptr, 64, s.meta_draw};
+  gfx::ProgramDispatch t;
+  t.program = test;
+  t.cs.buffers = &in;
+  t.rw_buffers = &out;
+  s.dev->DispatchProgram(t);
+  return true;
+}
+
+// A triangle over a whole target (with three vertices, or s.meta_draw's).
+constexpr const char* kFullScreenVs =
+    "void main() {\n"
+    "  gl_Position = vec4(float((gl_VertexIndex & 1) * 4 - 1), float((gl_VertexIndex & 2) * 2 - 1), 0.0, 1.0);\n"
+    "}\n";
+
+// Writes the clear depth over each layer of d where MetaTest found its
+// HTILE cleared.
+void HtileClear(State& s, DepthTarget& d, float z) {
+  if (!s.htile_clear) {
+    gfx::ProgramDesc pd;
+    pd.vs.glsl = kFullScreenVs;
     pd.fs.glsl =
         "layout(std140, R_UNIFORMS) uniform RClear { vec4 r_clear; };\n"
         "void main() { gl_FragDepth = r_clear.x; }\n";
     pd.fs.uniform_bytes = 16;
     s.htile_clear = s.dev->CreateProgram(pd);
-    s.htile_draw = s.dev->CreateBuffer(64);
   }
-  if (!s.htile_test || !s.htile_clear || !s.htile_draw) return;
-  const gfx::BufferData in{nullptr, d.htile_buf_size, d.htile_buf};
-  const gfx::RwBufferData out{nullptr, 64, s.htile_draw};
-  gfx::ProgramDispatch t;
-  t.program = s.htile_test;
-  t.cs.buffers = &in;
-  t.rw_buffers = &out;
-  s.dev->DispatchProgram(t);
+  if (!s.htile_clear || !MetaTest(s, d.htile)) return;
   const float u[4] = {z, 0, 0, 0};
   gfx::ProgramDraw c;
   c.program = s.htile_clear;
@@ -537,12 +583,86 @@ void HtileClear(State& s, DepthTarget& d, float z) {
   c.scissor = {0, 0, int32_t(d.w), int32_t(d.h)};
   c.state.depth_test = c.state.depth_write = true;
   c.state.depth_compare = gfx::CompareOp::Always;
-  c.indirect = s.htile_draw;
+  c.indirect = s.meta_draw;
   c.fs.uniforms = u;
   for (uint32_t i = 0; i < std::max(d.layers, 1u); i++) {
     c.depth_layer = int(i);
     s.dev->DrawProgram(c);
   }
+}
+
+// Fills a colour target with a clear colour (CB_COLORn_CLEAR_WORD0-1: the
+// target's format's bits), where MetaTest found its CMASK cleared
+// (indirect) or at once. The program unpacks the words in the target's
+// format: four halves, or four UNORM bytes.
+void ColorClear(State& s, const Target& t, const uint32_t words[2], bool indirect) {
+  uint32_t kind;
+  if (t.fmt == Format::A16B16G16R16F) kind = 0;
+  else if (t.fmt == Format::R8G8B8A8) kind = 1;
+  else FatalF("GPU: a fast clear of a colour target of format %d is not drawn yet", int(t.fmt));
+  if (t.swap) FatalF("GPU: a fast clear of a colour target with a component swap is not drawn yet");
+  if (!s.color_clear) {
+    gfx::ProgramDesc pd;
+    pd.vs.glsl = kFullScreenVs;
+    pd.fs.glsl =
+        "layout(std140, R_UNIFORMS) uniform RClear { uvec4 r_clear; };\n"
+        "layout(location = 0) out vec4 r_color0;\n"
+        "void main() {\n"
+        "  r_color0 = r_clear.z == 0u ? vec4(unpackHalf2x16(r_clear.x), unpackHalf2x16(r_clear.y))\n"
+        "                             : unpackUnorm4x8(r_clear.x);\n"
+        "}\n";
+    pd.fs.uniform_bytes = 16;
+    s.color_clear = s.dev->CreateProgram(pd);
+  }
+  if (!s.color_clear) return;
+  const uint32_t u[4] = {words[0], words[1], kind, 0};
+  gfx::ProgramDraw c;
+  c.program = s.color_clear;
+  c.targets[0] = {t.tex, 0};
+  c.viewport = {0, 0, t.w, t.h, 0.0f, 1.0f};
+  c.scissor = {0, 0, int32_t(t.w), int32_t(t.h)};
+  if (indirect) c.indirect = s.meta_draw;
+  else c.vertex_count = 3;
+  c.fs.uniforms = u;
+  s.dev->DrawProgram(c);
+}
+
+// A draw into colour target tex with CMASK fast clears (CB_COLORn_INFO's
+// FAST_CLEAR; cb: its CB_COLORn_* registers): a fast clear of its CMASK
+// since is applied with the clear colour the draw has. A CMASK seen the
+// first time is read as it is (a clear before the target's first draw).
+// A draw that eliminates fast clears (CB_COLOR_CONTROL's MODE 2) leaves
+// the image as it is, since clears are applied at once: on the console it
+// writes the clear colour its registers have then into the tiles still
+// cleared, which must be the colour applied.
+void CmaskDraw(State& s, gfx::TextureId tex, const uint32_t* cb, bool eliminate) {
+  const auto t = std::find_if(s.targets.begin(), s.targets.end(),
+                              [&](const Target& g) { return g.tex == tex; });
+  if (t == s.targets.end()) return;
+  const gaddr base = uint64_t(cb[7]) << 8;  // CB_COLORn_CMASK
+  auto [it, first] = s.cmasks.try_emplace(base);
+  Cmask& c = it->second;
+  if (first) {
+    c.meta.base = base;
+    c.meta.mask = ~0u;  // a cleared tile is 0
+    c.meta.written = base;
+    // CB_COLORn_CMASK_SLICE's TILE_MAX: 128x128-pixel blocks, 128 bytes each.
+    c.meta.written_size = uint64_t((cb[8] & 0x3FFF) + 1) * 128;
+  }
+  MetaCheck(c.meta);
+  const uint32_t words[2] = {cb[11], cb[12]};
+  if (c.meta.gpu || c.meta.clear) {
+    ColorClear(s, *t, words, c.meta.gpu);
+    c.meta.gpu = c.meta.clear = false;
+    c.words[0] = words[0];
+    c.words[1] = words[1];
+    c.applied = true;
+  }
+  if (!eliminate) return;
+  if (c.applied && (c.words[0] != words[0] || c.words[1] != words[1]))
+    FatalF("GPU: a fast clear eliminated with another clear colour than it was drawn with is not "
+           "modelled yet");
+  c.applied = false;
 }
 
 // A colour target holds its components in the shader's order; in memory
@@ -918,7 +1038,7 @@ struct Bound {
   std::vector<gfx::ColorTarget> images;
   std::vector<uint32_t> uniforms;
   gfx::ProgramResources res;
-  std::vector<gaddr> htiles;  // HTILEs written to their GPU buffers (HtileOf)
+  std::vector<gaddr> metas;  // metadata written to their GPU buffers (MetaOf)
 };
 // A guest range kept in a GPU buffer instead (a geometry shader's ring).
 struct GpuRange {
@@ -945,10 +1065,10 @@ void Bind(State& s, const StageState& st, const Resolved& r, Bound& b,
       continue;
     }
     const bool ok = Readable(br.base, br.size);
-    DepthTarget* ht = rw && ok ? HtileOf(s, br.base, br.size) : nullptr;
-    if (ht) {
-      b.rw.push_back({GPtr(br.base), br.size, ht->htile_buf, true});
-      b.htiles.push_back(br.base);
+    Meta* m = rw && ok ? MetaOf(s, br.base, br.size) : nullptr;
+    if (m) {
+      b.rw.push_back({GPtr(br.base), br.size, m->buf, true});
+      b.metas.push_back(br.base);
       continue;
     }
     if (rw) b.rw.push_back({ok ? GPtr(br.base) : nullptr, ok ? br.size : 0});
@@ -1404,17 +1524,17 @@ void Draw(const Regs& r, const DrawCall& call) {
   // CB_COLOR_CONTROL's MODE is CB_DISABLE), the depth.
   gfx::ProgramDraw d;
   int ntargets = 0;
-  // CB_COLOR_CONTROL's MODE: 0 disabled, 1 normal; the others (eliminating
-  // fast clears, resolving, decompressing) and targets with CMASK fast
-  // clears (CB_COLORn_INFO.FAST_CLEAR) or FMASK compression are not drawn.
+  // CB_COLOR_CONTROL's MODE: 0 disabled, 1 normal, 2 eliminating fast
+  // clears (CmaskDraw: nothing else is drawn); the others (resolving,
+  // decompressing) and targets with FMASK compression are not drawn.
   const uint32_t cb_mode = (cx[kCbColorControl] >> 4) & 7;
-  if (cb_mode > 1) FatalF("GPU: CB_COLOR_CONTROL mode %u is not drawn yet", cb_mode);
+  if (cb_mode > 2) FatalF("GPU: CB_COLOR_CONTROL mode %u is not drawn yet", cb_mode);
   for (int i = 0; i < 4 && cb_mode; i++) {
     const uint32_t* cb = cx + kCbColor0Base + 0xF * i;
     if (((cb[4] >> 2) & 0x1F) == 0) break;
-    if (cb[4] & (3u << 13))
-      FatalF("GPU: colour target %d with fast clears or compression (CB_COLOR_INFO %08X) is not "
-             "drawn yet", i, cb[4]);
+    if (cb[4] & (1u << 14))
+      FatalF("GPU: colour target %d with compression (CB_COLOR_INFO %08X) is not drawn yet", i,
+             cb[4]);
     Format fmt;
     if (!ColorFormat(cb[4], &fmt)) {
       FatalF("GPU: colour target format %u, number type %u is not drawn yet", (cb[4] >> 2) & 0x1F,
@@ -1430,8 +1550,11 @@ void Draw(const Regs& r, const DrawCall& call) {
     if (swap && cf == 7)
       FatalF("GPU: a colour target's component swap is not drawn yet (three components)");
     d.targets[i] = {ColorTarget(s, uint64_t(cb[0]) << 8, pitch, height, fmt, four ? swap : 0), 0};
+    if (cb[4] & (1u << 13)) CmaskDraw(s, d.targets[i].tex, cb, cb_mode == 2);
+    else if (cb_mode == 2) FatalF("GPU: a fast clear eliminated without FAST_CLEAR is not drawn yet");
     ntargets++;
   }
+  if (cb_mode == 2) return;
   const uint32_t zfmt = cx[kDbZInfo] & 3;
   const bool stencil = cx[kDbStencilInfo] & 1;
   if (zfmt) {
@@ -1445,15 +1568,16 @@ void Draw(const Regs& r, const DrawCall& call) {
                                     stencil ? uint64_t(cx[kDbStencilReadBase]) << 8 : 0,
                                     last ? last + 1 : 0);
     d.depth = dt->depth;
-    HtileCheck(*dt);
-    if (dt->htile_gpu) {
-      dt->htile_gpu = false;
+    MetaCheck(dt->htile);
+    if (dt->htile.gpu) {
+      dt->htile.gpu = false;
       HtileClear(s, *dt, AsFloat(cx[kDbDepthClear]));
     }
-    dt->htile = (cx[kDbZInfo] & (1u << 29)) ? uint64_t(cx[kDbHtileDataBase]) << 8 : 0;
-    dt->htile_stencil = stencil && !(cx[kDbStencilInfo] & (1u << 29));  // TILE_STENCIL_DISABLE
-    if (dt->htile_clear) {
-      dt->htile_clear = false;
+    dt->htile.base = (cx[kDbZInfo] & (1u << 29)) ? uint64_t(cx[kDbHtileDataBase]) << 8 : 0;
+    // TILE_STENCIL_DISABLE off: it tracks stencil too.
+    dt->htile.mask = stencil && !(cx[kDbStencilInfo] & (1u << 29)) ? 0 : 0xF;
+    if (dt->htile.clear) {
+      dt->htile.clear = false;
       for (uint32_t i = 0; i < std::max(dt->layers, 1u); i++)
         s.dev->ClearDepth(d.depth, AsFloat(cx[kDbDepthClear]), -1, int(i));
     }
@@ -1713,17 +1837,17 @@ void Dispatch(const Regs& r, const uint32_t groups[3]) {
   }
   for (const BufferRange& br : rc.buffers)
     if (br.written) {
-      if (std::find(b.htiles.begin(), b.htiles.end(), br.base) == b.htiles.end())
-        HtileWritten(s, br.base, br.size);
+      if (std::find(b.metas.begin(), b.metas.end(), br.base) == b.metas.end())
+        MetaWritten(s, br.base, br.size);
       else
-        HtileGpuWritten(s, br.base, br.size);
+        MetaGpuWritten(s, br.base, br.size);
       KeptWritten(s, br.base, br.size);
     }
 }
 
 void MemoryWritten(gaddr base, uint64_t size) {
   std::lock_guard<std::mutex> l(G().mu);
-  HtileWritten(G(), base, size);
+  MetaWritten(G(), base, size);
   KeptWritten(G(), base, size);
 }
 
@@ -1732,14 +1856,14 @@ void NextSubmission() {
   State& s = G();
   s.submission++;
   if (!s.dev) return;
-  // The HTILE writes applied on the GPU, landed by now: only to warn about
-  // those that were no full clears.
-  for (DepthTarget& d : s.depths) {
-    if (!d.htile_verify || d.htile_gpu) continue;
-    d.htile_verify = false;
-    HtileCleared(d, d.written, d.written_size);
-    d.written_size = 0;
-  }
+  // The metadata writes applied on the GPU, landed by now: only to stop
+  // at those that were no full clears.
+  ForEachMeta(s, [](Meta& m) {
+    if (!m.verify || m.gpu) return;
+    m.verify = false;
+    MetaCleared(m, m.written, m.written_size);
+    m.written_size = 0;
+  });
   for (gfx::BufferId b : s.retired) s.dev->DestroyBuffer(b);
   s.retired.clear();
   for (auto it = s.kept.begin(); it != s.kept.end();) {
