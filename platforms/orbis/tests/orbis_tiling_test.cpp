@@ -4,6 +4,7 @@
 // texture levels and slices lie where the firmware's (11.00) GL library
 // puts them.
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -90,6 +91,25 @@ void ExpectSliceAt(const TextureLayout& t, uint32_t slice, uint32_t x, uint32_t 
   if (got != byte) {
     std::printf("FAIL: slice %u (%u,%u) at byte %llu, want %llu\n", slice, x, y,
                 (unsigned long long)got, (unsigned long long)byte);
+    failures++;
+  }
+}
+
+// Element (x, y, z) of a 3D texture t's level 0 (bpe-byte elements) is at
+// byte `byte` from the level's start: the only element a marker there
+// detiles to.
+void ExpectThickAt(TextureLayout t, uint32_t bpe, uint32_t x, uint32_t y, uint32_t z, uint64_t byte) {
+  t.bpe = bpe;
+  Level l;
+  LevelOf(t, 0, &l);
+  std::vector<uint8_t> src(l.slice_bytes * l.depth), dst(uint64_t(l.w) * l.h * bpe);
+  if (byte + bpe <= src.size()) std::memset(&src[byte], 0xAB, bpe);
+  DetileSlice(l, bpe, z, src.data(), dst.data(), l.w * bpe);
+  const uint8_t* at = &dst[(uint64_t(y) * l.w + x) * bpe];
+  const bool ok = byte + bpe <= src.size() && std::count(dst.begin(), dst.end(), 0xAB) == int(bpe) &&
+                  std::count(at, at + bpe, 0xAB) == int(bpe);
+  if (!ok) {
+    std::printf("FAIL: thick bpe %u (%u,%u,%u) not at byte %llu\n", bpe, x, y, z, (unsigned long long)byte);
     failures++;
   }
 }
@@ -199,6 +219,41 @@ int main() {
   ExpectSliceAt(t, 1, 8, 0, 80128);
   ExpectSliceAt(t, 2, 0, 0, 159744);
   ExpectSliceAt(t, 3, 9, 9, 223244);
+  // A 3D texture in 1D thick (19), 16x16x16: micro tiles of 8x8x4, the
+  // depth padded to four (levels 2-4), each element size's order inside
+  // them (values from the firmware's (11.00) GL library).
+  t = {};
+  t.index = 19;
+  t.w = t.h = t.pitch = t.depth = 16;
+  t.volume = true;
+  ExpectLevel(t, 0, 0, 16384, "thick");
+  ExpectLevel(t, 1, 16384, 2048, "thick");
+  ExpectLevel(t, 2, 18432, 1024, "thick");
+  ExpectLevel(t, 4, 20480, 1024, "thick");
+  static const struct {
+    uint32_t bpe, x, y, z;
+    uint64_t byte;
+  } kThick[] = {
+      {1, 1, 0, 0, 1},    {1, 0, 1, 0, 2},    {1, 2, 0, 0, 4},     {1, 0, 2, 0, 8},
+      {1, 0, 0, 1, 16},   {1, 0, 0, 2, 32},   {1, 4, 0, 0, 64},    {1, 0, 4, 0, 128},
+      {1, 8, 0, 0, 256},  {1, 0, 8, 0, 512},  {1, 0, 0, 4, 1024},  {1, 3, 5, 6, 1191},
+      {4, 1, 0, 0, 4},    {4, 0, 1, 0, 8},    {4, 2, 0, 0, 16},    {4, 0, 0, 1, 32},
+      {4, 0, 2, 0, 64},   {4, 0, 0, 2, 128},  {4, 0, 0, 3, 160},   {4, 4, 0, 0, 256},
+      {4, 0, 4, 0, 512},  {4, 8, 0, 0, 1024}, {4, 0, 8, 0, 2048},  {4, 0, 0, 4, 4096},
+      {8, 1, 0, 0, 8},    {8, 0, 1, 0, 16},   {8, 0, 0, 1, 32},    {8, 2, 0, 0, 64},
+      {8, 0, 2, 0, 128},  {8, 0, 0, 2, 256},  {8, 0, 0, 4, 8192},  {8, 3, 5, 6, 9560},
+  };
+  for (const auto& e : kThick) ExpectThickAt(t, e.bpe, e.x, e.y, e.z, e.byte);
+  // Thick modes are not read for other textures yet.
+  t.volume = false;
+  t.depth = 1;
+  {
+    Level l;
+    if (LevelOf(t, 0, &l)) {
+      std::printf("FAIL: a 2D texture in a thick mode is read\n");
+      failures++;
+    }
+  }
   if (failures) return 1;
   std::printf("orbis_tiling: ok\n");
   return 0;

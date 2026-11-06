@@ -25,6 +25,7 @@ struct TextureLayout {
   bool depth_format = false;  // a 16 or 32-bit data format (not 3D): pads as depth
   uint32_t w = 1, h = 1, pitch = 1;  // level 0, in texels (PITCH)
   uint32_t depth = 1;   // a 3D texture's (else 1)
+  bool volume = false;  // a 3D texture (thick modes tile its depth)
   uint32_t slices = 1;  // array slices, 6 per cube (1 for 3D)
 };
 

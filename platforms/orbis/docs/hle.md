@@ -178,8 +178,10 @@ library.
   level clamp, offsets into a texture of several levels at a level not
   known (implicit, explicit, derivatives), cube image loads and cube
   samples with derivatives or offsets, draws into several slices at once,
-  textures in rotated, thick and PRT tile modes and compressed ones in
-  linear modes, CB_COLOR_CONTROL modes resolving and decompressing,
+  textures in rotated and PRT tile modes, textures other than 3D ones in
+  thick modes (a 3D texture in 1D thick is tiled in 8x8x4 micro tiles,
+  its depth padded to 4, as the GL library does; a compressed one takes
+  1D thin), 2D thick modes, compressed textures in linear modes, CB_COLOR_CONTROL modes resolving and decompressing,
   targets with FMASK compression, gathers from a texture of several
   levels at a level not known, and fast clears of colour targets in
   formats other than 16_16_16_16 float and 8_8_8_8 UNORM or with a

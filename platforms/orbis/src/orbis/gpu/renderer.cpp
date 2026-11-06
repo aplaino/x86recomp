@@ -944,6 +944,7 @@ gfx::TextureId TextureFor(State& s, const ImageRef& ref) {
       break;
     case 10:
       lay.depth = (t[4] & 0x1FFF) + 1;
+      lay.volume = true;
       desc.kind = gfx::TextureKind::Tex3D;
       break;
     default: FatalF("GPU: texture type %u (1D, multisampled) is not drawn yet", type);

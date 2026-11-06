@@ -28,8 +28,8 @@ constexpr uint32_t kMacroTileModes[16] = {0xE8, 0xD4, 0xD0, 0xD0, 0x80, 0x40, 0x
 constexpr uint32_t kPipeInterleaveBits = 8;  // 256 bytes
 
 // GB_TILE_MODE's ARRAY_MODE and MICRO_TILE_MODE_NEW values read here.
-enum : uint32_t { kLinearGeneral = 0, kLinearAligned = 1, k1dThin = 2, k2dThin = 4 };
-enum : uint32_t { kMicroDisplay = 0, kMicroThin = 1, kMicroDepth = 2 };
+enum : uint32_t { kLinearGeneral = 0, kLinearAligned = 1, k1dThin = 2, k1dThick = 3, k2dThin = 4 };
+enum : uint32_t { kMicroDisplay = 0, kMicroThin = 1, kMicroDepth = 2, kMicroThick = 4 };
 
 uint32_t Log2(uint32_t v) {
   uint32_t n = 0;
@@ -62,6 +62,11 @@ bool Lookup(uint32_t index, uint32_t bpe, Mode* out) {
   md.array = (r >> 2) & 0xF;
   md.micro = (r >> 22) & 7;
   if (md.array == kLinearGeneral || md.array == kLinearAligned) {
+    *out = md;
+    return true;
+  }
+  if (md.array == k1dThick) {
+    if (md.micro != kMicroThick) return false;
     *out = md;
     return true;
   }
@@ -110,6 +115,19 @@ uint32_t MicroIndex(uint32_t micro, uint32_t bpe, uint32_t x, uint32_t y) {
     default:
       return x0 | y0 << 1 | x1 << 2 | x2 << 3 | y1 << 4 | y2 << 5;
   }
+}
+
+// An element's index inside its 8x8x4 thick micro tile, by element size:
+// 1 and 2 bytes x0 y0 x1 y1 z0 z1 x2 y2, 4 bytes x0 y0 x1 z0 y1 z1 x2 y2,
+// 8 and 16 bytes x0 y0 z0 x1 y1 z1 x2 y2.
+uint32_t ThickIndex(uint32_t bpe, uint32_t x, uint32_t y, uint32_t z) {
+  const uint32_t x0 = Bit(x, 0), x1 = Bit(x, 1), x2 = Bit(x, 2);
+  const uint32_t y0 = Bit(y, 0), y1 = Bit(y, 1), y2 = Bit(y, 2);
+  const uint32_t z0 = Bit(z, 0), z1 = Bit(z, 1);
+  const uint32_t high = x2 << 6 | y2 << 7;
+  if (bpe <= 2) return x0 | y0 << 1 | x1 << 2 | y1 << 3 | z0 << 4 | z1 << 5 | high;
+  if (bpe == 4) return x0 | y0 << 1 | x1 << 2 | z0 << 3 | y1 << 4 | z1 << 5 | high;
+  return x0 | y0 << 1 | z0 << 2 | x1 << 3 | y1 << 4 | z1 << 5 | high;
 }
 
 uint32_t PaddedPitch(const Mode& md, uint32_t pitch) {
@@ -218,6 +236,13 @@ bool LevelLayout(const TextureLayout& t, uint32_t level, Level* out) {
   Mode md;
   if (!Lookup(index, t.bpe, &md)) return false;
   if (t.blocks && (md.array == kLinearGeneral || md.array == kLinearAligned)) return false;
+  // Thick modes tile uncompressed 3D textures; compressed ones take the 1D
+  // thin mode. Other textures in thick modes are not read yet.
+  if (md.array == k1dThick && !t.volume) return false;
+  if (md.array == k1dThick && t.blocks) {
+    index = 13;
+    if (!Lookup(index, t.bpe, &md)) return false;
+  }
   if (md.array == k2dThin && level && (pitch < md.m.pitch || h < md.m.height)) {
     if (!OneD(md.micro, &index) || !Lookup(index, t.bpe, &md)) return false;
   }
@@ -233,6 +258,12 @@ bool LevelLayout(const TextureLayout& t, uint32_t level, Level* out) {
       bytes = uint64_t(pitch) * h * t.bpe;
       break;
     }
+    case k1dThick:  // micro tiles of four slices: the depth padded to them
+      pitch = Align(pitch, 8);
+      h = Align(h, 8);
+      d = Align(d, 4);
+      bytes = uint64_t(pitch) * h * t.bpe;
+      break;
     case k1dThin:
       pitch = Align(pitch, 8);
       h = Align(h, 8);
@@ -261,14 +292,14 @@ bool LevelLayout(const TextureLayout& t, uint32_t level, Level* out) {
 
 uint64_t TiledBytes(uint32_t index, uint32_t pitch, uint32_t h, uint32_t bpe) {
   Mode md;
-  if (!Lookup(index, bpe, &md)) return 0;
+  if (!Lookup(index, bpe, &md) || md.array == k1dThick) return 0;
   return uint64_t(PaddedPitch(md, pitch)) * PaddedHeight(md, h) * bpe;
 }
 
 bool Detile(uint32_t index, const uint8_t* src, uint8_t* dst, uint32_t w, uint32_t h,
             uint32_t pitch, uint32_t bpe, uint32_t dst_row) {
   Mode md;
-  if (!Lookup(index, bpe, &md)) return false;
+  if (!Lookup(index, bpe, &md) || md.array == k1dThick) return false;
   pitch = PaddedPitch(md, pitch);
   const uint32_t height = PaddedHeight(md, h);
   for (uint32_t y = 0; y < h; y++) {
@@ -310,6 +341,15 @@ bool DetileSlice(const Level& l, uint32_t bpe, uint32_t slice, const uint8_t* sr
     if (md.array == kLinearGeneral || md.array == kLinearAligned) {
       std::memcpy(row, src + slice * l.slice_bytes + uint64_t(y) * l.pitch * bpe,
                   uint64_t(l.w) * bpe);
+      continue;
+    }
+    if (md.array == k1dThick) {
+      const uint64_t group = uint64_t(slice / 4) * 4 * l.slice_bytes;
+      for (uint32_t x = 0; x < l.w; x++) {
+        const uint64_t at = group + uint64_t(256 * bpe) * ((y / 8) * (l.pitch / 8) + x / 8) +
+                            ThickIndex(bpe, x, y, slice % 4) * bpe;
+        std::memcpy(row + uint64_t(x) * bpe, src + at, bpe);
+      }
       continue;
     }
     for (uint32_t x = 0; x < l.w; x++) {
