@@ -219,6 +219,12 @@ bool Step(Engines& e, Stream& s, bool ce) {
       // implemented yet.
       const uint32_t type = d[0] & 0x3F;
       if (type == 0x38 && ((d[0] >> 8) & 0xF) == 1) break;
+      // PIXEL_PIPE_STAT_DUMP (0x39): the renderer counts the pixels
+      // (OcclusionCount), but how the dump lays the render backends'
+      // counters out in memory is not measured yet.
+      if (type == 0x39)
+        FatalF("GPU: an occlusion counter dump (PIXEL_PIPE_STAT_DUMP to %02X%08X, %08X) is not written yet: "
+               "its layout is not measured", d[2] & 0xFF, d[1], d[0]);
       if (n > 1)
         FatalF("GPU: EVENT_WRITE of event %02X with an address not implemented yet (%08X %08X %08X)", type,
                d[0], d[1], n > 2 ? d[2] : 0);

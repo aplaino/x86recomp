@@ -861,6 +861,37 @@ int main() {
       }
     }
   }
+  // Occlusion counts over that depth target (stencil 0xA5 on the left
+  // half, 0 on the right): draws DB_COUNT_CONTROL counts add the pixels
+  // they write (twice for two instances), those its stencil test fails or that it does not count
+  // add nothing.
+  {
+    constexpr gaddr kStTarget = 0x1B6000, kDepthAt = 0x1B8000, kStencilAt = 0x1BC000;
+    auto counted = [&](bool left, uint32_t func, uint32_t count_control, uint32_t instances = 1) {
+      if (left) verts({{-1, -1}, {0, -1}, {-1, 1}});
+      else verts({{-1, -1}, {1, -1}, {-1, 1}});
+      Regs r;
+      DrawRegs(r, 0x11, kStTarget, kVsAt);
+      uint32_t* cx = r.context;
+      cx[0x001] = count_control;                    // DB_COUNT_CONTROL
+      cx[0x010] = 3;
+      cx[0x011] = 1;
+      cx[0x012] = uint32_t(kDepthAt >> 8);
+      cx[0x013] = uint32_t(kStencilAt >> 8);
+      cx[0x200] = 1u | func << 8;                   // stencil test, no depth test
+      cx[0x10C] = 0xA5u | 0xFFu << 8;               // ref 0xA5, read mask, no writes
+      const uint64_t before = OcclusionCount();
+      Draw(r, {3, instances, 0, 2});
+      Settle(true);
+      return OcclusionCount() - before;
+    };
+    const uint64_t all = counted(true, 7, 1u << 8, 2), failed = counted(true, 5, 1u << 8),
+                   right = counted(false, 5, 1u << 8), off = counted(false, 7, 1u << 8 | 1);
+    if (all != 64 || failed != 0 || right != 32 || off != 0)
+      std::printf("  counts: %llu %llu %llu %llu\n", (unsigned long long)all, (unsigned long long)failed,
+                  (unsigned long long)right, (unsigned long long)off);
+    Check(all == 64 && failed == 0 && right == 32 && off == 0, "occlusion counts count the pixels drawn");
+  }
   // An indirect draw through the command processor: its first vertex (3)
   // goes to the vertex shader's user SGPR 4, which it adds to the vertex
   // index; vertices 0-2 are off the target.

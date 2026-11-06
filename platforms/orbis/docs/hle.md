@@ -146,7 +146,15 @@ library.
   give are bound, and the shader takes the one whose words it loaded; a
   load outside the range or a descriptor not among them is fatal once
   the dispatch has run (the stage writes the instruction's address to
-  a fault word). Buffer loads at a 64-bit address (ADDR64, a V# of base
+  a fault word). Occlusion counts: a draw DB_COUNT_CONTROL counts
+  (ZPASS_INCREMENT_DISABLE clear, ZPASS_ENABLE set) also writes 1 for each
+  pixel it draws to a count target after its colour targets, blended
+  additively, and the counts are summed on the GPU into one 64-bit
+  counter, exact whatever PERFECT_ZPASS_COUNTS asks; a counted draw into
+  four colour targets is fatal. PIXEL_PIPE_STAT_CONTROL (which counter
+  the dumps take, their stride, the render backends) writes nothing; the
+  dumps (PIXEL_PIPE_STAT_DUMP) are fatal until their layout in memory is
+  measured. Buffer loads at a 64-bit address (ADDR64, a V# of base
   0 and no range) whose address is a lane's offset added to a pointer the
   stage reads at known offsets read that pointer's range the same way,
   checked the same way (compute stages; stores and other stages are

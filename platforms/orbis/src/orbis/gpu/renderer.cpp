@@ -29,7 +29,7 @@ namespace {
 using gfx::Format;
 
 // Context registers.
-constexpr uint32_t kDbRenderControl = 0x000, kDbDepthView = 0x002, kDbHtileDataBase = 0x005,
+constexpr uint32_t kDbRenderControl = 0x000, kDbCountControl = 0x001, kDbDepthView = 0x002, kDbHtileDataBase = 0x005,
                    kDbZInfo = 0x010, kDbStencilInfo = 0x011, kDbZReadBase = 0x012, kDbStencilReadBase = 0x013,
                    kDbDepthSize = 0x016,
                    kDbDepthClear = 0x00B, kDbStencilClear = 0x00A, kScreenScissorTl = 0x00C,
@@ -254,6 +254,16 @@ struct State {
   std::unordered_map<std::string, Program> programs;
   std::unordered_map<std::string, Program> compute;
   uint64_t submission = 0;
+  // Occlusion counts: draws DB_COUNT_CONTROL counts add 1 for each pixel
+  // they write to a count target of their size (R32F, blended); CountsAdd
+  // sums those on the GPU into `counted` as the sums land.
+  struct CountTarget {
+    gfx::TextureId tex = 0;
+    bool dirty = false;
+  };
+  std::map<std::pair<uint32_t, uint32_t>, CountTarget> count_targets;
+  gfx::ProgramId count_sum = 0;
+  std::atomic<uint64_t> counted{0};
 };
 State& G() {
   static State* s = new State;  // the GPU thread uses it until exit
@@ -1126,10 +1136,75 @@ void Bind(State& s, const StageState& st, const Resolved& r, Bound& b,
   b.res.uniforms = b.uniforms.data();
 }
 
-gfx::ProgramStage PixelStub() {
+gfx::ProgramStage PixelStub(int count) {
   gfx::ProgramStage st;
-  st.glsl = "void main() {}\n";
+  st.glsl = count < 0 ? "void main() {}\n"
+                      : "layout(location = " + std::to_string(count) +
+                            ") out vec4 r_count;\nvoid main() { r_count = vec4(1.0); }\n";
   return st;
+}
+
+// ---- occlusion counts
+
+// The count target of a w x h draw (zero when made).
+State::CountTarget& CountTargetFor(State& s, uint32_t w, uint32_t h) {
+  State::CountTarget& c = s.count_targets[{w, h}];
+  if (!c.tex) {
+    gfx::ImageDesc d;
+    d.w = int(w);
+    d.h = int(h);
+    d.fmt = Format::R32F;
+    d.color_target = true;
+    c.tex = s.dev->CreateImage(d);
+    if (!c.tex) FatalF("GPU: no %ux%u occlusion count target", w, h);
+    s.dev->ClearImage(c.tex, 0, {0, 0, 0, 0});
+  }
+  return c;
+}
+
+// Sums the count targets drawn into since the last sum on the GPU (64
+// bits, exact; a pixel's count is exact to 2^24 draws over it), adds the
+// sums to s.counted as they land and zeroes the targets.
+void CountsAdd(State& s) {
+  if (!s.count_sum) {
+    gfx::ProgramDesc pd;
+    pd.cs.glsl =
+        "layout(R_TEXTURE(0)) uniform sampler2D r_tex0;\n"
+        "void main() {\n"
+        "  ivec2 p = ivec2(gl_GlobalInvocationID.xy), n = textureSize(r_tex0, 0);\n"
+        "  if (p.x >= n.x || p.y >= n.y) return;\n"
+        "  uint v = uint(texelFetch(r_tex0, p, 0).r);\n"
+        "  if (v == 0u) return;\n"
+        "  uint w = r_rwbuf[0].x, old = atomicAdd(r_rw[w], v);\n"
+        "  if (old + v < old) atomicAdd(r_rw[w + 1u], 1u);\n"
+        "}\n";
+    pd.cs.textures = 1;
+    pd.cs.rw_buffers = 1;
+    pd.local_size[0] = pd.local_size[1] = 8;
+    s.count_sum = s.dev->CreateProgram(pd);
+    if (!s.count_sum) FatalF("GPU: the occlusion count sum does not compile");
+  }
+  for (auto& [size, c] : s.count_targets) {
+    if (!c.dirty) continue;
+    c.dirty = false;
+    uint32_t* sum = new uint32_t[2]{0, 0};
+    const gfx::RwBufferData out{sum, 8};
+    const gfx::SamplerDesc nearest;
+    gfx::ProgramDispatch d;
+    d.program = s.count_sum;
+    d.cs.textures = &c.tex;
+    d.cs.samplers = &nearest;
+    d.rw_buffers = &out;
+    d.land_later = true;
+    d.groups[0] = (size.first + 7) / 8;
+    d.groups[1] = (size.second + 7) / 8;
+    s.dev->DispatchProgram(d);
+    s.dev->ClearImage(c.tex, 0, {0, 0, 0, 0});
+    Signal(0, 0, [sum, &s] {
+      s.counted += sum[0] | uint64_t(sum[1]) << 32;
+      delete[] sum;
+    });
+  }
 }
 
 // ---- draws
@@ -1513,6 +1588,15 @@ gfx::TextureId TargetAt(gaddr addr, uint32_t w, uint32_t h) {
   return 0;
 }
 
+uint64_t OcclusionCount() {
+  {
+    std::lock_guard<std::mutex> l(G().mu);
+    if (G().dev) CountsAdd(G());
+  }
+  Settle(true);
+  return G().counted;
+}
+
 void Exclusive(const std::function<void()>& fn) {
   std::lock_guard<std::mutex> l(G().mu);
   fn();
@@ -1557,6 +1641,7 @@ void Draw(const Regs& r, const DrawCall& call) {
   // CB_COLOR_CONTROL's MODE is CB_DISABLE), the depth.
   gfx::ProgramDraw d;
   int ntargets = 0;
+  uint32_t fw = 0, fh = 0;  // the largest target's size
   // CB_COLOR_CONTROL's MODE: 0 disabled, 1 normal, 2 eliminating fast
   // clears (CmaskDraw: nothing else is drawn); the others (resolving,
   // decompressing) and targets with FMASK compression are not drawn.
@@ -1583,6 +1668,8 @@ void Draw(const Regs& r, const DrawCall& call) {
     if (swap && cf == 7)
       FatalF("GPU: a colour target's component swap is not drawn yet (three components)");
     d.targets[i] = {ColorTarget(s, uint64_t(cb[0]) << 8, pitch, height, fmt, four ? swap : 0), 0};
+    fw = std::max(fw, pitch);
+    fh = std::max(fh, height);
     if (cb[4] & (1u << 13)) CmaskDraw(s, d.targets[i].tex, cb, cb_mode == 2);
     else if (cb_mode == 2) FatalF("GPU: a fast clear eliminated without FAST_CLEAR is not drawn yet");
     ntargets++;
@@ -1601,6 +1688,8 @@ void Draw(const Regs& r, const DrawCall& call) {
                                     stencil ? uint64_t(cx[kDbStencilReadBase]) << 8 : 0,
                                     last ? last + 1 : 0);
     d.depth = dt->depth;
+    fw = std::max(fw, dw);
+    fh = std::max(fh, dh);
     MetaCheck(dt->htile);
     if (dt->htile.gpu) {
       dt->htile.gpu = false;
@@ -1625,11 +1714,25 @@ void Draw(const Regs& r, const DrawCall& call) {
     d.depth_layer = dt->layers ? int(first) : 0;
   }
   if (!ntargets && !d.depth) return;
+  // Occlusion counts (DB_COUNT_CONTROL: ZPASS_INCREMENT_DISABLE clear,
+  // ZPASS_ENABLE set): the pixels the draw writes, one more target after
+  // the colour targets. Counts are exact whatever PERFECT_ZPASS_COUNTS
+  // asks (a count of at least one when any pixel passes is what it
+  // promises without it).
+  const uint32_t cc = cx[kDbCountControl];
+  const bool counted = !(cc & 1) && ((cc >> 8) & 0xF);
+  if (counted) {
+    if (ntargets == 4) FatalF("GPU: an occlusion-counted draw into four colour targets is not drawn yet");
+    State::CountTarget& ct = CountTargetFor(s, fw, fh);
+    d.targets[ntargets] = {ct.tex, 0};
+    ct.dirty = true;
+  }
 
   // Shaders.
   const bool gs = cx[kVgtShaderStagesEn] & 0x3F;
   const uint32_t prim = r.uconfig[kPrimitiveType];
   StageState vs = ShaderState(r, Stage::Vertex, kPgmLoVs), ps = PixelState(r);
+  ps.count = counted ? ntargets : -1;
   vs.rects = !gs && prim == 0x11;
   Resolved rv = Resolve(vs);
   TargetSelects(s, rv);
@@ -1647,12 +1750,12 @@ void Draw(const Regs& r, const DrawCall& call) {
       FatalF("GPU: a pixel shader cannot run yet: %s", rp.error.c_str());
     }
   }
-  const std::string key = rv.key + '|' + rp.key;
+  const std::string key = rv.key + '|' + rp.key + (counted ? "|c" + std::to_string(ntargets) : "");
   Program& pr = s.programs[key];
   if (!pr.id && pr.error.empty()) {
     pr.vs = Translate(vs, rv);
     if (ps.code) pr.ps = Translate(ps, rp);
-    else pr.ps.stage = PixelStub();
+    else pr.ps.stage = PixelStub(ps.count);
     pr.error = !pr.vs.error.empty() ? pr.vs.error : pr.ps.error;
     if (pr.error.empty()) {
       gfx::ProgramDesc pd;
@@ -1740,6 +1843,12 @@ void Draw(const Regs& r, const DrawCall& call) {
     if (!(pr.ps.mrt_mask & (1u << i))) b.write_mask = 0;
     if (b.enable && from[0] == 3 && (bc & (1u << 29)))
       FatalF("GPU: blending into an alpha-only target is not drawn yet");
+  }
+  if (counted) {
+    gfx::TargetBlend& b = ps_.blend[ntargets];
+    b = {};
+    b.enable = true;
+    b.dst_color = b.dst_alpha = gfx::BlendFactor::One;
   }
   ps_.blend_constant = {AsFloat(cx[kCbBlendRed]), AsFloat(cx[kCbBlendRed + 1]),
                         AsFloat(cx[kCbBlendRed + 2]), AsFloat(cx[kCbBlendRed + 3])};

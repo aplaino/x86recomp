@@ -2297,6 +2297,10 @@ struct Translator {
       Line("}");
       Line("}");
     }
+    if (st.stage == Stage::Pixel && st.count >= 0 && mrts.count(uint32_t(st.count))) {
+      error = "a pixel shader exporting to the occlusion count's target";
+      return false;
+    }
     out->stage.glsl = Glsl();
     out->stage.buffers = uint32_t(nro);
     out->stage.rw_buffers = uint32_t(nrw);
@@ -2416,6 +2420,7 @@ struct Translator {
         std::snprintf(b, sizeof b, "layout(location = %u) out vec4 r_color%u;\n", m, m);
         g += b;
       }
+      if (st.count >= 0) g += "layout(location = " + std::to_string(st.count) + ") out vec4 r_count;\n";
     }
     if (st.stage == Stage::Compute && uses_lds) {
       const uint32_t lds = ((st.rsrc2 >> 15) & 0x1FF) * 128;
@@ -2441,6 +2446,7 @@ struct Translator {
     }
     g += inputs;
     for (uint32_t m : mrts) g += "  r_color" + std::to_string(m) + " = vec4(0.0);\n";
+    if (st.stage == Stage::Pixel && st.count >= 0) g += "  r_count = vec4(1.0);\n";
     for (uint32_t p : params) g += "  r_param" + std::to_string(p) + " = vec4(0.0);\n";
     g += body;
     g += "}\n";
@@ -2638,7 +2644,7 @@ Resolved Resolve(const StageState& st) {
   k.reserve(176 + 28 * rv.sites.size() + rv.r.buffers.size());
   const uint32_t head[] = {uint32_t(st.stage), st.rsrc1, st.rsrc2, st.ps_input_addr,
                            st.col_format, st.z_format, st.col_swap, st.threads[0], st.threads[1],
-                           st.threads[2], uint32_t(st.rects)};
+                           st.threads[2], uint32_t(st.rects), uint32_t(st.count)};
   add(head, sizeof head);
   if (st.stage == Stage::Pixel) add(st.ps_input_cntl, sizeof st.ps_input_cntl);
   const uint32_t id = CodeId(rv.code());

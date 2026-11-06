@@ -60,6 +60,9 @@ struct StageState {
   // the COMP_SWAP of one of one or two components (bits 2-3: how many).
   uint32_t ps_input_ena = 0, ps_input_addr = 0, ps_input_cntl[32] = {};
   uint32_t col_format = 0, z_format = 0, col_swap = 0;
+  // Pixel: the location of an output of 1 for each pixel the draw writes
+  // (occlusion counts, Renderer), -1 for none.
+  int count = -1;
   // Compute: COMPUTE_NUM_THREAD_X/Y/Z.
   uint32_t threads[3] = {1, 1, 1};
   // Export and Geometry passes: their invocations (a draw's vertices, its

@@ -67,4 +67,8 @@ gfx::TextureId TargetAt(gaddr addr, uint32_t w, uint32_t h);
 // targets): presentation.
 void Exclusive(const std::function<void()>& fn);
 
+// The pixels the draws DB_COUNT_CONTROL counts have written so far (the
+// occlusion counter, all render backends together), once they have landed.
+uint64_t OcclusionCount();
+
 }  // namespace recomp::orbis::gpu
