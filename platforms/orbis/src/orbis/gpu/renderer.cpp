@@ -1799,7 +1799,7 @@ void Dispatch(const Regs& r, const uint32_t groups[3]) {
     if (pr.error.empty()) {
       gfx::ProgramDesc pd;
       pd.cs = pr.vs.stage;
-      for (int i = 0; i < 3; i++) pd.local_size[i] = std::max(cs.threads[i], 1u);
+      for (int i = 0; i < 3; i++) pd.local_size[i] = pr.vs.local_size[i];
       pr.id = s.dev->CreateProgram(pd);
     } else {
       FatalF("GPU: a compute shader is not translated yet: %s", pr.error.c_str());
@@ -1811,8 +1811,9 @@ void Dispatch(const Regs& r, const uint32_t groups[3]) {
   for (const gfx::ColorTarget& img : b.images)
     if (!img.tex) return;
   // The fault word (Resolved::faults): the address of an instruction that
-  // loaded outside its range or found a descriptor not resolved, checked
-  // once the dispatch has landed.
+  // loaded outside its range, found a descriptor not resolved or indexed
+  // past the VGPRs, or the stage's for host subgroups unlike its waves,
+  // checked once the dispatch has landed.
   uint32_t* fault = rc.faults ? new uint32_t(0) : nullptr;
   if (fault) b.rw.push_back({fault, 4});
   gfx::ProgramDispatch d;
@@ -1845,8 +1846,9 @@ void Dispatch(const Regs& r, const uint32_t groups[3]) {
       const uint32_t at = *fault;
       delete fault;
       if (at)
-        FatalF("GPU: a compute shader loaded outside the range resolved for a run-time offset, or "
-               "a descriptor not found there, at %08X (address's low half)", at);
+        FatalF("GPU: a compute shader loaded outside the range resolved for a run-time offset, found "
+               "a descriptor not resolved there or indexed past its VGPRs at %08X (address's low half), "
+               "or ran in host subgroups unlike its waves (the stage's address)", at);
     });
   for (const BufferRange& br : rc.buffers)
     if (br.written) {

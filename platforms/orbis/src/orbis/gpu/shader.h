@@ -10,12 +10,18 @@
 // its memory instructions on the ranges the draw binds, by guest address,
 // so one translation serves every draw with the same code and formats.
 //
-// Lanes: each invocation is lane 0 of its own wave. Masks (EXEC, VCC and
-// the SGPR pairs that hold them) keep that lane's bit in bit 0, so a
-// comparison sets or clears bit 0 and a branch on an empty EXEC branches
-// when this lane is inactive. What needs the other lanes (counts of
-// active lanes, cross-lane moves) is not translated yet, but for
-// ds_swizzle, which reads them through the host's subgroup operations.
+// Lanes: in most stages each invocation is lane 0 of its own wave. Masks
+// (EXEC, VCC and the SGPR pairs that hold them) keep that lane's bit in
+// bit 0, so a comparison sets or clears bit 0 and a branch on an empty
+// EXEC branches when this lane is inactive; ds_swizzle within quads reads
+// the other lanes through the host's subgroup operations. A compute stage
+// that reads other lanes (Resolved::wave) runs in waves of 64 lanes
+// instead: each invocation runs lanes l and l + 32 of its wave, one host
+// subgroup of 32 invocations a wave, its SGPRs and masks the wave's (the
+// same in each invocation), its branches the wave's, comparisons and
+// carries ballots and cross-lane reads subgroup shuffles. A host whose
+// subgroups are not those 32 invocations in order is reported (the fault
+// word).
 // Scalars the stage loads at a run-time offset (an index from a
 // v_readfirstlane) are loaded as it runs, from the range the stage reads
 // at known offsets from the same pointer; descriptors among them are
@@ -95,6 +101,7 @@ struct Resolved {
   // address once one did).
   std::vector<uint32_t> match;
   bool faults = false;
+  bool wave = false;        // a compute stage run in waves (above)
   std::string key;          // code and facts: equal keys, equal translation
   std::string error;        // why the stage cannot run (empty: it can)
 };
@@ -107,8 +114,10 @@ struct Translated {
   // Pixel stages: which colour targets (bit per MRT) the shader exports.
   uint32_t mrt_mask = 0;
   bool writes_depth = false;
-  // Compute stages: their LDS size in dwords.
+  // Compute stages: their LDS size in dwords and the host's group size
+  // (in waves: 32 invocations a wave).
   uint32_t lds_dwords = 0;
+  uint32_t local_size[3] = {1, 1, 1};
 };
 
 Resolved Resolve(const StageState& st);

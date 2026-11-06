@@ -65,13 +65,15 @@ void TSharp(uint32_t t[8], gaddr addr, uint32_t w, uint32_t h, uint32_t type, ui
 }
 
 // Runs code with the user data on one group of `threads` (x) and waits
-// for it.
-void Run(gaddr code, const uint32_t* user, uint32_t n, uint32_t threads = 1) {
+// for it; rsrc1 and rsrc2 (beside USER_SGPR) as given.
+void Run(gaddr code, const uint32_t* user, uint32_t n, uint32_t threads = 1, uint32_t rsrc1 = 0,
+         uint32_t rsrc2 = 0) {
   Regs r;
   r.sh[kThreadX] = threads;
   r.sh[kThreadX + 1] = r.sh[kThreadX + 2] = 1;
   r.sh[kPgmLo] = uint32_t(code >> 8);
-  r.sh[kRsrc1 + 1] = n << 1;
+  r.sh[kRsrc1] = rsrc1;
+  r.sh[kRsrc1 + 1] = n << 1 | rsrc2;
   std::memcpy(r.sh + kUser, user, 4 * n);
   const uint32_t groups[3] = {1, 1, 1};
   Dispatch(r, groups);
@@ -552,6 +554,134 @@ int main() {
                          int(Rd32(kOut + 0x208)), int(Rd32(kOut + 0x20C)), int(Rd32(kOut + 0x210)),
                          int(Rd32(kOut + 0x214)), int(Rd32(kOut + 0x218)), int(Rd32(kOut + 0x21C)));
     Check(ok, "ds_swizzle_b32's bit-mask mode reads the lane across quads");
+  }
+
+  // A stage in waves: readlane, readfirstlane under a partial EXEC,
+  // writelane, comparisons and carries as ballots, a branch on the wave's
+  // VCC, v_movrels, ds_or_b32 and ds_read2_b64. Lane i stores 20 words at
+  // kOut + 0x2000 + 128i (kWaveWant); run on 64 and 40 invocations.
+  static const uint32_t kWave[] = {
+      0xBE94047E,  // s_mov_b64 s[20:21], exec
+      0x02094B00,  // v_readlane_b32 s4, v0, 37
+      0x020B0B00,  // v_readlane_b32 s5, v0, 5
+      0x7E0202A8,  // v_mov_b32 v1, 40
+      0x7D820300,  // v_cmp_lt_u32 vcc, v0, v1
+      0xBE86046A,  // s_mov_b64 s[6:7], vcc
+      0x7DA600A3,  // v_cmpx_le_u32 vcc, 35, v0
+      0xBE88047E,  // s_mov_b64 s[8:9], exec
+      0x4A0400FF, 0x00000064,  // v_add_i32 v2, vcc, 0x64, v0
+      0x7E140502,  // v_readfirstlane_b32 s10, v2
+      0xBEFE0414,  // s_mov_b64 exec, s[20:21]
+      0x7E060280,  // v_mov_b32 v3, 0
+      0x04076404,  // v_writelane_b32 v3, s4, 50
+      0xBEFC0381,  // s_mov_b32 m0, 1
+      0x7E140300,  // v_mov_b32 v10, v0
+      0x34160081,  // v_lshlrev_b32 v11, 1, v0
+      0x7E18870A,  // v_movrels_b32 v12, v10
+      0x7E1C02FF, 0xFFFFFFE0,  // v_mov_b32 v14, 0xffffffe0
+      0x4A1A1D00,  // v_add_i32 v13, vcc, v0, v14
+      0xBE8C046A,  // s_mov_b64 s[12:13], vcc
+      0x7E220281,  // v_mov_b32 v17, 1
+      0x00202280,  // v_cndmask_b32 v16, 0, v17, vcc
+      0x7E1E0281,  // v_mov_b32 v15, 1
+      0xBF860001,  // s_cbranch_vccz 1 (past the next)
+      0x7E1E0287,  // v_mov_b32 v15, 7
+      0x7E240280,  // v_mov_b32 v18, 0
+      0x342C0082,  // v_lshlrev_b32 v22, 2, v0
+      0xD8340000, 0x00000016,  // ds_write_b32 v22, v0
+      0xD8340100, 0x00001212,  // ds_write_b32 v18, v18 offset:256
+      0xBF8C007F,  // s_waitcnt lgkmcnt(0)
+      0xBF8A0000,  // s_barrier
+      0x3626009F,  // v_and_b32 v19, 31, v0
+      0x7E280281,  // v_mov_b32 v20, 1
+      0x34262913,  // v_lshlrev_b32 v19, v19, v20
+      0xD8280100, 0x00001312,  // ds_or_b32 v18, v19 offset:256
+      0xBF8C007F,  // s_waitcnt lgkmcnt(0)
+      0xBF8A0000,  // s_barrier
+      0xD8D80100, 0x15000012,  // ds_read_b32 v21, v18 offset:256
+      0xD9DC0301, 0x16000012,  // ds_read2_b64 v[22:25], v18 offset0:1 offset1:3
+      0xBF8C007F,  // s_waitcnt lgkmcnt(0)
+      0x343C0087,  // v_lshlrev_b32 v30, 7, v0
+      0x7E500204,  // v_mov_b32 v40, s4
+      0x7E520205,  // v_mov_b32 v41, s5
+      0x7E540206,  // v_mov_b32 v42, s6
+      0x7E560207,  // v_mov_b32 v43, s7
+      0x7E580208,  // v_mov_b32 v44, s8
+      0x7E5A0209,  // v_mov_b32 v45, s9
+      0x7E5C020A,  // v_mov_b32 v46, s10
+      0x7E5E0303,  // v_mov_b32 v47, v3
+      0x7E60030C,  // v_mov_b32 v48, v12
+      0x7E62020C,  // v_mov_b32 v49, s12
+      0x7E64020D,  // v_mov_b32 v50, s13
+      0x7E66030F,  // v_mov_b32 v51, v15
+      0x7E680310,  // v_mov_b32 v52, v16
+      0x7E6A0315,  // v_mov_b32 v53, v21
+      0x7E6C0316,  // v_mov_b32 v54, v22
+      0x7E6E0319,  // v_mov_b32 v55, v25
+      0x7E700214,  // v_mov_b32 v56, s20
+      0x7E720215,  // v_mov_b32 v57, s21
+      0x7E740300,  // v_mov_b32 v58, v0
+      0x7E760280,  // v_mov_b32 v59, 0
+      0xE0781000, 0x8000281E,  // buffer_store_dwordx4 v[40:43], v30, s[0:3], 0 offen
+      0xE0781010, 0x80002C1E,  // buffer_store_dwordx4 v[44:47], v30, s[0:3], 0 offen offset:16
+      0xE0781020, 0x8000301E,  // buffer_store_dwordx4 v[48:51], v30, s[0:3], 0 offen offset:32
+      0xE0781030, 0x8000341E,  // buffer_store_dwordx4 v[52:55], v30, s[0:3], 0 offen offset:48
+      0xE0781040, 0x8000381E,  // buffer_store_dwordx4 v[56:59], v30, s[0:3], 0 offen offset:64
+      0xBF810000,  // s_endpgm
+  };
+  constexpr gaddr kWaveAt = kCode + 0x1000, kWaveOut = kOut + 0x2000;
+  std::memcpy(GPtr(kWaveAt), kWave, sizeof kWave);
+  for (uint32_t threads : {64u, 40u}) {
+    const uint32_t hi = threads == 64 ? ~0u : 0xFFu;  // the upper half's lanes
+    uint32_t user[16] = {};
+    VSharp(user, kWaveOut, 64 * 128);
+    std::memset(GPtr(kWaveOut), 0xEE, 64 * 128);
+    // 64 VGPRs (rsrc1), 128 dwords of LDS (rsrc2).
+    Run(kWaveAt, user, 4, threads, 15, 1u << 15);
+    bool ok = true;
+    for (uint32_t i = 0; i < 64; i++) {
+      const uint32_t want[20] = {37, 5, ~0u, 0xFF, 0, hi & 0xFFFFFFF8u, 135, i == 50 ? 37u : 0u,
+                                 2 * i, 0, hi, 7, i >= 32 ? 1u : 0u, ~0u, 2, 7, ~0u, hi, i, 0};
+      for (uint32_t k = 0; k < 20; k++) {
+        const uint32_t got = Rd32(kWaveOut + 128 * i + 4 * k), w = i < threads ? want[k] : 0xEEEEEEEEu;
+        if (got != w && ok) std::printf("  %u invocations: lane %u word %u: %08X, not %08X\n", threads, i, k, got, w);
+        ok &= got == w;
+      }
+    }
+    Check(ok, "a stage in waves reads, writes and ballots across its lanes");
+  }
+
+  // Buffer loads at a 64-bit address (ADDR64): lane i reads word i + 1 of
+  // the table at s[0:1] through VGPRs that add i * 4 to the pointer; the
+  // stage reads word 4 at a known offset, which makes the range.
+  static const uint32_t kWide[] = {
+      0xC0010104,              // s_load_dword s2, s[0:1], 0x4
+      0x34020082,              // v_lshlrev_b32 v1, 2, v0
+      0x4A040200,              // v_add_i32 v2, vcc, s0, v1
+      0x7E060201,              // v_mov_b32 v3, s1
+      0x50060680,              // v_addc_u32 v3, vcc, 0, v3, vcc
+      0xBE840380,              // s_mov_b32 s4, 0
+      0xBE8503FF, 0x00040000,  // s_mov_b32 s5, 0x40000
+      0xBE8603C1,              // s_mov_b32 s6, -1
+      0xBE8703FF, 0x20024004,  // s_mov_b32 s7, 0x20024004
+      0xE0308004, 0x80010402,  // buffer_load_dword v4, v[2:3], s[4:7], 0 addr64 offset:4
+      0xBF8C0070,              // s_waitcnt vmcnt(0) lgkmcnt(0)
+      0x4A080802,              // v_add_i32 v4, vcc, s2, v4
+      0xE0701000, 0x80020401,  // buffer_store_dword v4, v1, s[8:11], 0 offen
+      0xBF810000,              // s_endpgm
+  };
+  constexpr gaddr kWideAt = kCode + 0x1200, kWideTable = kOut + 0x600;
+  std::memcpy(GPtr(kWideAt), kWide, sizeof kWide);
+  {
+    for (uint32_t i = 0; i < 5; i++) Wr32(kWideTable + 4 * i, 100 * i + 1);
+    uint32_t user[16] = {uint32_t(kWideTable), uint32_t(kWideTable >> 32)};
+    VSharp(user + 8, kOut, 16);
+    std::memset(GPtr(kOut), 0, 16);
+    Run(kWideAt, user, 12, 4);
+    bool ok = true;
+    for (uint32_t i = 0; i < 4; i++) ok &= Rd32(kOut + 4 * i) == 401 + 100 * (i + 1) + 1;
+    if (!ok) std::printf("  lanes: %u %u %u %u\n", Rd32(kOut), Rd32(kOut + 4), Rd32(kOut + 8), Rd32(kOut + 12));
+    Check(ok, "buffer loads at a 64-bit address read the pointer's range");
   }
 
   // An 8x8 texture of four levels, level n's texels n + 1 (linear), sampled

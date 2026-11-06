@@ -158,16 +158,20 @@ void KeepWalk(gaddr entry, gaddr fetch, std::shared_ptr<const Code> c) {
 
 // Whether Resolver::Step does anything for in: the scalar and memory
 // instructions, and the vector ones that write SGPRs (VCC, a
-// v_readfirstlane, a VOP3 with a scalar destination).
-bool Steps(const Instr& in) {
+// v_readfirstlane, a VOP3 with a scalar destination); in code with buffer
+// accesses at 64-bit addresses (vgprs), every one that writes VGPRs too
+// (Resolver::vgpr).
+bool Steps(const Instr& in, bool vgprs) {
   switch (in.fmt) {
     case Fmt::Sop1: case Fmt::Sopk: case Fmt::Sop2: case Fmt::Smrd: case Fmt::Mubuf: case Fmt::Mtbuf:
     case Fmt::Mimg: case Fmt::Vopc:
       return true;
-    case Fmt::Vop1: return in.op == 2;
-    case Fmt::Vop2: return in.op == 1 || (in.op >= 37 && in.op <= 42);
+    case Fmt::Vop1: return vgprs || in.op == 2;
+    case Fmt::Vop2: return vgprs || in.op == 1 || (in.op >= 37 && in.op <= 42);
     case Fmt::Vop3:
-      return in.op < 256 || in.op == 257 || in.op == 365 || in.op == 366 || (in.op >= 293 && in.op <= 298);
+      return vgprs || in.op < 256 || in.op == 257 || in.op == 365 || in.op == 366 || in.op == 384 + 2 ||
+             (in.op >= 293 && in.op <= 298);
+    case Fmt::Ds: case Fmt::Vintrp: return vgprs;
     default: return false;
   }
 }
@@ -178,8 +182,10 @@ bool Steps(const Instr& in) {
 void Index(Code& c) {
   c.steps.clear();
   c.fetch_steps.clear();
+  bool vgprs = false;
+  for (auto& [pc, in] : c.at) vgprs |= (in.fmt == Fmt::Mubuf || in.fmt == Fmt::Mtbuf) && (in.w0 & 0x8000);
   for (auto& [pc, in] : c.at)
-    if (Steps(in)) (c.fetch.count(pc) ? c.fetch_steps : c.steps).emplace_back(pc, in);
+    if (Steps(in, vgprs)) (c.fetch.count(pc) ? c.fetch_steps : c.steps).emplace_back(pc, in);
 }
 
 // An SGPR not known when the stage is resolved, but one value X away from
@@ -191,8 +197,10 @@ void Index(Code& c) {
 //   kHigh: the pointer's high half P_hi (p) plus that carry, so that the
 //     two halves are the 64-bit address P + (uint32_t)(c + stride * X);
 //   kLoaded: word c of what dynamic load id (Resolver::dyn) read.
+// kCarry: a VCC (or SGPR pair) holding the carries of a VGPR's kLow sum
+// (Resolver::vgpr).
 struct Var {
-  enum Kind : uint8_t { kNone, kValue, kLow, kHigh, kLoaded } kind = kNone;
+  enum Kind : uint8_t { kNone, kValue, kLow, kHigh, kLoaded, kCarry } kind = kNone;
   uint32_t c = 0, stride = 0, p = 0;
   gaddr id = 0;
 };
@@ -252,9 +260,10 @@ bool Source(const Scalars& s, const Instr& in, uint32_t code, uint32_t* out) {
 struct Site {
   int buffer = -1, image = -1;
   uint32_t vsharp[4] = {};  // buffer instructions: their V#
-  // A scalar load at a run-time offset (Resolver::Dyn): checked against
-  // its range as it runs.
-  bool dynamic = false;
+  // A scalar load at a run-time offset (Resolver::Dyn), or a buffer
+  // access at a 64-bit address from VGPRs (addr64, Resolver::Wide):
+  // checked against its range as it runs.
+  bool dynamic = false, addr64 = false;
   // An image access whose T# or S# was loaded at a run-time offset: the
   // descriptors it can find there (images) and where their words are in
   // the uniforms (match, in uvec4s: T#, then S#, three for each); the
@@ -281,6 +290,17 @@ struct Resolver {
   };
   std::vector<Dyn> dyn;
   std::map<gaddr, uint32_t> blocks;
+  // VGPRs the scalar run knows of: a uniform value (kValue, no stride), a
+  // lane's offset added to a known pointer's low half (kLow, p: that half)
+  // and the carry of that sum added to its high half (kHigh, p: that half;
+  // the same id, the sum's address). Buffer accesses at such a 64-bit
+  // address (ADDR64) read the range the stage reads from the pointer at
+  // known offsets (blocks), as Dyn's loads do.
+  Var vgpr[256];
+  struct Wide {
+    gaddr pc, P;
+  };
+  std::vector<Wide> wides;
   // Image accesses with a T# (and S#) from such loads (load -1: known).
   struct DynImage {
     gaddr pc;
@@ -548,6 +568,24 @@ struct Resolver {
                                                       (in.op >= 48 && in.op <= 64)
                                                 : in.op >= 4;
         if (in.fmt == Fmt::Mubuf && in.op >= 112) return true;  // cache control
+        if (!store)
+          for (uint32_t i = 0; i < 4; i++) vgpr[((in.w1 >> 8) + i) & 0xFF] = {};
+        if (in.w0 & 0x8000) {  // ADDR64: the address in VGPRs, the V# only its base (0) and no range
+          const uint32_t va = in.w1 & 0xFF;
+          const Var l = vgpr[va], h = vgpr[(va + 1) & 0xFF];
+          if (l.kind != Var::kLow || h.kind != Var::kHigh || h.id != l.id)
+            return Fail(pc, "a buffer access at a 64-bit address not known to the scalar run");
+          if (v[0] || (v[1] & 0xFF) || v[2] != ~0u || (v[1] >> 31) || ((v[3] >> 23) & 1) || (in.w0 & 0x3000))
+            return Fail(pc, "a buffer access at a 64-bit address with a V# range not translated yet");
+          if (store) return Fail(pc, "a buffer store at a 64-bit address not translated yet");
+          if (st.stage != Stage::Compute)
+            return Fail(pc, "a buffer access at a 64-bit address outside a compute stage not translated yet");
+          wides.push_back({pc, l.p | uint64_t(h.p & 0xFFFF) << 32});
+          Site& site = NewSite(pc);
+          site.dynamic = site.addr64 = true;
+          std::memcpy(site.vsharp, v, sizeof v);
+          return true;
+        }
         gaddr base;
         uint32_t size;
         Range(v, &base, &size);
@@ -557,6 +595,8 @@ struct Resolver {
         return true;
       }
       case Fmt::Mimg: {
+        if (!(in.op >= 8 && in.op <= 11))
+          for (uint32_t i = 0; i < 5; i++) vgpr[((in.w1 >> 8) + i) & 0xFF] = {};
         ImageRef ref;
         const uint32_t t = ((in.w1 >> 16) & 0x1F) * 4, smp = ((in.w1 >> 21) & 0x1F) * 4;
         const int words = (in.w0 & 0x8000) ? 4 : 8;
@@ -594,27 +634,91 @@ struct Resolver {
         return true;
       }
       case Fmt::Vop1:
-        if (in.op == 2) s.SetVar((w >> 17) & 0xFF, {Var::kValue, 0, 1, 0, pc});  // v_readfirstlane_b32
-        return true;
+        if (in.op == 2) {
+          s.SetVar((w >> 17) & 0xFF, {Var::kValue, 0, 1, 0, pc});  // v_readfirstlane_b32
+          return true;
+        }
+        return Valu(pc, in, 384 + in.op, (w >> 17) & 0xFF, w & 0x1FF, 0, 0, gcn::kVccLo);
       case Fmt::Vopc:
         s.Forget(gcn::kVccLo), s.Forget(gcn::kVccHi);
         return true;
       case Fmt::Vop2:
-        if (in.op == 1 || (in.op >= 37 && in.op <= 42)) s.Forget(gcn::kVccLo), s.Forget(gcn::kVccHi);
-        return true;
+        if (in.op == 1) {  // v_readlane_b32
+          s.Forget((w >> 17) & 0xFF);
+          return true;
+        }
+        return Valu(pc, in, in.op, (w >> 17) & 0xFF, w & 0x1FF, gcn::kVgpr + ((w >> 9) & 0xFF), gcn::kVccLo,
+                    gcn::kVccLo);
       case Fmt::Vop3: {
         const uint32_t d = w & 0xFF;
-        if (in.op < 256 || in.op == 257 || in.op == 365 || in.op == 366)
+        if (in.op < 256 || in.op == 257 || in.op == 365 || in.op == 366) {
           s.Forget(d), s.Forget(d + 1);
-        if (in.op >= 293 && in.op <= 298) {
-          const uint32_t sd = (w >> 8) & 0x7F;
-          s.Forget(sd), s.Forget(sd + 1);
+          return true;
         }
+        if (in.op == 384 + 2) {
+          s.SetVar(d, {Var::kValue, 0, 1, 0, pc});
+          return true;
+        }
+        const uint32_t sd = in.op >= 293 && in.op <= 298 ? (w >> 8) & 0x7F : gcn::kVccLo;
+        const uint32_t op = in.op >= 256 && in.op < 320 ? in.op - 256 : in.op;
+        return Valu(pc, in, op, d, in.w1 & 0x1FF, (in.w1 >> 9) & 0x1FF, (in.w1 >> 18) & 0x1FF, sd);
+      }
+      case Fmt::Ds: {  // reads: their VGPRs unknown
+        const uint32_t vdst = in.w1 >> 24;
+        if (in.op != 13 && in.op != 14 && in.op != 10)
+          for (uint32_t i = 0; i < 4; i++) vgpr[(vdst + i) & 0xFF] = {};
         return true;
       }
+      case Fmt::Vintrp:
+        vgpr[(w >> 18) & 0xFF] = {};
+        return true;
       default:
         return true;
     }
+  }
+
+  // A VALU instruction's VGPR (and carry) facts (vgpr): op in VOP2/VOP3
+  // numbering (VOP1 + 384), sources s0-s2 (9-bit codes), destination d,
+  // carry out sd.
+  bool Valu(gaddr pc, const Instr& in, uint32_t op, uint32_t d, uint32_t s0, uint32_t s1, uint32_t s2,
+            uint32_t sd) {
+    auto uniform = [&](uint32_t code, uint32_t* k) {
+      if (code < gcn::kVgpr) return Source(s, in, code, k);
+      const Var& v = vgpr[code - gcn::kVgpr];
+      if (v.kind != Var::kValue || v.stride) return false;
+      *k = v.c;
+      return true;
+    };
+    uint32_t a, b;
+    const bool ka = uniform(s0, &a), kb = uniform(s1, &b);
+    Var out;
+    switch (op) {
+      case 384 + 1:  // v_mov_b32
+        if (ka) out = {Var::kValue, a, 0, 0, pc};
+        break;
+      case 384 + 66: case 384 + 68:  // v_movreld: a VGPR M0 picks
+        for (Var& v : vgpr) v = {};
+        return true;
+      case 37:  // v_add_i32: a pointer's low half plus a lane's offset
+        if (ka && kb) out = {Var::kValue, a + b, 0, 0, pc};
+        else if (ka || kb) out = {Var::kLow, 0, 0, ka ? a : b, pc};
+        s.Forget(sd + 1);
+        if (out.kind == Var::kLow) s.SetVar(sd, {Var::kCarry, 0, 0, 0, pc});
+        else s.Forget(sd);
+        break;
+      case 40: {  // v_addc_u32: its high half plus that sum's carry
+        const Var carry = s2 < 128 ? s.var[s2] : Var{};
+        if (carry.kind == Var::kCarry && ka && kb && (a == 0 || b == 0))
+          out = {Var::kHigh, 0, 0, a | b, carry.id};
+        s.Forget(sd), s.Forget(sd + 1);
+        break;
+      }
+      case 38: case 39: case 41: case 42:
+        s.Forget(sd), s.Forget(sd + 1);
+        break;
+    }
+    vgpr[d & 0xFF] = out;
+    return true;
   }
 
   bool Run() {
@@ -637,19 +741,34 @@ struct Resolver {
     for (auto& [pc, in] : own->steps)
       if (!Step(pc, in)) return false;
     if (!Dynamic()) return false;
-    if (st.stage == Stage::Compute && SwizzlesAcrossQuads()) r.faults = true;
+    if (st.stage == Stage::Compute && CrossesLanes()) r.wave = r.faults = true;
+    if (st.stage == Stage::Compute && IndexesVgprs()) r.faults = true;
     std::sort(sites.begin(), sites.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     return true;
   }
 
-  // Whether the code has a ds_swizzle_b32 whose lanes cross quads (its
-  // translation needs the fault word).
-  bool SwizzlesAcrossQuads() const {
+  // Whether the code reads other lanes than its own: v_readlane,
+  // v_writelane, v_readfirstlane, ds_swizzle_b32 across quads. A compute
+  // stage that does runs in waves (Resolved::wave).
+  bool CrossesLanes() const {
     for (auto& [pc, in] : code().at) {
+      if ((in.fmt == Fmt::Vop2 && (in.op == 1 || in.op == 2)) || (in.fmt == Fmt::Vop1 && in.op == 2) ||
+          (in.fmt == Fmt::Vop3 && (in.op == 257 || in.op == 258 || in.op == 384 + 2)))
+        return true;
       if (in.fmt != Fmt::Ds || in.op != 53 || (in.w0 & 0x8000)) continue;
       const uint32_t o = in.w0 & 0xFFFF;
       if (((o & 0x1F) & 0x1C) != 0x1C || ((o >> 5) & 0x1C) || ((o >> 10) & 0x1C)) return true;
     }
+    return false;
+  }
+
+  // Whether the code indexes VGPRs by M0 (v_movrels, v_movreld): an index
+  // past the stage's VGPRs is reported (the fault word).
+  bool IndexesVgprs() const {
+    for (auto& [pc, in] : code().at)
+      if ((in.fmt == Fmt::Vop1 && in.op >= 66 && in.op <= 68) ||
+          (in.fmt == Fmt::Vop3 && in.op >= 384 + 66 && in.op <= 384 + 68))
+        return true;
     return false;
   }
 
@@ -747,6 +866,14 @@ struct Resolver {
       NewSite(L.pc).buffer = Buffer(L.P, L.size, false);
       r.faults = true;
     }
+    for (const Wide& x : wides) {
+      auto it = blocks.find(x.P);
+      if (it == blocks.end())
+        return Fail(x.pc, "a buffer access at a 64-bit address from a pointer the stage reads nowhere else");
+      if (!Readable(x.P, it->second)) return Fail(x.pc, "a buffer access at a 64-bit address outside memory");
+      NewSite(x.pc).buffer = Buffer(x.P, it->second, false);
+      r.faults = true;
+    }
     for (const DynImage& di : dyn_images) {
       const Dyn& first = dyn[size_t(di.tload >= 0 ? di.tload : di.sload)];
       std::vector<int64_t> xs;
@@ -835,14 +962,18 @@ struct Translator {
   std::set<uint32_t> params;           // VS: exported parameters
   std::map<uint32_t, bool> inputs;     // PS: input locations, flat
   std::set<uint32_t> mrts;             // PS: exported targets
-  bool depth = false, uses_lds = false, uses_quad = false, uses_shuffle = false;
+  bool depth = false, uses_lds = false, uses_quad = false, uses_shuffle = false, uses_ballot = false;
+  // In waves (Resolved::wave): the half of the wave (lanes 32 * half on)
+  // whose VGPRs the instruction being emitted works on.
+  bool wave = false;
+  int half = 0;
   std::map<gaddr, int> block_of;
   std::vector<int> ro_of, rw_of;       // binding -> RO / RW index (-1: not that kind)
   int nro = 0, nrw = 0;
   int ids = -1, emits = -1;            // Export: the vertex indices; Geometry: its emits
   int fault = -1;                      // the fault word's range (Resolved::faults)
 
-  Translator(const StageState& st, const Resolver& res) : st(st), res(res) {}
+  Translator(const StageState& st, const Resolver& res) : st(st), res(res), wave(res.r.wave) {}
 
   void Fail(gaddr pc, const char* what) {
     if (!error.empty()) return;
@@ -857,7 +988,18 @@ struct Translator {
 
   std::string V(uint32_t n) {
     max_vgpr = std::max(max_vgpr, int(n));
-    return "v" + std::to_string(n);
+    return "v" + std::to_string(n) + (wave ? "_" + std::to_string(half) : "");
+  }
+  // Whether the lane's EXEC bit is set; the lane's index in its wave.
+  std::string Active() const {
+    return wave ? std::string("((exec_") + (half ? "hi" : "lo") + " >> r_sl) & 1u) != 0u" : "(exec_lo & 1u) != 0u";
+  }
+  std::string Lane() const { return wave ? (half ? "(r_sl + 32u)" : "r_sl") : "r_lane"; }
+  // Whether a mask (an SGPR pair: VCC, EXEC) is empty: the wave's, or in a
+  // lane of its own, that lane's bit.
+  static std::string Empty(const char* mask, bool wave) {
+    const std::string m = mask;
+    return wave ? "(" + m + "_lo | " + m + "_hi) == 0u" : "(" + m + "_lo & 1u) == 0u";
   }
   static std::string S(uint32_t n) {
     switch (n) {
@@ -884,8 +1026,8 @@ struct Translator {
     Scalars none;
     if (Source(none, in, code, &c)) return U(c);
     switch (code) {
-      case gcn::kVccz: return "((vcc_lo & 1u) == 0u ? 1u : 0u)";
-      case gcn::kExecz: return "((exec_lo & 1u) == 0u ? 1u : 0u)";
+      case gcn::kVccz: return "(" + Empty("vcc", wave) + " ? 1u : 0u)";
+      case gcn::kExecz: return "(" + Empty("exec", wave) + " ? 1u : 0u)";
       case gcn::kScc: return "scc";
     }
     Fail(pc, "an operand not translated yet");
@@ -924,9 +1066,11 @@ struct Translator {
     auto fo = [&](const std::string& e) { Line(d + " = " + FOut(e, omod, clamp) + ";"); };
     auto io = [&](const std::string& e) { Line(d + " = " + e + ";"); };
     auto si = [&](int i) { return "int(" + s[i] + ")"; };
-    // Carry-out ops write sdst (VCC for VOP2).
+    // Carry-out ops write sdst (VCC for VOP2); in waves, the lane's ballot
+    // (Vector).
     auto carry = [&](const std::string& e) {
-      Line(Dst(sdst) + " = (" + e + ") ? 1u : 0u; " + Dst(sdst + 1) + " = 0u;");
+      if (wave) Line("r_b" + std::to_string(half) + " = " + e + ";");
+      else Line(Dst(sdst) + " = (" + e + ") ? 1u : 0u; " + Dst(sdst + 1) + " = 0u;");
     };
     switch (op) {
       case 0:  // v_cndmask_b32: s1 if the lane's bit of s2 (VCC) is set
@@ -1240,6 +1384,7 @@ struct Translator {
 
   void Buffer(gaddr pc, const Instr& in, const Site& site) {
     const uint32_t vdata = (in.w1 >> 8) & 0xFF;
+    if (site.addr64) return Wide(pc, in, site);
     uint32_t stride;
     const std::string addr = BufAddr(in, pc, site.vsharp, &stride);
     const int b = site.buffer;
@@ -1288,6 +1433,23 @@ struct Translator {
       }
     }
     Fail(pc, "a buffer instruction not translated yet");
+  }
+
+  // A buffer load at a 64-bit address (ADDR64: VGPRs vaddr, vaddr + 1,
+  // plus the offsets; the V# adds nothing): from the range resolved for it
+  // (Resolver::Wide), checked.
+  void Wide(gaddr pc, const Instr& in, const Site& site) {
+    const uint32_t vdata = (in.w1 >> 8) & 0xFF, vaddr = in.w1 & 0xFF, soff = in.w1 >> 24;
+    const int b = ro_of[size_t(site.buffer)];
+    if (in.fmt != Fmt::Mubuf || in.op < 12 || in.op > 15)
+      return Fail(pc, "a buffer instruction at a 64-bit address not translated yet");
+    if (b < 0) return Fail(pc, "a buffer load at a 64-bit address from a written range not translated yet");
+    const uint32_t n = in.op == 12 ? 1 : in.op == 13 ? 2 : in.op == 14 ? 4 : 3;
+    Line("r_t = " + U(in.w0 & 0xFFF) + " + " + Src(soff, in, pc) + "; r_a = " + V(vaddr) + " + r_t;");
+    Line("if (" + V(vaddr + 1) + " + (r_a < r_t ? 1u : 0u) != r_region[" + std::to_string(b) + "].y) r_fault(" +
+         U(uint32_t(pc)) + ");");
+    for (uint32_t i = 0; i < n; i++)
+      Line(V(vdata + i) + " = r_rdc(" + std::to_string(b) + ", r_a + " + U(4 * i) + ", " + U(uint32_t(pc)) + ");");
   }
 
   // An image access with descriptors loaded at a run-time offset: the
@@ -1570,10 +1732,15 @@ struct Translator {
         Line("r_lds_wr(" + a + " + " + U(off0 * 4) + ", " + V(d0) + ");");
         Line("r_lds_wr(" + a + " + " + U(off1 * 4) + ", " + V(d1) + ");");
         return;
+      case 10: Line("r_lds_or(" + a + " + " + U(off0 | off1 << 8) + ", " + V(d0) + ");"); return;
       case 54: Line(V(vdst) + " = r_lds_rd(" + a + " + " + U(off0 | off1 << 8) + ");"); return;
       case 55:
         Line(V(vdst) + " = r_lds_rd(" + a + " + " + U(off0 * 4) + ");");
         Line(V(vdst + 1) + " = r_lds_rd(" + a + " + " + U(off1 * 4) + ");");
+        return;
+      case 119:  // ds_read2_b64
+        for (uint32_t i = 0; i < 4; i++)
+          Line(V(vdst + i) + " = r_lds_rd(" + a + " + " + U((i < 2 ? off0 : off1) * 8 + (i & 1) * 4) + ");");
         return;
     }
     Fail(pc, "an LDS instruction not translated yet");
@@ -1591,19 +1758,15 @@ struct Translator {
     if (!(offset & 0x8000)) {
       // Bit-mask mode, in groups of 32 lanes: lane ((l & and) | or) ^ xor.
       // One that keeps each lane in its quad (lane bits 2-4 as they are)
-      // is a quad permutation; others are not translated yet.
+      // is a quad permutation; others run in waves (a half of the wave is
+      // a group).
       const uint32_t and_mask = offset & 0x1F, or_mask = (offset >> 5) & 0x1F, xor_mask = (offset >> 10) & 0x1F;
       if ((and_mask & 0x1C) != 0x1C || (or_mask & 0x1C) || (xor_mask & 0x1C)) {
-        // Across quads: a shuffle in the host's subgroup, whose groups of
-        // 32 invocations are the wave's (a host with smaller subgroups
-        // reports it: compute stages only, SwizzlesAcrossQuads).
-        if (fault < 0) return Fail(pc, "ds_swizzle_b32 across quads outside a compute stage not translated yet");
+        if (!wave) return Fail(pc, "ds_swizzle_b32 across quads outside a compute stage not translated yet");
         uses_shuffle = true;
-        Line("if (gl_SubgroupSize < 32u) r_fault(" + U(uint32_t(pc)) + ");");
-        Line("r_q = gl_SubgroupInvocationID;");
-        Line("r_t = subgroupShuffle(" + V(addr) + ", (r_q & ~31u) | ((((r_q & 31u) & " + U(and_mask) + ") | " +
-             U(or_mask) + ") ^ " + U(xor_mask) + "));");
-        Line("if ((exec_lo & 1u) != 0u) " + V(vdst) + " = r_t;");
+        Line("r_t = subgroupShuffle(" + V(addr) + ", ((r_sl & " + U(and_mask) + ") | " + U(or_mask) + ") ^ " +
+             U(xor_mask) + ");");
+        Line("if (" + Active() + ") " + V(vdst) + " = r_t;");
         return;
       }
       for (uint32_t q = 0; q < 4; q++) sel[q] = (((q & and_mask) | or_mask) ^ xor_mask) & 3;
@@ -1617,7 +1780,7 @@ struct Translator {
            "subgroupQuadBroadcast(" + V(addr) + ", " + U(sel[1]) + ") : r_q == 2u ? subgroupQuadBroadcast(" +
            V(addr) + ", " + U(sel[2]) + ") : subgroupQuadBroadcast(" + V(addr) + ", " + U(sel[3]) + ");");
     }
-    Line("if ((exec_lo & 1u) != 0u) " + V(vdst) + " = r_t;");
+    Line("if (" + Active() + ") " + V(vdst) + " = r_t;");
   }
 
   // A scalar instruction.
@@ -1805,7 +1968,114 @@ struct Translator {
     for (uint32_t i = 0; i < n; i++) Line(S(d + i) + " = " + Load(site.buffer, "r_a + " + U(4 * i)) + ";");
   }
 
+  // In waves: lane r_sl's bit of the half's word of a mask source (an SGPR
+  // pair or a constant, 64 bits as SOP's operands).
+  std::string MaskBit(uint32_t code, const Instr& in, gaddr pc) {
+    if (code >= gcn::kVgpr) {
+      Fail(pc, "a VGPR as a lane mask");
+      return "0u";
+    }
+    if (code < 104 || code == gcn::kVccLo || code == gcn::kExecLo)
+      return "((" + S(code + uint32_t(half)) + " >> r_sl) & 1u)";
+    uint32_t k;
+    Scalars none;
+    if (!Source(none, in, code, &k)) {
+      Fail(pc, "a lane mask not translated yet");
+      return "0u";
+    }
+    if (half) k = code != gcn::kLiteral && int32_t(k) < 0 ? 0xFFFFFFFFu : 0u;
+    return "((" + U(k) + " >> r_sl) & 1u)";
+  }
+
+  // In waves: v_readlane_b32, v_writelane_b32 and v_readfirstlane_b32
+  // (false: another instruction). An empty EXEC reads lane 0.
+  bool CrossLane(gaddr pc, const Instr& in) {
+    const bool vop3 = in.fmt == Fmt::Vop3;
+    uint32_t op = in.op;
+    if (vop3) {
+      if (op != 257 && op != 258 && op != 384 + 2) return false;
+      op = op == 384 + 2 ? 2 + 384 : op - 256;
+    } else if (!((in.fmt == Fmt::Vop2 && (op == 1 || op == 2)) || (in.fmt == Fmt::Vop1 && op == 2))) {
+      return false;
+    } else if (in.fmt == Fmt::Vop1) {
+      op += 384;
+    }
+    const uint32_t dst = vop3 ? in.w0 & 0xFF : (in.w0 >> 17) & 0xFF;
+    const uint32_t src0 = vop3 ? in.w1 & 0x1FF : in.w0 & 0x1FF;
+    const uint32_t lane = vop3 ? (in.w1 >> 9) & 0x1FF : (in.w0 >> 9) & 0xFF;
+    // A lane's value of src0 (r_l: the lane), all invocations taking part.
+    auto read = [&]() -> std::string {
+      if (src0 < gcn::kVgpr) return Src(src0, in, pc);
+      uses_shuffle = true;
+      half = 0;
+      const std::string lo = V(src0 - gcn::kVgpr);
+      half = 1;
+      const std::string hi = V(src0 - gcn::kVgpr);
+      half = 0;
+      Line("r_t = subgroupShuffle(" + lo + ", r_l & 31u); r_t2 = subgroupShuffle(" + hi + ", r_l & 31u);");
+      return "(r_l < 32u ? r_t : r_t2)";
+    };
+    switch (op) {
+      case 1:
+        Line("r_l = " + Src(lane, in, pc) + " & 63u;");
+        Line(Dst(dst) + " = " + read() + ";");
+        return true;
+      case 384 + 2:
+        Line("r_l = exec_lo != 0u ? uint(findLSB(exec_lo)) : exec_hi != 0u ? 32u + uint(findLSB(exec_hi)) : 0u;");
+        Line(Dst(dst) + " = " + read() + ";");
+        return true;
+      case 2:  // whatever the lane's EXEC bit
+        Line("r_l = " + Src(lane, in, pc) + " & 63u; r_t = " + Src(src0, in, pc) + ";");
+        for (half = 0; half < 2; half++) Line("if (r_l == " + Lane() + ") " + V(dst) + " = r_t;");
+        half = 0;
+        return true;
+    }
+    return false;
+  }
+
+  // v_movreld_b32, v_movrels_b32, v_movrelsd_b32: VGPRs indexed by M0
+  // (vdst + M0, src0 + M0); one past the stage's VGPRs is reported.
+  void Movrel(gaddr pc, const Instr& in, uint32_t op) {
+    if (fault < 0) return Fail(pc, "v_movrel outside a compute stage not translated yet");
+    const bool vop3 = in.fmt == Fmt::Vop3;
+    const uint32_t vdst = vop3 ? in.w0 & 0xFF : (in.w0 >> 17) & 0xFF;
+    const uint32_t src0 = vop3 ? in.w1 & 0x1FF : in.w0 & 0x1FF;
+    const uint32_t count = ((st.rsrc1 & 0x3F) + 1) * 4;
+    auto indexed = [&](uint32_t base, bool write) {
+      Line("r_x = " + U(base) + " + m0;");
+      Line("switch (r_x) {");
+      for (uint32_t i = 0; i < count; i++)
+        Line("case " + U(i) + ": " + (write ? V(i) + " = r_t" : "r_t = " + V(i)) + "; break;");
+      Line("default: r_fault(" + U(uint32_t(pc)) + ");" + (write ? "" : " r_t = 0u;"));
+      Line("}");
+    };
+    if (op != 66 && src0 < gcn::kVgpr) return Fail(pc, "v_movrels of a scalar");
+    Line("if (" + Active() + ") {");
+    if (op == 66) Line("r_t = " + Src(src0, in, pc) + ";");
+    else indexed(src0 - gcn::kVgpr, false);
+    if (op == 67) Line(V(vdst) + " = r_t;");
+    else indexed(vdst, true);
+    Line("}");
+  }
+
+  // A vector instruction: in waves, for each half, then the ballot of an
+  // SGPR pair it writes (comparisons, carries; inactive lanes 0).
   void Vector(gaddr pc, const Instr& in) {
+    if (!wave) return VectorLanes(pc, in, nullptr);
+    if (CrossLane(pc, in)) return;
+    int ballot = -1;
+    for (half = 0; half < 2; half++) VectorLanes(pc, in, &ballot);
+    half = 0;
+    if (ballot < 0) return;
+    uses_ballot = true;
+    Line("r_t = subgroupBallot(r_b0).x; r_t2 = subgroupBallot(r_b1).x;");
+    Line(Dst(uint32_t(ballot) & 0xFF) + " = r_t; " + Dst((uint32_t(ballot) & 0xFF) + 1) + " = r_t2;");
+    if (ballot & 0x100) Line("exec_lo = r_t; exec_hi = r_t2;");  // cmpx
+  }
+
+  // A vector instruction for the lanes of one invocation (in waves: half
+  // `half`, the SGPR pair it ballots in *ballot, 0x100 set for cmpx).
+  void VectorLanes(gaddr pc, const Instr& in, int* ballot) {
     std::string s[3];
     bool abs[3] = {}, neg[3] = {};
     uint32_t omod = 0;
@@ -1813,12 +2083,13 @@ struct Translator {
     std::string d;
     uint32_t sdst = gcn::kVccLo;
     uint32_t op;
+    const std::string b = "r_b" + std::to_string(half);
     switch (in.fmt) {
       case Fmt::Vop2:
         op = in.op;
         s[0] = Src(in.w0 & 0x1FF, in, pc);
         s[1] = V((in.w0 >> 9) & 0xFF);
-        s[2] = "vcc_lo";
+        s[2] = wave ? MaskBit(gcn::kVccLo, in, pc) : "vcc_lo";
         d = V((in.w0 >> 17) & 0xFF);
         break;
       case Fmt::Vop1:
@@ -1828,6 +2099,7 @@ struct Translator {
           Line(Dst((in.w0 >> 17) & 0xFF) + " = " + Src(in.w0 & 0x1FF, in, pc) + ";");
           return;
         }
+        if (in.op >= 66 && in.op <= 68) return Movrel(pc, in, in.op);
         s[0] = Src(in.w0 & 0x1FF, in, pc);
         d = V((in.w0 >> 17) & 0xFF);
         break;
@@ -1837,6 +2109,11 @@ struct Translator {
         std::string cond;
         if (!Compare(pc, in.op, s, abs, neg, &cond)) return;
         // Inactive lanes compare false.
+        if (wave) {
+          Line(b + " = " + Active() + " && " + cond + ";");
+          *ballot = int(gcn::kVccLo) | ((in.op >> 4) & 1 ? 0x100 : 0);
+          return;
+        }
         Line("vcc_lo = (exec_lo & 1u) != 0u && " + cond + " ? 1u : 0u; vcc_hi = 0u;");
         if ((in.op >> 4) & 1) Line("exec_lo &= vcc_lo; exec_hi = 0u;");  // cmpx
         return;
@@ -1856,6 +2133,11 @@ struct Translator {
           std::string cond;
           if (!Compare(pc, op, s, abs, neg, &cond)) return;
           const uint32_t sd = w0 & 0xFF;
+          if (wave) {
+            Line(b + " = " + Active() + " && " + cond + ";");
+            *ballot = int(sd) | ((op >> 4) & 1 ? 0x100 : 0);
+            return;
+          }
           Line(Dst(sd) + " = (exec_lo & 1u) != 0u && " + cond + " ? 1u : 0u; " + Dst(sd + 1) + " = 0u;");
           if ((op >> 4) & 1) Line("exec_lo = " + Dst(sd) + "; exec_hi = 0u;");
           return;
@@ -1867,10 +2149,17 @@ struct Translator {
           Line(Dst(w0 & 0xFF) + " = " + s[0] + ";");
           return;
         }
+        if (op >= 384 + 66 && op <= 384 + 68) return Movrel(pc, in, op - 384);
+        if (wave && (op == 0 || (op >= 40 && op <= 42))) s[2] = MaskBit((w1 >> 18) & 0x1FF, in, pc);
         break;
       }
       default:
         return Fail(pc, "an instruction not translated yet");
+    }
+    // Carries out: inactive lanes' bits are 0.
+    if (wave && op >= 37 && op <= 42) {
+      Line(b + " = false;");
+      *ballot = int(sdst);
     }
     // The lane's EXEC bit guards every VGPR write.
     const std::string saved = body;
@@ -1878,7 +2167,7 @@ struct Translator {
     Valu(pc, in, op, d, s, abs, neg, omod, clamp, sdst);
     std::string ops = body;
     body = saved;
-    Line("if ((exec_lo & 1u) != 0u) {");
+    Line("if (" + Active() + ") {");
     body += ops;
     Line("}");
   }
@@ -1897,11 +2186,11 @@ struct Translator {
           const gaddr target = next + 4 * Simm16(in);
           const std::string tb = U(uint32_t(block_of.at(target)));
           const std::string nb = in.op == 2 ? "" : U(uint32_t(block_of.at(next)));
-          static const char* kCond[10] = {"", "", "true", "", "scc == 0u", "scc != 0u",
-                                          "(vcc_lo & 1u) == 0u", "(vcc_lo & 1u) != 0u",
-                                          "(exec_lo & 1u) == 0u", "(exec_lo & 1u) != 0u"};
+          const std::string kCond[10] = {"", "", "true", "", "scc == 0u", "scc != 0u",
+                                         Empty("vcc", wave), "!(" + Empty("vcc", wave) + ")",
+                                         Empty("exec", wave), "!(" + Empty("exec", wave) + ")"};
           if (in.op == 2) Line("pc = " + tb + "; continue;");
-          else Line(std::string("pc = (") + kCond[in.op] + ") ? " + tb + " : " + nb + "; continue;");
+          else Line("pc = (" + kCond[in.op] + ") ? " + tb + " : " + nb + "; continue;");
           return;
         }
         return Fail(pc, "a program control instruction not translated yet");
@@ -1914,27 +2203,40 @@ struct Translator {
         return Vector(pc, in);
       case Fmt::Vintrp:
         return Interp(pc, in);
-      case Fmt::Mubuf: case Fmt::Mtbuf:
-        if (in.fmt == Fmt::Mubuf && in.op >= 112) return;
-        Line("if ((exec_lo & 1u) != 0u) {");
-        Buffer(pc, in, site->second);
-        Line("}");
-        return;
-      case Fmt::Mimg:
-        Line("if ((exec_lo & 1u) != 0u) {");
-        if (site->second.image >= 0) Image(pc, in, site->second.image);
-        else DynamicImage(pc, in, site->second);
-        Line("}");
-        return;
       case Fmt::Exp:
         return Export(pc, in);
-      case Fmt::Ds:
-        if (in.op == 53) return Swizzle(pc, in);
-        Line("if ((exec_lo & 1u) != 0u) {");
-        Lds(pc, in);
-        Line("}");
-        return;
+      default:
+        break;
     }
+    // Memory instructions: lane by lane (in waves, a half at a time).
+    for (half = 0; half < (wave ? 2 : 1); half++) {
+      switch (in.fmt) {
+        case Fmt::Mubuf: case Fmt::Mtbuf:
+          if (in.fmt == Fmt::Mubuf && in.op >= 112) break;
+          Line("if (" + Active() + ") {");
+          Buffer(pc, in, site->second);
+          Line("}");
+          break;
+        case Fmt::Mimg:
+          Line("if (" + Active() + ") {");
+          if (site->second.image >= 0) Image(pc, in, site->second.image);
+          else DynamicImage(pc, in, site->second);
+          Line("}");
+          break;
+        case Fmt::Ds:
+          if (in.op == 53) {
+            Swizzle(pc, in);
+            break;
+          }
+          Line("if (" + Active() + ") {");
+          Lds(pc, in);
+          Line("}");
+          break;
+        default:
+          break;
+      }
+    }
+    half = 0;
   }
 
   // s_sendmsg: a GS's cuts and emits on stream 0 (the one drawn) as its
@@ -2019,6 +2321,8 @@ struct Translator {
     char b[256];
     if (uses_quad) g += "#extension GL_KHR_shader_subgroup_quad : require\n";
     if (uses_shuffle) g += "#extension GL_KHR_shader_subgroup_shuffle : require\n";
+    if (uses_ballot) g += "#extension GL_KHR_shader_subgroup_ballot : require\n";
+    if (wave) g += "#extension GL_KHR_shader_subgroup_basic : require\n";
     // The uniform block: user data, the code bases, each range's base and
     // size (Uniforms()).
     g += "layout(std140, R_UNIFORMS) uniform RUser {\n  uvec4 r_user[4];\n  uvec4 r_misc;\n  uvec4 r_misc2;\n"
@@ -2128,22 +2432,24 @@ struct Translator {
       std::snprintf(b, sizeof b, "shared uint r_lds[%u];\n", std::max(lds, 1u));
       g += b;
       g += "uint r_lds_rd(uint a) { return (a >> 2) < uint(r_lds.length()) ? r_lds[a >> 2] : 0u; }\n"
-           "void r_lds_wr(uint a, uint v) { if ((a >> 2) < uint(r_lds.length())) r_lds[a >> 2] = v; }\n";
+           "void r_lds_wr(uint a, uint v) { if ((a >> 2) < uint(r_lds.length())) r_lds[a >> 2] = v; }\n"
+           "void r_lds_or(uint a, uint v) { if ((a >> 2) < uint(r_lds.length())) atomicOr(r_lds[a >> 2], v); }\n";
     }
     g += st.rects ? "void r_vs(uint r_vid) {\n" : "void main() {\n";
     g += "  uint scc = 0u, m0 = 0u, vcc_lo = 0u, vcc_hi = 0u, exec_lo = 1u, exec_hi = 0u;\n";
     g += "  uint r_t, r_t2, r_a, r_w, r_w1, r_w2, r_w3, r_unused; uvec4 r_v4, r_t4; uint r_c[4], r_d[4], r_q;\n"
-         "  uint r_i, r_o, r_lane = 0u;\n";
+         "  uint r_i, r_o, r_lane = 0u, r_l, r_x, r_sl = 0u; bool r_b0, r_b1;\n";
     for (int i = 0; i < 104; i++) {
       const std::string init = i < 16 ? "r_user[" + std::to_string(i / 4) + "][" + std::to_string(i % 4) + "]" : "0u";
       std::snprintf(b, sizeof b, "%ss%d = %s%s", i % 8 ? " " : "  uint ", i, init.c_str(), i % 8 == 7 ? ";\n" : ",");
       g += b;
     }
+    const std::string inputs = Inputs();  // can name more VGPRs
     for (int i = 0; i <= max_vgpr; i++) {
-      std::snprintf(b, sizeof b, "  uint v%d = 0u;\n", i);
+      std::snprintf(b, sizeof b, wave ? "  uint v%d_0 = 0u, v%d_1 = 0u;\n" : "  uint v%d = 0u;\n", i, i);
       g += b;
     }
-    g += Inputs();
+    g += inputs;
     for (uint32_t m : mrts) g += "  r_color" + std::to_string(m) + " = vec4(0.0);\n";
     for (uint32_t p : params) g += "  r_param" + std::to_string(p) + " = vec4(0.0);\n";
     g += body;
@@ -2278,11 +2584,31 @@ struct Translator {
           g += b;
         }
         // Waves take a group's invocations in order, 64 at a time.
-        g += "  r_lane = gl_LocalInvocationIndex % 64u;\n";
         const uint32_t comps = (st.rsrc2 >> 11) & 3;
-        vg(0, "gl_LocalInvocationID.x");
-        if (comps >= 1) vg(1, "gl_LocalInvocationID.y");
-        if (comps >= 2) vg(2, "gl_LocalInvocationID.z");
+        if (!wave) {
+          g += "  r_lane = gl_LocalInvocationIndex % 64u;\n";
+          vg(0, "gl_LocalInvocationID.x");
+          if (comps >= 1) vg(1, "gl_LocalInvocationID.y");
+          if (comps >= 2) vg(2, "gl_LocalInvocationID.z");
+          break;
+        }
+        // In waves: host invocation i runs lanes i % 32 and i % 32 + 32 of
+        // wave i / 32, the group's invocations past its size inactive.
+        const uint32_t tx = std::max(st.threads[0], 1u), ty = std::max(st.threads[1], 1u),
+                       n = tx * ty * std::max(st.threads[2], 1u);
+        g += "  r_sl = gl_SubgroupInvocationID;\n";
+        g += "  if (gl_SubgroupSize != 32u || gl_LocalInvocationIndex % 32u != r_sl ||\n"
+             "      gl_SubgroupID != gl_LocalInvocationIndex / 32u) r_fault(" + U(uint32_t(st.code)) + ");\n";
+        g += "  r_i = min(" + U(n) + " - gl_LocalInvocationIndex / 32u * 64u, 64u);\n"
+             "  exec_lo = r_i >= 32u ? 0xFFFFFFFFu : (1u << r_i) - 1u;\n"
+             "  exec_hi = r_i >= 64u ? 0xFFFFFFFFu : r_i > 32u ? (1u << (r_i - 32u)) - 1u : 0u;\n";
+        for (half = 0; half < 2; half++) {
+          const std::string i = "(gl_LocalInvocationIndex / 32u * 64u + r_sl + " + U(32u * uint32_t(half)) + ")";
+          g += "  " + V(0) + " = " + i + " % " + U(tx) + ";\n";
+          if (comps >= 1) g += "  " + V(1) + " = " + i + " / " + U(tx) + " % " + U(ty) + ";\n";
+          if (comps >= 2) g += "  " + V(2) + " = " + i + " / " + U(tx * ty) + ";\n";
+        }
+        half = 0;
         break;
       }
     }
@@ -2342,6 +2668,7 @@ Resolved Resolve(const StageState& st) {
     }
   }
   k += rv.r.faults ? 'f' : '-';
+  k += rv.r.wave ? 'w' : '-';
   for (const BufferRange& b : rv.r.buffers) k += b.written ? 'w' : 'r';
   return rv.r;
 }
@@ -2372,6 +2699,12 @@ Translated Translate(const StageState& st, const Resolved& r) {
   t.stage.rw_images = images;
   t.stage.uniform_bytes = uint32_t(Uniforms(st, rv.r).size() * 4);
   t.lds_dwords = ((st.rsrc2 >> 15) & 0x1FF) * 128;
+  for (int i = 0; i < 3; i++) t.local_size[i] = std::max(st.threads[i], 1u);
+  if (rv.r.wave) {
+    const uint32_t n = t.local_size[0] * t.local_size[1] * t.local_size[2];
+    t.local_size[0] = (n + 63) / 64 * 32;
+    t.local_size[1] = t.local_size[2] = 1;
+  }
   return t;
 }
 
