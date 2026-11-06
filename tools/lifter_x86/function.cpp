@@ -334,8 +334,20 @@ bool RecoverJumpTable64(const Program& p, const Function& f, const Insn& jmp,
   // jcc on the path: the index is at most N past ja falling through or
   // jbe taken, below N past jae falling through or jb taken.
   bool below = false;
-  ZydisRegister alias = ZYDIS_REGISTER_NONE;  // compared, then copied to idx
+  // Compared in another register (alias) that holds idx's value: idx was
+  // copied from it, before or after the compare. Copied before, the walk
+  // back from the compare may cross a branch; then nothing in the address
+  // range from the copy to the compare may write either register.
+  ZydisRegister alias = ZYDIS_REGISTER_NONE;
   uint32_t alias_cases = 0;
+  uint64_t cmp_va = 0;
+  bool crossed = false;
+  auto untouched = [&](uint64_t from, uint64_t to) {
+    for (auto it = f.insns.upper_bound(from); it != f.insns.end() && it->first < to; ++it)
+      if (!it->second.ok || WritesReg(it->second, idx) || WritesReg(it->second, alias))
+        return false;
+    return true;
+  };
   // Clang schedules the case-independent stores and loads of the code
   // after the switch between the bounds check and the jmp: 17 instructions
   // seen in a game's x64 code.
@@ -410,16 +422,18 @@ bool RecoverJumpTable64(const Program& p, const Function& f, const Insn& jmp,
         // Compared in another register that idx was copied from since.
         alias = reg(o0);
         alias_cases = uint32_t(o1.imm.value.u) + !below;
+        cmp_va = in->va;
         state = kAlias;
         break;
       case kAlias:
         if ((d.mnemonic == ZYDIS_MNEMONIC_MOVSXD || d.mnemonic == ZYDIS_MNEMONIC_MOVZX ||
              (d.mnemonic == ZYDIS_MNEMONIC_MOV && o0.size == 32)) &&
-            reg(o0) == idx && reg(o1) == alias)
+            reg(o0) == idx && reg(o1) == alias) {
+          if (crossed && (in->va >= cmp_va || !untouched(in->va, cmp_va))) return unbounded();
           return bounded(alias_cases);
-        if (WritesReg(*in, idx) || WritesReg(*in, alias) ||
-            d.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE)
-          return unbounded();
+        }
+        if (WritesReg(*in, idx) || WritesReg(*in, alias)) return unbounded();
+        if (d.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE) crossed = true;
         break;
     }
   }
