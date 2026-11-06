@@ -212,10 +212,16 @@ bool Step(Engines& e, Stream& s, bool ce) {
     case kIndexBase: e.index_base = (d[0] & ~1u) | uint64_t(d[1] & 0xFFFF) << 32; break;
     case kNumInstances: e.instances = d[0]; break;
     case kEventWrite: {
-      // Flushes, partial flushes and cache actions only: the events that
-      // write query results are not implemented yet.
+      // Flushes, partial flushes and cache actions only, and
+      // PIXEL_PIPE_STAT_CONTROL (0x38, index 1: which occlusion counter
+      // the dumps take, their stride and the render backends dumping),
+      // which writes nothing. The events that write query results are not
+      // implemented yet.
       const uint32_t type = d[0] & 0x3F;
-      if (n > 1) FatalF("GPU: EVENT_WRITE of event %02X with an address not implemented yet", type);
+      if (type == 0x38 && ((d[0] >> 8) & 0xF) == 1) break;
+      if (n > 1)
+        FatalF("GPU: EVENT_WRITE of event %02X with an address not implemented yet (%08X %08X %08X)", type,
+               d[0], d[1], n > 2 ? d[2] : 0);
       break;
     }
     case kDrawIndex2:  // max size, index buffer, count, initiator
