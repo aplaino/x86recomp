@@ -563,9 +563,10 @@ live in Ctx and are used in place (never cached in locals).
   every sticky flag (IE DE ZE OE UE PE) and precedence (a zero divisor
   suppresses DE for a denormal dividend) match the hardware. Under FTZ
   (underflow masked) a denormal result is the zero of its sign, with UE
-  and PE.
-- Not modelled, fatal if reached: unmasked SIMD exceptions (#XM), and
-  DAZ actually changing a result.
+  and PE. Under DAZ a denormal operand is the zero of its sign before
+  anything else (NaN rules, precedence), with no DE; tests/x86/
+  sse_ftz_test checks both against the host.
+- Not modelled, fatal if reached: unmasked SIMD exceptions (#XM).
 - Integer and data-movement forms are plain portable C++.
 - tests/x86/lift_sse_test runs every SSE form in a game EXE lifted and
   natively from random states rich in special values (for a game whose

@@ -1,7 +1,10 @@
-// sse_ftz_test: SSE arithmetic and CVTPD2PS under FTZ against the host,
-// from operands near the bottom of the range (denormal results, exact or
-// not, and ones that round into or out of it), every rounding mode, FTZ
-// set and clear. x86-64 hosts only.
+// sse_ftz_test: SSE arithmetic and CVTPD2PS under FTZ and DAZ against
+// the host, from operands near the bottom of the range (denormal results,
+// exact or not, and ones that round into or out of it), every rounding
+// mode, FTZ and DAZ set and clear; and the other forms that read
+// floating-point operands (square roots, minimum and maximum, compares,
+// conversions, rounding) on denormal operands under DAZ set and clear.
+// x86-64 hosts only.
 
 #include <cstdint>
 #include <cstdio>
@@ -34,6 +37,16 @@ HOST_FORM(HostSubpd, "subpd")
 HOST_FORM(HostMulpd, "mulpd")
 HOST_FORM(HostDivpd, "divpd")
 HOST_FORM(HostCvtpd2ps, "cvtpd2ps")
+HOST_FORM(HostSqrtps, "sqrtps")
+HOST_FORM(HostSqrtpd, "sqrtpd")
+HOST_FORM(HostMinps, "minps")
+HOST_FORM(HostMaxpd, "maxpd")
+HOST_FORM(HostCmpltps, "cmpltps")
+HOST_FORM(HostCmplepd, "cmplepd")
+HOST_FORM(HostCvtps2pd, "cvtps2pd")
+HOST_FORM(HostCvttps2dq, "cvttps2dq")
+HOST_FORM(HostCvtpd2dq, "cvtpd2dq")
+HOST_FORM(HostRoundps, "roundps $4,")
 
 // Biased exponents that reach the denormal range: denormal and near-min
 // operands (add, sub), about half the range down (mul), the top (div).
@@ -81,9 +94,10 @@ int main() {
                       {"mulps", sse::kMul, HostMulps}, {"divps", sse::kDiv, HostDivps}},
           kDouble[] = {{"addpd", sse::kAdd, HostAddpd}, {"subpd", sse::kSub, HostSubpd},
                        {"mulpd", sse::kMul, HostMulpd}, {"divpd", sse::kDiv, HostDivpd}};
-  long flushed = 0;
+  long flushed = 0, zeroed = 0;
   for (int t = 0; t < 200000; t++) {
-    const uint32_t mxcsr = sse::kMxcsrDefault | uint32_t(g() % 4) << 13 | (g() % 4 ? 0x8000 : 0);
+    const uint32_t mxcsr = sse::kMxcsrDefault | uint32_t(g() % 4) << 13 | (g() % 4 ? 0x8000 : 0) |
+                           (g() % 2 ? 0x40 : 0);
     Xmm d, s, sd;
     for (int i = 0; i < 4; i++) {
       sse::SetLane<uint32_t>(d, i, Float(g));
@@ -115,13 +129,56 @@ int main() {
     c.mxcsr = mxcsr;
     sse::CvtFloat(c, false, 2, got, sd, 0);
     Check("cvtpd2ps", mxcsr, d, sd, got, c.mxcsr, want, want_mxcsr);
+
+    // The other forms, on the same float operands and doubles from them.
+    Xmm dd, ss;
+    for (int i = 0; i < 2; i++) {
+      sse::SetLane<uint64_t>(dd, i, Double(g));
+      sse::SetLane<uint64_t>(ss, i, Double(g));
+    }
+    bool den = false;
+    for (int i = 0; i < 4; i++) den |= !(sse::Lane<uint32_t>(s, i) & 0x7F800000u);
+    if ((mxcsr & 0x40) && den) zeroed++;
+    struct {
+      const char* name;
+      void (*host)(uint32_t&, Xmm&, const Xmm&);
+      bool dbl;
+      void (*lift)(Ctx&, Xmm&, const Xmm&);
+    } const kForms[] = {
+        {"sqrtps", HostSqrtps, false, [](Ctx& c, Xmm& d, const Xmm& s) { sse::Sqrt(c, false, 4, d, s, 0); }},
+        {"sqrtpd", HostSqrtpd, true, [](Ctx& c, Xmm& d, const Xmm& s) { sse::Sqrt(c, true, 2, d, s, 0); }},
+        {"minps", HostMinps, false, [](Ctx& c, Xmm& d, const Xmm& s) { sse::MinMax(c, false, false, 4, d, s, 0); }},
+        {"maxpd", HostMaxpd, true, [](Ctx& c, Xmm& d, const Xmm& s) { sse::MinMax(c, true, true, 2, d, s, 0); }},
+        {"cmpltps", HostCmpltps, false, [](Ctx& c, Xmm& d, const Xmm& s) { sse::Cmp(c, false, 4, d, s, 1, 0); }},
+        {"cmplepd", HostCmplepd, true, [](Ctx& c, Xmm& d, const Xmm& s) { sse::Cmp(c, true, 2, d, s, 2, 0); }},
+        {"cvtps2pd", HostCvtps2pd, false, [](Ctx& c, Xmm& d, const Xmm& s) { sse::CvtFloat(c, true, 2, d, s, 0); }},
+        {"cvttps2dq", HostCvttps2dq, false, [](Ctx& c, Xmm& d, const Xmm& s) { sse::CvtToDq(c, false, true, d, s, 0); }},
+        {"cvtpd2dq", HostCvtpd2dq, true, [](Ctx& c, Xmm& d, const Xmm& s) { sse::CvtToDq(c, true, false, d, s, 0); }},
+        {"roundps", HostRoundps, false, [](Ctx& c, Xmm& d, const Xmm& s) { sse::Round(c, false, 4, d, s, 4, 0); }},
+    };
+    for (const auto& f : kForms) {
+      const Xmm& a = f.dbl ? dd : d;
+      const Xmm& b = f.dbl ? ss : s;
+      Xmm want = a, got = a;
+      uint32_t want_mxcsr = mxcsr;
+      f.host(want_mxcsr, want, b);
+      Ctx c{};
+      c.mxcsr = mxcsr;
+      f.lift(c, got, b);
+      Check(f.name, mxcsr, a, b, got, c.mxcsr, want, want_mxcsr);
+    }
   }
   // The operands must reach the case: results flushed on the host.
   if (flushed < 10000) {
     std::printf("FAIL only %ld results underflowed under FTZ\n", flushed);
     failures++;
   }
+  if (zeroed < 10000) {
+    std::printf("FAIL only %ld runs with denormal operands under DAZ\n", zeroed);
+    failures++;
+  }
   if (failures) return 1;
-  std::printf("sse ftz: ok (%ld underflowed under FTZ)\n", flushed);
+  std::printf("sse ftz: ok (%ld underflowed under FTZ, %ld runs with denormal operands under DAZ)\n",
+              flushed, zeroed);
   return 0;
 }
