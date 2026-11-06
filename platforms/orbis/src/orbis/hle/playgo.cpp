@@ -102,6 +102,34 @@ ORBIS_HLE("libScePlayGo", scePlayGoSetInstallSpeed, 2) {
   return 0;
 }
 
+// int scePlayGoGetLanguageMask(ScePlayGoHandle h, ScePlayGoLanguageMask*
+// mask): the library checks the mask pointer (invalid argument, not a bad
+// pointer); the service answers. On 11.00, with the system language
+// English (as libSceSystemService's HLE reports it), the service answers
+// 0x4000000000000000 (measured).
+ORBIS_HLE("libScePlayGo", scePlayGoGetLanguageMask, 2) {
+  std::lock_guard<std::mutex> l(g_mu);
+  if (!g_init) return kErrNotInitialized;
+  if (!Arg(c, 1)) return kErrInvalidArgument;
+  if (uint32_t e = CheckHandle(uint32_t(Arg(c, 0)))) return e;
+  recomp::Wr64(Arg(c, 1), 0x4000000000000000ull);
+  return 0;
+}
+
+// int scePlayGoPrefetch(ScePlayGoHandle h, const ScePlayGoChunkId* ids,
+// uint32_t n, ScePlayGoInstallSpeed min_speed): the library checks the
+// pointer and 1 <= n <= 999 (invalid argument) and passes the speed on as a
+// signed byte. Every chunk is local, so there is nothing to fetch; on
+// 11.00 the service answers 0 for an installed game (measured).
+ORBIS_HLE("libScePlayGo", scePlayGoPrefetch, 4) {
+  std::lock_guard<std::mutex> l(g_mu);
+  if (!g_init) return kErrNotInitialized;
+  if (!Arg(c, 1)) return kErrBadPointer;
+  const uint32_t n = uint32_t(Arg(c, 2));
+  if (n - 1 > kMaxEntries - 1) return kErrInvalidArgument;
+  return CheckHandle(uint32_t(Arg(c, 0)));
+}
+
 ORBIS_HLE("libScePlayGo", scePlayGoGetInstallSpeed, 2) {
   std::lock_guard<std::mutex> l(g_mu);
   if (uint32_t e = CheckHandle(uint32_t(Arg(c, 0)))) return e;

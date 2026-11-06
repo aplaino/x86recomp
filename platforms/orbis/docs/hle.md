@@ -158,7 +158,9 @@ library.
   target to DB_DEPTH_CLEAR at its next draw; other HTILE writes are
   fatal. The depth clear of DB_RENDER_CONTROL is modelled.
 - recomp_orbis_system also: libScePlayGo (the game is installed in full:
-  every chunk local, nothing to do, ETAs 0) and libSceDiscMap (a disc
+  every chunk local, nothing to do, ETAs 0, prefetching succeeds; the
+  language mask is the service's answer for a console set to English,
+  0x4000000000000000, measured on 11.00) and libSceDiscMap (a disc
   game's file locations from its sce_discmap.plt: MD5 of the path below
   /app0/, 24-bit block, location and length; every block is on the HDD).
 - recomp_orbis_audio: libSceAudioOut. Ports numbered and checked as
@@ -302,8 +304,9 @@ library.
   param.sfo's USER_DEFINED_PARAM_1-4, no add-on content (its info: not
   found), temporary data at /temp0 (cleared when mounted with the format
   option). Mounting add-on content, entitlement keys, download progress,
-  free space and a USER_DEFINED_PARAM_n param.sfo does not have are not
-  implemented.
+  free space and a USER_DEFINED_PARAM_2-4 param.sfo does not have are
+  not implemented. Without USER_DEFINED_PARAM_1, AppParamGetInt(1)
+  returns 0 and the value 0 (measured on 11.00).
 - recomp_orbis_savedata_dialog: libSceSaveDataDialog. The library's side
   is 11.00's: the states, the checks of the parameter and everything it
   points to (the common dialog base's size and magic included; some

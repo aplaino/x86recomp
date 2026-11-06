@@ -71,7 +71,9 @@ ORBIS_HLE("libSceAppContent", sceAppContentInitialize, 2) {
 }
 
 // int sceAppContentAppParamGetInt(uint32_t id, int32_t* value): 0 the SKU
-// (3, full), 1-4 param.sfo's USER_DEFINED_PARAM_1-4.
+// (3, full), 1-4 param.sfo's USER_DEFINED_PARAM_1-4. On 11.00, id 1 with no
+// USER_DEFINED_PARAM_1 in param.sfo returns 0 and value 0 (measured); the
+// other ids' answer without their parameter is not measured.
 ORBIS_HLE("libSceAppContent", sceAppContentAppParamGetInt, 2) {
   if (!Initialized()) return kErrNotInitialized;
   if (!Arg(c, 1)) return kErrParameter;
@@ -82,11 +84,15 @@ ORBIS_HLE("libSceAppContent", sceAppContentAppParamGetInt, 2) {
   } else if (id >= 1 && id <= 4) {
     const auto& ints = recomp::orbis::AppParam().ints;
     auto it = ints.find("USER_DEFINED_PARAM_" + std::to_string(id));
-    if (it == ints.end())
+    if (it != ints.end()) {
+      v = int32_t(it->second);
+    } else if (id == 1) {
+      v = 0;
+    } else {
       recomp::FatalF("sceAppContentAppParamGetInt(%u): param.sfo has no USER_DEFINED_PARAM_%u "
                      "(the system's answer not implemented)",
                      id, id);
-    v = int32_t(it->second);
+    }
   } else {
     recomp::FatalF("sceAppContentAppParamGetInt(%u) not implemented", id);
   }
