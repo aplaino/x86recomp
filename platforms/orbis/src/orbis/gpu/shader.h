@@ -14,7 +14,12 @@
 // the SGPR pairs that hold them) keep that lane's bit in bit 0, so a
 // comparison sets or clears bit 0 and a branch on an empty EXEC branches
 // when this lane is inactive. What needs the other lanes (counts of
-// active lanes, cross-lane moves) is not translated yet. Export (ES) and
+// active lanes, cross-lane moves) is not translated yet, but for
+// ds_swizzle, which reads them through the host's subgroup operations.
+// Scalars the stage loads at a run-time offset (an index from a
+// v_readfirstlane) are loaded as it runs, from the range the stage reads
+// at known offsets from the same pointer; descriptors among them are
+// picked from those that range holds (Resolved::match). Export (ES) and
 // Geometry (GS) stages run as compute passes of 64-invocation groups, one
 // group per wave and the invocation's index in it as its lane, which
 // swizzled buffer accesses (the rings between ES, GS and the copy shader)
@@ -83,6 +88,13 @@ struct Resolved {
   std::vector<BufferRange> buffers;
   std::vector<ImageRef> images;
   gaddr fetch = 0;          // the fetch shader the stage calls (0: none)
+  // Descriptors loaded at run-time offsets: the words of those each such
+  // access can find (Uniforms puts them last), and whether the stage
+  // reports a load outside its range or a descriptor not among them (one
+  // more read-write range, after the others: a word, the instruction's
+  // address once one did).
+  std::vector<uint32_t> match;
+  bool faults = false;
   std::string key;          // code and facts: equal keys, equal translation
   std::string error;        // why the stage cannot run (empty: it can)
 };

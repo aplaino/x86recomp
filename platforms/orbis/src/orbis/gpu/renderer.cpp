@@ -1810,6 +1810,11 @@ void Dispatch(const Regs& r, const uint32_t groups[3]) {
   Bind(s, cs, rc, b);
   for (const gfx::ColorTarget& img : b.images)
     if (!img.tex) return;
+  // The fault word (Resolved::faults): the address of an instruction that
+  // loaded outside its range or found a descriptor not resolved, checked
+  // once the dispatch has landed.
+  uint32_t* fault = rc.faults ? new uint32_t(0) : nullptr;
+  if (fault) b.rw.push_back({fault, 4});
   gfx::ProgramDispatch d;
   d.program = pr.id;
   d.cs = b.res;
@@ -1835,6 +1840,14 @@ void Dispatch(const Regs& r, const uint32_t groups[3]) {
       if (br.written) l.ranges.push_back({br.base, br.size, s.dev->WritesQueued()});
     l.pending = l.ranges.size() + l.signals.size();
   }
+  if (fault)
+    Signal(0, 0, [fault] {
+      const uint32_t at = *fault;
+      delete fault;
+      if (at)
+        FatalF("GPU: a compute shader loaded outside the range resolved for a run-time offset, or "
+               "a descriptor not found there, at %08X (address's low half)", at);
+    });
   for (const BufferRange& br : rc.buffers)
     if (br.written) {
       if (std::find(b.metas.begin(), b.metas.end(), br.base) == b.metas.end())

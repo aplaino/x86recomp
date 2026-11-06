@@ -64,10 +64,12 @@ void TSharp(uint32_t t[8], gaddr addr, uint32_t w, uint32_t h, uint32_t type, ui
   t[6] = t[7] = 0;
 }
 
-// Runs code with the user data on one 1x1x1 group and waits for it.
-void Run(gaddr code, const uint32_t* user, uint32_t n) {
+// Runs code with the user data on one group of `threads` (x) and waits
+// for it.
+void Run(gaddr code, const uint32_t* user, uint32_t n, uint32_t threads = 1) {
   Regs r;
-  r.sh[kThreadX] = r.sh[kThreadX + 1] = r.sh[kThreadX + 2] = 1;
+  r.sh[kThreadX] = threads;
+  r.sh[kThreadX + 1] = r.sh[kThreadX + 2] = 1;
   r.sh[kPgmLo] = uint32_t(code >> 8);
   r.sh[kRsrc1 + 1] = n << 1;
   std::memcpy(r.sh + kUser, user, 4 * n);
@@ -482,6 +484,74 @@ int main() {
     Wr32(kOut, 0);
     Run(kCarryAt, user, 16);
     Check(Rd32(kOut) == 0x13579BDFu, "s_addc_u32 adds s_add_u32's carry");
+  }
+
+  // A T# from a table at a run-time offset: entry i (32 bytes) of the
+  // table at s[0:1], i read from kOut + 16 by each lane and made scalar
+  // (v_readfirstlane), the entry's address summed in halves. The stage
+  // also reads the table's word 0x40 at a known offset, which makes the
+  // table's range. Entries 0 and 1 are 1x1 textures of 111 and 222, 2
+  // and 3 zero (no image).
+  static const uint32_t kPick[] = {
+      0xE0300010, 0x80030100,  // buffer_load_dword v1, off, s[12:15], 0 offset:16
+      0xBF8C0F70,              // s_waitcnt vmcnt(0)
+      0x7E280501,              // v_readfirstlane_b32 s20, v1
+      0xC00A8140,              // s_load_dword s21, s[0:1], 0x40
+      0x9314A014,              // s_mul_i32 s20, s20, 32
+      0x80161400,              // s_add_u32 s22, s0, s20
+      0x82178001,              // s_addc_u32 s23, s1, 0
+      0xC0CC1700,              // s_load_dwordx8 s[24:31], s[22:23], 0x0
+      0xBF8C007F,              // s_waitcnt lgkmcnt(0)
+      0x7E040280,              // v_mov_b32 v2, 0
+      0x7E060280,              // v_mov_b32 v3, 0
+      0xF0000100, 0x00060402,  // image_load v4, v[2:3], s[24:31] dmask:0x1
+      0xBF8C0F70,              // s_waitcnt vmcnt(0)
+      0xE0700000, 0x80030400,  // buffer_store_dword v4, off, s[12:15], 0
+      0xBF810000,              // s_endpgm
+  };
+  constexpr gaddr kPickAt = kCode + 0xE00, kTable = kOut + 0x400, kPickTex = kTex + 0x70000;
+  std::memcpy(GPtr(kPickAt), kPick, sizeof kPick);
+  {
+    std::memset(GPtr(kTable), 0, 0x104);
+    for (uint32_t i = 0; i < 2; i++) {
+      uint32_t t[8];
+      TSharp(t, kPickTex + 0x1000 * i, 1, 1, 9, 8, 0, 1);
+      std::memcpy(GPtr(kTable + 32 * i), t, sizeof t);
+      Wr32(kPickTex + 0x1000 * i, 111 * (i + 1));
+    }
+    for (uint32_t i = 0; i < 2; i++) {
+      uint32_t user[16] = {uint32_t(kTable), uint32_t(kTable >> 32)};
+      VSharp(user + 12, kOut, 32);
+      Wr32(kOut + 16, i);
+      Wr32(kOut, 0);
+      Run(kPickAt, user, 16);
+      if (Rd32(kOut) != 111 * (i + 1)) std::printf("  entry %u: %u\n", i, Rd32(kOut));
+      Check(Rd32(kOut) == 111 * (i + 1), "a T# loaded at a run-time offset picks its texture");
+    }
+  }
+
+  // ds_swizzle_b32 in bit-mask mode across quads (lane ^ 4) over a wave of
+  // 64: lane i stores lane i ^ 4's id (v0) at kOut + 0x200 + 4i.
+  static const uint32_t kSwz[] = {
+      0xD8D4101F, 0x01000000,  // ds_swizzle_b32 v1, v0 offset:swizzle(BITMASK_PERM xor 4)
+      0xBF8C007F,              // s_waitcnt lgkmcnt(0)
+      0x34040082,              // v_lshlrev_b32 v2, 2, v0
+      0xE0701000, 0x80000102,  // buffer_store_dword v1, v2, s[0:3], 0 offen
+      0xBF810000,              // s_endpgm
+  };
+  constexpr gaddr kSwzAt = kCode + 0xF00;
+  std::memcpy(GPtr(kSwzAt), kSwz, sizeof kSwz);
+  {
+    uint32_t user[16] = {};
+    VSharp(user, kOut + 0x200, 256);
+    std::memset(GPtr(kOut + 0x200), 0xFF, 256);
+    Run(kSwzAt, user, 4, 64);
+    bool ok = true;
+    for (uint32_t i = 0; i < 64; i++) ok &= Rd32(kOut + 0x200 + 4 * i) == (i ^ 4);
+    if (!ok) std::printf("  lane 0..7: %d %d %d %d %d %d %d %d\n", int(Rd32(kOut + 0x200)), int(Rd32(kOut + 0x204)),
+                         int(Rd32(kOut + 0x208)), int(Rd32(kOut + 0x20C)), int(Rd32(kOut + 0x210)),
+                         int(Rd32(kOut + 0x214)), int(Rd32(kOut + 0x218)), int(Rd32(kOut + 0x21C)));
+    Check(ok, "ds_swizzle_b32's bit-mask mode reads the lane across quads");
   }
 
   // An 8x8 texture of four levels, level n's texels n + 1 (linear), sampled

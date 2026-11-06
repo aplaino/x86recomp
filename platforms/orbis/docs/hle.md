@@ -126,7 +126,15 @@ library.
   level 0), so draws sample what compute stored. A compute group's waves
   take its invocations 64 at a time in order: an invocation's lane (what
   ADD_TID_ENABLE adds to a buffer index) is its place in the group modulo
-  64. CLEAR_STATE loads the Sea
+  64. A compute stage can load scalars and descriptors at a run-time
+  offset: an index a v_readfirstlane reads, scaled and added to a
+  pointer the stage also reads at known offsets. Those loads read the
+  range the known offsets cover (from the pointer to the end of the last
+  one), the descriptors the range holds at the offsets the index can
+  give are bound, and the shader takes the one whose words it loaded; a
+  load outside the range or a descriptor not among them is fatal once
+  the dispatch has run (the stage writes the instruction's address to
+  a fault word). CLEAR_STATE loads the Sea
   Islands clear state's scissors, masks and depth ranges (AMD's published
   values), not the console's driver's, which are not measured. A draw with
   an ES, a GS and a copy shader runs the ES and the GS as compute passes
@@ -145,8 +153,12 @@ library.
   results, 1 to 2 across a face) point to. Not drawn yet, each fatal:
   tessellation stages, on-chip and instanced GS, GS streams 1-3, indexed
   rectangle lists, adjacency primitive types, cross-lane instructions
-  (ds_swizzle's bit-mask mode, lane counts; its quad mode is a subgroup
-  quad broadcast), 1D and multisampled textures, cube arrays, arrays
+  other than ds_swizzle (v_readlane, lane counts; ds_swizzle's quad mode
+  and its bit-mask mode within quads are subgroup quad broadcasts, its
+  bit-mask mode across quads a subgroup shuffle, compute stages only, in
+  the host subgroup's groups of 32, which the stage reports as a fault
+  on a host with smaller subgroups), descriptors loaded at run-time
+  offsets outside compute stages, 1D and multisampled textures, cube arrays, arrays
   from a slice other than 0, colour targets sampled as other than 2D or
   from a level past 0, depth targets sampled with levels, samples with a
   level clamp, offsets into a texture of several levels at a level not

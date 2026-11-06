@@ -182,24 +182,52 @@ void Index(Code& c) {
     if (Steps(in)) (c.fetch.count(pc) ? c.fetch_steps : c.steps).emplace_back(pc, in);
 }
 
+// An SGPR not known when the stage is resolved, but one value X away from
+// known ones: X is what a v_readfirstlane reads (id: its address), the
+// same in every lane, which the code can use as an index.
+//   kValue: c + stride * X (32-bit arithmetic);
+//   kLow: a pointer's low half P_lo (p) plus kValue's c + stride * X, its
+//     carry not known;
+//   kHigh: the pointer's high half P_hi (p) plus that carry, so that the
+//     two halves are the 64-bit address P + (uint32_t)(c + stride * X);
+//   kLoaded: word c of what dynamic load id (Resolver::dyn) read.
+struct Var {
+  enum Kind : uint8_t { kNone, kValue, kLow, kHigh, kLoaded } kind = kNone;
+  uint32_t c = 0, stride = 0, p = 0;
+  gaddr id = 0;
+};
+
 // SGPRs 0-103, VCC 106-107, M0 124 and EXEC 126-127, and whether each is
-// known.
+// known (or, if not, what is known of it).
 struct Scalars {
   uint32_t v[128] = {};
   bool known[128] = {};
+  Var var[128];
   // SCC, while it is a known carry or borrow (s_add_u32, s_sub_u32 and
-  // their chains): what s_addc_u32 and s_subb_u32 read for 64-bit sums.
+  // their chains): what s_addc_u32 and s_subb_u32 read for 64-bit sums;
+  // or the carry of a kLow sum (carry.kind kLow).
   bool scc = false, scc_known = false;
+  Var carry;
   bool Get(uint32_t r, uint32_t* out) const {
     if (r >= 128 || !known[r]) return false;
     *out = v[r];
     return true;
   }
   void Set(uint32_t r, uint32_t x) {
-    if (r < 128) v[r] = x, known[r] = true;
+    if (r < 128) v[r] = x, known[r] = true, var[r] = {};
   }
   void Forget(uint32_t r) {
-    if (r < 128) known[r] = false;
+    if (r < 128) known[r] = false, var[r] = {};
+  }
+  void SetVar(uint32_t r, const Var& x) {
+    if (r < 128) known[r] = false, var[r] = x;
+  }
+  // An operand as c + stride * X (kNone if it is not one).
+  Var Value(uint32_t code) const {
+    if (code >= 128 || known[code]) return {};
+    Var x = var[code];
+    if (x.kind == Var::kLow) x.kind = Var::kValue, x.c += x.p, x.p = 0;
+    return x.kind == Var::kValue ? x : Var{};
   }
 };
 
@@ -224,6 +252,15 @@ bool Source(const Scalars& s, const Instr& in, uint32_t code, uint32_t* out) {
 struct Site {
   int buffer = -1, image = -1;
   uint32_t vsharp[4] = {};  // buffer instructions: their V#
+  // A scalar load at a run-time offset (Resolver::Dyn): checked against
+  // its range as it runs.
+  bool dynamic = false;
+  // An image access whose T# or S# was loaded at a run-time offset: the
+  // descriptors it can find there (images) and where their words are in
+  // the uniforms (match, in uvec4s: T#, then S#, three for each); the
+  // translation picks the one the loaded words equal.
+  std::vector<int> images;
+  uint32_t match = 0;
 };
 
 struct Resolver {
@@ -233,6 +270,26 @@ struct Resolver {
   Resolved r;
   Scalars s;
   std::vector<std::pair<gaddr, Site>> sites;  // by address once Run is done
+  // Scalar loads at a run-time offset: from pointer P at
+  // (uint32_t)(c + stride * X) + off, n dwords. They read the range the
+  // stage reads from P at known offsets (blocks: P to the end of its last
+  // such read), size bytes.
+  struct Dyn {
+    gaddr pc, P;
+    uint32_t c, stride, off, n, size = 0;
+    gaddr id;
+  };
+  std::vector<Dyn> dyn;
+  std::map<gaddr, uint32_t> blocks;
+  // Image accesses with a T# (and S#) from such loads (load -1: known).
+  struct DynImage {
+    gaddr pc;
+    int tload = -1, sload = -1;
+    uint32_t tword = 0, sword = 0;
+    ImageRef known;
+    int words = 8;
+  };
+  std::vector<DynImage> dyn_images;
 
   explicit Resolver(const StageState& st) : st(st) {}
 
@@ -287,15 +344,18 @@ struct Resolver {
     const uint32_t w = in.w0;
     // Scalar ALU instructions other than the carries below may write SCC.
     const bool carry_known = s.scc_known, carry_in = s.scc;
+    const Var carry_var = s.carry;
     if (in.fmt == Fmt::Sop1 || in.fmt == Fmt::Sop2 || in.fmt == Fmt::Sopk || in.fmt == Fmt::Sopc)
-      s.scc_known = false;
+      s.scc_known = false, s.carry = {};
     switch (in.fmt) {
       case Fmt::Sop1: {
         const uint32_t d = (w >> 16) & 0x7F;
         uint32_t a, b;
         switch (in.op) {
           case 3:  // s_mov_b32
-            if (Source(s, in, w & 0xFF, &a)) s.Set(d, a); else s.Forget(d);
+            if (Source(s, in, w & 0xFF, &a)) s.Set(d, a);
+            else if ((w & 0xFF) < 128) s.SetVar(d, s.var[w & 0xFF]);
+            else s.Forget(d);
             return true;
           case 4: {  // s_mov_b64: constants sign-extended, the literal zero-extended
             const uint32_t c = w & 0xFF;
@@ -309,6 +369,10 @@ struct Resolver {
             if (ok) {
               s.Set(d, a);
               s.Set(d + 1, b);
+            } else if (c < 127) {
+              const Var lo = s.var[c], hi = s.var[c + 1];
+              s.SetVar(d, lo);
+              s.SetVar(d + 1, hi);
             } else {
               s.Forget(d);
               s.Forget(d + 1);
@@ -368,6 +432,13 @@ struct Resolver {
         if (in.op == 0) s.Set(d, uint32_t(int32_t(int16_t(w & 0xFFFF))));
         else if (in.op == 15 && s.Get(d, &a)) s.Set(d, a + uint32_t(int32_t(int16_t(w & 0xFFFF))));
         else if (in.op == 16 && s.Get(d, &a)) s.Set(d, a * uint32_t(int32_t(int16_t(w & 0xFFFF))));
+        else if ((in.op == 15 || in.op == 16) && s.Value(d).kind) {
+          Var x = s.Value(d);
+          const uint32_t k = uint32_t(int32_t(int16_t(w & 0xFFFF)));
+          if (in.op == 15) x.c += k;
+          else x.c *= k, x.stride *= k;
+          s.SetVar(d, x);
+        }
         else if (in.op >= 3 && in.op <= 14) {}  // compares: SCC only
         else s.Forget(d);
         return true;
@@ -379,6 +450,8 @@ struct Resolver {
         const bool wide = in.op == 11 || in.op == 15 || in.op == 17 || in.op == 19 || in.op == 21 ||
                           in.op == 23 || in.op == 25 || in.op == 27 || in.op == 29 || in.op == 31 ||
                           in.op == 33 || in.op == 35 || in.op == 37 || in.op == 41 || in.op == 42;
+        if ((!k || (in.op == 4 && carry_var.kind == Var::kLow)) && !wide && SumOf(in, d, carry_var))
+          return true;
         if (!k || wide) {
           s.Forget(d);
           if (wide) s.Forget(d + 1);
@@ -448,9 +521,20 @@ struct Resolver {
             if (off + 4 * i + 4 <= size) s.Set(d + i, Rd32(a + 4 * i)); else s.Set(d + i, 0);
         } else {
           uint32_t lo, hi;
-          if (!s.Get(base, &lo) || !s.Get(base + 1, &hi))
-            return Fail(pc, "a scalar load from an unknown address");
-          a = (lo | uint64_t(hi & 0xFFFF) << 32) + off;
+          if (!s.Get(base, &lo) || !s.Get(base + 1, &hi)) {
+            const Var l = s.var[base], h = s.var[base + 1];
+            if (l.kind != Var::kLow || h.kind != Var::kHigh || h.id != l.id)
+              return Fail(pc, "a scalar load from an unknown address");
+            if (!RunsAsCompute(st.stage) || st.stage != Stage::Compute)
+              return Fail(pc, "a scalar load at a run-time offset outside a compute stage not translated yet");
+            dyn.push_back({pc, l.p | uint64_t(h.p & 0xFFFF) << 32, l.c, l.stride, off, n, 0, l.id});
+            site.dynamic = true;
+            for (uint32_t i = 0; i < n; i++) s.SetVar(d + i, {Var::kLoaded, i, 0, 0, gaddr(dyn.size() - 1)});
+            return true;
+          }
+          const gaddr ptr = lo | uint64_t(hi & 0xFFFF) << 32;
+          blocks[ptr] = std::max(blocks[ptr], off + 4 * n);
+          a = ptr + off;
           if (!Readable(a, 4 * n)) return Fail(pc, "a scalar load outside memory");
           site.buffer = Buffer(a & ~uint64_t(3), 4 * n, false);
           for (uint32_t i = 0; i < n; i++) s.Set(d + i, Rd32(a + 4 * i));
@@ -476,12 +560,26 @@ struct Resolver {
         ImageRef ref;
         const uint32_t t = ((in.w1 >> 16) & 0x1F) * 4, smp = ((in.w1 >> 21) & 0x1F) * 4;
         const int words = (in.w0 & 0x8000) ? 4 : 8;
-        for (int i = 0; i < words; i++)
-          if (!s.Get(t + uint32_t(i), &ref.t[i])) return Fail(pc, "an image access with an unknown T#");
-        if (in.op >= 32)  // samples, gathers, levels: with a sampler
+        ref.storage = in.op >= 8 && in.op <= 11;
+        DynImage di{pc};
+        di.words = words;
+        if (!Loaded(t, words, &di.tload, &di.tword)) {
+          for (int i = 0; i < words; i++)
+            if (!s.Get(t + uint32_t(i), &ref.t[i])) return Fail(pc, "an image access with an unknown T#");
+        }
+        if (in.op >= 32 && !Loaded(smp, 4, &di.sload, &di.sword)) {  // samples, gathers, levels: with a sampler
           for (int i = 0; i < 4; i++)
             if (!s.Get(smp + uint32_t(i), &ref.s[i])) return Fail(pc, "a sample with an unknown S#");
-        ref.storage = in.op >= 8 && in.op <= 11;
+        }
+        if (di.tload >= 0 || di.sload >= 0) {
+          if (ref.storage) return Fail(pc, "a store to an image loaded at a run-time offset not translated yet");
+          if (di.tload >= 0 && di.sload >= 0 && dyn[size_t(di.tload)].id != dyn[size_t(di.sload)].id)
+            return Fail(pc, "a T# and an S# loaded at unrelated run-time offsets");
+          di.known = ref;
+          NewSite(pc);
+          dyn_images.push_back(di);
+          return true;
+        }
         // Same texture and sampler: one binding.
         int at = -1;
         for (size_t i = 0; i < r.images.size(); i++)
@@ -496,7 +594,7 @@ struct Resolver {
         return true;
       }
       case Fmt::Vop1:
-        if (in.op == 2) s.Forget((w >> 17) & 0xFF);  // v_readfirstlane_b32
+        if (in.op == 2) s.SetVar((w >> 17) & 0xFF, {Var::kValue, 0, 1, 0, pc});  // v_readfirstlane_b32
         return true;
       case Fmt::Vopc:
         s.Forget(gcn::kVccLo), s.Forget(gcn::kVccHi);
@@ -538,7 +636,160 @@ struct Resolver {
     // fetch shader where it is.
     for (auto& [pc, in] : own->steps)
       if (!Step(pc, in)) return false;
+    if (!Dynamic()) return false;
+    if (st.stage == Stage::Compute && SwizzlesAcrossQuads()) r.faults = true;
     std::sort(sites.begin(), sites.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    return true;
+  }
+
+  // Whether the code has a ds_swizzle_b32 whose lanes cross quads (its
+  // translation needs the fault word).
+  bool SwizzlesAcrossQuads() const {
+    for (auto& [pc, in] : code().at) {
+      if (in.fmt != Fmt::Ds || in.op != 53 || (in.w0 & 0x8000)) continue;
+      const uint32_t o = in.w0 & 0xFFFF;
+      if (((o & 0x1F) & 0x1C) != 0x1C || ((o >> 5) & 0x1C) || ((o >> 10) & 0x1C)) return true;
+    }
+    return false;
+  }
+
+  // Whether n SGPRs from first are words in a row of one dynamic load.
+  bool Loaded(uint32_t first, int n, int* load, uint32_t* word) const {
+    const Var& v0 = s.var[first];
+    if (first + uint32_t(n) > 128 || v0.kind != Var::kLoaded) return false;
+    for (int i = 1; i < n; i++) {
+      const Var& v = s.var[first + uint32_t(i)];
+      if (v.kind != Var::kLoaded || v.id != v0.id || v.c != v0.c + uint32_t(i)) return false;
+    }
+    *load = int(v0.id);
+    *word = v0.c;
+    return true;
+  }
+
+  // SOP2 sums and products with an operand c + stride * X (Var). Under
+  // s_add_u32 one with a known operand starts a pointer (kLow: that
+  // operand is P_lo), whose carry s_addc_u32 of known operands adds to
+  // P_hi (kHigh).
+  bool SumOf(const Instr& in, uint32_t d, const Var& carry) {
+    const uint32_t w = in.w0, ca = w & 0xFF, cb = (w >> 8) & 0xFF;
+    uint32_t a, b;
+    const bool ka = Source(s, in, ca, &a), kb = Source(s, in, cb, &b);
+    const Var va = s.Value(ca), vb = s.Value(cb);
+    Var x;
+    switch (in.op) {
+      case 0: case 2:  // s_add_u32, s_add_i32
+        if (ka && vb.kind) x = vb;
+        else if (kb && va.kind) x = va, a = b;
+        else return false;
+        if (in.op == 0) {
+          x.kind = Var::kLow;
+          x.p = a;
+          s.SetVar(d, x);
+          s.carry = x;
+          return true;
+        }
+        x.c += a;
+        break;
+      case 1: case 3:  // s_sub_u32, s_sub_i32
+        if (ka && vb.kind) x = vb, x.c = a - vb.c, x.stride = 0u - vb.stride;
+        else if (kb && va.kind) x = va, x.c -= b;
+        else return false;
+        break;
+      case 4:  // s_addc_u32: a pointer's high half
+        if (!ka || !kb || carry.kind != Var::kLow) return false;
+        x = {Var::kHigh, carry.c, carry.stride, a + b, carry.id};
+        break;
+      case 38:  // s_mul_i32
+        if (ka && vb.kind) x = vb, x.c *= a, x.stride *= a;
+        else if (kb && va.kind) x = va, x.c *= b, x.stride *= b;
+        else return false;
+        break;
+      case 30:  // s_lshl_b32
+        if (!kb || !va.kind) return false;
+        x = va, x.c <<= (b & 31), x.stride <<= (b & 31);
+        break;
+      default:
+        return false;
+    }
+    s.SetVar(d, x);
+    return true;
+  }
+
+  // The values of X for which load L's dwords lie in its range, its
+  // offset c + stride * X taken without wrapping.
+  bool Xs(const Dyn& L, std::vector<int64_t>* out) const {
+    out->clear();
+    const int64_t c = int32_t(L.c), st = int32_t(L.stride), lim = int64_t(L.size) - L.off - 4 * L.n;
+    if (lim < 0) return true;
+    if (!st) {
+      if (c >= 0 && c <= lim) out->push_back(0);
+      return true;
+    }
+    // c + st * X in [0, lim].
+    auto floordiv = [](int64_t p, int64_t q) { return p / q - ((p % q) != 0 && ((p < 0) != (q < 0))); };
+    auto ceildiv = [&](int64_t p, int64_t q) { return -floordiv(-p, q); };
+    const int64_t lo = st > 0 ? ceildiv(-c, st) : ceildiv(c - lim, -st);
+    const int64_t hi = st > 0 ? floordiv(lim - c, st) : floordiv(c, -st);
+    if (hi - lo >= 65536) return false;
+    for (int64_t x = lo; x <= hi; x++) out->push_back(x);
+    return true;
+  }
+
+  // The dynamic loads' ranges, and the descriptors their image accesses
+  // can find (Site::images, Resolved::match).
+  bool Dynamic() {
+    for (Dyn& L : dyn) {
+      auto it = blocks.find(L.P);
+      if (it == blocks.end())
+        return Fail(L.pc, "a scalar load at a run-time offset from a pointer the stage reads nowhere else");
+      L.size = it->second;
+      if (!Readable(L.P, L.size)) return Fail(L.pc, "a scalar load at a run-time offset outside memory");
+      NewSite(L.pc).buffer = Buffer(L.P, L.size, false);
+      r.faults = true;
+    }
+    for (const DynImage& di : dyn_images) {
+      const Dyn& first = dyn[size_t(di.tload >= 0 ? di.tload : di.sload)];
+      std::vector<int64_t> xs;
+      if (!Xs(first, &xs)) return Fail(di.pc, "too many run-time offsets of a descriptor");
+      Site& site = NewSite(di.pc);
+      for (int64_t x : xs) {
+        ImageRef ref = di.known;
+        bool ok = true;
+        auto read = [&](int load, uint32_t word, uint32_t* out, int n) {
+          const Dyn& L = dyn[size_t(load)];
+          const int64_t o = int64_t(int32_t(L.c)) + int64_t(int32_t(L.stride)) * x;
+          if (o < 0 || o + L.off + 4 * L.n > L.size) return void(ok = false);
+          for (int i = 0; i < n; i++) out[i] = Rd32(L.P + uint64_t(o) + L.off + 4 * (word + uint32_t(i)));
+        };
+        if (di.tload >= 0) read(di.tload, di.tword, ref.t, di.words);
+        if (di.sload >= 0) read(di.sload, di.sword, ref.s, 4);
+        if (!ok || (ref.t[3] >> 28) < 8) continue;  // no image there
+        int at = -1;
+        for (size_t i = 0; i < r.images.size(); i++)
+          if (!std::memcmp(r.images[i].t, ref.t, sizeof ref.t) &&
+              !std::memcmp(r.images[i].s, ref.s, sizeof ref.s) && !r.images[i].storage)
+            at = int(i);
+        if (at < 0) {
+          r.images.push_back(ref);
+          at = int(r.images.size() - 1);
+        }
+        if (std::find(site.images.begin(), site.images.end(), at) == site.images.end())
+          site.images.push_back(at);
+      }
+      site.match = uint32_t(r.match.size() / 4);
+      for (int i : site.images) {
+        const ImageRef& ref = r.images[size_t(i)];
+        r.match.insert(r.match.end(), ref.t, ref.t + 8);
+        r.match.insert(r.match.end(), ref.s, ref.s + 4);
+      }
+      r.faults = true;
+    }
+    size_t textures = 0;
+    for (const ImageRef& ref : r.images) textures += !ref.storage;
+    if (textures > 16) {
+      r.error = "more than 16 textures (with those found at run-time offsets)";
+      return false;
+    }
     return true;
   }
 };
@@ -584,11 +835,12 @@ struct Translator {
   std::set<uint32_t> params;           // VS: exported parameters
   std::map<uint32_t, bool> inputs;     // PS: input locations, flat
   std::set<uint32_t> mrts;             // PS: exported targets
-  bool depth = false, uses_lds = false, uses_quad = false;
+  bool depth = false, uses_lds = false, uses_quad = false, uses_shuffle = false;
   std::map<gaddr, int> block_of;
   std::vector<int> ro_of, rw_of;       // binding -> RO / RW index (-1: not that kind)
   int nro = 0, nrw = 0;
   int ids = -1, emits = -1;            // Export: the vertex indices; Geometry: its emits
+  int fault = -1;                      // the fault word's range (Resolved::faults)
 
   Translator(const StageState& st, const Resolver& res) : st(st), res(res) {}
 
@@ -1038,9 +1290,33 @@ struct Translator {
     Fail(pc, "a buffer instruction not translated yet");
   }
 
-  void Image(gaddr pc, const Instr& in, const Site& site) {
-    const ImageRef& ref = res.r.images[size_t(site.image)];
-    const std::string t = "r_tex" + std::to_string(site.image);
+  // An image access with descriptors loaded at a run-time offset: the
+  // access for the candidate (Site::images) whose words the loaded T# (and
+  // S#) equal, a fault if none.
+  void DynamicImage(gaddr pc, const Instr& in, const Site& site) {
+    const uint32_t t = ((in.w1 >> 16) & 0x1F) * 4, smp = ((in.w1 >> 21) & 0x1F) * 4;
+    const int words = (in.w0 & 0x8000) ? 4 : 8;
+    for (size_t k = 0; k < site.images.size(); k++) {
+      const uint32_t m = site.match + 3 * uint32_t(k);
+      std::string cond;
+      auto word = [&](uint32_t reg, uint32_t at) {
+        cond += (cond.empty() ? "" : " && ") + S(reg) + " == r_match[" + std::to_string(m + at / 4) + "]." +
+                "xyzw"[at % 4];
+      };
+      for (int i = 0; i < words; i++) word(t + uint32_t(i), uint32_t(i));
+      if (in.op >= 32)
+        for (uint32_t i = 0; i < 4; i++) word(smp + i, 8 + i);
+      Line(std::string(k ? "} else " : "") + "if (" + cond + ") {");
+      Image(pc, in, site.images[k]);
+    }
+    if (!site.images.empty()) Line("} else {");
+    Line("r_fault(" + U(uint32_t(pc)) + ");");
+    if (!site.images.empty()) Line("}");
+  }
+
+  void Image(gaddr pc, const Instr& in, int image) {
+    const ImageRef& ref = res.r.images[size_t(image)];
+    const std::string t = "r_tex" + std::to_string(image);
     const uint32_t vaddr = in.w1 & 0xFF, vdata = (in.w1 >> 8) & 0xFF, dmask = (in.w0 >> 8) & 0xF;
     const gfx::TextureKind kind = ImageKind(ref.t);
     const char type = ImageType(ref.t);
@@ -1095,7 +1371,7 @@ struct Translator {
       uint32_t at = vdata;
       for (int i = 0; i < 4; i++)
         if (dmask & (1u << i)) v[i] = V(at++);
-      const std::string img = "r_img" + std::to_string(site.image);
+      const std::string img = "r_img" + std::to_string(image);
       const std::string val = "uvec4(" + v[0] + ", " + v[1] + ", " + v[2] + ", " + v[3] + ")";
       Line("imageStore(" + img + ", " + c + ", " + (type == 'f' ? "uintBitsToFloat(" + val + ")" : type == 'i' ? "ivec4(" + val + ")" : val) + ");");
       return;
@@ -1311,9 +1587,28 @@ struct Translator {
   void Swizzle(gaddr pc, const Instr& in) {
     const uint32_t offset = in.w0 & 0xFFFF;
     const uint32_t addr = in.w1 & 0xFF, vdst = in.w1 >> 24;
-    if (!(offset & 0x8000)) return Fail(pc, "ds_swizzle_b32's bit-mask mode not translated yet");
+    uint32_t sel[4] = {offset & 3, (offset >> 2) & 3, (offset >> 4) & 3, (offset >> 6) & 3};
+    if (!(offset & 0x8000)) {
+      // Bit-mask mode, in groups of 32 lanes: lane ((l & and) | or) ^ xor.
+      // One that keeps each lane in its quad (lane bits 2-4 as they are)
+      // is a quad permutation; others are not translated yet.
+      const uint32_t and_mask = offset & 0x1F, or_mask = (offset >> 5) & 0x1F, xor_mask = (offset >> 10) & 0x1F;
+      if ((and_mask & 0x1C) != 0x1C || (or_mask & 0x1C) || (xor_mask & 0x1C)) {
+        // Across quads: a shuffle in the host's subgroup, whose groups of
+        // 32 invocations are the wave's (a host with smaller subgroups
+        // reports it: compute stages only, SwizzlesAcrossQuads).
+        if (fault < 0) return Fail(pc, "ds_swizzle_b32 across quads outside a compute stage not translated yet");
+        uses_shuffle = true;
+        Line("if (gl_SubgroupSize < 32u) r_fault(" + U(uint32_t(pc)) + ");");
+        Line("r_q = gl_SubgroupInvocationID;");
+        Line("r_t = subgroupShuffle(" + V(addr) + ", (r_q & ~31u) | ((((r_q & 31u) & " + U(and_mask) + ") | " +
+             U(or_mask) + ") ^ " + U(xor_mask) + "));");
+        Line("if ((exec_lo & 1u) != 0u) " + V(vdst) + " = r_t;");
+        return;
+      }
+      for (uint32_t q = 0; q < 4; q++) sel[q] = (((q & and_mask) | or_mask) ^ xor_mask) & 3;
+    }
     uses_quad = true;
-    const uint32_t sel[4] = {offset & 3, (offset >> 2) & 3, (offset >> 4) & 3, (offset >> 6) & 3};
     if (sel[0] == sel[1] && sel[0] == sel[2] && sel[0] == sel[3]) {
       Line("r_t = subgroupQuadBroadcast(" + V(addr) + ", " + U(sel[0]) + ");");
     } else {
@@ -1500,6 +1795,13 @@ struct Translator {
     else off = S(w & 0xFF);
     const std::string addr = in.op >= 8 ? "(" + S(base) + " + " + off + ")" : "(" + S(base) + " + " + off + ")";
     Line("r_a = " + addr + ";");
+    if (site.dynamic) {  // a run-time offset: checked against its range
+      if (ro_of[size_t(site.buffer)] < 0) return Fail(pc, "a scalar load at a run-time offset from a written range");
+      for (uint32_t i = 0; i < n; i++)
+        Line(S(d + i) + " = r_rdc(" + std::to_string(ro_of[size_t(site.buffer)]) + ", r_a + " + U(4 * i) + ", " +
+             U(uint32_t(pc)) + ");");
+      return;
+    }
     for (uint32_t i = 0; i < n; i++) Line(S(d + i) + " = " + Load(site.buffer, "r_a + " + U(4 * i)) + ";");
   }
 
@@ -1620,7 +1922,8 @@ struct Translator {
         return;
       case Fmt::Mimg:
         Line("if ((exec_lo & 1u) != 0u) {");
-        Image(pc, in, site->second);
+        if (site->second.image >= 0) Image(pc, in, site->second.image);
+        else DynamicImage(pc, in, site->second);
         Line("}");
         return;
       case Fmt::Exp:
@@ -1666,6 +1969,7 @@ struct Translator {
     }
     if (st.stage == Stage::Export) ids = nro++;
     if (st.stage == Stage::Geometry) emits = nrw++;
+    if (res.r.faults) fault = nrw++;
     for (const BufferRange& b : res.r.buffers)
       if (b.written && !RunsAsCompute(st.stage)) {
         error = "a store outside a compute stage not translated yet";
@@ -1714,12 +2018,14 @@ struct Translator {
     std::string g;
     char b[256];
     if (uses_quad) g += "#extension GL_KHR_shader_subgroup_quad : require\n";
+    if (uses_shuffle) g += "#extension GL_KHR_shader_subgroup_shuffle : require\n";
     // The uniform block: user data, the code bases, each range's base and
     // size (Uniforms()).
     g += "layout(std140, R_UNIFORMS) uniform RUser {\n  uvec4 r_user[4];\n  uvec4 r_misc;\n  uvec4 r_misc2;\n"
          "  uvec4 r_misc3;\n";
     if (nro) g += "  uvec4 r_region[" + std::to_string(nro) + "];\n";
     if (nrw) g += "  uvec4 r_rwregion[" + std::to_string(nrw) + "];\n";
+    if (!res.r.match.empty()) g += "  uvec4 r_match[" + std::to_string(res.r.match.size() / 4) + "];\n";
     g += "};\n";
     if (nro)
       g += "uint r_rd(int b, uint a) {\n  uint o = a - r_region[b].x;\n"
@@ -1731,6 +2037,12 @@ struct Translator {
            "  return o < r_rwregion[b].z ? r_rw[r_rwbuf[b].x + (o >> 2)] : 0u;\n}\n"
            "void r_wr(int b, uint a, uint v) {\n  uint o = a - r_rwregion[b].x;\n"
            "  if (o < r_rwregion[b].z) r_rw[r_rwbuf[b].x + (o >> 2)] = v;\n}\n";
+    if (fault >= 0) {
+      g += "void r_fault(uint at) { r_rw[r_rwbuf[" + std::to_string(fault) + "].x] = at; }\n";
+      if (nro)
+        g += "uint r_rdc(int b, uint a, uint at) {\n  uint o = a - r_region[b].x;\n"
+             "  if (o >= r_region[b].z) { r_fault(at); return 0u; }\n  return r_ld(uint(b), o >> 2);\n}\n";
+    }
     g += "float r_mul_legacy(float a, float b) { return a == 0.0 || b == 0.0 ? 0.0 : a * b; }\n"
          "float r_min_legacy(float a, float b) { return a < b ? a : b; }\n"
          "float r_max_legacy(float a, float b) { return a >= b ? a : b; }\n"
@@ -1869,7 +2181,8 @@ struct Translator {
   }
   bool UsesCompare(int image) const {
     for (auto& [pc, site] : res.sites)
-      if (site.image == image) {
+      if (site.image == image ||
+          std::find(site.images.begin(), site.images.end(), image) != site.images.end()) {
         const Instr& in = res.code().at.at(pc);
         if (in.fmt == Fmt::Mimg && in.op >= 32 && in.op <= 95 && ((in.op - 32) & 8)) return true;
       }
@@ -2017,13 +2330,18 @@ Resolved Resolve(const StageState& st) {
   for (auto& [pc, s] : rv.sites) {
     const uint32_t site[4] = {uint32_t(s.buffer), uint32_t(s.image), s.vsharp[3], s.vsharp[1] >> 31};
     add(site, sizeof site);
-    if (s.image >= 0) {
-      const ImageRef& ref = rv.r.images[size_t(s.image)];
-      const uint32_t f[3] = {ref.t[1] & (ref.storage ? 0x3FF00000 : 0x3C000000), ref.t[3] & 0xF00FFFFF,
-                             ref.s[0] & 0x7000};
+    std::vector<int> images = s.images;
+    if (s.image >= 0) images = {s.image};
+    const uint32_t dyn[3] = {uint32_t(s.dynamic), uint32_t(s.images.size()), s.match};
+    if (s.dynamic || !s.images.empty()) add(dyn, sizeof dyn);
+    for (int i : images) {
+      const ImageRef& ref = rv.r.images[size_t(i)];
+      const uint32_t f[4] = {ref.t[1] & (ref.storage ? 0x3FF00000 : 0x3C000000), ref.t[3] & 0xF00FFFFF,
+                             ref.s[0] & 0x7000, uint32_t(i)};
       add(f, sizeof f);
     }
   }
+  k += rv.r.faults ? 'f' : '-';
   for (const BufferRange& b : rv.r.buffers) k += b.written ? 'w' : 'r';
   return rv.r;
 }
@@ -2082,7 +2400,9 @@ std::vector<uint32_t> Uniforms(const StageState& st, const Resolved& r) {
     }
     if (pass == 0 && st.stage == Stage::Export) u.insert(u.end(), {0, 0, st.invocations * 4, 0});
     if (pass == 1 && st.stage == Stage::Geometry) u.insert(u.end(), {0, 0, st.invocations * st.max_vert * 4, 0});
+    if (pass == 1 && r.faults) u.insert(u.end(), {0, 0, 4, 0});
   }
+  u.insert(u.end(), r.match.begin(), r.match.end());
   return u;
 }
 
