@@ -136,8 +136,9 @@ library.
   not those invocations in order is fatal once the dispatch has run (the
   fault word below). Other stages run one lane per invocation, where
   v_readfirstlane reads the invocation's own lane. v_movrels and
-  v_movreld index VGPRs by M0 in compute stages; an index past the
-  stage's VGPRs is fatal the same way. A compute stage can load scalars and descriptors at a run-time
+  v_movreld index VGPRs by M0; past the stage's VGPRs a source reads
+  VGPR0 and a destination is not written (Sea Islands ISA, "Out-of-Range
+  GPRs"). A compute stage can load scalars and descriptors at a run-time
   offset: an index a v_readfirstlane reads, scaled and added to a
   pointer the stage also reads at known offsets. Those loads read the
   range the known offsets cover (from the pointer to the end of the last
@@ -170,8 +171,7 @@ library.
   rectangle lists, adjacency primitive types, cross-lane instructions
   outside compute stages other than ds_swizzle within quads (its quad
   mode and its bit-mask mode within quads are subgroup quad broadcasts),
-  lane counts of a mask (s_bcnt1 and the like), v_movrels outside
-  compute stages, descriptors loaded at run-time
+  lane counts of a mask (s_bcnt1 and the like), descriptors loaded at run-time
   offsets outside compute stages, 1D and multisampled textures, cube arrays, arrays
   from a slice other than 0, colour targets sampled as other than 2D or
   from a level past 0, depth targets sampled with levels, samples with a

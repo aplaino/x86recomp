@@ -742,7 +742,6 @@ struct Resolver {
       if (!Step(pc, in)) return false;
     if (!Dynamic()) return false;
     if (st.stage == Stage::Compute && CrossesLanes()) r.wave = r.faults = true;
-    if (st.stage == Stage::Compute && IndexesVgprs()) r.faults = true;
     std::sort(sites.begin(), sites.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     return true;
   }
@@ -759,16 +758,6 @@ struct Resolver {
       const uint32_t o = in.w0 & 0xFFFF;
       if (((o & 0x1F) & 0x1C) != 0x1C || ((o >> 5) & 0x1C) || ((o >> 10) & 0x1C)) return true;
     }
-    return false;
-  }
-
-  // Whether the code indexes VGPRs by M0 (v_movrels, v_movreld): an index
-  // past the stage's VGPRs is reported (the fault word).
-  bool IndexesVgprs() const {
-    for (auto& [pc, in] : code().at)
-      if ((in.fmt == Fmt::Vop1 && in.op >= 66 && in.op <= 68) ||
-          (in.fmt == Fmt::Vop3 && in.op >= 384 + 66 && in.op <= 384 + 68))
-        return true;
     return false;
   }
 
@@ -2034,9 +2023,10 @@ struct Translator {
   }
 
   // v_movreld_b32, v_movrels_b32, v_movrelsd_b32: VGPRs indexed by M0
-  // (vdst + M0, src0 + M0); one past the stage's VGPRs is reported.
+  // (vdst + M0, src0 + M0). Past the stage's VGPRs (Sea Islands ISA,
+  // "Out-of-Range GPRs") a source reads VGPR0 and a destination is not
+  // written.
   void Movrel(gaddr pc, const Instr& in, uint32_t op) {
-    if (fault < 0) return Fail(pc, "v_movrel outside a compute stage not translated yet");
     const bool vop3 = in.fmt == Fmt::Vop3;
     const uint32_t vdst = vop3 ? in.w0 & 0xFF : (in.w0 >> 17) & 0xFF;
     const uint32_t src0 = vop3 ? in.w1 & 0x1FF : in.w0 & 0x1FF;
@@ -2046,7 +2036,7 @@ struct Translator {
       Line("switch (r_x) {");
       for (uint32_t i = 0; i < count; i++)
         Line("case " + U(i) + ": " + (write ? V(i) + " = r_t" : "r_t = " + V(i)) + "; break;");
-      Line("default: r_fault(" + U(uint32_t(pc)) + ");" + (write ? "" : " r_t = 0u;"));
+      Line(std::string("default: ") + (write ? "break;" : "r_t = " + V(0) + "; break;"));
       Line("}");
     };
     if (op != 66 && src0 < gcn::kVgpr) return Fail(pc, "v_movrels of a scalar");

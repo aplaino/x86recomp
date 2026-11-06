@@ -558,7 +558,7 @@ int main() {
 
   // A stage in waves: readlane, readfirstlane under a partial EXEC,
   // writelane, comparisons and carries as ballots, a branch on the wave's
-  // VCC, v_movrels, ds_or_b32 and ds_read2_b64. Lane i stores 20 words at
+  // VCC, v_movrels (past the VGPRs too), ds_or_b32 and ds_read2_b64. Lane i stores 20 words at
   // kOut + 0x2000 + 128i (kWaveWant); run on 64 and 40 invocations.
   static const uint32_t kWave[] = {
       0xBE94047E,  // s_mov_b64 s[20:21], exec
@@ -621,7 +621,11 @@ int main() {
       0x7E700214,  // v_mov_b32 v56, s20
       0x7E720215,  // v_mov_b32 v57, s21
       0x7E740300,  // v_mov_b32 v58, v0
-      0x7E760280,  // v_mov_b32 v59, 0
+      0xBEFC03FF, 0x00000064,  // s_mov_b32 m0, 100
+      0x7E3E870A,  // v_movrels_b32 v31, v10 (past the VGPRs: v0)
+      0x7E400285,  // v_mov_b32 v32, 5
+      0x7E288520,  // v_movreld_b32 v20, v32 (past the VGPRs: not written)
+      0x7E76031F,  // v_mov_b32 v59, v31
       0xE0781000, 0x8000281E,  // buffer_store_dwordx4 v[40:43], v30, s[0:3], 0 offen
       0xE0781010, 0x80002C1E,  // buffer_store_dwordx4 v[44:47], v30, s[0:3], 0 offen offset:16
       0xE0781020, 0x8000301E,  // buffer_store_dwordx4 v[48:51], v30, s[0:3], 0 offen offset:32
@@ -641,7 +645,7 @@ int main() {
     bool ok = true;
     for (uint32_t i = 0; i < 64; i++) {
       const uint32_t want[20] = {37, 5, ~0u, 0xFF, 0, hi & 0xFFFFFFF8u, 135, i == 50 ? 37u : 0u,
-                                 2 * i, 0, hi, 7, i >= 32 ? 1u : 0u, ~0u, 2, 7, ~0u, hi, i, 0};
+                                 2 * i, 0, hi, 7, i >= 32 ? 1u : 0u, ~0u, 2, 7, ~0u, hi, i, i};
       for (uint32_t k = 0; k < 20; k++) {
         const uint32_t got = Rd32(kWaveOut + 128 * i + 4 * k), w = i < threads ? want[k] : 0xEEEEEEEEu;
         if (got != w && ok) std::printf("  %u invocations: lane %u word %u: %08X, not %08X\n", threads, i, k, got, w);
