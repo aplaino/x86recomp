@@ -104,7 +104,7 @@ library.
   back to guest memory; as large as their padded pitch and slice or
   DB_DEPTH_SIZE, and sampled through a copy of their top-left corner when
   a T# describes less of them; a T# at a depth target's
-  DB_STENCIL_READ_BASE samples its stencil, resolved into an R8 image;
+  DB_STENCIL_READ_BASE samples its stencil, resolved into an R8 (UNORM or UINT) image;
   a depth target drawn one DB_DEPTH_VIEW slice at a time, or sampled
   through an array T#, becomes a 2D array of as many slices as used; a
   2D T# of several levels over colour targets takes each level from the

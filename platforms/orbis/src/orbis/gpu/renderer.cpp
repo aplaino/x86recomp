@@ -194,6 +194,7 @@ struct TargetView {
   gfx::TextureId tex;
   gfx::DepthId depth;
   uint32_t levels = 1;  // a colour target's levels (MippedTarget)
+  Format fmt = Format::Unknown;  // a stencil's: R8 or R8Uint (SampledStencil)
 };
 struct DepthTarget {
   gaddr addr;
@@ -236,7 +237,7 @@ struct State {
   gfx::Device* dev = nullptr;
   std::vector<Target> targets;
   std::vector<TargetView> views;
-  gfx::ProgramId stencil_program = 0;  // SampledStencil's
+  gfx::ProgramId stencil_program = 0, stencil_uint = 0;  // SampledStencil's
   std::map<uint32_t, gfx::ProgramId> meta_tests;  // MetaTest's, by mask
   gfx::BufferId meta_draw = 0;
   gfx::ProgramId htile_clear = 0, color_clear = 0;  // HtileClear's, ColorClear's
@@ -786,16 +787,19 @@ gfx::TextureId SampledDepth(State& s, const DepthTarget& dt, uint32_t w, uint32_
   return view->depth;
 }
 
-// A depth target's stencil as a T# of w x h in an 8-bit UNORM format
-// samples it (the stencil plane in guest memory, which the host's
+// A depth target's stencil as a T# of w x h in an 8-bit UNORM or UINT
+// format samples it (the stencil plane in guest memory, which the host's
 // depth-stencil image keeps instead): an R8 image of stencil / 255, made
 // each time it is bound. Eight full-screen draws over the depth target,
-// one a bit, pass where that stencil bit is set and add its weight.
+// one a bit, pass where that stencil bit is set and add its weight (k /
+// 255 sums exactly in UNORM). For UINT, one more draw writes those values
+// as integers to an R8Uint image.
 gfx::TextureId SampledStencil(State& s, const DepthTarget& dt, const uint32_t t[8], uint32_t w,
                               uint32_t h) {
   Format fmt;
-  if (!TextureFormat(t, &fmt) || fmt != Format::R8) {
-    FatalF("GPU: a stencil sampled in a format other than R8 is not drawn yet");
+  if (!TextureFormat(t, &fmt) || (fmt != Format::R8 && fmt != Format::R8Uint)) {
+    FatalF("GPU: a stencil sampled in a format other than R8 is not drawn yet (data format %u, number "
+           "format %u)", (t[1] >> 20) & 0x3F, (t[1] >> 26) & 0xF);
   }
   w = std::min(w, dt.w);
   h = std::min(h, dt.h);
@@ -813,20 +817,21 @@ gfx::TextureId SampledStencil(State& s, const DepthTarget& dt, const uint32_t t[
     s.stencil_program = s.dev->CreateProgram(pd);
     if (!s.stencil_program) return 0;
   }
-  TargetView* view = nullptr;
-  for (TargetView& v : s.views)
-    if (v.addr == dt.stencil && v.tex && v.w == w && v.h == h) view = &v;
-  if (!view) {
+  auto view_of = [&](Format f) -> TargetView* {
+    for (TargetView& v : s.views)
+      if (v.addr == dt.stencil && v.tex && v.w == w && v.h == h && v.fmt == f) return &v;
     gfx::ImageDesc d;
     d.w = int(w);
     d.h = int(h);
-    d.fmt = Format::R8;
+    d.fmt = f;
     d.color_target = true;
     const gfx::TextureId tex = s.dev->CreateImage(d);
-    if (!tex) return 0;
-    s.views.push_back({dt.stencil, w, h, tex, 0});
-    view = &s.views.back();
-  }
+    if (!tex) return nullptr;
+    s.views.push_back({dt.stencil, w, h, tex, 0, 1, f});
+    return &s.views.back();
+  };
+  TargetView* view = view_of(Format::R8);
+  if (!view) return 0;
   s.dev->ClearImage(view->tex, 0, {0, 0, 0, 0});
   gfx::ProgramDraw d;
   d.program = s.stencil_program;
@@ -851,7 +856,34 @@ gfx::TextureId SampledStencil(State& s, const DepthTarget& dt, const uint32_t t[
     d.fs.uniforms = u;
     s.dev->DrawProgram(d);
   }
-  return view->tex;
+  if (fmt == Format::R8) return view->tex;
+  if (!s.stencil_uint) {
+    gfx::ProgramDesc pd;
+    pd.vs.glsl = kFullScreenVs;
+    pd.fs.glsl =
+        "layout(R_TEXTURE(0)) uniform sampler2D r_tex0;\n"
+        "layout(location = 0) out uvec4 r_color0;\n"
+        "void main() {\n"
+        "  r_color0 = uvec4(uint(round(texelFetch(r_tex0, ivec2(gl_FragCoord.xy), 0).r * 255.0)));\n"
+        "}\n";
+    pd.fs.textures = 1;
+    s.stencil_uint = s.dev->CreateProgram(pd);
+    if (!s.stencil_uint) return 0;
+  }
+  const gfx::TextureId unorm = view->tex;
+  TargetView* uview = view_of(Format::R8Uint);
+  if (!uview) return 0;
+  gfx::ProgramDraw u;
+  u.program = s.stencil_uint;
+  u.targets[0] = {uview->tex, 0};
+  u.viewport = d.viewport;
+  u.scissor = d.scissor;
+  u.vertex_count = 3;
+  const gfx::SamplerDesc nearest;
+  u.fs.textures = &unorm;
+  u.fs.samplers = &nearest;
+  s.dev->DrawProgram(u);
+  return uview->tex;
 }
 
 // A T#'s texture: the colour target at its address, else its texels from

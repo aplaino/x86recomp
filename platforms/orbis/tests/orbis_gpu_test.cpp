@@ -819,6 +819,44 @@ int main() {
     Check(std::fabs(red + 1.25f) <= 1e-4f,
           "a T# of several levels reads each level's colour target");
   }
+  // A draw over the left half of an 8x8 depth target with a stencil that
+  // replaces it with 0xA5, then loads of the stencil through T#s in R8
+  // UNORM and R8 UINT at x 1 (drawn) and 6 (not: the clear's 0).
+  {
+    constexpr gaddr kStTarget = 0x1B6000, kDepthAt = 0x1B8000, kStencilAt = 0x1BC000;
+    verts({{-1, -1}, {0, -1}, {-1, 1}});
+    Regs r;
+    DrawRegs(r, 0x11, kStTarget, kVsAt);
+    uint32_t* cx = r.context;
+    cx[0x010] = 3;                                  // DB_Z_INFO: 32-bit float
+    cx[0x011] = 1;                                  // DB_STENCIL_INFO: 8 bits
+    cx[0x012] = uint32_t(kDepthAt >> 8);            // DB_Z_READ_BASE
+    cx[0x013] = uint32_t(kStencilAt >> 8);          // DB_STENCIL_READ_BASE
+    cx[0x016] = 0;                                  // DB_DEPTH_SIZE: 8x8
+    cx[0x200] = 1u | 7u << 8;                       // DB_DEPTH_CONTROL: stencil, always
+    cx[0x10B] = 4u | 4u << 4 | 4u << 8;             // DB_STENCIL_CONTROL: replace
+    cx[0x10C] = 0xA5u | 0xFFu << 8 | 0xFFu << 16;   // ref, read and write masks
+    Draw(r, {3, 1, 0, 2});
+    Settle(true);
+    for (const uint32_t nfmt : {0u, 4u}) {
+      for (const uint32_t x : {1u, 6u}) {
+        uint32_t user[16] = {};
+        TSharp(user, kStencilAt, 8, 8, 9, 14, 0, 1);
+        user[1] = 1u << 20 | nfmt << 26;  // 8, UNORM or UINT
+        VSharp(user + 8, kOut, 16);
+        user[12] = x;
+        user[13] = 3;
+        Wr32(kOut, 0xEEEEEEEEu);
+        Run(kLoadAt, user, 16);
+        const uint32_t want = x == 1 ? 0xA5 : 0, got = Rd32(kOut);
+        float f;
+        std::memcpy(&f, &got, 4);
+        const bool ok = nfmt ? got == want : std::fabs(f - float(want) / 255.0f) < 1e-6f;
+        if (!ok) std::printf("  number format %u, x %u: %08X\n", nfmt, x, got);
+        Check(ok, "a stencil samples as R8 UNORM and UINT");
+      }
+    }
+  }
   // An indirect draw through the command processor: its first vertex (3)
   // goes to the vertex shader's user SGPR 4, which it adds to the vertex
   // index; vertices 0-2 are off the target.
