@@ -26,14 +26,19 @@ library.
     /temp0, /download0 and /savedataN are below the per-user data
     directory. Descriptors are the host's, limited to those the guest
     opened (1 and 2 write to the host's stdout and stderr). struct stat is
-    FreeBSD 9's.
+    FreeBSD 9's. The root (/) is a directory; a top-level name the
+    sandbox's root does not have (11.00's, listed over FTP) is absent
+    (ENOENT); those it has but nothing here maps are fatal.
 - recomp_orbis_libc_internal: libSceLibcInternal, the firmware's libc
   that system modules games ship import (a game's own libc is lifted).
 - recomp_orbis_system: libSceSystemService (fixed settings: English (US),
   YYYY/MM/DD, 24-hour, UTC, no DST, parental control off, cross to
   confirm), libSceUserService (one user, id 1, "Player"),
   libSceSysmodule (system modules are HLE: loading one records it),
-  libSceScreenShot (the system takes none).
+  libSceScreenShot (the system takes none). The system's events: one
+  pending at the start, type 0x10000003 without data (measured on 11.00;
+  what raises it is not known); the status's flags all clear, a game in
+  the foreground.
   Event queues: small integers, as the kqueue descriptors they are; an
   event is returned once per trigger (EV_CLEAR) with its last data.
   User events (EVFILT_USER) are per queue, level unless added as edge
@@ -69,7 +74,10 @@ library.
   A8R8G8B8 and A8B8G8R8 buffers are shown; tiled ones are the GPU's
   colour target at that address (black before it has drawn one). A flip
   submitted from the CPU waits until the GPU has finished what was
-  submitted before it, as the console's GPU has by the vblank.
+  submitted before it, as the console's GPU has by the vblank. Colour
+  adjustment with a plain settings size sends the display nothing, as
+  11.00's library does; settings that would reach it are not
+  implemented.
 - recomp_orbis_gnm: libSceGnmDriver. Its packet builders write what
   11.00's do (the same dwords; a padding NOP's body is left alone, the
   NOP-wrapped context registers of the Update*Shader functions included,
@@ -168,7 +176,8 @@ library.
   has taken the previous one (every `length` samples at 48 kHz on the
   host's clock, so a run without an audio device keeps time). Samples
   go to the software mixer (runtime/audio), a queue-fed voice per port,
-  scaled by the port's volumes; 8 channels are folded to stereo.
+  scaled by the port's volumes; 8 channels are folded to stereo, the
+  standard order's swapped side and back pairs alike.
 - recomp_orbis_ngs2: libSceNgs2, rendering on the caller's thread into
   the game's buffers (the game gives them to libSceAudioOut). What
   follows 11.00: the allocator protocol (the context-buffer info, the
@@ -284,7 +293,10 @@ library.
   positions, for tests; read as it grows, so a driver can append to it);
   one state per read; the motion sensors report it lying still. While a
   system dialog is open the game reads it intercepted
-  (SCE_PAD_BUTTON_INTERCEPTED alone, sticks centred).
+  (SCE_PAD_BUTTON_INTERCEPTED alone, sticks centred). libSceMouse: no
+  mouse is attached; a read gives one zeroed sample, as 11.00's library
+  does with no input; the driver's first handle as measured (0x160500),
+  a second open not modelled.
 - libSceNpTrophy (recomp_orbis_np): contexts and handles from 1,
   unlocks kept below DataDir()/trophies; what needs the trophy pack
   (outside the game's files) is not implemented.
@@ -304,8 +316,9 @@ library.
   param.sfo's USER_DEFINED_PARAM_1-4, no add-on content (its info: not
   found), temporary data at /temp0 (cleared when mounted with the format
   option). Mounting add-on content, entitlement keys, download progress,
-  free space and a USER_DEFINED_PARAM_2-4 param.sfo does not have are
-  not implemented. Without USER_DEFINED_PARAM_1, AppParamGetInt(1)
+  free space with download data and a USER_DEFINED_PARAM_2-4 param.sfo
+  does not have are not implemented. With DOWNLOAD_DATA_SIZE 0 the free
+  space query answers 0x80D90004 (measured). Without USER_DEFINED_PARAM_1, AppParamGetInt(1)
   returns 0 and the value 0 (measured on 11.00).
 - recomp_orbis_savedata_dialog: libSceSaveDataDialog. The library's side
   is 11.00's: the states, the checks of the parameter and everything it

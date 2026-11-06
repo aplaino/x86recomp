@@ -279,6 +279,37 @@ ORBIS_HLE("libSceVideoOut", sceVideoOutSetFlipRate, 2) {
   return 0;
 }
 
+// int sceVideoOutColorSettingsSetGamma_(SceVideoOutColorSettings* s, float
+// gamma, uint32_t size): size 12 or 16; gamma in [0.1, 2.0] (11.00 compares
+// it as a float with 2.0 and as a double with 0.1, so NaN passes); the
+// settings are cleared and gamma goes to the three channels.
+ORBIS_HLE("libSceVideoOut", sceVideoOutColorSettingsSetGamma_, 2) {
+  const recomp::gaddr s = Arg(c, 0);
+  const uint32_t size = uint32_t(Arg(c, 1));
+  const float gamma = recomp::hle::ArgF(c, 0);
+  if (!s || (size != 16 && size != 12) || gamma > 2.0f || 0.1 > double(gamma))
+    return uint32_t(kErrInvalidValue);
+  std::memset(recomp::GPtr(s), 0, size);
+  for (int i = 0; i < 3; i++) std::memcpy(recomp::GPtr(s + 4 * i), &gamma, 4);
+  return 0;
+}
+
+// int sceVideoOutAdjustColor_(int handle, const SceVideoOutColorSettings* s,
+// uint32_t size): 11.00's library sends the driver the settings only for
+// the sizes it encodes as 0x1108 and 0x1110; with a plain size (12 or 16)
+// it sends none and the display's colour stays as it is. Settings that
+// would reach the driver are not implemented.
+ORBIS_HLE("libSceVideoOut", sceVideoOutAdjustColor_, 3) {
+  const uint32_t size = uint32_t(Arg(c, 2));
+  {
+    std::lock_guard<std::mutex> l(g_mu);
+    if (int(Arg(c, 0)) != kHandle || !g_port.open) return uint32_t(kErrInvalidHandle);
+  }
+  if (size == 0x1108 || size == 0x1110)
+    recomp::FatalF("sceVideoOutAdjustColor_: colour settings for the display not implemented");
+  return 0;
+}
+
 // int sceVideoOutGetResolutionStatus(int handle, SceVideoOutResolutionStatus*
 // status): the output's, from the display driver; measured on a base
 // console with a 1080p display (firmware 11.00): 1920 x 1080 and the same

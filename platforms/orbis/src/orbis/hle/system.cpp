@@ -19,6 +19,14 @@ enum : int {
   kParentalLevel = 7, kEnterButton = 1000,
 };
 constexpr uint64_t kSystemServiceErrorParameter = 0x80A10003;
+constexpr uint64_t kSystemServiceErrorNoEvent = 0x80A10004;
+
+// The system's events for the game: on 11.00 a game finds one event
+// pending at its start, of type 0x10000003 with no data (measured; what
+// raises it is not known). The service keeps pending events as bits;
+// libSceSystemService maps each bit to its type.
+constexpr uint32_t kStartEvent = 0x10000003;
+bool g_start_event = true;
 
 constexpr int kUserId = 0x10000000;  // the one signed-in user, as the console numbers its first
 constexpr uint64_t kUserServiceErrorAlreadyInitialized = 0x80960002;
@@ -47,6 +55,35 @@ ORBIS_HLE("libSceSystemService", sceSystemServiceParamGetInt, 2) {
     default: return kSystemServiceErrorParameter;
   }
   recomp::Wr32(Arg(c, 1), uint32_t(v));
+  return 0;
+}
+
+// int sceSystemServiceGetStatus(SceSystemServiceStatus* status): the
+// library clears the 0x88 bytes, then writes the pending events' count and
+// the flags (system UI overlaid, in background, CPU mode 7, live
+// streaming, out of the VR play area), which are all clear for a game in
+// the foreground (measured). It does not check the pointer.
+ORBIS_HLE("libSceSystemService", sceSystemServiceGetStatus, 1) {
+  const recomp::gaddr s = Arg(c, 0);
+  if (!s) recomp::FatalF("sceSystemServiceGetStatus(NULL): not modelled");
+  std::memset(recomp::GPtr(s), 0, 0x88);
+  std::lock_guard<std::mutex> l(g_mu);
+  recomp::Wr32(s, g_start_event ? 1 : 0);
+  return 0;
+}
+
+// int sceSystemServiceReceiveEvent(SceSystemServiceEvent* event): the
+// oldest pending event; the library clears the 0x2004 bytes and writes its
+// type (and, for some types, data; the start event has none). None
+// pending: 0x80A10004.
+ORBIS_HLE("libSceSystemService", sceSystemServiceReceiveEvent, 1) {
+  const recomp::gaddr e = Arg(c, 0);
+  std::lock_guard<std::mutex> l(g_mu);
+  if (!g_start_event) return kSystemServiceErrorNoEvent;
+  if (!e) recomp::FatalF("sceSystemServiceReceiveEvent(NULL): not modelled");
+  g_start_event = false;
+  std::memset(recomp::GPtr(e), 0, 0x2004);
+  recomp::Wr32(e, kStartEvent);
   return 0;
 }
 

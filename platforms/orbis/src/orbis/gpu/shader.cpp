@@ -703,6 +703,24 @@ struct Translator {
         carry(s[0] + " > " + s[1]);
         io("r_t");
         return true;
+      // v_addc_u32, v_subb_u32, v_subbrev_u32: the lane's bit of s2 (VCC
+      // in VOP2) carries in, read before the carry out is written (both may
+      // be VCC).
+      case 40:
+        Line("r_t2 = " + s[2] + " & 1u; r_t = " + s[0] + " + " + s[1] + " + r_t2;");
+        carry("r_t < " + s[0] + " || (r_t2 != 0u && r_t == " + s[0] + ")");
+        io("r_t");
+        return true;
+      case 41:
+        Line("r_t2 = " + s[2] + " & 1u; r_t = " + s[0] + " - " + s[1] + " - r_t2;");
+        carry(s[1] + " > " + s[0] + " || (r_t2 != 0u && " + s[1] + " == " + s[0] + ")");
+        io("r_t");
+        return true;
+      case 42:
+        Line("r_t2 = " + s[2] + " & 1u; r_t = " + s[1] + " - " + s[0] + " - r_t2;");
+        carry(s[0] + " > " + s[1] + " || (r_t2 != 0u && " + s[0] + " == " + s[1] + ")");
+        io("r_t");
+        return true;
       case 43: fo("ldexp(" + f(0) + ", " + si(1) + ")"); return true;
       case 46: io("packUnorm2x16(vec2(" + f(0) + ", " + f(1) + "))"); return true;
       case 45: io("packSnorm2x16(vec2(" + f(0) + ", " + f(1) + "))"); return true;
@@ -734,6 +752,9 @@ struct Translator {
       case 343: fo("r_med3(" + f(0) + ", " + f(1) + ", " + f(2) + ")"); return true;
       case 344: io("uint(max(min(" + si(0) + ", " + si(1) + "), min(max(" + si(0) + ", " + si(1) + "), " + si(2) + ")))"); return true;
       case 345: io("max(min(" + s[0] + ", " + s[1] + "), min(max(" + s[0] + ", " + s[1] + "), " + s[2] + "))"); return true;
+      // v_sad_u32: |S0 - S1| of unsigned values, plus S2 (as LLVM selects it
+      // for umax - umin + c).
+      case 349: io("(max(" + s[0] + ", " + s[1] + ") - min(" + s[0] + ", " + s[1] + ")) + " + s[2]); return true;
       case 361: case 363: io(s[0] + " * " + s[1]); return true;
       case 362: { io("r_mulhi_u(" + s[0] + ", " + s[1] + ")"); return true; }
       case 364: { io("r_mulhi_i(" + s[0] + ", " + s[1] + ")"); return true; }
@@ -758,7 +779,9 @@ struct Translator {
       case 384 + 36: fo("floor(" + f(0) + ")"); return true;
       case 384 + 37: fo("exp2(" + f(0) + ")"); return true;
       case 384 + 39: fo("log2(" + f(0) + ")"); return true;
-      case 384 + 42: fo("1.0 / " + f(0)); return true;
+      // v_rcp_f32; v_rcp_iflag_f32 (integer division's) differs only in a
+      // flag nothing here reads.
+      case 384 + 42: case 384 + 43: fo("1.0 / " + f(0)); return true;
       case 384 + 44: fo("r_rsq_clamp(" + f(0) + ")"); return true;
       case 384 + 46: fo("inversesqrt(" + f(0) + ")"); return true;
       case 384 + 51: fo("sqrt(" + f(0) + ")"); return true;
@@ -966,10 +989,21 @@ struct Translator {
         for (uint32_t i = 0; i < n; i++) Line(V(vdata + i) + " = " + Load(b, "r_a + " + U(4 * i)) + ";");
         return;
       }
-      case 4: case 28: case 29: case 30: case 31: {  // buffer_store_format_x, _dword(s)
+      case 4: case 5: case 6: case 7:  // buffer_store_format_x(y, yz, yzw)
+      case 28: case 29: case 30: case 31: {  // buffer_store_dword(x2, x4, x3)
         if (rw_of[size_t(b)] < 0) return Fail(pc, "a store outside a compute stage not translated yet");
-        const uint32_t n = in.op == 4 || in.op == 28 ? 1 : in.op == 29 ? 2 : in.op == 30 ? 4 : 3;
+        const uint32_t n = in.op <= 7 ? in.op - 3 : in.op == 28 ? 1 : in.op == 29 ? 2 : in.op == 30 ? 4 : 3;
         if (in.op == 4 && ((v[3] >> 15) & 0xF) != 4) return Fail(pc, "a format store not translated yet");
+        if (in.op >= 5 && in.op <= 7) {
+          // Formats of 32-bit components (32_32, 32_32_32, 32_32_32_32) as
+          // integers or floats: the registers' bits, one dword each, the
+          // V#'s selects in order. Other formats convert: not translated.
+          const uint32_t dfmt = (v[3] >> 15) & 0xF, nfmt = (v[3] >> 12) & 7;
+          const uint32_t comps = dfmt == 11 ? 2 : dfmt == 13 ? 3 : dfmt == 14 ? 4 : 0;
+          if (!comps || (nfmt != 4 && nfmt != 5 && nfmt != 7) || comps != n ||
+              (v[3] & 0xFFF & ((1u << (3 * n)) - 1)) != ((4u | 5u << 3 | 6u << 6 | 7u << 9) & ((1u << (3 * n)) - 1)))
+            return Fail(pc, "a format store not translated yet");
+        }
         Line("r_a = " + addr + ";");
         for (uint32_t i = 0; i < n; i++)
           Line("r_wr(" + std::to_string(rw_of[size_t(b)]) + ", r_a + " + U(4 * i) + ", " + V(vdata + i) + ");");

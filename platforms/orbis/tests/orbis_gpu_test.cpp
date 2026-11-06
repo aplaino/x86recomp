@@ -370,6 +370,59 @@ int main() {
     Check(got == cc.want, "a cube map samples the face and texel of a direction");
   }
 
+  // v_sad_u32 on three dwords from kOut + 16, stored at kOut: the
+  // difference of unsigned values plus the third, mod 2^32.
+  static const uint32_t kSad[] = {
+      0xE03C0010, 0x80030100,  // buffer_load_dwordx3 v[1:3], off, s[12:15], 0 offset:16
+      0xBF8C0F70,              // s_waitcnt vmcnt(0)
+      0xD2BA0004, 0x040E0501,  // v_sad_u32 v4, v1, v2, v3
+      0xE0700000, 0x80030400,  // buffer_store_dword v4, off, s[12:15], 0
+      0xBF810000,              // s_endpgm
+  };
+  constexpr gaddr kSadAt = kCode + 0xA00;
+  std::memcpy(GPtr(kSadAt), kSad, sizeof kSad);
+  struct SadCase {
+    uint32_t a, b, c, want;
+  } sads[] = {
+      {5, 0xFFFFFFF0u, 7, 0xFFFFFFF2u},  // unsigned: not |5 - (-16)| + 7
+      {3, 10, 0xFFFFFFFEu, 5},           // the sum wraps
+  };
+  for (const SadCase& sc : sads) {
+    uint32_t user[16] = {};
+    VSharp(user + 12, kOut, 32);
+    Wr32(kOut + 16, sc.a);
+    Wr32(kOut + 20, sc.b);
+    Wr32(kOut + 24, sc.c);
+    Wr32(kOut, 0);
+    Run(kSadAt, user, 16);
+    if (Rd32(kOut) != sc.want)
+      std::printf("  v_sad_u32(%08X, %08X, %08X): %08X, want %08X\n", sc.a, sc.b, sc.c,
+                  Rd32(kOut), sc.want);
+    Check(Rd32(kOut) == sc.want, "v_sad_u32 adds the unsigned difference");
+  }
+
+  // buffer_store_format_xy through a V# of format 32_32 uint: two dwords
+  // from kOut + 16 stored at kOut as they are.
+  static const uint32_t kStoreXy[] = {
+      0xE0340010, 0x80030100,  // buffer_load_dwordx2 v[1:2], off, s[12:15], 0 offset:16
+      0xBF8C0F70,              // s_waitcnt vmcnt(0)
+      0xE0140000, 0x80030100,  // buffer_store_format_xy v[1:2], off, s[12:15], 0
+      0xBF810000,              // s_endpgm
+  };
+  constexpr gaddr kStoreXyAt = kCode + 0xB00;
+  std::memcpy(GPtr(kStoreXyAt), kStoreXy, sizeof kStoreXy);
+  {
+    uint32_t user[16] = {};
+    VSharp(user + 12, kOut, 32);
+    user[15] = 0xFACu | 4u << 12 | 11u << 15;
+    Wr32(kOut + 16, 0x89ABCDEFu);
+    Wr32(kOut + 20, 0x7FC00001u);
+    Wr64(kOut, 0);
+    Run(kStoreXyAt, user, 16);
+    Check(Rd32(kOut) == 0x89ABCDEFu && Rd32(kOut + 4) == 0x7FC00001u,
+          "buffer_store_format_xy stores 32-bit components as they are");
+  }
+
   // An 8x8 texture of four levels, level n's texels n + 1 (linear), sampled
   // at (0.5, 0.5) with derivatives (image_sample_d) from kOut + 16, nearest
   // level (MIP_FILTER point, MAX_LOD 4): derivatives of 4 texels a pixel

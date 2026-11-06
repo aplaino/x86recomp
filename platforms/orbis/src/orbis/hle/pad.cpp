@@ -23,6 +23,7 @@
 
 #include "orbis/hle.h"
 #include "orbis/host.h"
+#include "orbis/process.h"
 #include "x86/runtime.h"
 
 namespace {
@@ -331,6 +332,14 @@ ORBIS_HLE("libScePad", scePadSetLightBar, 2) {
   return 0;
 }
 
+// int scePadResetLightBar(int handle): the system's colour for the user
+// again; the library checks the handle and passes it to the driver. The
+// host's controller keeps the colour it has.
+ORBIS_HLE("libScePad", scePadResetLightBar, 1) {
+  std::lock_guard<std::mutex> l(g_mu);
+  return Check(int32_t(Arg(c, 0)));
+}
+
 // The motion sensors report the controller lying still: nothing to reset
 // or correct.
 ORBIS_HLE("libScePad", scePadResetOrientation, 1) {
@@ -362,4 +371,92 @@ ORBIS_HLE("libScePad", scePadGetControllerInformation, 2) {
   recomp::GPtr(p)[11] = 1;   // connected once
   recomp::GPtr(p)[12] = 1;   // connected
   return 0;
+}
+
+// libSceMouse: no mouse is attached. The library (11.00) keeps eight slots
+// of opened mice, each a handle the HID driver gives and registered with
+// the input service; with nothing attached a read returns one zeroed
+// sample (not connected). The driver's first handle on the console was
+// 0x160500 (measured); a second open is not modelled. A merged open takes
+// two of the driver's handles and gives the game the first; the second
+// stays inside the library.
+namespace {
+
+constexpr uint32_t kMouseErrInvalidArg = 0x80DF0001, kMouseErrInvalidHandle = 0x80DF0003,
+                   kMouseErrAlreadyOpened = 0x80DF0004, kMouseErrNotInitialized = 0x80DF0005;
+constexpr int32_t kMouseHandle = 0x160500;
+constexpr size_t kMouseDataSize = 40;
+
+bool g_mouse_init = false;
+struct MouseSlot {
+  int32_t handle = 0;
+  int32_t user = 0, index = 0;
+  bool merged = false;  // the user's mice 0 and 1
+};
+MouseSlot g_mice[8];
+
+bool MouseOpened(int32_t user, int32_t index) {
+  for (const MouseSlot& m : g_mice)
+    if (m.handle && m.user == user && (m.index == index || (m.merged && index <= 1)))
+      return true;
+  return false;
+}
+
+MouseSlot* FreeMouseSlot() {
+  for (MouseSlot& m : g_mice)
+    if (!m.handle) return &m;
+  return nullptr;
+}
+
+MouseSlot* FindMouse(int32_t h) {
+  for (MouseSlot& m : g_mice)
+    if (m.handle && m.handle == h) return &m;
+  return nullptr;
+}
+
+}  // namespace
+
+ORBIS_HLE("libSceMouse", sceMouseInit, 0) {
+  std::lock_guard<std::mutex> l(g_mu);
+  g_mouse_init = true;
+  return 0;
+}
+
+// int sceMouseOpen(SceUserServiceUserId user, int type, int index, const
+// SceMouseOpenParam* param): type 0; param's bit 0 (behaviour from SDK
+// 2.00) merges the user's mice 0 and 1 under one handle.
+ORBIS_HLE("libSceMouse", sceMouseOpen, 4) {
+  std::lock_guard<std::mutex> l(g_mu);
+  if (!g_mouse_init) return kMouseErrNotInitialized;
+  if (Arg(c, 1) != 0) return kMouseErrInvalidArg;
+  const int32_t user = int32_t(Arg(c, 0)), index = int32_t(Arg(c, 2));
+  const recomp::gaddr param = Arg(c, 3);
+  const bool merged = recomp::orbis::SdkVersion() >= 0x02000000 && param && (recomp::Rd8(param) & 1);
+  if (merged ? MouseOpened(user, 0) || MouseOpened(user, 1) : MouseOpened(user, index))
+    return kMouseErrAlreadyOpened;
+  for (const MouseSlot& m : g_mice)
+    if (m.handle) recomp::FatalF("sceMouseOpen: a second mouse handle is not modelled");
+  *FreeMouseSlot() = {kMouseHandle, user, merged ? 0 : index, merged};
+  return uint32_t(kMouseHandle);
+}
+
+ORBIS_HLE("libSceMouse", sceMouseClose, 1) {
+  std::lock_guard<std::mutex> l(g_mu);
+  if (!g_mouse_init) return kMouseErrNotInitialized;
+  MouseSlot* s = FindMouse(int32_t(Arg(c, 0)));
+  if (!s) return kMouseErrInvalidHandle;
+  *s = {};
+  return 0;
+}
+
+// int sceMouseRead(int32_t handle, SceMouseData* data, int32_t num): num
+// in 1-64; nothing attached: one zeroed sample.
+ORBIS_HLE("libSceMouse", sceMouseRead, 3) {
+  std::lock_guard<std::mutex> l(g_mu);
+  if (!g_mouse_init) return kMouseErrNotInitialized;
+  const int32_t n = int32_t(Arg(c, 2));
+  if (!Arg(c, 1) || n < 1 || n > 64) return kMouseErrInvalidArg;
+  if (!FindMouse(int32_t(Arg(c, 0)))) return kMouseErrInvalidHandle;
+  std::memset(recomp::GPtr(Arg(c, 1)), 0, kMouseDataSize);
+  return 1;
 }

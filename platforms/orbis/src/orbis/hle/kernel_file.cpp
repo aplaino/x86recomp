@@ -120,6 +120,19 @@ Mapped MapPath(const std::string& guest) {
       }
   }
   if (guest.compare(0, 9, "/savedata") == 0) return m;  // not mounted
+  // The sandbox's root holds only what the system put there (11.00, as
+  // listed over FTP: app0, dev, system_tmp, av_contents, system_ex, a
+  // directory with a random 10-character name, and for system applications
+  // system_data, user, update, usb0-7, disc, mnt, Temp, sce_sbx, bgft); a
+  // name it does not have is absent. Those it has are not modelled.
+  static const char* const kSandbox[] = {"dev", "system_tmp", "av_contents", "system_ex",
+                                         "system_data", "user", "update", "disc", "mnt",
+                                         "Temp", "sce_sbx", "bgft"};
+  const size_t end = guest.find('/', 1);
+  const std::string top = guest.substr(1, end == std::string::npos ? std::string::npos : end - 1);
+  bool present = top.size() == 10 || top.compare(0, 3, "usb") == 0;
+  for (const char* n : kSandbox) present = present || top == n;
+  if (guest.size() > 1 && guest[0] == '/' && !present) return m;
   FatalF("file path %s: no mount point maps it", guest.c_str());
 }
 
@@ -177,6 +190,16 @@ void PutStat(gaddr p, const struct stat& st) {
 }
 
 int64_t Stat(const std::string& path, gaddr out) {
+  if (path == "/") {
+    // The sandbox's root: a directory, drwxrwxr-x, owned by root (11.00,
+    // as listed over FTP); the rest as the host's data directory has it.
+    struct stat st;
+    if (::stat(DataDir().c_str(), &st) != 0) return -FromHost(errno);
+    st.st_mode = S_IFDIR | 0775;
+    st.st_uid = st.st_gid = 0;
+    PutStat(out, st);
+    return 0;
+  }
   const Mapped m = MapPath(path);
   if (!m.ok) return -kENOENT;
   struct stat st;

@@ -21,7 +21,8 @@ using recomp::gaddr;
 using recomp::orbis::SdkVersion;
 
 constexpr uint32_t kErrNotInitialized = 0x80D90001, kErrParameter = 0x80D90002,
-                   kErrBusy = 0x80D90003, kErrNotFound = 0x80D90005;
+                   kErrBusy = 0x80D90003, kErrNoDownloadData = 0x80D90004,
+                   kErrNotFound = 0x80D90005;
 
 std::mutex g_mu;
 bool g_initialized = false;
@@ -146,4 +147,21 @@ ORBIS_HLE("libSceAppContent", sceAppContentTemporaryDataFormat, 1) {
   std::error_code ec;
   std::filesystem::remove_all(recomp::DataDir() + "/temp0", ec);
   return 0;
+}
+
+// int sceAppContentDownloadDataGetAvailableSpaceKb(const
+// SceAppContentMountPoint* mount_point, size_t* available_kb): the library
+// checks both pointers, the service answers. On 11.00, for a game whose
+// param.sfo gives DOWNLOAD_DATA_SIZE 0 (no download data), the service
+// answers 0x80D90004 for /download0 and the size is not written
+// (measured). A game with download data: not implemented.
+ORBIS_HLE("libSceAppContent", sceAppContentDownloadDataGetAvailableSpaceKb, 2) {
+  if (!Initialized()) return kErrNotInitialized;
+  if (!Arg(c, 0) || !Arg(c, 1)) return kErrParameter;
+  const auto& ints = recomp::orbis::AppParam().ints;
+  auto it = ints.find("DOWNLOAD_DATA_SIZE");
+  if (it == ints.end() || it->second != 0)
+    recomp::FatalF("sceAppContentDownloadDataGetAvailableSpaceKb: a game with download data "
+                   "not implemented");
+  return kErrNoDownloadData;
 }

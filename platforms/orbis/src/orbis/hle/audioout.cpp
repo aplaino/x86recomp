@@ -104,7 +104,7 @@ void Play(Port& p, recomp::gaddr buf) {
     } else if (p.channels == 2) {
       l = sample(i);
       r = sample(i + 1);
-    } else {  // L, R, C, LFE, LS, RS, LB, RB
+    } else {  // L, R, C, LFE, then two left/right pairs (side, back or back, side)
       const float c = sample(i + 2) * kHalf;
       l = sample(i) + c + (sample(i + 4) + sample(i + 6)) * kHalf;
       r = sample(i + 1) + c + (sample(i + 5) + sample(i + 7)) * kHalf;
@@ -180,7 +180,8 @@ ORBIS_HLE("libSceAudioOut", sceAudioOutInit, 0) {
 // uint32_t length, uint32_t freq, uint32_t param): length 256-2048
 // samples in steps of 256, 48 kHz; param's low byte is the format (S16
 // mono, stereo, 8 channels, float mono, stereo, 8 channels, then the
-// "standard" 8-channel orders of both).
+// "standard" 8-channel orders of both, S16 then float). The standard order
+// swaps the side and back pairs, which the fold to stereo weighs alike.
 ORBIS_HLE("libSceAudioOut", sceAudioOutOpen, 6) {
   const uint32_t type = uint32_t(Arg(c, 1)), length = uint32_t(Arg(c, 3)),
                  freq = uint32_t(Arg(c, 4)), param = uint32_t(Arg(c, 5));
@@ -196,7 +197,6 @@ ORBIS_HLE("libSceAudioOut", sceAudioOutOpen, 6) {
   const uint32_t format = param & 0xFF;
   static const int kChannels[8] = {1, 2, 8, 1, 2, 8, 8, 8};
   if (format > 7) return kErrInvalidFormat;
-  if (format >= 6) recomp::FatalF("sceAudioOutOpen: the standard 8-channel order not implemented yet");
   if (param & ~0xFFu) recomp::FatalF("sceAudioOutOpen: param %08X not implemented yet", param);
   for (int s : slots) {
     Port& p = g_ports[s];
@@ -207,7 +207,7 @@ ORBIS_HLE("libSceAudioOut", sceAudioOutOpen, 6) {
     p.length = length;
     p.format = format;
     p.channels = kChannels[format];
-    p.is_float = format >= 3;
+    p.is_float = format >= 3 && format != 6;
     OpenVoice(p);
     return 0x20000000 | p.type << 16 | uint32_t(s);
   }
