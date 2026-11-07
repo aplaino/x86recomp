@@ -112,6 +112,7 @@ class Emitter {
     }
     h += "\n";
     for (const auto& name : helper_order_) h += helpers_[name];
+    if (out_->writes_depth) h += kDepthOutDefault;
     out_->glsl = h + "\n" + funcs + init + main;
   }
 
@@ -949,7 +950,7 @@ class Emitter {
     }
     if (s.usage == kDepth && s.index == 0) {
       out_->writes_depth = true;
-      return "  gl_FragDepth = float(" + v + ");\n";
+      return "  gl_FragDepth = R_DEPTH_OUT(float(" + v + "));\n";
     }
     if (s.usage != kColor || s.index > 3) Fail(loc, "pixel shader outputs are COLOR0-3 and DEPTH");
     if (out_->color_outputs & (1u << s.index)) Fail(loc, "two outputs to one render target");

@@ -20,7 +20,8 @@ layout(std140, set = 0, binding = 2) uniform r_vs_state {
   ivec4 r_in[16];
   vec4 r_pixel;
   vec4 r_clip[6];      // the user clip planes, in clip space (D3D9's with shaders)
-  ivec4 r_clip_mask;   // x: CLIPPLANEENABLE
+  ivec4 r_clip_mask;   // x: CLIPPLANEENABLE; y: depth (r_position)
+  vec4 r_depth;        // xy: depth from w's k0, k1 (reversed_z.h)
 };
 out float gl_ClipDistance[6];
 // r_pixel: 1 / viewport width and height; zw: the frame's jitter (the
@@ -71,18 +72,25 @@ vec4 r_fetch(int slot) {
   return vec4(0.0, 0.0, 0.0, 1.0);
 }
 // D3D9 puts pixel centres on integers, Metal on halves: half a pixel
-// right and down (clip space is y-up).
+// right and down (clip space is y-up). Depth (reversed_z.h), by
+// r_clip_mask.y: 0 z; 1 (a reversed buffer) w - z: depth 1 - z / w,
+// clipped where z was; 2 (reversed, from w) the same as k0 - k1 w.
 vec4 r_position(vec4 p) {
   for (int i = 0; i < 6; i++)
     gl_ClipDistance[i] = (r_clip_mask.x & (1 << i)) != 0 ? dot(p, r_clip[i]) : 1.0;
-  return vec4(p.x + p.w * (r_pixel.x + r_pixel.z), p.y - p.w * (r_pixel.y + r_pixel.w), p.zw);
+  float z = r_clip_mask.y == 0 ? p.z : r_clip_mask.y == 1 ? p.w - p.z : fma(-r_depth.y, p.w, r_depth.x);
+  return vec4(p.x + p.w * (r_pixel.x + r_pixel.z), p.y - p.w * (r_pixel.y + r_pixel.w), z, p.w);
 }
 )";
   } else {
     p += R"(#define R_FLOAT_BINDING set = 0, binding = 0
 #define R_INT_BINDING set = 0, binding = 1
 #define R_SAMPLER_BINDING(n) set = 0, binding = n
+// r_alpha: x ALPHAFUNC, y ALPHAREF; w 1 if the depth buffer is reversed
+// (reversed_z.h).
 layout(std140, set = 0, binding = 2) uniform r_ps_state { ivec4 r_alpha; vec4 r_bias[4]; vec4 r_vscale; };
+// The depth a shader writes, as a reversed depth buffer stores it.
+#define R_DEPTH_OUT(d) (r_alpha.w != 0 ? 1.0 - (d) : (d))
 // Metal samplers have no LOD bias: the shader adds it where the level is
 // implicit.
 #define R_BIAS(n) r_bias[(n) >> 2][(n) & 3]

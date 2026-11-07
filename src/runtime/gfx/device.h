@@ -330,6 +330,15 @@ class Device {
   // Anisotropic filtering of at least `level` (2..16; 0: as the game sets
   // it) for mipmapped textures sampled with linear filtering.
   virtual void SetMinAnisotropy(int level) { (void)level; }
+  // Depth from w (Metal: gfx/reversed_z.h): the vertex shader constants
+  // c[wvp_register]..+3 where the game keeps its world-view-projection
+  // (rows, D3D's row vectors; -1: none), perspective draws whose position
+  // is made from them getting their depth from w alone; and, optional,
+  // the near and far planes of the projection the game draws with at the
+  // time of the call (false if it cannot tell), exact where the matrix's
+  // are rounded. Called from the drawing thread, at a draw.
+  using DepthPlanes = bool (*)(float* near_plane, float* far_plane);
+  virtual void SetDepthFromW(int wvp_register, DepthPlanes planes) { (void)wvp_register, (void)planes; }
   // Decode DXT textures on upload even where the GPU samples BC formats
   // (to check the path GPUs without them take). Before any texture exists.
   virtual void DecodeDxtOnUpload() {}

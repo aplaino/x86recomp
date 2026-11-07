@@ -73,6 +73,14 @@ struct GameConfig {
   // Anisotropic filtering at least this (2..16) for the game's mipmapped
   // textures; 0 keeps the game's own. <ID>_ANISO overrides.
   int anisotropy = 0;
+  // Depth computed from w (gfx::Device::SetDepthFromW; RECOMP_DEPTH_FROM_W=0
+  // turns it off): the vertex shader constants c[n]..c[n + 3] that hold
+  // the world-view-projection the game's shaders transform positions with
+  // (rows, for row vectors; -1: none), and, optional, the near and far
+  // planes of the projection it draws with now (from its own camera
+  // state, on the drawing thread; false if none).
+  int wvp_register = -1;
+  bool (*depth_planes)(float* near_plane, float* far_plane) = nullptr;
 
   // Physical memory a 32-bit guest is told the machine has
   // (GlobalMemoryStatus[Ex]), in MiB; available is three quarters of it.

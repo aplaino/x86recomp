@@ -111,6 +111,7 @@ class Translator {
     out_->minor = minor_;
     Decode();
     Declare();
+    if (!pixel_) out_->position_matrix = PositionMatrix();
     Emit();
   }
 
@@ -206,6 +207,108 @@ class Translator {
       ins_.push_back(std::move(in));
     }
     Fail("shader without END");
+  }
+
+  // ---- the position's matrix (Program::position_matrix)
+
+  // What a temporary's z and w hold: the sum over `rows` of a scalar times
+  // c[k].z (lane z) and c[k].w (lane w), the same scalar in both, plus
+  // c[trans].zw once (-1: none). `known` false: anything else.
+  struct ZwSum {
+    bool known = false;
+    std::set<uint32_t> rows;
+    int trans = -1;
+  };
+
+  // The b of Program::position_matrix, or -1. Followed through mov, mul,
+  // mad and add in straight-line code; a write in an if block may or may
+  // not happen (unknown after it); loops and calls are not followed.
+  int PositionMatrix() const {
+    std::map<uint32_t, ZwSum> temps;
+    ZwSum pos;
+    int writes = 0, depth = 0;
+    auto is_pos = [&](const Param& p) {
+      if (major_ < 3) return p.type == RASTOUT && p.num == 0;
+      auto it = vs3_outputs_.find(p.num);
+      return p.type == OUTPUT && it != vs3_outputs_.end() && it->second.usage == kPosition &&
+             it->second.index == 0;
+    };
+    // Lanes z and w read .z and .w; read one component (a scalar).
+    auto zw = [](const Param& p) { return ((p.swz >> 4) & 3) == 2 && ((p.swz >> 6) & 3) == 3; };
+    auto scalar = [](const Param& p) { return ((p.swz >> 4) & 3) == ((p.swz >> 6) & 3) && p.mod <= 1; };
+    // A register the application sets (a def in the shader overrides it).
+    auto app = [&](const Param& p) { return p.type == CONST && !p.rel && !defs_.count(p.num); };
+    // A source added as it is: the translation only unnegated.
+    auto term = [&](const Param& p) -> ZwSum {
+      if (p.rel || p.mod > 1 || !zw(p)) return {};
+      if (app(p)) {
+        ZwSum r;
+        r.known = p.mod == 0;
+        r.trans = int(p.num);
+        return r;
+      }
+      auto it = p.type == TEMP ? temps.find(p.num) : temps.end();
+      if (it == temps.end() || (p.mod && it->second.trans >= 0)) return {};
+      return it->second;
+    };
+    // A scalar times a row, or times a sum without the translation.
+    auto prod = [&](const Param& a, const Param& b) -> ZwSum {
+      for (int k = 0; k < 2; k++) {
+        const Param& f = k ? a : b;
+        if (!scalar(k ? b : a) || f.rel || f.mod > 1 || !zw(f)) continue;
+        if (app(f)) {
+          ZwSum r;
+          r.known = true;
+          r.rows.insert(f.num);
+          return r;
+        }
+        auto it = f.type == TEMP ? temps.find(f.num) : temps.end();
+        if (it != temps.end() && it->second.known && it->second.trans < 0) return it->second;
+      }
+      return {};
+    };
+    auto sum = [](ZwSum a, const ZwSum& b) -> ZwSum {
+      if (!a.known || !b.known || (a.trans >= 0 && b.trans >= 0)) return {};
+      a.rows.insert(b.rows.begin(), b.rows.end());
+      if (b.trans >= 0) a.trans = b.trans;
+      return a;
+    };
+    for (const Ins& in : ins_) {
+      if (in.op == IF || in.op == IFC) {
+        depth++;
+        continue;
+      }
+      if (in.op == ENDIF) {
+        depth--;
+        continue;
+      }
+      if (in.op == RET && depth == 0) break;  // the end of main (subroutines follow)
+      if (in.op == CALL || in.op == CALLNZ || in.op == LOOP_ || in.op == REP || in.op == BREAK ||
+          in.op == BREAKC || in.op == BREAKP || in.op == LABEL_)
+        return -1;
+      if (!in.has_dst || in.op == DCL || in.op == DEF || in.op == DEFI || in.op == DEFB) continue;
+      ZwSum v;
+      if (depth == 0 && !in.predicated && !(in.dst.mod & 1) && in.dst.shift == 0) {
+        const std::vector<Param>& a = in.src;
+        if (in.op == MOV && a.size() == 1) v = term(a[0]);
+        else if (in.op == ADD && a.size() == 2) v = sum(term(a[0]), term(a[1]));
+        else if (in.op == MUL && a.size() == 2) v = prod(a[0], a[1]);
+        else if (in.op == MAD && a.size() == 3) v = sum(prod(a[0], a[1]), term(a[2]));
+      }
+      const uint32_t m = in.dst.mask & 0xC;
+      if (!m) continue;
+      if (is_pos(in.dst)) {
+        writes++;
+        pos = m == 0xC ? v : ZwSum{};
+      } else if (in.dst.type == TEMP) {
+        temps[in.dst.num] = m == 0xC ? v : ZwSum{};
+      }
+    }
+    if (writes != 1 || !pos.known || pos.trans < 3) return -1;
+    const uint32_t b = uint32_t(pos.trans) - 3;
+    for (uint32_t r : pos.rows)
+      if (r < b || r > b + 2) return -1;
+    return int(b);
   }
 
   // ---- declarations: registers used, inputs, outputs, samplers
@@ -907,7 +1010,7 @@ class Translator {
       }
       for (const auto& [type, num] : written_)
         if (type == DEPTHOUT) {
-          post += "  gl_FragDepth = r_odepth.x;\n";
+          post += "  gl_FragDepth = R_DEPTH_OUT(r_odepth.x);\n";
           out_->writes_depth = true;
         }
       if (out_->color_outputs & 1) post += "  r_color0(r_c0);\n";
@@ -922,6 +1025,7 @@ class Translator {
       help += "  return i >= 0 && i < " + std::to_string(max_c_) + " ? c[i] : vec4(0.0);\n}\n";
     }
     help += "float r_off0(float x) { return abs(x) < 1e-37 ? 1e-37 : x; }\n";
+    if (out_->writes_depth) help += kDepthOutDefault;
     if (helpers_.count("mulz"))
       help += "// D3D9's multiply: 0 times anything (infinity, NaN) is 0.\n"
               "vec4 r_mulz(vec4 a, vec4 b) {\n"

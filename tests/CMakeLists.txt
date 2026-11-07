@@ -153,6 +153,19 @@ target_link_libraries(hlsl_bytecode_test PRIVATE recomp_hlsl)
 add_test(NAME hlsl_bytecode COMMAND hlsl_bytecode_test ${RECOMP_GLSLANG}
          ${CMAKE_CURRENT_SOURCE_DIR}/hlsl/prelude.glsl ${CMAKE_CURRENT_BINARY_DIR})
 
+# metal_depth_test: reversed depth on the Metal backend (gfx/reversed_z.h):
+# translated shaders with the Metal prelude, drawn on the GPU as D3D9
+# stores depth and reversed, must store mirrored values and pass the same
+# depth tests (skipped without a Metal device); macOS.
+if(APPLE)
+  add_executable(metal_depth_test metal_depth_test.mm)
+  set_source_files_properties(metal_depth_test.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc;-std=c++20")
+  target_link_libraries(metal_depth_test PRIVATE recomp_gfx recomp_hlsl "-framework Metal"
+                        "-framework Foundation")
+  add_test(NAME metal_depth COMMAND metal_depth_test)
+  set_tests_properties(metal_depth PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
 # lift_flags_test: programs whose flags cross calls, returns, tail calls
 # and indirect calls, lifted with the lifter's flag analysis and with
 # every flag spilled (recomp_lift --flags-test), must behave the same;

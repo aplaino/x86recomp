@@ -22,7 +22,11 @@
 //                                   implicit level (0.0 if the backend's
 //                                   samplers apply D3D9's MIPMAPLODBIAS);
 //   void r_color0(inout vec4 c)     pixel shaders that write COLOR0: called
-//                                   last with it (the alpha test).
+//                                   last with it (the alpha test);
+// and may define
+//   float R_DEPTH_OUT(d)            pixel shaders: the depth a shader writes
+//                                   (DEPTH, oDepth) as the depth buffer
+//                                   stores it ((d) if not defined).
 // The body declares, if it reads them:
 //   layout(std140, R_FLOAT_BINDING) uniform r_float_regs { vec4 c[n]; };
 //   layout(std140, R_INT_BINDING) uniform r_int_regs { ivec4 r_i[16];
@@ -38,6 +42,10 @@
 #include <vector>
 
 namespace recomp::hlsl {
+
+// The body's default for the optional R_DEPTH_OUT.
+inline constexpr const char* kDepthOutDefault =
+    "#ifndef R_DEPTH_OUT\n#define R_DEPTH_OUT(d) (d)\n#endif\n";
 
 struct Define {
   std::string name, value;
@@ -99,6 +107,14 @@ struct Program {
   bool writes_depth = false, writes_point_size = false;
   std::vector<Sampler> samplers;
   uint32_t float_regs = 0;  // c registers the GLSL declares
+  // Vertex shaders from bytecode: b if the POSITION output's z and w are
+  // the vertex times the matrix in float registers c[b]..c[b + 3] (rows,
+  // D3D's row vectors: c[b + 3] the translation, added once), z and w
+  // alike: z = sum of s_k c[b + k].z and w = the same sum of the .w, for
+  // the same scalars s_k (s_3 = 1), nothing else added to either. A
+  // backend may then compute the depth from w alone (gfx/reversed_z.h).
+  // -1: not known to be so.
+  int position_matrix = -1;
 };
 
 // D3DXSHADER flags that change the translation.
