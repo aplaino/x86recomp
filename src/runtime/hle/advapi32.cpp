@@ -325,6 +325,23 @@ HLE_NAMED("oleaut32.dll", "#6", SysFreeString, 1) {
   return 0;
 }
 
+// VARIANT: vt (2 bytes) at +0, the value at +8. Only the empty and string
+// kinds are ever made here (the benchmark's system query that fails).
+constexpr uint16_t kVtEmpty = 0, kVtBstr = 8;
+
+HLE_NAMED("oleaut32.dll", "#8", VariantInit, 1) {
+  if (Arg(c, 0)) Wr16(Arg(c, 0), kVtEmpty);
+  return 0;
+}
+
+HLE_NAMED("oleaut32.dll", "#9", VariantClear, 1) {
+  const uint32_t v = Arg(c, 0);
+  if (!v) return 0;
+  if (Rd16(v) == kVtBstr) com::FreeBstr(Rd32(v + 8));
+  Wr16(v, kVtEmpty);
+  return 0;  // S_OK
+}
+
 // ---- wintrust / crypt32 --------------------------------------------------------
 // Authenticode: every file is trusted (the user's own install), and no
 // signer certificate is ever found, so callers that read the signer's

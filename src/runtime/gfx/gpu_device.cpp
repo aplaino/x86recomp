@@ -33,6 +33,7 @@
 #include <set>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "runtime/gfx/device.h"
@@ -428,7 +429,13 @@ class GpuDevice final : public Device {
     for (auto& [id, sh] : shaders_) SDL_ReleaseGPUShader(dev_, sh.sh);
     for (auto& [k, s] : samplers_) SDL_ReleaseGPUSampler(dev_, s);
     for (auto& [id, t] : textures_) SDL_ReleaseGPUTexture(dev_, t.tex);
-    for (auto& [id, d] : depths_) SDL_ReleaseGPUTexture(dev_, d.tex);
+    // A depth texture's depth entry shares the texture's GPU texture, released above
+    // (as DestroyTexture does it).
+    std::unordered_set<DepthId> shared;
+    for (auto& [id, t] : textures_)
+      if (t.depth) shared.insert(t.depth);
+    for (auto& [id, d] : depths_)
+      if (!shared.count(id)) SDL_ReleaseGPUTexture(dev_, d.tex);
     for (SDL_GPUTexture* t : {backbuffer_, front_, dummy_, dummy_2d_, dummy_cube_, dummy_3d_,
                               smaa_area_, smaa_search_, smaa_edges_, smaa_blend_})
       if (t) SDL_ReleaseGPUTexture(dev_, t);
@@ -714,6 +721,8 @@ class GpuDevice final : public Device {
     std::lock_guard<std::recursive_mutex> l(mu_);
     auto it = depths_.find(id);
     if (it == depths_.end()) return;
+    for (auto& [tid, t] : textures_)
+      if (t.depth == id) return;  // a depth texture's: DestroyTexture lets go of it
     if (pass_depth_ == it->second.tex) Flush();
     if (current_depth_ == id) {
       current_depth_ = 0;
