@@ -70,5 +70,8 @@ void Exclusive(const std::function<void()>& fn);
 // The pixels the draws DB_COUNT_CONTROL counts have written so far (the
 // occlusion counter, all render backends together), once they have landed.
 uint64_t OcclusionCount();
+// Runs fn with that count once the draws queued so far are counted, as a
+// signal writing n bytes at a (the occlusion counter dump).
+void OcclusionCountThen(gaddr a, uint64_t n, std::function<void(uint64_t)> fn);
 
 }  // namespace recomp::orbis::gpu

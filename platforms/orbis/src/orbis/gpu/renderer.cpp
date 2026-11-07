@@ -1597,6 +1597,12 @@ uint64_t OcclusionCount() {
   return G().counted;
 }
 
+void OcclusionCountThen(gaddr a, uint64_t n, std::function<void(uint64_t)> fn) {
+  std::lock_guard<std::mutex> l(G().mu);
+  if (G().dev) CountsAdd(G());
+  Signal(a, n, [fn = std::move(fn)] { fn(G().counted); });
+}
+
 void Exclusive(const std::function<void()>& fn) {
   std::lock_guard<std::mutex> l(G().mu);
   fn();

@@ -91,6 +91,8 @@ struct Engines {
   // The event an end-of-pipe interrupt raises: the graphics one, or on a
   // compute ring its pipe's (sceGnmAddEqEvent ids 0 to 6).
   uint64_t irq_event = kEqEventGfxEop;
+  // The last PIXEL_PIPE_STAT_CONTROL's word: how occlusion dumps lay out.
+  uint32_t pipe_stat_control = 0;
 };
 
 uint64_t Ns() {
@@ -212,19 +214,31 @@ bool Step(Engines& e, Stream& s, bool ce) {
     case kIndexBase: e.index_base = (d[0] & ~1u) | uint64_t(d[1] & 0xFFFF) << 32; break;
     case kNumInstances: e.instances = d[0]; break;
     case kEventWrite: {
-      // Flushes, partial flushes and cache actions only, and
-      // PIXEL_PIPE_STAT_CONTROL (0x38, index 1: which occlusion counter
-      // the dumps take, their stride and the render backends dumping),
-      // which writes nothing. The events that write query results are not
-      // implemented yet.
-      const uint32_t type = d[0] & 0x3F;
-      if (type == 0x38 && ((d[0] >> 8) & 0xF) == 1) break;
-      // PIXEL_PIPE_STAT_DUMP (0x39): the renderer counts the pixels
-      // (OcclusionCount), but how the dump lays the render backends'
-      // counters out in memory is not measured yet.
-      if (type == 0x39)
-        FatalF("GPU: an occlusion counter dump (PIXEL_PIPE_STAT_DUMP to %02X%08X, %08X) is not written yet: "
-               "its layout is not measured", d[2] & 0xFF, d[1], d[0]);
+      // Flushes, partial flushes and cache actions, and the occlusion
+      // counter's events: PIXEL_PIPE_STAT_CONTROL (0x38, index 1) says
+      // how the dumps lay out and writes nothing; PIXEL_PIPE_STAT_DUMP
+      // (0x39, index 1) writes the render backends' counters at its
+      // address. Measured on 11.00 with the control word 0x7FC00: 8
+      // backends, 16 bytes apart (a query's begin at +0, its end at +8),
+      // each a 64-bit running count with bit 63 set. The renderer counts
+      // all backends together, so backend 0 carries the count and the
+      // others stay at 0; differences between dumps, what a query
+      // reads, are the console's.
+      const uint32_t type = d[0] & 0x3F, index = (d[0] >> 8) & 0xF;
+      if (type == 0x38 && index == 1 && n > 1) {
+        e.pipe_stat_control = d[1];
+        break;
+      }
+      if (type == 0x39 && index == 1 && n > 2) {
+        if (e.pipe_stat_control != 0x7FC00)
+          FatalF("GPU: an occlusion counter dump with PIXEL_PIPE_STAT_CONTROL %08X is not written yet: only "
+                 "0007FC00's layout is measured", e.pipe_stat_control);
+        const gaddr a = (d[1] & ~7u) | uint64_t(d[2] & 0xFFFF) << 32;
+        OcclusionCountThen(a, 16 * 7 + 8, [a](uint64_t count) {
+          for (int rb = 0; rb < 8; rb++) Wr64(a + 16 * rb, 1ull << 63 | (rb ? 0 : count));
+        });
+        break;
+      }
       if (n > 1)
         FatalF("GPU: EVENT_WRITE of event %02X with an address not implemented yet (%08X %08X %08X)", type,
                d[0], d[1], n > 2 ? d[2] : 0);

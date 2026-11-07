@@ -867,7 +867,7 @@ int main() {
   // add nothing.
   {
     constexpr gaddr kStTarget = 0x1B6000, kDepthAt = 0x1B8000, kStencilAt = 0x1BC000;
-    auto counted = [&](bool left, uint32_t func, uint32_t count_control, uint32_t instances = 1) {
+    auto draw_counted = [&](bool left, uint32_t func, uint32_t count_control, uint32_t instances = 1) {
       if (left) verts({{-1, -1}, {0, -1}, {-1, 1}});
       else verts({{-1, -1}, {1, -1}, {-1, 1}});
       Regs r;
@@ -880,8 +880,11 @@ int main() {
       cx[0x013] = uint32_t(kStencilAt >> 8);
       cx[0x200] = 1u | func << 8;                   // stencil test, no depth test
       cx[0x10C] = 0xA5u | 0xFFu << 8;               // ref 0xA5, read mask, no writes
-      const uint64_t before = OcclusionCount();
       Draw(r, {3, instances, 0, 2});
+    };
+    auto counted = [&](bool left, uint32_t func, uint32_t count_control, uint32_t instances = 1) {
+      const uint64_t before = OcclusionCount();
+      draw_counted(left, func, count_control, instances);
       Settle(true);
       return OcclusionCount() - before;
     };
@@ -891,6 +894,34 @@ int main() {
       std::printf("  counts: %llu %llu %llu %llu\n", (unsigned long long)all, (unsigned long long)failed,
                   (unsigned long long)right, (unsigned long long)off);
     Check(all == 64 && failed == 0 && right == 32 && off == 0, "occlusion counts count the pixels drawn");
+    // A query through the command processor: PIXEL_PIPE_STAT_CONTROL as
+    // the console's Gnm writes it, a dump (begin) at kQuery, a counted
+    // draw of 64 pixels, a dump (end) at kQuery + 8. Each of the 8 render
+    // backends' 16 bytes holds begin and end with bit 63 set; their
+    // differences add up to the draw's pixels.
+    constexpr gaddr kQuery = kOut + 0x4000;
+    auto dump = [&](gaddr at) {
+      const uint32_t dcb[] = {0xC0024600, 0x138, 0x7FC00, 0, 0xC0024600, 0x139, uint32_t(at), uint32_t(at >> 32)};
+      std::memcpy(GPtr(kDcb), dcb, sizeof dcb);
+      std::atomic<bool> done{false};
+      SubmitGraphics({{kDcb, uint32_t(sizeof dcb / 4)}}, {{0, 0}}, [&] { done = true; });
+      for (int i = 0; i < 5000 && !done; i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      return bool(done);
+    };
+    std::memset(GPtr(kQuery), 0xEE, 128);
+    bool ok = dump(kQuery);
+    draw_counted(true, 7, 1u << 8, 2);
+    ok &= dump(kQuery + 8);
+    Settle(true);
+    uint64_t sum = 0;
+    for (int rb = 0; rb < 8; rb++) {
+      const uint64_t begin = Rd64(kQuery + 16 * rb), end = Rd64(kQuery + 16 * rb + 8);
+      ok &= (begin >> 63) && (end >> 63) && end >= begin;
+      sum += end - begin;
+    }
+    if (!ok || sum != 64) std::printf("  dumped sum %llu\n", (unsigned long long)sum);
+    Check(ok && sum == 64, "an occlusion query's dumps hold the pixels drawn between them");
   }
   // An indirect draw through the command processor: its first vertex (3)
   // goes to the vertex shader's user SGPR 4, which it adds to the vertex

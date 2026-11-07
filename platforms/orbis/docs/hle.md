@@ -152,9 +152,13 @@ library.
   additively, and the counts are summed on the GPU into one 64-bit
   counter, exact whatever PERFECT_ZPASS_COUNTS asks; a counted draw into
   four colour targets is fatal. PIXEL_PIPE_STAT_CONTROL (which counter
-  the dumps take, their stride, the render backends) writes nothing; the
-  dumps (PIXEL_PIPE_STAT_DUMP) are fatal until their layout in memory is
-  measured. Buffer loads at a 64-bit address (ADDR64, a V# of base
+  the dumps take, their stride, the render backends) writes nothing but
+  is kept; a dump (PIXEL_PIPE_STAT_DUMP) writes, once the draws before it
+  are counted, 8 render backends' 64-bit counters 16 bytes apart at its
+  address, each with bit 63 set (measured on 11.00 under the control
+  word 0x7FC00, the only one handled: a query's begin at +0, its end at
+  +8). Backend 0 carries the whole count and the rest stay at 0, so the
+  begin-to-end differences add up as the console's do. Buffer loads at a 64-bit address (ADDR64, a V# of base
   0 and no range) whose address is a lane's offset added to a pointer the
   stage reads at known offsets read that pointer's range the same way,
   checked the same way (compute stages; stores and other stages are
