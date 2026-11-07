@@ -784,6 +784,7 @@ void EnsureSdlVideo() {
     g_desktop_density = d;
     g_display_w = g_desktop_w = int(std::lround(float(m->w) * d));
     g_display_h = g_desktop_h = int(std::lround(float(m->h) * d));
+    if (m->refresh_rate > 0) g_desktop_hz = int(std::lround(m->refresh_rate));
   }
 }
 
@@ -791,6 +792,11 @@ void DesktopSize(int* w, int* h) {
   if (OnMainThread()) EnsureSdlVideo();
   *w = g_desktop_w;
   *h = g_desktop_h;
+}
+
+int DesktopRefreshRate() {
+  if (OnMainThread()) EnsureSdlVideo();
+  return g_desktop_hz;
 }
 
 namespace {

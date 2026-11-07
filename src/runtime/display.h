@@ -15,4 +15,8 @@ namespace recomp {
 // brings up SDL video if needed.
 void DesktopSize(int* w, int* h);
 
+// The host desktop's refresh rate, rounded to whole Hz (60 if SDL does
+// not know it). Main thread; brings up SDL video if needed.
+int DesktopRefreshRate();
+
 }  // namespace recomp
