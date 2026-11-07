@@ -1293,7 +1293,8 @@ class MetalDevice final : public Device {
     float depth[4];        // depth from w: k0, k1 (reversed_z.h)
   };
   struct PsState {
-    int32_t alpha[4];  // D3DCMPFUNC (ALWAYS when the test is off), ALPHAREF, 0,
+    int32_t alpha[4];  // D3DCMPFUNC (ALWAYS when the test is off), ALPHAREF,
+                       // bit n: sampler n reads a reversed depth texture (R_DEPTH_TEX),
                        // 1 if the depth buffer is reversed (R_DEPTH_OUT)
     float bias[16];    // per sampler register: MIPMAPLODBIAS (R_BIAS)
     float vscale[4];   // game pixels per pixel of the target (r_vpos)
@@ -2719,6 +2720,10 @@ void main() {
     pst.alpha[0] = rs_[15] ? int32_t(rs_[25]) : 8;
     pst.alpha[1] = int32_t(rs_[24] & 0xFF);
     pst.alpha[3] = pass_.reversed ? 1 : 0;
+    // Depth textures sampled: read back as D3D9 stores depth (R_DEPTH_TEX).
+    for (uint32_t r = 0; r < ps.samplers; r++)
+      if (const Tex* t = FindTex(d.textures[r]); t && t->depth && ReversedDepth(t->tex.pixelFormat))
+        pst.alpha[2] |= int32_t(1u << r);
     const float lod_bias = jitter_draw_ && upscaler_ == Upscaler::Taa ? kTaaLodBias : 0.0f;
     for (uint32_t r = 0; r < 16 && d.sampler_states; r++) pst.bias[r] = AsFloat(d.sampler_states[r][8]) + lod_bias;
     pst.vscale[0] = 1.0f / pass_.sx;

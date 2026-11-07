@@ -1,11 +1,13 @@
 // Reversed depth on the Metal backend (gfx/reversed_z.h): translated
 // shaders, completed with the Metal prelude (gfx/metal_prelude.h) and
 // compiled as the backend compiles them, drawn on the GPU with depth as
-// Direct3D 9 stores it and reversed (1 - d), must store mirrored values
-// and make the same depth-test decisions. Depth from w: which vertex
-// shaders and matrices qualify, and two layers 3 mm apart 30 m away, in
-// world coordinates kilometres from the origin, must keep their order
-// and store what D3D9 would (reversed), clipped at the same near and far.
+// Direct3D 9 stores it and reversed (1 - d), must store mirrored values,
+// make the same depth-test decisions, and read the same values back from
+// a depth texture. Depth from w: which vertex shaders and matrices
+// qualify, and two layers 3 mm apart 30 m away, in world coordinates
+// kilometres from the origin, must keep their order, store what D3D9
+// would (reversed), clipped at the same near and far, and read back as
+// D3D9 stores them.
 //
 //   metal_depth_test        (skipped, exit 77, without a Metal device)
 
@@ -109,6 +111,16 @@ Tokens BlitVs() {
   a.Dcl(0, 0, Dst(V, 0));
   a.Dcl(0, 0, Dst(O, 0));
   a.I(MAD, {Dst(O, 0), Src(V, 0, 0x24), Src(C, 0, 0x40), Src(C, 0, 0x15)});  // v0.xyzx, c0.xxxy, c0.yyyx
+  return a.End();
+}
+
+// ps_3_0: s0 read at TEXCOORD0 as the colour.
+Tokens SamplePs() {
+  Asm a(true);
+  a.Dcl(5, 0, Dst(V, 0));
+  a.DclSampler(2, 0);
+  a.I(TEX, {Dst(R, 0), Src(V, 0), Src(S, 0)});
+  a.I(MOV, {Dst(OC, 0), Src(R, 0)});
   return a.End();
 }
 
@@ -360,7 +372,7 @@ int TableChecks() {
 
 struct Fixture {
   Gpu& g;
-  id<MTLFunction> vs, ps, ps_depth;
+  id<MTLFunction> vs, ps, ps_depth, ps_sample;
   id<MTLTexture> color, depth;
 };
 
@@ -458,6 +470,42 @@ int DepthOutChecks(Fixture& f) {
       }
     }
   std::printf("%s oDepth\n", failures ? "FAIL" : "ok");
+  return failures;
+}
+
+// A depth texture read by a pixel shader (R_DEPTH_TEX): the perspective
+// triangle's depth drawn as D3D9 stores it and reversed, each read back
+// through the sampler (reversed: its bit in the prelude's mask) must give
+// the same colour, the depth D3D9 stores.
+int SampleChecks(Fixture& f) {
+  Gpu& g = f.g;
+  id<MTLRenderPipelineState> draw = g.Pipeline(f.vs, f.ps, MTLPixelFormatRGBA32Float, MTLPixelFormatDepth32Float);
+  id<MTLRenderPipelineState> read = g.Pipeline(f.vs, f.ps_sample, MTLPixelFormatRGBA32Float, MTLPixelFormatInvalid);
+  if (!draw || !read) return 1;
+  const float z[3] = {0.2f, 0.5f, 0.9f}, w[3] = {1.0f, 2.0f, 4.0f}, one[3] = {1, 1, 1};
+  std::vector<Vertex> tri = Cover(z, w);
+  for (Vertex& v : tri) v.pos[0] = v.pos[0] * 0.25f - 0.5f * v.pos[3];
+  std::vector<float> rgba[2], z_d3d;
+  for (int rev = 0; rev < 2; rev++) {
+    id<MTLTexture> depth = g.Texture(MTLPixelFormatDepth32Float);
+    Gpu::Draw d{draw, g.DepthState(MTLCompareFunctionAlways, true), tri, {{1, 0, 0, 1}, {}}, rev != 0};
+    g.Run(f.color, depth, rev ? 0.0 : 1.0, {d}, nullptr, rev ? nullptr : &z_d3d);
+    Gpu::Draw r{read, g.DepthState(MTLCompareFunctionAlways, false), Cover(one, one), {}, false};
+    r.tex = depth;
+    r.depth_samplers = rev ? 1 : 0;
+    g.Run(f.color, nil, 0, {r}, &rgba[rev], nullptr);
+  }
+  int failures = 0;
+  for (int i = 0; i < kSize * kSize; i++) {
+    const float* a = &rgba[0][i * 4];
+    const float* b = &rgba[1][i * 4];
+    bool ok = std::fabs(a[0] - z_d3d[i]) <= 1e-7f && a[3] == b[3];
+    for (int k = 0; k < 3; k++) ok = ok && a[k] == a[0] && std::fabs(a[k] - b[k]) <= 2e-6f;
+    if (!ok && failures++ < 8)
+      std::printf("FAIL sample: pixel %d: %.9g %.9g %.9g %.9g, reversed %.9g %.9g %.9g %.9g, stored %.9g\n", i,
+                  a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3], z_d3d[i]);
+  }
+  std::printf("%s depth texture read (R_DEPTH_TEX)\n", failures ? "FAIL" : "ok");
   return failures;
 }
 
@@ -675,6 +723,50 @@ int FromWChecks(Gpu& g, id<MTLTexture> color, id<MTLTexture> depth) {
   return failures;
 }
 
+// A depth texture drawn from w, read by a pixel shader (R_DEPTH_TEX): the
+// depth D3D9 stores for the layer, within float rounding, as from z.
+int FromWSampleChecks(Fixture& f) {
+  Gpu& g = f.g;
+  id<MTLFunction> wvs = g.Compile(WvpVs(0));
+  if (!wvs) return 1;
+  id<MTLRenderPipelineState> draw = g.Pipeline(wvs, f.ps, MTLPixelFormatRGBA32Float, MTLPixelFormatDepth32Float);
+  id<MTLRenderPipelineState> read = g.Pipeline(f.vs, f.ps_sample, MTLPixelFormatRGBA32Float, MTLPixelFormatInvalid);
+  if (!draw || !read) return 1;
+  const M4 vp = ViewProj(kCx, kCy, kCz);
+  const gfx::WProjection exact = gfx::PerspectiveOfPlanes(kNear, kFar);
+  const float at_0[3] = {0, 0, 0}, one[3] = {1, 1, 1};
+  const double dist = 30.0, want = exact.a * (dist - exact.n) / dist;
+  int failures = 0;
+  double worst[2] = {};
+  for (int mode = 1; mode <= 2; mode++) {
+    id<MTLTexture> depth = g.Texture(MTLPixelFormatDepth32Float);
+    Gpu::Draw d{draw, g.DepthState(MTLCompareFunctionAlways, true), Layer(dist, at_0), {{1, 0, 0, 1}, {}}, true};
+    d.vc = WvpConsts(vp);
+    gfx::WProjection p;
+    gfx::WDepth wd;
+    if (mode == 2) {
+      if (!Perspective(vp, &p) || !wd.Use(p, &exact)) return 1;
+      d.mode = 2;
+      d.k[0] = wd.K0();
+      d.k[1] = wd.K1();
+    }
+    g.Run(f.color, depth, 0.0, {d}, nullptr, nullptr);
+    Gpu::Draw r{read, g.DepthState(MTLCompareFunctionAlways, false), Cover(one, one), {}, false};
+    r.tex = depth;
+    r.depth_samplers = 1;
+    std::vector<float> rgba;
+    g.Run(f.color, nil, 0, {r}, &rgba, nullptr);
+    for (int i = 0; i < kSize * kSize; i++) worst[mode - 1] = std::fmax(worst[mode - 1], std::fabs(rgba[i * 4] - want));
+  }
+  if (worst[0] > 1e-4 || worst[1] > 2e-7) {
+    std::printf("FAIL depth texture read, from w: off by %.3g from z, %.3g from w\n", worst[0], worst[1]);
+    failures++;
+  }
+  std::printf("%s depth texture read, from w (off by %.3g from z, %.3g from w)\n", failures ? "FAIL" : "ok", worst[0],
+              worst[1]);
+  return failures;
+}
+
 }  // namespace
 
 int main() {
@@ -685,16 +777,19 @@ int main() {
       std::printf("skipped: no Metal device\n");
       return failures ? 1 : 77;
     }
-    Fixture f{g, nil, nil, nil, g.Texture(MTLPixelFormatRGBA32Float), g.Texture(MTLPixelFormatDepth32Float)};
+    Fixture f{g, nil, nil, nil, nil, g.Texture(MTLPixelFormatRGBA32Float), g.Texture(MTLPixelFormatDepth32Float)};
     f.vs = g.Compile(PassVs());
     f.ps = g.Compile(ConstPs(false));
     f.ps_depth = g.Compile(ConstPs(true));
-    if (!f.vs || !f.ps || !f.ps_depth) return 1;
+    f.ps_sample = g.Compile(SamplePs());
+    if (!f.vs || !f.ps || !f.ps_depth || !f.ps_sample) return 1;
     std::vector<float> z_d3d, z_rev;
     failures += PositionChecks(f, &z_d3d, &z_rev);
+    failures += SampleChecks(f);
     failures += CompareChecks(f);
     failures += DepthOutChecks(f);
     failures += FromWChecks(g, f.color, f.depth);
+    failures += FromWSampleChecks(f);
     return failures ? 1 : 0;
   }
 }

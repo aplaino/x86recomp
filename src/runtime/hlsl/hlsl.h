@@ -26,7 +26,11 @@
 // and may define
 //   float R_DEPTH_OUT(d)            pixel shaders: the depth a shader writes
 //                                   (DEPTH, oDepth) as the depth buffer
-//                                   stores it ((d) if not defined).
+//                                   stores it ((d) if not defined);
+//   vec4 R_DEPTH_TEX(n, v)          what a 2D sampler register n read: v
+//                                   as the shader expects it (a depth
+//                                   texture stored otherwise than D3D9
+//                                   does; (v) if not defined).
 // The body declares, if it reads them:
 //   layout(std140, R_FLOAT_BINDING) uniform r_float_regs { vec4 c[n]; };
 //   layout(std140, R_INT_BINDING) uniform r_int_regs { ivec4 r_i[16];
@@ -43,9 +47,11 @@
 
 namespace recomp::hlsl {
 
-// The body's default for the optional R_DEPTH_OUT.
+// The body's defaults for the optional R_DEPTH_OUT and R_DEPTH_TEX.
 inline constexpr const char* kDepthOutDefault =
     "#ifndef R_DEPTH_OUT\n#define R_DEPTH_OUT(d) (d)\n#endif\n";
+inline constexpr const char* kDepthTexDefault =
+    "#ifndef R_DEPTH_TEX\n#define R_DEPTH_TEX(n, v) (v)\n#endif\n";
 
 struct Define {
   std::string name, value;

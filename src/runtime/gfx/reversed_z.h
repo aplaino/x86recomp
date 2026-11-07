@@ -17,7 +17,10 @@
 //     the viewport is 1 - (MinZ + z (MaxZ - MinZ)) (ReversedViewportDepth).
 //   - Clears to z clear to 1 - z; DEPTHBIAS and SLOPESCALEDEPTHBIAS are
 //     negated (the bias moves the stored value the other way).
-//   - Pixel shaders: depth they write (oDepth) is stored as 1 - depth.
+//   - Pixel shaders: depth they write (oDepth) is stored as 1 - depth, and
+//     what they sample from a reversed depth texture (INTZ: the scene's
+//     depth read by lighting, fog, depth of field, soft particles) is read
+//     as 1 - the value stored.
 //
 // Depth from w (RECOMP_DEPTH_FROM_W, on unless 0; with reversed depth
 // only, for a game that names its world-view-projection registers,

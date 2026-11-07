@@ -615,27 +615,29 @@ class Translator {
         // The sampler's LOD bias (R_BIAS, hlsl.h); texld is pixel-only.
         std::string b = "R_BIAS(" + std::to_string(s[1].num) + ")";
         if (in.ctl == 1) {  // texldp
-          if (ty == ParamType::Sampler2D) return "textureProj(" + smp + ", " + c + ", " + b + ")";
+          if (ty == ParamType::Sampler2D)
+            return DepthTex(s[1].num, "textureProj(" + smp + ", " + c + ", " + b + ")");
           return "texture(" + smp + ", (" + c + ").xyz / (" + c + ").w, " + b + ")";
         }
         if (in.ctl == 2)  // texldb
-          return "texture(" + smp + ", " + co + ", (" + c + ").w + " + b + ")";
-        return "texture(" + smp + ", " + co + ", " + b + ")";
+          return DepthTex(s[1].num, ty, "texture(" + smp + ", " + co + ", (" + c + ").w + " + b + ")");
+        return DepthTex(s[1].num, ty, "texture(" + smp + ", " + co + ", " + b + ")");
       }
       case TEXLDL: {
         need(2);
         ParamType ty = sampler_type_.count(s[1].num) ? sampler_type_[s[1].num] : ParamType::Sampler2D;
         std::string smp = SamplerName(s[1].num), c = S(s[0]);
         std::string co = ty == ParamType::Sampler2D ? "(" + c + ").xy" : "(" + c + ").xyz";
-        return "textureLod(" + smp + ", " + co + ", (" + c + ").w)";
+        return DepthTex(s[1].num, ty, "textureLod(" + smp + ", " + co + ", (" + c + ").w)");
       }
       case TEXLDD: {
         need(4);
         ParamType ty = sampler_type_.count(s[1].num) ? sampler_type_[s[1].num] : ParamType::Sampler2D;
         std::string smp = SamplerName(s[1].num);
         const char* sw = ty == ParamType::Sampler2D ? ".xy" : ".xyz";
-        return "textureGrad(" + smp + ", (" + S(s[0]) + ")" + sw + ", (" + S(s[2]) + ")" + sw +
-               ", (" + S(s[3]) + ")" + sw + ")";
+        return DepthTex(s[1].num, ty,
+                        "textureGrad(" + smp + ", (" + S(s[0]) + ")" + sw + ", (" + S(s[2]) + ")" + sw +
+                            ", (" + S(s[3]) + ")" + sw + ")");
       }
       default:
         Fail("unsupported opcode " + std::to_string(in.op) + " in " +
@@ -831,8 +833,8 @@ class Translator {
     }
     if (pixel_ && major_ == 1 && in.op == TEX) {
       std::string n = std::to_string(in.dst.num);
-      Line("r_tx[" + n + "] = texture(" + SamplerName(in.dst.num) + ", r_tc[" + n + "].xy, R_BIAS(" +
-           n + "));");
+      const std::string v = "texture(" + SamplerName(in.dst.num) + ", r_tc[" + n + "].xy, R_BIAS(" + n + "))";
+      Line("r_tx[" + n + "] = " + DepthTex(in.dst.num, v) + ";");
       return;
     }
     if (pixel_ && major_ == 1 && in.op == TEXCOORD) {
@@ -1026,6 +1028,7 @@ class Translator {
     }
     help += "float r_off0(float x) { return abs(x) < 1e-37 ? 1e-37 : x; }\n";
     if (out_->writes_depth) help += kDepthOutDefault;
+    if (depth_tex_) help += kDepthTexDefault;
     if (helpers_.count("mulz"))
       help += "// D3D9's multiply: 0 times anything (infinity, NaN) is 0.\n"
               "vec4 r_mulz(vec4 a, vec4 b) {\n"
@@ -1073,6 +1076,17 @@ class Translator {
   std::map<uint32_t, ParamType> sampler_type_;
   std::set<uint32_t> used_samplers_;
   std::set<std::string> helpers_;
+  bool depth_tex_ = false;  // R_DEPTH_TEX used
+
+  // What 2D sampler register n read, as the shader expects it (R_DEPTH_TEX,
+  // hlsl.h: a depth texture may be stored otherwise).
+  std::string DepthTex(uint32_t n, const std::string& v) {
+    depth_tex_ = true;
+    return "R_DEPTH_TEX(" + std::to_string(n) + ", " + v + ")";
+  }
+  std::string DepthTex(uint32_t n, ParamType ty, const std::string& v) {
+    return ty == ParamType::Sampler2D ? DepthTex(n, v) : v;
+  }
 
   // RECOMP_D3D9_LEGACY_MUL=1: every multiply (MUL, MAD, DP3, DP4, LRP)
   // as D3D9 hardware does it, 0 times anything giving 0. Costly where
