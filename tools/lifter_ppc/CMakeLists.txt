@@ -5,6 +5,7 @@ add_executable(recomp_lift_ppc
   elf.cpp
   elf_reader.cpp
   emit.cpp
+  frame.cpp
   main.cpp
   ppc.cpp
   program.cpp)

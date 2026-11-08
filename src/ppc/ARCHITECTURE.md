@@ -181,6 +181,49 @@ mask bit 4, an unused immediate).
   ordinal, va)`, defined by the platform. `sc` calls `Sc()`, traps that
   fire `Trap()`, `mftb` (and `mfspr` of TBL or TBU, its later spelling)
   `TimeBase()`.
+- Frames and resumable functions, for unwinding (below): each prologue
+  the image reader gives a length for is read into a frame description,
+  and functions it marks resumable get their resume starts.
+
+## Unwinding
+An exception's dispatch walks the guest stack, and its unwind continues
+in a frame further up. Both are the platform's (its exception structures
+and handlers); the core gives them the frames and the continuation.
+- Frame descriptions (`LiftedFrame`, `LiftedSave`; ppc/unwind.h). The
+  lifter follows each prologue over symbolic values (tools/lifter_ppc/
+  frame.cpp): a register's value on entry, r1 on entry plus an offset, or
+  a constant. Stores of entry values to the stack are saves; `stwu`,
+  `stwux` and `subf` with a constant move r1; `mflr` and `mfcr` copy LR and
+  CR; a call is to a register save routine (straight-line code to its
+  `blr`, whose stores count) or a stack probe (with branches: what it can
+  write is unknown after it). What it records: r1 after the prologue, a
+  frame pointer (a nonvolatile register left at r1 on entry plus an
+  offset), and where each saved value is: a stack slot, or a register
+  (LR kept in r31). A prologue that branches or whose LR cannot be found
+  is unreadable, and unwinding through it is fatal. A nonvolatile register
+  the prologue changes without saving (a funclet's frame pointer, set from
+  r12) is left as it is, as the function's own epilogue leaves it.
+  `VirtualUnwind` takes a state inside the function to its caller's:
+  r1 on entry from the frame pointer if there is one (the body may have
+  moved r1 since, as alloca does), else from r1; then the saved values;
+  the rest as they are. The tables are in generated/table.cpp, registered
+  as the lifted module loads; functions without one (leaves, a format
+  that describes no prologues) end a walk.
+- Continuing elsewhere (`GuestResume`). Lifted functions are host
+  functions, so a continuation in a frame further up is a C++ exception
+  `GuestResume{target, frame}`, thrown with the context already holding
+  the registers to continue with. A resumable function (the image reader
+  marks those with an exception handler) records r1 on entry and wraps
+  its body in a try block; it catches a GuestResume for its own frame and
+  a target in its range, runs the code at the target (`Resume`) and
+  returns, so its caller goes on as after any return. The code at a
+  target is a start of its own, overlapping the function: the addresses
+  the reader names (an `__except` block's) and the constants the code
+  builds that land on an instruction a resumable function reaches (the
+  continuation after a catch block, which the catch block returns). The
+  function's own code is unchanged. A continuation in the frame that
+  called into the platform, at that call's return address, is a plain
+  return.
 
 ## Lifted modules
 `recomp_add_lifted_ppc(<target> <dir> LINK <platform library>)` makes a

@@ -35,6 +35,14 @@ struct Image {
   std::map<uint64_t, std::string> names;
   std::map<uint64_t, ImportRef> imports;  // thunk VA -> export it calls
   Cpu cpu = Cpu::kGeneric;  // the CPU its code is for
+  // The length in bytes of the prologues the format describes, by function
+  // start: the lifter reads each into a frame description (LiftedFrame).
+  std::map<uint64_t, uint64_t> prologues;
+  // Functions an exception's unwind may continue in (those with an
+  // exception handler), and addresses in them it may continue at that the
+  // format names (an __except block's start); see Program::ResumeStarts.
+  std::set<uint64_t> resumable;
+  std::set<uint64_t> resume_targets;
 
   // A start given more than once keeps the first size that is not 0.
   void AddStart(uint64_t va, uint64_t size = 0) {
@@ -61,6 +69,17 @@ struct Function {
   std::set<uint64_t> labels;  // targets of branches inside the function
   // BCCTR instructions recognised as jump tables: their possible targets.
   std::map<uint64_t, std::vector<uint64_t>> tables;
+  // An unwind may continue in it (Image::resumable): GuestResume.
+  bool resumable = false;
+};
+
+// A prologue as the lifter read it (recomp::ppc::LiftedFrame).
+struct Frame {
+  uint64_t va = 0, end = 0;
+  int32_t sp = 0, fp_offset = 0;
+  uint8_t fp = 0;
+  bool unreadable = false;
+  std::vector<recomp::ppc::LiftedSave> saves;
 };
 
 class Program {
@@ -81,14 +100,22 @@ class Program {
   // TextHash() of the code ranges in address order, for the runtime's check.
   uint64_t text_hash() const;
   const std::map<uint64_t, Function>& functions() const { return funcs_; }
+  // The frames of the functions whose prologue the image describes.
+  std::vector<Frame> Frames() const;
   const std::vector<std::string>& warnings() const { return warnings_; }
 
  private:
   Function Build(uint64_t start, uint64_t end, std::set<uint64_t>& found);
   bool JumpTable(const Function& f, uint64_t bcctr_va, std::vector<uint64_t>& targets);
   bool ConstOf(uint64_t va, uint64_t lo, int reg, uint64_t& out, int depth = 0) const;
+  // Addresses the module holds as constants: LIS with ADDI or ORI in the
+  // code reached, and with `data` the words in its data.
+  std::set<uint64_t> Constants(bool data) const;
   // Starts that only a pointer reaches: see Discover.
   std::set<uint64_t> PointerStarts(const std::set<uint64_t>& starts) const;
+  // Starts where an unwind may continue a resumable function: see Discover.
+  std::set<uint64_t> ResumeStarts(const std::set<uint64_t>& starts) const;
+  Frame ReadPrologue(uint64_t va, uint64_t len) const;
   // The end of the code range holding `va`.
   uint64_t CodeEnd(uint64_t va) const;
   void Warn(const std::string& w);
