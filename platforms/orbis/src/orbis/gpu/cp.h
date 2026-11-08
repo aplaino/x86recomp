@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <vector>
 
 #include "runtime/guest_memory.h"
@@ -37,6 +38,15 @@ void MapComputeRing(uint32_t vqid, uint32_t pipe, gaddr base, uint32_t size_dw,
                     gaddr rptr_addr);
 void UnmapComputeRing(uint32_t vqid);
 void KickComputeRing(uint32_t vqid, uint32_t wptr_dw);
+
+// The global data share: on-chip memory every engine (and, through DS
+// instructions with GDS set, every shader) shares; GCN's 64 KiB. Never
+// destroyed: the GPU threads use it until exit.
+struct GdsMemory {
+  std::mutex mu;
+  uint8_t bytes[64 * 1024] = {};
+};
+GdsMemory& Gds();
 
 // The graphics end-of-pipe interrupt's event (sceGnmAddEqEvent id 0x40).
 inline constexpr uint64_t kEqEventGfxEop = 0x40;

@@ -95,18 +95,6 @@ struct Engines {
   uint32_t pipe_stat_control = 0;
 };
 
-// The global data share: on-chip memory every engine (and, through DS
-// instructions with GDS set, every shader) shares; GCN's 64 KiB. Never
-// destroyed: the GPU threads use it until exit.
-struct GdsMemory {
-  std::mutex mu;
-  uint8_t bytes[64 * 1024] = {};
-};
-GdsMemory& Gds() {
-  static GdsMemory* g = new GdsMemory;
-  return *g;
-}
-
 uint64_t Ns() {
   return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                       std::chrono::steady_clock::now().time_since_epoch())
@@ -546,6 +534,11 @@ void ComputeThread(std::shared_ptr<Ring> r) {
 }
 
 }  // namespace
+
+GdsMemory& Gds() {
+  static GdsMemory* g = new GdsMemory;
+  return *g;
+}
 
 void SubmitGraphics(std::vector<CmdBuffer> dcbs, std::vector<CmdBuffer> ccbs,
                     std::function<void()> done) {

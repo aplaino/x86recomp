@@ -643,6 +643,124 @@ int main() {
     Check(ok, "s_nand, s_nor and s_xnor invert their op in 32 and 64 bits and set SCC from both halves");
   }
 
+  // v_mbcnt_lo/hi_u32_b32 over a wave: lane i stores mbcnt(-1) (i),
+  // mbcnt of s[4:5] = 0x0000FFFF:AAAAAAAA plus 5 and mbcnt(EXEC) at
+  // kOut + 0x5400 + 16i; run on 64 and 40 invocations.
+  {
+    static const uint32_t kMbcnt[] = {
+        0xBE8403FF, 0xAAAAAAAA,  // s_mov_b32 s4, 0xaaaaaaaa
+        0xBE8503FF, 0x0000FFFF,  // s_mov_b32 s5, 0xffff
+        0xD2460001, 0x000100C1,  // v_mbcnt_lo_u32_b32 v1, -1, 0
+        0xD2480001, 0x000202C1,  // v_mbcnt_hi_u32_b32 v1, -1, v1
+        0xD2460002, 0x00010A04,  // v_mbcnt_lo_u32_b32 v2, s4, 5
+        0xD2480002, 0x00020405,  // v_mbcnt_hi_u32_b32 v2, s5, v2
+        0xD2460005, 0x0001007E,  // v_mbcnt_lo_u32_b32 v5, exec_lo, 0
+        0xD2480005, 0x00020A7F,  // v_mbcnt_hi_u32_b32 v5, exec_hi, v5
+        0x34060084,              // v_lshlrev_b32 v3, 4, v0
+        0xE0741000, 0x80000103,  // buffer_store_dwordx2 v[1:2], v3, s[0:3], 0 offen
+        0xE0701008, 0x80000503,  // buffer_store_dword v5, v3, s[0:3], 0 offen offset:8
+        0xBF810000,              // s_endpgm
+    };
+    constexpr gaddr kAt = kCode + 0x1700, kTo = kOut + 0x5400;
+    std::memcpy(GPtr(kAt), kMbcnt, sizeof kMbcnt);
+    for (uint32_t threads : {64u, 40u}) {
+      uint32_t user[16] = {};
+      VSharp(user, kTo, 64 * 16);
+      std::memset(GPtr(kTo), 0xEE, 64 * 16);
+      Run(kAt, user, 4, threads, 1);
+      bool ok = true;
+      for (uint32_t i = 0; i < 64; i++) {
+        const uint32_t want[3] = {i, (i < 32 ? i / 2 : 16 + std::min(i - 32, 16u)) + 5, i};
+        for (uint32_t k = 0; k < 3; k++) {
+          const uint32_t got = Rd32(kTo + 16 * i + 4 * k), w = i < threads ? want[k] : 0xEEEEEEEEu;
+          if (got != w && ok) std::printf("  %u invocations: lane %u word %u: %08X, not %08X\n", threads, i, k, got, w);
+          ok &= got == w;
+        }
+      }
+      Check(ok, "v_mbcnt_lo/hi count a mask's bits below each lane of a wave");
+    }
+  }
+
+  // ds_append on the GDS: M0 = size 0x10 at base 0x100, the counter at
+  // GDS 0x104 from 1000; each lane stores the counter's value before its
+  // wave's append plus its mbcnt(EXEC) at kOut + 0x5800 + 4i. Two waves
+  // (128 invocations) take 1000-1127 between them, then 40 lanes
+  // 1128-1167; the GDS holds 1168.
+  {
+    static const uint32_t kAppend[] = {
+        0xBEFC03FF, 0x00100100,  // s_mov_b32 m0, 0x00100100
+        0xD2460001, 0x0001007E,  // v_mbcnt_lo_u32_b32 v1, exec_lo, 0
+        0xD2480001, 0x0002027F,  // v_mbcnt_hi_u32_b32 v1, exec_hi, v1
+        0xD8FA0004, 0x02000000,  // ds_append v2 offset:4 gds
+        0xBF8C007F,              // s_waitcnt lgkmcnt(0)
+        0x4A040302,              // v_add_i32 v2, vcc, v2, v1
+        0x34060082,              // v_lshlrev_b32 v3, 2, v0
+        0xE0701000, 0x80000203,  // buffer_store_dword v2, v3, s[0:3], 0 offen
+        0xBF810000,              // s_endpgm
+    };
+    constexpr gaddr kAt = kCode + 0x1800, kTo = kOut + 0x5800;
+    std::memcpy(GPtr(kAt), kAppend, sizeof kAppend);
+    const uint32_t start = 1000;
+    std::memcpy(Gds().bytes + 0x104, &start, 4);
+    bool ok = true;
+    uint32_t first = start;
+    for (uint32_t threads : {128u, 40u}) {
+      uint32_t user[16] = {};
+      VSharp(user, kTo, 128 * 4);
+      std::memset(GPtr(kTo), 0xEE, 128 * 4);
+      Run(kAt, user, 4, threads, 1);
+      std::vector<bool> seen(threads);
+      for (uint32_t i = 0; i < threads; i++) {
+        const uint32_t v = Rd32(kTo + 4 * i) - first;
+        if ((v >= threads || seen[v]) && ok) std::printf("  %u invocations: lane %u: %u\n", threads, i, v + first);
+        ok &= v < threads && !seen[v];
+        if (v < threads) seen[v] = true;
+      }
+      first += threads;
+    }
+    uint32_t end;
+    std::memcpy(&end, Gds().bytes + 0x104, 4);
+    if (end != first) std::printf("  GDS counter %u, not %u\n", end, first);
+    Check(ok && end == first, "ds_append hands each wave its own run of a GDS counter");
+  }
+
+  // ds_write_b64 and ds_read_b64: lane i writes (i, i + 100) at LDS
+  // 16 + 8i, then reads lane i ^ 1's pair and stores it at
+  // kOut + 0x5A00 + 8i (64 invocations).
+  {
+    static const uint32_t kLds64[] = {
+        0x7E020300,              // v_mov_b32 v1, v0
+        0x4A0400FF, 0x00000064,  // v_add_i32 v2, vcc, 0x64, v0
+        0x34060083,              // v_lshlrev_b32 v3, 3, v0
+        0xD9340010, 0x00000103,  // ds_write_b64 v3, v[1:2] offset:16
+        0xBF8C007F,              // s_waitcnt lgkmcnt(0)
+        0xBF8A0000,              // s_barrier
+        0x3A080081,              // v_xor_b32 v4, 1, v0
+        0x34080883,              // v_lshlrev_b32 v4, 3, v4
+        0xD9D80010, 0x05000004,  // ds_read_b64 v[5:6], v4 offset:16
+        0xBF8C007F,              // s_waitcnt lgkmcnt(0)
+        0xE0741000, 0x80000503,  // buffer_store_dwordx2 v[5:6], v3, s[0:3], 0 offen
+        0xBF810000,              // s_endpgm
+    };
+    constexpr gaddr kAt = kCode + 0x1900, kTo = kOut + 0x5A00;
+    std::memcpy(GPtr(kAt), kLds64, sizeof kLds64);
+    uint32_t user[16] = {};
+    VSharp(user, kTo, 64 * 8);
+    std::memset(GPtr(kTo), 0xEE, 64 * 8);
+    // 8 VGPRs (rsrc1), 256 dwords of LDS (rsrc2, in 128-dword units).
+    Run(kAt, user, 4, 64, 1, 2u << 15);
+    bool ok = true;
+    for (uint32_t i = 0; i < 64; i++) {
+      const uint32_t want[2] = {i ^ 1, (i ^ 1) + 100};
+      for (uint32_t k = 0; k < 2; k++) {
+        const uint32_t got = Rd32(kTo + 8 * i + 4 * k);
+        if (got != want[k] && ok) std::printf("  lane %u word %u: %08X, not %08X\n", i, k, got, want[k]);
+        ok &= got == want[k];
+      }
+    }
+    Check(ok, "ds_write_b64 and ds_read_b64 move a lane's pair through the LDS");
+  }
+
   // A stage in waves: readlane, readfirstlane under a partial EXEC,
   // writelane, comparisons and carries as ballots, a branch on the wave's
   // VCC, v_movrels (past the VGPRs too), ds_or_b32 and ds_read2_b64. Lane i stores 20 words at

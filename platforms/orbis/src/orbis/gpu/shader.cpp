@@ -14,6 +14,7 @@
 #include <set>
 #include <unordered_map>
 
+#include "orbis/gpu/cp.h"
 #include "orbis/gpu/gcn.h"
 #include "orbis/gpu/renderer.h"
 #include "x86/runtime.h"
@@ -742,17 +743,25 @@ struct Resolver {
       if (!Step(pc, in)) return false;
     if (!Dynamic()) return false;
     if (st.stage == Stage::Compute && CrossesLanes()) r.wave = r.faults = true;
+    for (auto& [pc, in] : code().at) {
+      if (in.fmt != Fmt::Ds || !(in.w0 & 0x20000)) continue;
+      if (st.stage != Stage::Compute) return Fail(pc, "a DS instruction on GDS outside a compute stage");
+      r.gds = r.wave = r.faults = true;
+    }
     std::sort(sites.begin(), sites.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     return true;
   }
 
   // Whether the code reads other lanes than its own: v_readlane,
-  // v_writelane, v_readfirstlane, ds_swizzle_b32 across quads. A compute
-  // stage that does runs in waves (Resolved::wave).
+  // v_writelane, v_readfirstlane, v_mbcnt (the lanes below its own),
+  // ds_swizzle_b32 across quads. A compute stage that does runs in waves
+  // (Resolved::wave).
   bool CrossesLanes() const {
     for (auto& [pc, in] : code().at) {
-      if ((in.fmt == Fmt::Vop2 && (in.op == 1 || in.op == 2)) || (in.fmt == Fmt::Vop1 && in.op == 2) ||
-          (in.fmt == Fmt::Vop3 && (in.op == 257 || in.op == 258 || in.op == 384 + 2)))
+      if ((in.fmt == Fmt::Vop2 && (in.op == 1 || in.op == 2 || in.op == 35 || in.op == 36)) ||
+          (in.fmt == Fmt::Vop1 && in.op == 2) ||
+          (in.fmt == Fmt::Vop3 && (in.op == 257 || in.op == 258 || in.op == 291 || in.op == 292 ||
+                                   in.op == 384 + 2)))
         return true;
       if (in.fmt != Fmt::Ds || in.op != 53 || (in.w0 & 0x8000)) continue;
       const uint32_t o = in.w0 & 0xFFFF;
@@ -961,6 +970,7 @@ struct Translator {
   int nro = 0, nrw = 0;
   int ids = -1, emits = -1;            // Export: the vertex indices; Geometry: its emits
   int fault = -1;                      // the fault word's range (Resolved::faults)
+  int gds = -1;                        // the GDS's range (Resolved::gds)
 
   Translator(const StageState& st, const Resolver& res) : st(st), res(res), wave(res.r.wave) {}
 
@@ -1097,6 +1107,14 @@ struct Translator {
       case 32: fo(f(0) + " * " + F(U(in.literal)) + " + " + f(1)); return true;  // madmk
       case 33: fo(f(0) + " * " + f(1) + " + " + F(U(in.literal))); return true;  // madak
       case 34: io("uint(bitCount(" + s[0] + ")) + " + s[1]); return true;
+      case 35:  // v_mbcnt_lo_u32_b32: the mask's bits below the lane, low half
+        io("uint(bitCount(" + s[0] + " & (" + Lane() + " >= 32u ? 0xFFFFFFFFu : (1u << " + Lane() +
+           ") - 1u))) + " + s[1]);
+        return true;
+      case 36:  // v_mbcnt_hi_u32_b32: the same, high half
+        io("uint(bitCount(" + s[0] + " & (" + Lane() + " <= 32u ? 0u : (1u << (" + Lane() +
+           " - 32u)) - 1u))) + " + s[1]);
+        return true;
       case 37: {  // v_add_i32: carry out
         Line("r_t = " + s[0] + " + " + s[1] + ";");
         carry("r_t < " + s[0]);
@@ -1721,11 +1739,19 @@ struct Translator {
         Line("r_lds_wr(" + a + " + " + U(off0 * 4) + ", " + V(d0) + ");");
         Line("r_lds_wr(" + a + " + " + U(off1 * 4) + ", " + V(d1) + ");");
         return;
+      case 77:  // ds_write_b64
+        Line("r_lds_wr(" + a + " + " + U(off0 | off1 << 8) + ", " + V(d0) + ");");
+        Line("r_lds_wr(" + a + " + " + U((off0 | off1 << 8) + 4) + ", " + V(d0 + 1) + ");");
+        return;
       case 10: Line("r_lds_or(" + a + " + " + U(off0 | off1 << 8) + ", " + V(d0) + ");"); return;
       case 54: Line(V(vdst) + " = r_lds_rd(" + a + " + " + U(off0 | off1 << 8) + ");"); return;
       case 55:
         Line(V(vdst) + " = r_lds_rd(" + a + " + " + U(off0 * 4) + ");");
         Line(V(vdst + 1) + " = r_lds_rd(" + a + " + " + U(off1 * 4) + ");");
+        return;
+      case 118:  // ds_read_b64
+        Line(V(vdst) + " = r_lds_rd(" + a + " + " + U(off0 | off1 << 8) + ");");
+        Line(V(vdst + 1) + " = r_lds_rd(" + a + " + " + U((off0 | off1 << 8) + 4) + ");");
         return;
       case 119:  // ds_read2_b64
         for (uint32_t i = 0; i < 4; i++)
@@ -1733,6 +1759,26 @@ struct Translator {
         return;
     }
     Fail(pc, "an LDS instruction not translated yet");
+  }
+
+  // ds_append on the GDS (in waves): the dword at M0's base plus the
+  // offset gets the wave's count of active lanes added, and each active
+  // lane the value before. An offset past M0's size, or past the GDS,
+  // faults.
+  void Append(gaddr pc, const Instr& in) {
+    if (in.op != 62) return Fail(pc, "a DS instruction on GDS not translated yet");
+    uses_ballot = true;
+    const uint32_t offset = in.w0 & 0xFFFF, vdst = in.w1 >> 24;
+    Line("r_o = (m0 & 0xFFFFu) + " + U(offset) + ";");
+    Line("if (" + U(offset + 4) + " > (m0 >> 16) || r_o + 4u > " + U(uint32_t(sizeof Gds().bytes)) + ") r_fault(" +
+         U(uint32_t(pc)) + ");");
+    Line("else {");
+    Line("r_t = 0u; if (subgroupElect()) r_t = atomicAdd(r_rw[r_rwbuf[" + std::to_string(gds) +
+         "].x + (r_o >> 2)], uint(bitCount(exec_lo) + bitCount(exec_hi)));");
+    Line("r_t = subgroupBroadcastFirst(r_t);");
+    for (half = 0; half < 2; half++) Line("if (" + Active() + ") " + V(vdst) + " = r_t;");
+    half = 0;
+    Line("}");
   }
 
   // ds_swizzle_b32 in its quad mode (offset bit 15): each lane of a quad
@@ -2235,7 +2281,10 @@ struct Translator {
           Line("}");
           break;
         case Fmt::Ds:
-          if (in.w0 & 0x20000) return Fail(pc, "a DS instruction on GDS not translated yet");
+          if (in.w0 & 0x20000) {
+            if (half == 0) Append(pc, in);
+            break;
+          }
           if (in.op == 53) {
             Swizzle(pc, in);
             break;
@@ -2284,6 +2333,7 @@ struct Translator {
     if (st.stage == Stage::Export) ids = nro++;
     if (st.stage == Stage::Geometry) emits = nrw++;
     if (res.r.faults) fault = nrw++;
+    if (res.r.gds) gds = nrw++;
     for (const BufferRange& b : res.r.buffers)
       if (b.written && !RunsAsCompute(st.stage)) {
         error = "a store outside a compute stage not translated yet";
@@ -2687,6 +2737,7 @@ Resolved Resolve(const StageState& st) {
   }
   k += rv.r.faults ? 'f' : '-';
   k += rv.r.wave ? 'w' : '-';
+  k += rv.r.gds ? 'g' : '-';
   for (const BufferRange& b : rv.r.buffers) k += b.written ? 'w' : 'r';
   return rv.r;
 }
@@ -2752,6 +2803,7 @@ std::vector<uint32_t> Uniforms(const StageState& st, const Resolved& r) {
     if (pass == 0 && st.stage == Stage::Export) u.insert(u.end(), {0, 0, st.invocations * 4, 0});
     if (pass == 1 && st.stage == Stage::Geometry) u.insert(u.end(), {0, 0, st.invocations * st.max_vert * 4, 0});
     if (pass == 1 && r.faults) u.insert(u.end(), {0, 0, 4, 0});
+    if (pass == 1 && r.gds) u.insert(u.end(), {0, 0, uint32_t(sizeof Gds().bytes), 0});
   }
   u.insert(u.end(), r.match.begin(), r.match.end());
   return u;

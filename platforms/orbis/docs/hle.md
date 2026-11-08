@@ -105,8 +105,11 @@ library.
   graphics event 0x40, or on a compute ring event 0 to 6 by its pipe;
   their data is the id (a timestamp of 0). Other ids are fatal. Mip statistics are accepted and
   never written. GDS (64 KiB, shared by every ring) is host memory that
-  DMA_DATA writes and reads; shaders' GDS instructions are not
-  translated yet (fatal), so nothing else sees it.
+  DMA_DATA writes and reads; a compute shader with GDS instructions (of
+  them only ds_append is translated; others are fatal) runs in waves
+  and binds it read-write, written back before its dispatch returns, so
+  that it never runs behind the command processor. A ds_append past M0's
+  size or the GDS is fatal (the dispatch's fault word).
 - recomp_orbis_gpu draws on gfx::Device (orbis/gpu/renderer.h): its
   shaders translated to GLSL (orbis/gpu/shader.h), colour and depth
   targets as device images found by their guest address (never written

@@ -105,6 +105,9 @@ struct Resolved {
   std::vector<uint32_t> match;
   bool faults = false;
   bool wave = false;        // a compute stage run in waves (above)
+  // A compute stage (in waves) with DS instructions on the GDS: it binds
+  // the GDS (cp.h) as one more read-write range, after the fault word.
+  bool gds = false;
   std::string key;          // code and facts: equal keys, equal translation
   std::string error;        // why the stage cannot run (empty: it can)
 };

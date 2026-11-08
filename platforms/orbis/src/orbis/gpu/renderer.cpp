@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "orbis/gpu/cp.h"
 #include "orbis/gpu/shader.h"
 #include "orbis/gpu/tiling.h"
 #include "runtime/log.h"
@@ -1964,12 +1965,19 @@ void Dispatch(const Regs& r, const uint32_t groups[3]) {
   // checked once the dispatch has landed.
   uint32_t* fault = rc.faults ? new uint32_t(0) : nullptr;
   if (fault) b.rw.push_back({fault, 4});
+  // The GDS (Resolved::gds): read and written back before the dispatch
+  // returns, so that the command processor's GDS stays the GPU's.
+  std::unique_lock<std::mutex> gds(Gds().mu, std::defer_lock);
+  if (rc.gds) {
+    gds.lock();
+    b.rw.push_back({Gds().bytes, uint32_t(sizeof Gds().bytes)});
+  }
   gfx::ProgramDispatch d;
   d.program = pr.id;
   d.cs = b.res;
   d.rw_buffers = b.rw.data();
   d.rw_images = b.images.data();
-  d.land_later = true;
+  d.land_later = !rc.gds;
   d.groups[1] = groups[1];
   d.groups[2] = groups[2];
   // More groups in x than the host runs at once: in parts, each told
