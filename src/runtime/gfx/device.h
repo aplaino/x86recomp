@@ -485,6 +485,9 @@ enum class Backend {
 std::unique_ptr<Device> CreateDevice(Backend b, SDL_Window* window);
 
 std::unique_ptr<Device> CreateD3D9Device(SDL_Window* window);
+// A null window makes a device without a swap chain (compute and drawing
+// into images, read back; Present shows nothing): tests, and work that
+// needs the GPU before a window exists.
 std::unique_ptr<Device> CreateGpuDevice(SDL_Window* window);
 
 }  // namespace recomp::gfx

@@ -3,8 +3,8 @@
 // target, the scissor, clears and depth testing, a compute dispatch
 // writing a buffer (written back) and a storage image, GPU buffers read
 // by draws and dispatches and drawn from as indices, and reading images
-// back. Needs a Vulkan device (lavapipe will do); exits 77 (skipped)
-// without one.
+// back, on a device without a window. Needs a Vulkan device (lavapipe
+// will do); exits 77 (skipped) without one.
 
 #include <SDL3/SDL.h>
 
@@ -60,8 +60,7 @@ int main() {
     std::printf("skipped: SDL video: %s\n", SDL_GetError());
     return 77;
   }
-  SDL_Window* w = SDL_CreateWindow("gfx_program_test", 64, 64, SDL_WINDOW_HIDDEN);
-  std::unique_ptr<Device> dev = w ? CreateGpuDevice(w) : nullptr;
+  std::unique_ptr<Device> dev = CreateGpuDevice(nullptr);
   if (!dev) {
     std::printf("skipped: no SDL_GPU device\n");
     return 77;
@@ -230,7 +229,6 @@ int main() {
   dev->DrawImage(rt, {0, 0, 4, 4});
   dev->Present();
   dev.reset();
-  SDL_DestroyWindow(w);
   SDL_Quit();
   if (failures) return 1;
   std::printf("gfx programs: ok\n");

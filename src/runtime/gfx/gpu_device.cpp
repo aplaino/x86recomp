@@ -402,7 +402,7 @@ class GpuDevice final : public Device {
       WarnF("gfx: SDL_CreateGPUDeviceWithProperties: %s\n", SDL_GetError());
       return false;
     }
-    if (!SDL_ClaimWindowForGPUDevice(dev_, window_)) {
+    if (window_ && !SDL_ClaimWindowForGPUDevice(dev_, window_)) {
       WarnF("gfx: SDL_ClaimWindowForGPUDevice: %s\n", SDL_GetError());
       return false;
     }
@@ -493,7 +493,7 @@ class GpuDevice final : public Device {
       if (b) SDL_ReleaseGPUTransferBuffer(dev_, b);
     if (vs_) SDL_ReleaseGPUShader(dev_, vs_);
     if (fs_) SDL_ReleaseGPUShader(dev_, fs_);
-    SDL_ReleaseWindowFromGPUDevice(dev_, window_);
+    if (window_) SDL_ReleaseWindowFromGPUDevice(dev_, window_);
     SDL_DestroyGPUDevice(dev_);
   }
 
@@ -516,7 +516,7 @@ class GpuDevice final : public Device {
     // presentation tears in fullscreen).
     SDL_GPUPresentMode mode = SDL_GPU_PRESENTMODE_VSYNC;
     mailbox_emulated_ = false;
-    if (!vsync) {
+    if (window_ && !vsync) {
       if (SDL_WindowSupportsGPUPresentMode(dev_, window_, SDL_GPU_PRESENTMODE_MAILBOX)) {
         mode = SDL_GPU_PRESENTMODE_MAILBOX;
       } else {
@@ -527,7 +527,7 @@ class GpuDevice final : public Device {
         next_show_ns_ = 0;
       }
     }
-    SDL_SetGPUSwapchainParameters(dev_, window_, SDL_GPU_SWAPCHAINCOMPOSITION_SDR, mode);
+    if (window_) SDL_SetGPUSwapchainParameters(dev_, window_, SDL_GPU_SWAPCHAINCOMPOSITION_SDR, mode);
     // Both start black, as a fresh D3D swap chain does.
     for (SDL_GPUTexture* t : {backbuffer_, front_}) {
       SetPass(t, nullptr);
@@ -2653,6 +2653,7 @@ void r_color0(inout vec4 c) {
   void Show(SDL_GPUCommandBuffer* cmd) {
     SDL_GPUTexture* sc = nullptr;
     Uint32 sw = 0, sh = 0;
+    if (!window_) return;  // no swap chain
     if (mailbox_emulated_) {
       // One frame per refresh, on a grid of refresh periods: a frame
       // before the next grid point stays in the front buffer unshown, so
