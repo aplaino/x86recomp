@@ -1242,7 +1242,9 @@ HLE ABI; then the unwinder and CRT; then graphics and audio.
 
 ### Layout: base, CPU cores, platform modules
 Three layers, each a set of directories and shared libraries; each uses
-only those below it.
+only those below it. They are kept apart by directory and build option,
+not by branches: every core and module is on main, the unfinished ones
+off by default.
 
 - The base (src/runtime, cmake/host.cmake): what any guest's program
   needs on its host. The host layer (RECOMP_HOST, on by default): SDL3,

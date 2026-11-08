@@ -56,12 +56,16 @@ every guest shares (`src/runtime`), a core per guest CPU (the x86 core:
   their comparison).
 
 Consoles whose CPU the lifter already models are to be platform modules
-on the same core rather than forks: the first, for the PlayStation 4
-(its executable format, system libraries and GPU), is in progress on
-its own branch. A console with another CPU brings that CPU's core with
-it: the Nintendo Switch module ([platforms/horizon](platforms/horizon))
-is on the AArch64 core (`src/a64`, `tools/lifter_a64`, `tests/a64`), and
-builds with the x86 core and Win32 switched off.
+on the same core rather than forks: the PlayStation 4 module
+([platforms/orbis](platforms/orbis): its executable format, system
+libraries and GPU) is on the x86 core. A console with another CPU brings
+that CPU's core with it: the Xbox 360 module
+([platforms/xbox360](platforms/xbox360)) is on the PowerPC core
+(`src/ppc`, `tools/lifter_ppc`, `tests/ppc`), the Nintendo Switch module
+([platforms/horizon](platforms/horizon)) on the AArch64 core
+(`src/a64`, `tools/lifter_a64`, `tests/a64`); both build with the x86
+core and Win32 switched off. The console modules are in progress and off
+by default (RECOMP_PLATFORM_ORBIS, _XBOX360, _HORIZON).
 
 [ARCHITECTURE.md](ARCHITECTURE.md) describes the design; each platform's
 `docs/` the observed behaviour of what it reimplements

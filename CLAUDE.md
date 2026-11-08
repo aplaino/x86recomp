@@ -19,6 +19,8 @@ OS or middleware API goes here, even when a game is where it came up.
     Remastered, PS4; the platform module RECOMP_PLATFORM_ORBIS)
   - ~/Documents/Programming/Recomp/PS4/UnchartedRecharted (Uncharted:
     The Nathan Drake Collection, PS4)
+  - ~/Documents/Programming/Recomp/X360/game (Xbox 360; the platform
+    module RECOMP_PLATFORM_XBOX360)
 - The base is src/runtime (with cmake/host.cmake); the x86 core is
   src/x86, tools/lifter_x86 and tests/x86, the PowerPC core src/ppc,
   tools/lifter_ppc and tests/ppc, the AArch64 core src/a64,
@@ -41,6 +43,26 @@ OS or middleware API goes here, even when a game is where it came up.
   rebuild each one listed under Layout, re-lift if the lifter changed, and
   run its ctest (with <ID>_GAME_EXE set, the EXE-derived oracle tests run
   too).
+- The oracle tests of the PowerPC and AArch64 cores need a Python with
+  their packages: pass -DRECOMP_PYTHON=<venv>/bin/python (the venv's own
+  path, not its resolved symlink) when the tree has no `.venv/`, or they
+  are skipped.
+
+## Branches and landing
+- One long-lived branch, main. Every core and platform module lives on
+  it, kept apart by directory and CMake option, not by branches; a module
+  that is not finished is still merged, off by default.
+- Work happens on a short-lived topic branch in its own worktree
+  (../SwARc-<topic>, cut from main), never in the main checkout, which
+  only follows origin/main.
+- Land with `tools/land.py` from the topic's worktree: it rebases onto
+  origin/main, builds and tests the presets the change touches, and
+  fast-forwards main. Never push to main any other way; never merge main
+  into a topic (rebase).
+- A change to the base (src/runtime, cmake, top-level CMake) lands on its
+  own, before the core or platform work that needs it.
+- Split commits by layer (base, a core, a platform) when they would
+  otherwise mix, so each can be read and reverted alone.
 
 ## Product constraints (see ARCHITECTURE.md)
 - No emulation in the shipping binary: no interpreter, JIT, runtime
@@ -86,9 +108,8 @@ OS or middleware API goes here, even when a game is where it came up.
   their CMakeLists.txt (their registrars run when it loads). Every
   library links what it uses: --no-undefined (Linux) and ld64 (macOS)
   refuse anything else.
-- Another session may be working in the main checkout: do parallel work
-  in a separate git worktree (e.g. ../SwARc-<topic>) and build games
-  against it in their own build dirs (-DSWARC_DIR=...).
+- To try a topic in a game before landing, build the game against the
+  topic's worktree in a build dir of its own (-DSWARC_DIR=...).
 - The guest arena base is chosen at startup and is not a compile-time
   constant. Do not hand host pointers to guest code; convert with
   GuestMemory::to_guest.
