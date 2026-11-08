@@ -6,7 +6,7 @@
 namespace recomp::xbox360 {
 
 // Notification ids xam raises: the system UI shown (1) or closed (0), the
-// signed-in slots' mask, the controllers' mask.
+// signed-in slots' mask, the users with a controller changed (0).
 constexpr uint32_t kXnSysUi = 0x00000009, kXnSysSigninChanged = 0x0000000A,
                    kXnSysInputDevicesChanged = 0x00000012;
 

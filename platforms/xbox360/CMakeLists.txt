@@ -78,6 +78,8 @@ foreach(_m xboxkrnl xam)
   endif()
   recomp_bundle(recomp_xbox360_${_m})
 endforeach()
+# xam's controllers are the host's SDL gamepads.
+target_link_libraries(recomp_xbox360_xam PRIVATE SDL3::SDL3 recomp_log)
 
 # recomp_lift_ppc reads XEX2.
 target_sources(recomp_lift_ppc PRIVATE lifter/xex_reader.cpp)

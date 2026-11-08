@@ -1236,14 +1236,15 @@ static void Xam(void) {
   CHECK(NetDll_WSAStartup(1, 0x0202, wsa) == 0 && wsa[0] == 0x0202 && wsa[1] == 0x0202);
   CHECK(NetDll_WSAStartup(3, 0x0202, wsa) == 10022 && NetDll_XNetStartup(1, 0) == 0);
   CHECK(NetDll_XNetGetEthernetLinkStatus(1) == 0);
-  // No controller: zeroed results, ERROR_DEVICE_NOT_CONNECTED.
+  // No controller (player 4 has none): zeroed results,
+  // ERROR_DEVICE_NOT_CONNECTED.
   uint8_t pad[0x14];
   memset(pad, 0xAA, sizeof pad);
-  CHECK(XamInputGetCapabilities(0, 0, pad) == 1167 && pad[0] == 0 && pad[0x13] == 0);
+  CHECK(XamInputGetCapabilities(3, 0, pad) == 1167 && pad[0] == 0 && pad[0x13] == 0);
   memset(pad, 0xAA, sizeof pad);
-  CHECK(XamInputGetState(0, 0, pad) == 1167 && pad[0] == 0 && pad[0xF] == 0 && pad[0x10] == 0xAA);
+  CHECK(XamInputGetState(3, 0, pad) == 1167 && pad[0] == 0 && pad[0xF] == 0 && pad[0x10] == 0xAA);
   uint16_t vibration[2] = {0x8000, 0x8000};
-  CHECK(XamInputSetState(0, 0, vibration) == 1167);
+  CHECK(XamInputSetState(3, 0, vibration) == 1167);
   // The Ex forms, which titles find through XexGetProcedureAddress.
   u32 xam = 0, wsa_ex = 0, xnet_ex = 0;
   CHECK(XexGetModuleHandle("xam.xex", &xam) == 0 && XexGetProcedureAddress(xam, 36, &wsa_ex) == 0 &&
@@ -1742,9 +1743,89 @@ static void Apcs(void) {
         apc_log[1] == ov[1] && apc_log[2] == (u32)(uintptr_t)ov);
 }
 
+// XINPUT_STATE.
+typedef struct {
+  u32 packet;
+  uint16_t buttons;
+  uint8_t left_trigger, right_trigger;
+  int16_t lx, ly, rx, ry;
+} PadState;
+
+// Reads player 1's pad until `buttons` are down (the pads are read every
+// few milliseconds); its result.
+static u32 PadWait(PadState* s, uint16_t buttons) {
+  int64_t ms = -10000;
+  u32 r = 0;
+  for (int k = 0; k < 1000; k++) {
+    r = XamInputGetState(0, 0, s);
+    if (r || (s->buttons & buttons) == buttons) break;
+    KeDelayExecutionThread(1, 0, &ms);
+  }
+  return r;
+}
+
+// Rumbles player 1's pad at `speed`, a request to the test program
+// (title_main.cpp), and waits for XN_SYS_INPUTDEVICESCHANGED on h.
+static int PadChange(u32 h, uint16_t speed, int notified) {
+  uint16_t vibration[2] = {speed, 0};
+  int64_t second = -10000000;
+  u32 id = 0, value = 9;
+  if (XamInputSetState(0, 0, vibration) != 0) return 0;
+  if (!notified) return 1;
+  return NtWaitForSingleObjectEx(h, 1, 0, &second) == 0 && XNotifyGetNext(h, 0x12, &id, &value) == 1 &&
+         id == 0x12 && value == 0 && XNotifyGetNext(h, 0, &id, &value) == 0;
+}
+
+// Two pads (title_main.cpp): player 1's holds A, d-pad up, the guide
+// button and the left stick up; player 2's nothing.
+static void Controllers(void) {
+  uint8_t caps[0x14];
+  memset(caps, 0xAA, sizeof caps);
+  CHECK(XamInputGetCapabilities(0, 0, caps) == 0 && caps[0] == 1 && caps[1] == 1 && caps[2] == 0 &&
+        caps[3] == 0 && caps[4] == 0xF3 && caps[5] == 0xFF && caps[0x13] == 0xFF);
+  CHECK(XamInputGetCapabilities(1, 1, caps) == 0 && caps[0] == 1);
+  // No keyboard, no type 3 context; flags naming no device fail.
+  memset(caps, 0xAA, sizeof caps);
+  CHECK(XamInputGetCapabilities(0, 2, caps) == 1167 && caps[0] == 0 && caps[0x13] == 0);
+  CHECK(XamInputGetCapabilities(0, 9, caps) == 1167 && XamInputGetCapabilities(0, 0x10, caps) == 1167);
+  CHECK(XamInputGetCapabilities(0, 0x40, caps) == 1627 && XamInputGetCapabilities(2, 1, caps) == 1167);
+  CHECK(XamInputGetCapabilities(0xFF, 1, caps) == 1167);
+
+  // The guide button stays clear; the stick's up is positive. The packet
+  // number holds while the state does.
+  PadState s, t;
+  CHECK(PadWait(&s, 0x1001) == 0 && s.buttons == 0x1001 && s.left_trigger == 0 && s.right_trigger == 0 &&
+        s.lx == 0 && s.ly == 32767 && s.rx == 0 && s.ry == 0 && s.packet != 0);
+  CHECK(XamInputGetState(0, 0, &t) == 0 && t.packet == s.packet);
+  CHECK(XamInputGetState(1, 0, &t) == 0 && t.buttons == 0 && XamInputGetState(0, 8, &t) == 1167);
+  CHECK(XamInputGetState(0xFF, 0, &t) == 1167);
+
+  // Player 2's pad unplugged and plugged in again: a notification each
+  // time, and it is player 2's again; player 1 keeps theirs.
+  u32 h = XamNotifyCreateListener(1, 1), id, value;
+  while (XNotifyGetNext(h, 0, &id, &value)) {
+  }
+  CHECK(PadChange(h, 0x1111, 1));
+  CHECK(XamInputGetState(1, 0, &t) == 1167 && XamInputGetCapabilities(1, 1, caps) == 1167);
+  CHECK(XamInputGetState(0, 0, &t) == 0 && t.buttons == 0x1001);
+  CHECK(PadChange(h, 0x2222, 1));
+  CHECK(XamInputGetState(1, 0, &t) == 0 && XamInputGetState(2, 0, &t) == 1167);
+  // B pressed, the left trigger pulled: a new packet.
+  CHECK(PadChange(h, 0x3333, 0));
+  CHECK(PadWait(&t, 0x3001) == 0 && t.buttons == 0x3001 && t.packet > s.packet);
+  int64_t ms = -10000;
+  for (int k = 0; k < 1000 && t.left_trigger != 255; k++) {
+    KeDelayExecutionThread(1, 0, &ms);
+    XamInputGetState(0, 0, &t);
+  }
+  CHECK(t.left_trigger == 255 && t.ly == 32767);
+  NtClose(h);
+}
+
 int main(void) {
   Modules();
   Xam();
+  Controllers();
   Users();
   Content();
   Timers();

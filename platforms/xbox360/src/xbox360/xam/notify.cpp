@@ -13,6 +13,7 @@
 #include "xbox360/config.h"
 #include "xbox360/hle.h"
 #include "xbox360/kernel.h"
+#include "xbox360/xam/input.h"
 #include "xbox360/xam/notify.h"
 
 namespace recomp::xbox360 {
@@ -70,8 +71,9 @@ void Broadcast(uint32_t id, uint32_t value) {
 }
 
 // XamNotifyCreateListener(areas, highest version): a handle to a new
-// listener.
+// listener. Controllers are read from then on, so that it hears of them.
 HLE(kXam, 650, XamNotifyCreateListener) {
+  StartControllers();
   uint64_t areas = Arg64(c, 0);
   uint32_t version = std::min(Arg(c, 1), kMaxVersion);
   uint32_t obj = SystemAlloc(kListenerSize);

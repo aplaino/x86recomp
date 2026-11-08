@@ -241,6 +241,16 @@ device, which mixes them and downmixes to the device; the floats are
 handed over unchanged. With no device the frames are dropped and the
 callbacks keep their pace.
 
+### Controllers
+xam's controllers (`src/xbox360/xam/input.cpp`, docs/xam.md "Input") are
+the host's SDL gamepads, read on a host thread of their own that starts
+SDL's gamepad subsystem and updates it every 4 ms (SDL wants both on one
+thread on every host). New pads take the free users in order and keep
+them until they disconnect; a change of the users with a pad raises
+XN_SYS_INPUTDEVICESCHANGED. The thread starts with the first input call
+or notification listener. Automated runs (`<ID>_BACKGROUND`) read no
+pads.
+
 ### The XMA decoder
 The XMA decoder (`src/xbox360/xma.{h,cpp}`, docs/xboxkrnl.md "XMA") is
 what the kernel's XMA* exports and titles' audio libraries see of the
@@ -304,9 +314,11 @@ builds and runs them too.
   the hard disk, its module and XEX headers, the settings and the video
   mode, the GPU's registers, interrupts and a ring buffer's packets,
   string conversions, an audio client, xam's startup exports and messages,
-  users, profile settings, notifications, content packages, timers) and
-  exits with the number of failed checks. It runs with SDL's dummy audio
-  driver. The test writes the disc's files and empties the data directory
+  users, profile settings, notifications, content packages, timers,
+  controllers) and exits with the number of failed checks. It runs with
+  SDL's dummy audio driver; its controllers are two virtual SDL gamepads
+  (the host's are ignored), which the test program unplugs, plugs in and
+  presses when the title rumbles them. The test writes the disc's files and empties the data directory
   before each run; it then checks the saves left on the data directory
   (title settings, content packages).
 
@@ -324,8 +336,7 @@ builds and runs them too.
    the audio render driver, timers, the kernel exports and xam's startup
    ones (the loader, networking, memory, messages, the music player's,
    users, profile settings, notifications, content), APCs, the XGI and
-   XLiveBase messages titles send and XMA decoding are done; next host
-   controllers, the kernel's remaining edge cases and the imports no
-   title has called yet.
+   XLiveBase messages titles send, XMA decoding, the kernel's edge cases
+   and controllers are done; next the imports no title has called yet.
 5. Xenos: drawing, shaders and presentation through gfx::Device, behind
    the command processor (which runs the ring buffer already).

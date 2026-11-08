@@ -23,12 +23,37 @@ only a console can settle.
   starts from its disc has none (xam's code).
 
 ## Input
-- No controller is connected yet: the host's input devices are not read.
-  XamInputGetCapabilities zeroes XINPUT_CAPABILITIES (0x14 bytes) and
-  XamInputGetState XINPUT_STATE (16 bytes: packet number, gamepad), and
-  both, like XamInputSetState, return ERROR_DEVICE_NOT_CONNECTED, as xam
-  does for a user without a device (for a gamepad and, through
-  HidGetCapabilities, a keyboard).
+- Each user (0-3) has device contexts by type, bound by xam to the
+  controller ports; type 0 is the gamepad. A user outside 0-3, 0xFF
+  (any user) among them, has none (xam's code). Here the host's
+  gamepads (SDL) take the users in the order they connect and keep them
+  until they disconnect.
+- XamInputGetCapabilities(user, flags, *caps) zeroes XINPUT_CAPABILITIES
+  (0x14 bytes) and asks the devices the flags name (0 means 3): the
+  gamepad (1; with 8 its type 3 context instead), types 1 (0x10) and 4
+  (0x20), the keyboard (2; xam also asks the HID driver). The first that
+  is there fills it and the call returns 0; if none is,
+  ERROR_DEVICE_NOT_CONNECTED, and with flags naming none of them
+  ERROR_FUNCTION_FAILED (xam's code). Only gamepads exist here, with no
+  type 3 context (console check), and report type 1 (gamepad), subtype 1,
+  no flags, every button but the guide button (0xF3FF) and full trigger,
+  stick and motor ranges, as Xenia has it (console check).
+- XamInputGetState(user, flags, *state) zeroes XINPUT_STATE (16 bytes:
+  packet number, then XINPUT_GAMEPAD: buttons, triggers, sticks X and Y,
+  big-endian, up positive) and returns ERROR_DEVICE_NOT_CONNECTED when
+  the user has no gamepad (flags with 8: no type 3 context); otherwise
+  the driver's state, with the guide button (0x0400) cleared for titles
+  (xam's code). The packet number changes when the state does, as Xenia
+  has it (console check). While the system UI holds input xam gives
+  titles the last packet number and a neutral pad; it never does here.
+- XamInputSetState(user, flags, *vibration) sets the motors (the left,
+  low-frequency one's speed, then the right's) until changed; the flags
+  are not used. ERROR_DEVICE_NOT_CONNECTED when the user has no gamepad,
+  ERROR_BUSY when the driver is (xam's code); here it never is.
+- xam broadcasts XN_SYS_INPUTDEVICESCHANGED (0x12) with value 0 whenever
+  the mask of users with a gamepad changes (xam's code). Here pads are
+  read from the first input call or notification listener on; the pads
+  found then were there before the title and raise nothing.
 
 ## Live (XLiveBase, app 0xFC)
 - xam's handler for app 0xFC forwards each message to an object that

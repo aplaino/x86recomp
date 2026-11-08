@@ -31,7 +31,7 @@ add_custom_command(OUTPUT "${_title_gen}/funcs_000.cpp" "${_title_gen}/table.cpp
 recomp_add_lifted_ppc_files(xbox360_title_code "${_title_gen}/funcs_000.cpp" "${_title_gen}/table.cpp"
                             LINK recomp_xbox360)
 add_executable(xbox360_title title_main.cpp)
-target_link_libraries(xbox360_title PRIVATE recomp_xbox360 recomp_xbox360_xboxkrnl recomp_xbox360_xam
+target_link_libraries(xbox360_title PRIVATE SDL3::SDL3 recomp_xbox360 recomp_xbox360_xboxkrnl recomp_xbox360_xam
                       xbox360_title_code)
 recomp_bundle(xbox360_title)
 # Its disc (the files title.c reads) and a data directory, emptied before
