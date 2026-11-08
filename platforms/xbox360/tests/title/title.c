@@ -1,0 +1,2225 @@
+// The runtime test title (tests/CMakeLists.txt, xbox360_runtime): a
+// program that calls the kernel as a title does, through imports, and
+// checks what the kernel's documented behaviour gives. Built for the
+// 64-bit ELFv2 ABI like the fixture, so pointers are 64-bit here while
+// the guest's structures hold 32-bit ones (uint32_t fields), and calls
+// into the kernel pass at most eight arguments: ELFv2's parameter area is
+// not the Xenon's (start.S's XENON9 and XENON10 wrappers make the calls
+// that need more). Reports each failed check with DbgPrint and returns
+// their number, which the title's end makes the process's exit status.
+
+#include <stdint.h>
+
+typedef uint32_t u32;
+
+// The imports (imports.S). Every result is declared unsigned: the kernel
+// returns 32-bit values, zero-extended here.
+u32 DbgPrint(const char* fmt, ...);
+u32 ExAllocatePool(u32 size);
+u32 ExCreateThread(u32* handle, u32 stack, u32* id, void* startup, void* start, void* context, u32 flags);
+u32 ExFreePool(u32 p);
+u32 InterlockedFlushSList(void* head);
+u32 InterlockedPopEntrySList(void* head);
+u32 KeDelayExecutionThread(u32 mode, u32 alertable, int64_t* interval);
+u32 KeGetCurrentProcessType(void);
+u32 KeLockL2(u32 index, u32 va, u32 size, u32 a, u32 b);
+u32 KeUnlockL2(u32 index);
+u32 KeInitializeSemaphore(void* sem, u32 count, u32 limit);
+uint64_t KeQueryPerformanceFrequency(void);
+u32 KeQuerySystemTime(uint64_t* time);
+u32 KeReleaseSemaphore(void* sem, u32 increment, u32 adjustment, u32 wait);
+u32 KeResetEvent(void* event);
+u32 KeSetEvent(void* event, u32 increment, u32 wait);
+u32 KeWaitForSingleObject(void* obj, u32 reason, u32 mode, u32 alertable, int64_t* timeout);
+u32 KfAcquireSpinLock(u32* lock);
+u32 KfReleaseSpinLock(u32* lock, u32 irql);
+u32 MmAllocatePhysicalMemoryEx(u32 flags, u32 size, u32 protect, u32 lo, u32 hi, u32 align);
+u32 MmFreePhysicalMemory(u32 type, u32 va);
+u32 MmGetPhysicalAddress(u32 va);
+u32 MmQueryAddressProtect(u32 va);
+u32 NtAllocateVirtualMemory(u32* base, u32* size, u32 type, u32 protect, u32 debug);
+u32 NtClose(u32 handle);
+u32 NtCreateEvent(u32* handle, void* attributes, u32 type, u32 state);
+u32 NtCreateMutant(u32* handle, void* attributes, u32 owned);
+u32 NtFreeVirtualMemory(u32* base, u32* size, u32 type, u32 debug);
+u32 NtQueryVirtualMemory(u32 base, void* info, u32 debug);
+u32 NtReleaseMutant(u32 handle, u32* previous);
+u32 NtResumeThread(u32 handle, u32* previous);
+u32 NtSuspendThread(u32 handle, u32* previous);
+u32 NtSetEvent(u32 handle, u32* previous);
+u32 NtWaitForSingleObjectEx(u32 handle, u32 mode, u32 alertable, int64_t* timeout);
+u32 NtWaitForMultipleObjectsEx(u32 count, u32* handles, u32 type, u32 mode, u32 alertable, int64_t* timeout);
+u32 ObReferenceObjectByHandle(u32 handle, u32 type, u32* object);
+u32 ObDereferenceObject(u32 object);
+u32 RtlEnterCriticalSection(void* cs);
+u32 RtlFillMemoryUlong(void* dest, u32 length, u32 pattern);
+u32 RtlInitAnsiString(void* dest, const char* src);
+u32 RtlInitializeCriticalSection(void* cs);
+u32 RtlLeaveCriticalSection(void* cs);
+u32 RtlTryEnterCriticalSection(void* cs);
+u32 KeTlsAlloc(void);
+u32 KeTlsGetValue(u32 index);
+u32 KeTlsFree(u32 index);
+u32 NtPulseEvent(u32 handle, u32* previous);
+u32 RtlTimeFieldsToTime(const uint16_t* fields, uint64_t* time);
+u32 KeTlsSetValue(u32 index, u32 value);
+u32 sprintf(char* buf, const char* fmt, ...);
+u32 NtCreateFile(void);  // through NtCreateFile9
+u32 NtQueryDirectoryFile(void);  // through NtQueryDirectoryFile9
+u32 NtFlushBuffersFile(u32 handle, u32* io);
+u32 NtOpenFile(u32* handle, u32 access, void* attributes, u32* io, u32 share, u32 options);
+u32 NtQueryFullAttributesFile(void* attributes, void* info);
+u32 NtQueryInformationFile(u32 handle, u32* io, void* info, u32 length, u32 cls);
+u32 NtQueryVolumeInformationFile(u32 handle, u32* io, void* info, u32 length, u32 cls);
+u32 NtReadFile(u32 handle, u32 event, void* apc, void* context, u32* io, void* buf, u32 length, int64_t* offset);
+u32 NtSetInformationFile(u32 handle, u32* io, void* info, u32 length, u32 cls);
+u32 NtWriteFile(u32 handle, u32 event, void* apc, void* context, u32* io, const void* buf, u32 length,
+                int64_t* offset);
+u32 ObCreateSymbolicLink(void* link, void* target);
+u32 ObDeleteSymbolicLink(void* link);
+u32 _vsnprintf(char* buf, u32 count, const char* fmt, uint64_t* args);
+u32 RtlImageXexHeaderField(u32 headers, u32 key);
+u32 XexCheckExecutablePrivilege(u32 privilege);
+u32 XexGetModuleHandle(const char* name, u32* handle);
+u32 XexGetModuleSection(u32 handle, const char* name, u32* data, u32* size);
+u32 XexGetProcedureAddress(u32 handle, u32 ordinal, u32* address);
+u32 ExGetXConfigSetting(u32 category, u32 setting, void* buffer, u32 size, uint16_t* required);
+u32 ExRegisterTitleTerminateNotification(void* registration, u32 create);
+u32 FscSetCacheElementCount(u32 count);
+u32 HalGetCurrentAVPack(void);
+u32 VdQueryVideoMode(u32* mode);
+u32 VdEnableRingBufferRPtrWriteBack(u32 pa, u32 block_log2);
+u32 VdInitializeRingBuffer(u32 pa, u32 size_log2);
+u32 VdSetGraphicsInterruptCallback(void* callback, u32 user);
+u32 KeEnableFpuExceptions(u32 enable);
+u32 RtlMultiByteToUnicodeN(uint16_t* dest, u32 dest_bytes, u32* written, const char* src, u32 src_bytes);
+u32 RtlUnicodeToMultiByteN(char* dest, u32 dest_bytes, u32* written, const uint16_t* src, u32 src_bytes);
+u32 RtlUnicodeStringToAnsiString(void* ansi, void* unicode, u32 allocate);
+u32 RtlFreeAnsiString(void* ansi);
+u32 RtlNtStatusToDosError(u32 status);
+u32 RtlTimeToTimeFields(const uint64_t* time, uint16_t* fields);
+// seh.S
+u32 seh_outer(u32 code);
+u32 own_frame(u32 code);
+u32 capture(void* context);
+u32 back_outer(void);
+u32 sj_caller(void);
+extern u32 seh_log[16];
+u32 XAudioRegisterRenderDriverClient(u32* registration, u32* driver);
+u32 XAudioUnregisterRenderDriverClient(u32 driver);
+u32 XAudioSubmitRenderDriverFrame(u32 driver, float* samples);
+u32 XAudioGetVoiceCategoryVolumeChangeMask(u32 driver, u32* mask);
+u32 XAudioGetVoiceCategoryVolume(u32 category, u32* volume);
+u32 XMACreateContext(u32* context);
+u32 XMAReleaseContext(u32 context);
+u32 MmQueryStatistics(u32* statistics);
+u32 NtCreateTimer(u32* handle, void* attributes, u32 type);
+u32 NtSetTimerEx(u32 handle, int64_t* due, void* apc, u32 mode, void* context, u32 resume, u32 period, u32* previous);
+u32 NtCancelTimer(u32 handle, u32* current);
+u32 KeInitializeApc(void* apc, u32 thread, void* kernel, void* rundown, void* normal, u32 mode, u32 context);
+u32 KeInsertQueueApc(void* apc, u32 arg1, u32 arg2, u32 increment);
+u32 NtQueueApcThread(u32 thread, void* routine, u32 context, u32 arg1, u32 arg2);
+u32 KeEnterCriticalRegion(void);
+u32 KeLeaveCriticalRegion(void);
+u32 XGetAVPack(void);     // xam
+u32 XGetVideoMode(u32* mode);  // xam
+u32 XGetGameRegion(void);
+u32 XamGetSystemVersion(void);
+u32 XamLoaderGetLaunchDataSize(u32* size);
+u32 XamLoaderGetLaunchData(void* buffer, u32 size);
+u32 NetDll_WSAStartup(u32 caller, u32 version, void* data);
+u32 NetDll_XNetStartup(u32 caller, void* parameters);
+u32 NetDll_XNetGetEthernetLinkStatus(u32 caller);
+u32 XamInputGetCapabilities(u32 user, u32 flags, void* caps);
+u32 XamInputGetState(u32 user, u32 flags, void* state);
+u32 XamInputSetState(u32 user, u32 flags, void* vibration);
+u32 XamAlloc(u32 attributes, u32 size, u32* address);
+u32 XamFree(u32 address);
+u32 XMsgInProcessCall(u32 app, u32 message, void* p1, void* p2);
+u32 XamUserGetSigninState(u32 slot);
+u32 XamUserGetXUID(u32 slot, u32 types, uint64_t* xuid);
+u32 XamUserGetName(u32 slot, char* buffer, u32 size);
+u32 XamUserReadProfileSettings(void);  // through XamUserReadProfileSettings9
+u32 XamUserWriteProfileSettings(u32 title, u32 slot, u32 count, void* settings, u32* overlapped);
+u32 XamNotifyCreateListener(uint64_t areas, u32 version);
+u32 XNotifyGetNext(u32 listener, u32 match, u32* id, u32* value);
+u32 XamUserCheckPrivilege(u32 slot, u32 privilege, u32* result);
+u32 XamShowSigninUI(u32 panes, u32 flags);
+u32 XamSessionCreateHandle(u32* handle);
+u32 XamSessionRefObjByHandle(u32 handle, u32* object);
+u32 XNotifyPositionUI(u32 position);
+u32 XMsgStartIORequest(u32 app, u32 message, u32* overlapped, void* buffer, u32 size);
+u32 XMsgStartIORequestEx(u32 app, u32 message, u32* overlapped, void* buffer, u32 size, void* xparams);
+u32 XamEnumerate(u32 handle, u32 flags, void* buffer, u32 size, u32* returned, u32* overlapped);
+u32 XamContentCreateEx(void);  // through XamContentCreateEx9
+u32 XamContentClose(const char* root, u32* overlapped);
+u32 XamContentDelete(u32 user, void* data, u32* overlapped);
+u32 XamContentCreateEnumerator(u32 user, u32 device, u32 type, u32 flags, u32 items, u32* size, u32* handle);
+u32 XamContentGetDeviceData(u32 device, void* data);
+u32 XamContentGetCreator(u32 user, void* data, u32* is_creator, uint64_t* creator, u32* overlapped);
+u32 XamContentGetDeviceState(u32 device, u32* overlapped);
+u32 XGetLanguage(void);
+u32 XamGetExecutionId(u32* info);
+u32 XNetLogonGetTitleID(u32 service);
+u32 XMsgCancelIORequest(u32* overlapped, u32 wait);
+u32 XamUserAreUsersFriends(u32 slot, uint64_t* xuids, u32 count, u32* result, u32* overlapped);
+u32 XamWriteGamerTile(u32 slot, u32 title, u32 large, u32 small, u32 award, u32* overlapped);
+u32 XamUserCreateStatsEnumerator(u32 title, u32 kind, uint64_t pivot, u32 rows, u32 count, void* views, u32* size,
+                                 u32* handle);
+u32 XamShowFriendsUI(u32 slot);
+u32 XamShowPlayerReviewUI(u32 slot, uint64_t xuid);
+u32 XamShowAchievementsUI(u32 slot, u32 title);
+u32 XamShowGamerCardUIForXUID(u32 slot, uint64_t xuid, u32 flags);
+u32 XamShowMarketplaceUI(u32 slot, u32 type, uint64_t offer, u32 categories);
+u32 XamShowKeyboardUI(u32 slot, u32 flags, const uint16_t* text, const uint16_t* title, const uint16_t* description,
+                      uint16_t* buffer, u32 chars, u32* overlapped);
+u32 XamShowMessageBoxUIEx(void);  // through XamShowMessageBoxUIEx9
+u32 XamShowDirtyDiscErrorUI(void);
+u32 XamVoiceCreate(u32 slot, u32 packets, u32* voice);
+u32 XamVoiceHeadsetPresent(u32 voice);
+u32 XamVoiceSubmitPacket(u32 voice, u32 size, void* packet);
+u32 XamVoiceClose(u32 voice);
+u32 NetDll_WSACleanup(u32 caller);
+u32 NetDll_socket(u32 caller, u32 family, u32 type, u32 protocol);
+u32 NetDll_closesocket(u32 caller, u32 s);
+u32 NetDll_ioctlsocket(u32 caller, u32 s, u32 command, u32* arg);
+u32 NetDll_setsockopt(u32 caller, u32 s, u32 level, u32 option, const void* value, u32 length);
+u32 NetDll_getsockopt(u32 caller, u32 s, u32 level, u32 option, void* value, u32* length);
+u32 NetDll_getsockname(u32 caller, u32 s, void* name, u32* length);
+u32 NetDll_bind(u32 caller, u32 s, const void* name, u32 length);
+u32 NetDll_connect(u32 caller, u32 s, const void* name, u32 length);
+u32 NetDll_recv(u32 caller, u32 s, void* buffer, u32 length, u32 flags);
+u32 NetDll_recvfrom(u32 caller, u32 s, void* buffer, u32 length, u32 flags, void* from, u32* from_length);
+u32 NetDll_send(u32 caller, u32 s, const void* buffer, u32 length, u32 flags);
+u32 NetDll_sendto(u32 caller, u32 s, const void* buffer, u32 length, u32 flags, const void* to, u32 to_length);
+u32 NetDll_inet_addr(const char* text);
+u32 NetDll_WSAGetLastError(void);
+u32 NetDll_WSACreateEvent(void);
+u32 NetDll_XNetCleanup(u32 caller);
+u32 NetDll_XNetRandom(u32 caller, void* buffer, u32 length);
+u32 NetDll_XNetCreateKey(u32 caller, void* id, void* key);
+u32 NetDll_XNetRegisterKey(u32 caller, const void* id, const void* key);
+u32 NetDll_XNetUnregisterKey(u32 caller, const void* id);
+u32 NetDll_XNetXnAddrToInAddr(u32 caller, const void* xnaddr, const void* id, u32* ina);
+u32 NetDll_XNetDnsLookup(u32 caller, const char* name, u32 event, u32* xndns);
+u32 NetDll_XNetDnsRelease(u32 caller, u32 xndns);
+u32 NetDll_XNetQosListen(u32 caller, const void* id, const void* data, u32 size, u32 bits, u32 flags);
+u32 NetDll_XNetQosLookup(void);  // through NetDll_XNetQosLookup13
+u32 NetDll_XNetQosRelease(u32 caller, u32 xnqos);
+u32 NetDll_XNetGetTitleXnAddr(u32 caller, void* xnaddr);
+u32 NetDll_XNetGetDebugXnAddr(u32 caller, void* xnaddr);
+u32 XamShowDeviceSelectorUI(u32 user, u32 type, u32 flags, uint64_t bytes, u32* device, u32* overlapped);
+extern u32 __imp_NtClose, __imp_ExThreadObjectType, __imp_KeTimeStampBundle, __imp_XboxKrnlVersion,
+    __imp_XexExecutableModuleHandle, __imp_ExLoadedCommandLine, __imp_VdGlobalDevice, __imp_VdGpuClockInMHz,
+    __imp_VdHSIOCalibrationLock;
+
+// start.S
+void _start(void);
+void thread_startup(void);
+u32 sprintf9(char* buf, const char* fmt, int a, int b, int c, int d, int e, int f, int g);
+u32 NtCreateFile9(u32* handle, u32 access, void* attributes, u32* io, void* size, u32 file_attributes,
+                  u32 share, u32 disposition, u32 options);
+u32 NtQueryDirectoryFile9(u32 handle, u32 event, void* apc, void* context, u32* io, void* info, u32 length,
+                          void* mask, u32 restart);
+u32 XamUserReadProfileSettings9(u32 title, u32 slot, u32 xuid_count, void* xuids, u32 count, u32* ids, u32* size,
+                                void* results, u32* overlapped);
+u32 XamShowMessageBoxUIEx9(u32 slot, const uint16_t* title, const uint16_t* text, u32 count, const uint16_t** buttons,
+                           u32 focus, u32 flags, u32* result, u32* overlapped);
+u32 XamContentCreateEx9(u32 user, const char* root, void* data, u32 flags, u32* disposition, u32* license,
+                        u32 cache_size, uint64_t content_size, u32* overlapped);
+u32 NetDll_XNetQosLookup13(u32 caller, u32 cxna, u32* xnaddrs, u32* ids, u32* keys, u32 cina, u32* inas,
+                           u32* services, u32 probes, u32 bits, u32 flags, u32 event, u32* xnqos);
+u32 VdSwap10(volatile u32* words, u32* fetch, u32 writeback, void* system, u32 value, u32* front, u32* format,
+             u32* color_space, u32* width, u32* height);
+void interrupt_entry(void);
+void normal_entry(void);
+void kernel_entry(void);
+void audio_entry(void);
+uint64_t time_base(void);
+uint64_t pcr(void);
+
+enum {
+  kMemCommit = 0x1000, kMemReserve = 0x2000, kMemDecommit = 0x4000, kMemRelease = 0x8000, kMemTopDown = 0x100000,
+  kMemLargePages = 0x20000000, kMem16MbPages = 0x80000000, kPageReadWrite = 0x04,
+  kStatusTimeout = 0x102, kStatusConflictingAddresses = 0xC0000018, kStatusInvalidHandle = 0xC0000008,
+  kStatusMutantNotOwned = 0xC0000046, kStatusEndOfFile = 0xC0000011, kStatusAccessDenied = 0xC0000022,
+  kStatusObjectNameNotFound = 0xC0000034, kStatusObjectNameCollision = 0xC0000035, kStatusNotFound = 0xC0000225,
+  kStatusObjectNameExists = 0x40000000, kStatusObjectTypeMismatch = 0xC0000024, kStatusNotSameDevice = 0xC00000D4,
+  kStatusMemoryNotAllocated = 0xC00000A0, kMemFree = 0x10000,
+  kStatusObjectPathNotFound = 0xC000003A, kStatusNoMoreFiles = 0x80000006,
+  kGenericRead = 0x80000000, kGenericWrite = 0x40000000,
+  kOpen = 1, kCreate = 2, kOpenIf = 3, kSync = 0x20, kDirectoryFile = 0x1, kNonDirectoryFile = 0x40,
+  kOpened = 1, kCreated = 2,
+};
+
+void* memset(void* d, int v, unsigned long n) {
+  for (unsigned long k = 0; k < n; k++) ((volatile unsigned char*)d)[k] = (unsigned char)v;
+  return d;
+}
+void* memcpy(void* d, const void* s, unsigned long n) {
+  for (unsigned long k = 0; k < n; k++) ((volatile unsigned char*)d)[k] = ((const unsigned char*)s)[k];
+  return d;
+}
+
+// ANSI_STRING.
+struct Ansi {
+  uint16_t length, maximum;
+  u32 buffer;
+};
+
+static int failures;
+#define CHECK(cond)                                                          \
+  do {                                                                       \
+    if (!(cond)) {                                                           \
+      failures++;                                                            \
+      DbgPrint("FAIL line %d: %s\n", __LINE__, #cond);                       \
+    }                                                                        \
+  } while (0)
+
+static volatile u32* At(u32 va) { return (volatile u32*)(uintptr_t)va; }
+static int Memeq(const void* a, const void* b, unsigned long n) {
+  for (unsigned long k = 0; k < n; k++)
+    if (((const char*)a)[k] != ((const char*)b)[k]) return 0;
+  return 1;
+}
+static int Streq(const char* a, const char* b) {
+  while (*a && *a == *b) a++, b++;
+  return *a == *b;
+}
+
+// ---- memory -------------------------------------------------------------
+static void Memory(void) {
+  u32 base = 0, size = 0x3000;
+  CHECK(NtAllocateVirtualMemory(&base, &size, kMemReserve | kMemCommit, kPageReadWrite, 0) == 0);
+  CHECK(base && base < 0x40000000 && (base & 0xFFF) == 0 && size == 0x3000);
+  *At(base + 0x1FFC) = 0x12345678;
+  CHECK(*At(base + 0x1FFC) == 0x12345678);
+  u32 info[7];
+  CHECK(NtQueryVirtualMemory(base + 0x1000, info, 0) == 0);
+  CHECK(info[0] == base + 0x1000 && info[1] == base && info[3] == 0x2000 && info[4] == kMemCommit &&
+        info[5] == kPageReadWrite);
+  // Decommitted pages come back zero.
+  u32 b2 = base + 0x1000, s2 = 0x1000;
+  CHECK(NtFreeVirtualMemory(&b2, &s2, kMemDecommit, 0) == 0);
+  CHECK(NtQueryVirtualMemory(base + 0x1000, info, 0) == 0 && info[4] == kMemReserve && info[3] == 0x1000);
+  b2 = base + 0x1000;
+  s2 = 0x1000;
+  CHECK(NtAllocateVirtualMemory(&b2, &s2, kMemCommit, kPageReadWrite, 0) == 0 && b2 == base + 0x1000);
+  CHECK(*At(base + 0x1FFC) == 0);
+  // A fixed reservation over one that exists fails.
+  u32 b3 = base, s3 = 0x1000;
+  CHECK(NtAllocateVirtualMemory(&b3, &s3, kMemReserve, kPageReadWrite, 0) == kStatusConflictingAddresses);
+  u32 rel = 0;
+  CHECK(NtFreeVirtualMemory(&base, &rel, kMemRelease, 0) == 0 && rel == 0x3000);
+  // A commit with no base reserves too (top down here, as a title's heap
+  // asks); none reaches the never-mapped first 64 KiB.
+  base = 0;
+  size = 0xFFFC;
+  CHECK(NtAllocateVirtualMemory(&base, &size, kMemCommit | kMemTopDown, kPageReadWrite, 0) == 0);
+  CHECK(base >= 0x10000 && base < 0x40000000 && size == 0x10000);
+  *At(base + 0xFFF8) = 0x55AA55AA;
+  CHECK(*At(base + 0xFFF8) == 0x55AA55AA);
+  rel = 0;
+  CHECK(NtFreeVirtualMemory(&base, &rel, kMemRelease, 0) == 0 && rel == 0x10000);
+  b2 = 0x1000;
+  s2 = 0x1000;
+  CHECK(NtAllocateVirtualMemory(&b2, &s2, kMemCommit, kPageReadWrite, 0) != 0);
+  // Large pages: 64 KiB granularity from 0x40000000.
+  base = 0;
+  size = 0x1000;
+  CHECK(NtAllocateVirtualMemory(&base, &size, kMemReserve | kMemCommit | kMemLargePages, kPageReadWrite, 0) == 0);
+  CHECK(base >= 0x40000000 && base < 0x80000000 && (base & 0xFFFF) == 0 && size == 0x10000);
+  rel = 0;
+  CHECK(NtFreeVirtualMemory(&base, &rel, kMemRelease, 0) == 0);
+  // ... and commits and decommits whole 64 KiB pages in it, as a heap
+  // that grows by the sizes it gets back relies on.
+  base = 0;
+  size = 0x100000;
+  CHECK(NtAllocateVirtualMemory(&base, &size, kMemReserve | kMemLargePages, kPageReadWrite, 0) == 0);
+  b2 = base;
+  s2 = 0x20E50;
+  CHECK(NtAllocateVirtualMemory(&b2, &s2, kMemCommit | kMemLargePages, kPageReadWrite, 0) == 0 && b2 == base &&
+        s2 == 0x30000);
+  b2 = base + 0x10100;
+  s2 = 0x100;
+  CHECK(NtFreeVirtualMemory(&b2, &s2, kMemDecommit, 0) == 0 && b2 == base + 0x10000 && s2 == 0x10000);
+  CHECK(NtQueryVirtualMemory(base + 0x10000, info, 0) == 0 && info[4] == kMemReserve && info[3] == 0x10000);
+  rel = 0;
+  CHECK(NtFreeVirtualMemory(&base, &rel, kMemRelease, 0) == 0 && rel == 0x100000);
+  // A release with a size frees that range of one reservation: a tail (as
+  // a heap shrinking a block in place gives back), then a middle, whose
+  // remainder becomes a reservation of its own.
+  base = 0;
+  size = 0x6000;
+  CHECK(NtAllocateVirtualMemory(&base, &size, kMemReserve | kMemCommit, kPageReadWrite, 0) == 0);
+  *At(base + 0x5000) = 1;
+  b2 = base + 0x4100;
+  s2 = 0x1F00;
+  CHECK(NtFreeVirtualMemory(&b2, &s2, kMemRelease, 0) == 0 && b2 == base + 0x4000 && s2 == 0x2000);
+  CHECK(NtQueryVirtualMemory(base + 0x4000, info, 0) == 0 && info[4] == kMemFree);
+  b2 = base + 0x1000;
+  s2 = 0x1000;
+  CHECK(NtFreeVirtualMemory(&b2, &s2, kMemRelease, 0) == 0);
+  CHECK(NtQueryVirtualMemory(base + 0x2000, info, 0) == 0 && info[1] == base + 0x2000 && info[3] == 0x2000 &&
+        info[4] == kMemCommit && info[2] == kPageReadWrite);
+  rel = 0;
+  CHECK(NtFreeVirtualMemory(&base, &rel, kMemRelease, 0) == 0 && rel == 0x1000);
+  b2 = base + 0x2000;
+  rel = 0;
+  CHECK(NtFreeVirtualMemory(&b2, &rel, kMemRelease, 0) == 0 && rel == 0x2000);
+  b2 = base + 0x5000;
+  s2 = 0x1000;
+  CHECK(NtFreeVirtualMemory(&b2, &s2, kMemRelease, 0) == kStatusMemoryNotAllocated);
+  // The kernel pool.
+  u32 p = ExAllocatePool(100);
+  CHECK(p != 0 && (p & 15) == 0);
+  ExFreePool(p);
+}
+
+// ---- physical memory and its views ---------------------------------------------
+static void Physical(void) {
+  u32 small = MmAllocatePhysicalMemoryEx(0, 0x2000, kPageReadWrite, 0, 0, 0x1000);
+  u32 large = MmAllocatePhysicalMemoryEx(0, 0x10000, kPageReadWrite | kMemLargePages, 0, 0, 0x10000);
+  u32 huge = MmAllocatePhysicalMemoryEx(0, 0x1000000, kPageReadWrite | kMem16MbPages, 0, 0x1FFFFFFF, 0x1000000);
+  CHECK(small >= 0xE0000000 && large >= 0xA0000000 && large < 0xC0000000 && huge >= 0xC0000000 &&
+        huge < 0xE0000000);
+  // The 4 KiB view is one page into physical memory: what is written
+  // there is read through the 64 KiB view at its physical address.
+  u32 pa = MmGetPhysicalAddress(small);
+  CHECK(pa == small - 0xE0000000 + 0x1000);
+  *At(small + 4) = 0xCAFEF00D;
+  CHECK(*At(0xA0000000 + pa + 4) == 0xCAFEF00D);
+  CHECK(*At(0xC0000000 + pa + 4) == 0xCAFEF00D);
+  CHECK(MmGetPhysicalAddress(large) == large - 0xA0000000);
+  CHECK(MmQueryAddressProtect(large) == kPageReadWrite);
+  // No two allocations share physical pages, whatever their views.
+  u32 pl = MmGetPhysicalAddress(large), ph = MmGetPhysicalAddress(huge);
+  CHECK(pa + 0x2000 <= pl || pl + 0x10000 <= pa);
+  CHECK(pa + 0x2000 <= ph || ph + 0x1000000 <= pa);
+  CHECK(pl + 0x10000 <= ph || ph + 0x1000000 <= pl);
+  // Physical bounds.
+  u32 low = MmAllocatePhysicalMemoryEx(0, 0x10000, kPageReadWrite | kMemLargePages, 0x100000, 0x1FFFFF, 0x10000);
+  CHECK(low && MmGetPhysicalAddress(low) >= 0x100000 && MmGetPhysicalAddress(low) + 0x10000 <= 0x200000);
+  MmFreePhysicalMemory(0, low);
+  // Whole pages of the view are committed.
+  u32 part = MmAllocatePhysicalMemoryEx(0, 0x1000, kPageReadWrite | kMemLargePages, 0, 0, 0x10000), info[7];
+  CHECK(part && NtQueryVirtualMemory(part + 0x8000, info, 0) == 0 && info[4] == kMemCommit);
+  MmFreePhysicalMemory(0, part);
+  MmFreePhysicalMemory(0, small);
+  MmFreePhysicalMemory(0, large);
+  MmFreePhysicalMemory(0, huge);
+}
+
+// ---- threads, TLS, synchronisation ------------------------------------------
+struct Shared {
+  u32 cs[7];      // RTL_CRITICAL_SECTION
+  u32 event[4];   // a synchronization event (KEVENT)
+  u32 count;
+  u32 tls_index;
+  u32 tls_seen;   // what a worker read from its own slot before setting it
+  u32 kthread;    // a worker's KPCR+0x100
+  u32 thread_id;  // a worker's KTHREAD+0x14C
+  u32 cpu[2];     // a worker's KPCR+0x10C and KTHREAD+0xBF
+  u32 handle;     // a worker's own handle
+  u32 stage;
+  u32 ticks, stop;
+};
+static struct Shared shared;
+
+static int WaitFor(volatile u32* p, u32 v) {
+  int64_t ms = -10000;
+  for (int k = 0; k < 1000 && *p != v; k++) KeDelayExecutionThread(1, 0, &ms);
+  return *p == v;
+}
+
+static u32 Counter(void* arg) {
+  (void)arg;
+  for (int k = 0; k < 20000; k++) {
+    RtlEnterCriticalSection(shared.cs);
+    RtlEnterCriticalSection(shared.cs);  // recursion
+    u32 v = shared.count;
+    shared.count = v + 1;
+    RtlLeaveCriticalSection(shared.cs);
+    RtlLeaveCriticalSection(shared.cs);
+  }
+  return 7;
+}
+
+static u32 Probe(void* arg) {
+  shared.tls_seen = KeTlsGetValue(shared.tls_index);
+  KeTlsSetValue(shared.tls_index, 0x2222);
+  shared.kthread = *At((u32)pcr() + 0x100);
+  shared.thread_id = *At(shared.kthread + 0x14C);
+  KeWaitForSingleObject(shared.event, 3, 1, 0, 0);
+  return (u32)(uintptr_t)arg;
+}
+
+static u32 Affine(void* arg) {
+  (void)arg;
+  u32 pc = (u32)pcr();
+  shared.cpu[0] = *(volatile unsigned char*)(uintptr_t)(pc + 0x10C);
+  shared.cpu[1] = *(volatile unsigned char*)(uintptr_t)(*At(pc + 0x100) + 0xBF);
+  return 0;
+}
+
+static u32 SelfSuspend(void* arg) {
+  (void)arg;
+  u32 previous = 9;
+  shared.stage = 1;
+  u32 status = NtSuspendThread(shared.handle, &previous);
+  shared.stage = 2;
+  return status == 0 && previous == 0 ? 5 : 6;
+}
+
+static u32 Ticker(void* arg) {
+  (void)arg;
+  int64_t ms = -10000;
+  while (!*(volatile u32*)&shared.stop) {
+    shared.ticks++;
+    KeDelayExecutionThread(1, 0, &ms);
+  }
+  return 0;
+}
+
+static u32 Setter(void* arg) {
+  int64_t ms = -200000;
+  KeDelayExecutionThread(1, 0, &ms);
+  KeSetEvent(arg, 1, 0);
+  return 0;
+}
+
+static void Threads(void) {
+  CHECK(KeGetCurrentProcessType() == 1);
+  // r13: the KPCR, whose current thread is this thread's KTHREAD, a
+  // thread object.
+  u32 me = *At((u32)pcr() + 0x100);
+  CHECK(me != 0 && (*At(me) >> 24) == 6);
+
+  // TLS: a slot per thread.
+  shared.tls_index = KeTlsAlloc();
+  CHECK(shared.tls_index != 0xFFFFFFFF);
+  CHECK(KeTlsSetValue(shared.tls_index, 0x1111) && KeTlsGetValue(shared.tls_index) == 0x1111);
+  // A slot freed and handed out again reads 0.
+  u32 slot = KeTlsAlloc();
+  CHECK(KeTlsSetValue(slot, 5) && KeTlsFree(slot) && KeTlsAlloc() == slot && KeTlsGetValue(slot) == 0);
+  KeTlsFree(slot);
+
+  // A worker created suspended, started, waiting on an event.
+  shared.event[0] = 1 << 24;  // KeInitializeEvent: a synchronization event, not signalled
+  shared.event[1] = 0;
+  shared.event[2] = shared.event[3] = (u32)(uintptr_t)&shared.event[2];
+  u32 h = 0, id = 0;
+  CHECK(ExCreateThread(&h, 0, &id, (void*)thread_startup, (void*)Probe, (void*)(uintptr_t)42, 1) == 0);
+  CHECK(h != 0 && id != 0);
+  int64_t ten_ms = -100000;
+  CHECK(NtWaitForSingleObjectEx(h, 1, 0, &ten_ms) == kStatusTimeout);  // still suspended
+  u32 previous = 9;
+  CHECK(NtResumeThread(h, &previous) == 0 && previous == 1);
+  int64_t zero = 0;
+  CHECK(NtWaitForSingleObjectEx(h, 1, 0, &zero) == kStatusTimeout);    // waiting on the event
+  KeDelayExecutionThread(1, 0, &ten_ms);
+  KeSetEvent(shared.event, 1, 0);
+  CHECK(NtWaitForSingleObjectEx(h, 1, 0, 0) == 0);
+  CHECK(shared.event[1] == 0);  // the waiter took the synchronization event
+  CHECK(shared.tls_seen == 0 && KeTlsGetValue(shared.tls_index) == 0x1111);
+  CHECK(shared.kthread != me && shared.thread_id == id);
+  // The thread's exit status, and its KTHREAD through its handle.
+  u32 obj = 0;
+  CHECK(ObReferenceObjectByHandle(h, __imp_ExThreadObjectType, &obj) == 0 && obj == shared.kthread);
+  CHECK(*At(obj + 0x140) == 42);
+  ObDereferenceObject(obj);
+  CHECK(NtClose(h) == 0 && NtClose(h) == kStatusInvalidHandle);
+  // Flag 0x80: the KTHREAD in place of a handle.
+  u32 kt = 0;
+  CHECK(ExCreateThread(&kt, 0, &id, (void*)thread_startup, (void*)Probe, (void*)(uintptr_t)43, 0x80) == 0);
+  CHECK(kt != 0 && (*At(kt) >> 24) == 6 && *At(kt + 0x14C) == id);
+  KeDelayExecutionThread(1, 0, &ten_ms);
+  KeSetEvent(shared.event, 1, 0);
+  CHECK(KeWaitForSingleObject((void*)(uintptr_t)kt, 3, 1, 0, 0) == 0 && shared.kthread == kt);
+  CHECK(*At(kt + 0x140) == 43);
+  ObDereferenceObject(kt);
+
+  // Bits 24-31 of the flags: an affinity mask, the thread on its lowest
+  // processor from its first instruction.
+  CHECK(ExCreateThread(&h, 0, 0, (void*)thread_startup, (void*)Affine, 0, 0x0C000000) == 0);
+  CHECK(NtWaitForSingleObjectEx(h, 1, 0, 0) == 0 && shared.cpu[0] == 2 && shared.cpu[1] == 2);
+  NtClose(h);
+  // A thread suspending itself stops in the call until resumed, which
+  // returns the count it had.
+  CHECK(ExCreateThread(&h, 0, 0, (void*)thread_startup, (void*)SelfSuspend, 0, 1) == 0);
+  shared.handle = h;
+  CHECK(NtResumeThread(h, &previous) == 0 && previous == 1);
+  CHECK(WaitFor(&shared.stage, 1));
+  CHECK(NtWaitForSingleObjectEx(h, 1, 0, &ten_ms) == kStatusTimeout && shared.stage == 1);
+  CHECK(NtResumeThread(h, &previous) == 0 && previous == 1);
+  CHECK(NtWaitForSingleObjectEx(h, 1, 0, 0) == 0 && shared.stage == 2);
+  CHECK(ObReferenceObjectByHandle(h, __imp_ExThreadObjectType, &obj) == 0 && *At(obj + 0x140) == 5);
+  ObDereferenceObject(obj);
+  NtClose(h);
+  // Another running thread, suspended, stops by its next delay.
+  CHECK(ExCreateThread(&h, 0, 0, (void*)thread_startup, (void*)Ticker, 0, 0) == 0);
+  KeDelayExecutionThread(1, 0, &ten_ms);
+  CHECK(NtSuspendThread(h, &previous) == 0 && previous == 0);
+  KeDelayExecutionThread(1, 0, &ten_ms);
+  u32 held = shared.ticks;
+  for (int k = 0; k < 3; k++) KeDelayExecutionThread(1, 0, &ten_ms);
+  CHECK(held != 0 && shared.ticks == held);
+  shared.stop = 1;
+  CHECK(NtResumeThread(h, &previous) == 0 && previous == 1);
+  CHECK(NtWaitForSingleObjectEx(h, 1, 0, 0) == 0);
+  NtClose(h);
+
+  // A relative timeout of 0x8000000000000000 (XAPI's INFINITE) waits
+  // until the object is signalled.
+  u32 ev[4] = {0, 0, (u32)(uintptr_t)&ev[2], (u32)(uintptr_t)&ev[2]};  // a notification event
+  int64_t forever = (int64_t)0x8000000000000000ull;
+  CHECK(ExCreateThread(&h, 0, 0, (void*)thread_startup, (void*)Setter, ev, 0) == 0);
+  CHECK(KeWaitForSingleObject(ev, 3, 1, 0, &forever) == 0 && ev[1] == 1);
+  NtWaitForSingleObjectEx(h, 1, 0, 0);
+  NtClose(h);
+
+  // Four threads contending for a critical section.
+  RtlInitializeCriticalSection(shared.cs);
+  u32 hs[4];
+  for (int k = 0; k < 4; k++) CHECK(ExCreateThread(&hs[k], 0x10000, 0, (void*)thread_startup, (void*)Counter, 0, 0) == 0);
+  CHECK(NtWaitForMultipleObjectsEx(4, hs, 0, 1, 0, 0) == 0);
+  CHECK(shared.count == 80000);
+  CHECK(shared.cs[4] == 0xFFFFFFFF && shared.cs[6] == 0);  // free again
+  for (int k = 0; k < 4; k++) NtClose(hs[k]);
+  CHECK(RtlTryEnterCriticalSection(shared.cs) == 1 && shared.cs[6] == me);
+  RtlLeaveCriticalSection(shared.cs);
+}
+
+static void Objects(void) {
+  // A notification event created signalled stays signalled through waits.
+  u32 e = 0;
+  CHECK(NtCreateEvent(&e, 0, 0, 1) == 0);
+  int64_t zero = 0;
+  CHECK(NtWaitForSingleObjectEx(e, 1, 0, &zero) == 0 && NtWaitForSingleObjectEx(e, 1, 0, &zero) == 0);
+  // A synchronization event is taken by one wait.
+  u32 s = 0, previous = 9;
+  CHECK(NtCreateEvent(&s, 0, 1, 0) == 0);
+  CHECK(NtWaitForSingleObjectEx(s, 1, 0, &zero) == kStatusTimeout);
+  CHECK(NtSetEvent(s, &previous) == 0 && previous == 0);
+  u32 both[2] = {s, e};
+  CHECK(NtWaitForMultipleObjectsEx(2, both, 1, 1, 0, &zero) == 0);  // any: the first, s
+  CHECK(NtWaitForMultipleObjectsEx(2, both, 1, 1, 0, &zero) == 1);  // s taken: e
+  CHECK(NtWaitForMultipleObjectsEx(2, both, 0, 1, 0, &zero) == kStatusTimeout);  // all
+  NtClose(s);
+  NtClose(e);
+  // A semaphore counts down with waits.
+  u32 sem[5];
+  KeInitializeSemaphore(sem, 2, 3);
+  CHECK(KeWaitForSingleObject(sem, 3, 1, 0, &zero) == 0 && KeWaitForSingleObject(sem, 3, 1, 0, &zero) == 0);
+  CHECK(KeWaitForSingleObject(sem, 3, 1, 0, &zero) == kStatusTimeout);
+  CHECK(KeReleaseSemaphore(sem, 1, 3, 0) == 0 && sem[1] == 3);
+  // A mutant is recursive for its owner.
+  u32 m = 0;
+  CHECK(NtCreateMutant(&m, 0, 1) == 0);
+  CHECK(NtWaitForSingleObjectEx(m, 1, 0, &zero) == 0);
+  CHECK(NtReleaseMutant(m, &previous) == 0 && NtReleaseMutant(m, &previous) == 0 && previous == 0);
+  CHECK(NtReleaseMutant(m, &previous) == kStatusMutantNotOwned);
+  NtClose(m);
+  // Named objects, as XAPI's CreateEvent and CreateMutex ask for them:
+  // under \BaseNamedObjects (-4) with OBJ_OPENIF.
+  struct Ansi name;
+  RtlInitAnsiString(&name, "Shared");
+  u32 attributes[3] = {0xFFFFFFFC, (u32)(uintptr_t)&name, 0x80};
+  u32 n1 = 0, n2 = 0;
+  CHECK(NtCreateEvent(&n1, attributes, 0, 0) == 0);
+  CHECK(NtCreateEvent(&n2, attributes, 1, 1) == kStatusObjectNameExists && n2 && n2 != n1);
+  CHECK(NtWaitForSingleObjectEx(n1, 1, 0, &zero) == kStatusTimeout);  // the first one's state
+  CHECK(NtSetEvent(n2, &previous) == 0 && NtWaitForSingleObjectEx(n1, 1, 0, &zero) == 0);
+  CHECK(NtCreateMutant(&m, attributes, 0) == kStatusObjectTypeMismatch);
+  attributes[2] = 0;
+  CHECK(NtCreateEvent(&s, attributes, 0, 0) == kStatusObjectNameCollision);
+  RtlInitAnsiString(&name, "SHARED");
+  CHECK(NtCreateEvent(&s, attributes, 0, 0) == 0);  // names compare exactly
+  NtClose(s);
+  attributes[2] = 0xC0;  // ... unless case-insensitive
+  CHECK(NtCreateEvent(&s, attributes, 0, 0) == kStatusObjectNameExists);
+  NtClose(s);
+  NtClose(n1);
+  NtClose(n2);
+  attributes[2] = 0x80;  // the name went with its last handle
+  CHECK(NtCreateMutant(&m, attributes, 0) == 0);
+  NtClose(m);
+  // A spin lock holds the owner's KPCR.
+  u32 lock = 0;
+  u32 irql = KfAcquireSpinLock(&lock);
+  CHECK(lock == (u32)pcr() && irql == 0);
+  KfReleaseSpinLock(&lock, irql);
+  CHECK(lock == 0);
+  // A release frees the lock whoever holds it.
+  lock = 0x1234;
+  KfReleaseSpinLock(&lock, irql);
+  CHECK(lock == 0);
+  // An interlocked list: pop and flush.
+  u32 nodes[3] = {(u32)(uintptr_t)&nodes[1], (u32)(uintptr_t)&nodes[2], 0};
+  u32 head[2] = {(u32)(uintptr_t)&nodes[0], 3 << 16};
+  CHECK(InterlockedPopEntrySList(head) == (u32)(uintptr_t)&nodes[0]);
+  CHECK(head[0] == (u32)(uintptr_t)&nodes[1] && (head[1] >> 16) == 2);
+  CHECK(InterlockedFlushSList(head) == (u32)(uintptr_t)&nodes[1] && head[0] == 0 && (head[1] >> 16) == 0);
+  // A call through an import's slot reaches its handler.
+  u32 (*close)(u32) = (u32(*)(u32))(uintptr_t)__imp_NtClose;
+  CHECK(close(0x1234) == kStatusInvalidHandle);
+}
+
+// ---- strings and formatting, variables, time ------------------------------------------
+static u32 Vsn(char* buf, u32 count, const char* fmt, ...) {
+  // The guest's va_list: the 8-byte slots of the parameter area.
+  __builtin_va_list ap;
+  __builtin_va_start(ap, fmt);
+  u32 n = _vsnprintf(buf, count, fmt, (uint64_t*)ap);
+  __builtin_va_end(ap);
+  return n;
+}
+
+static void Strings(void) {
+  static const char kName[] = "kernel";
+  u32 s[2];
+  RtlInitAnsiString(s, kName);
+  CHECK(s[0] == (6u << 16 | 7) && s[1] == (u32)(uintptr_t)kName);
+  char buf[96];
+  u32 n = sprintf(buf, "%d|%5x|%-4s|%08X|%I64d|%.3f", -12, 0xAB, "ab", 0xBEEF, (int64_t)-5000000000, 2.5);
+  CHECK(Streq(buf, "-12|   ab|ab  |0000BEEF|-5000000000|2.500") && n == 41);
+  static const uint16_t kWide[] = {'w', 'i', 0};
+  CHECK(sprintf(buf, "%c|%%|%S|%ls|%-3d|", 'z', kWide, kWide, 7) == 14 && Streq(buf, "z|%|wi|wi|7  |"));
+  // The ninth argument comes from the caller's parameter area.
+  CHECK(sprintf9(buf, "%c%c%c%c%c%c%c", 'a', 'b', 'c', 'd', 'e', 'f', 'g') == 7 && Streq(buf, "abcdefg"));
+  CHECK(Vsn(buf, sizeof buf, "%s=%u", "n", 7u) == 3 && Streq(buf, "n=7"));
+  CHECK(Vsn(buf, 4, "%s", "toolong") == 0xFFFFFFFF);
+  u32 words[4] = {0, 0, 0, 0};
+  RtlFillMemoryUlong(words, 12, 0x01020304);
+  CHECK(words[0] == 0x01020304 && words[2] == 0x01020304 && words[3] == 0);
+}
+
+static void Variables(void) {
+  const uint16_t* version = (const uint16_t*)(uintptr_t)__imp_XboxKrnlVersion;
+  CHECK(version[0] == 2 && version[2] == 17559);
+  // The time stamp bundle's tick count follows the time.
+  volatile u32* bundle = At(__imp_KeTimeStampBundle);
+  u32 before = bundle[4];
+  int64_t fifty_ms = -500000;
+  KeDelayExecutionThread(1, 0, &fifty_ms);
+  u32 after = bundle[4];
+  CHECK(after - before >= 40 && after - before < 1000);
+  uint64_t t0 = time_base();
+  KeDelayExecutionThread(1, 0, &fifty_ms);
+  uint64_t t1 = time_base(), f = KeQueryPerformanceFrequency();
+  CHECK(f == 49875000 && t1 - t0 >= f / 25 && t1 - t0 < f);
+  uint64_t now = 0;
+  KeQuerySystemTime(&now);
+  CHECK(now > 0x01D0000000000000ull);  // after 2014
+}
+
+
+// ---- files ------------------------------------------------------------------
+// The title's disc (tests/CMakeLists.txt writes it): data.bin (the 32 bytes
+// 0-9A-V), Sub/Name.TXT ("hello"), Sub/other.dat.
+struct Attributes {
+  u32 root, name, attributes;
+};
+
+static u32 OpenPath(u32* h, const char* path, u32 access, u32 disposition, u32 options, u32* io) {
+  struct Ansi name;
+  RtlInitAnsiString(&name, path);
+  struct Attributes a = {0, (u32)(uintptr_t)&name, 0};
+  return NtCreateFile9(h, access, &a, io, 0, 0x80, 7, disposition, options);
+}
+
+static u32 QueryFullIn(u32 root, const char* path, uint64_t* info) {
+  struct Ansi name;
+  RtlInitAnsiString(&name, path);
+  struct Attributes a = {root, (u32)(uintptr_t)&name, 0x40};
+  return NtQueryFullAttributesFile(&a, info);
+}
+static u32 QueryFull(const char* path, uint64_t* info) { return QueryFullIn(0, path, info); }
+
+static void Files(void) {
+  u32 h = 0, d = 0, io[2];
+  char buf[64];
+  uint64_t info[7];
+  // A file on the disc, read in order, then at an offset.
+  CHECK(OpenPath(&h, "game:\\data.bin", kGenericRead, kOpen, kSync | kNonDirectoryFile, io) == 0 &&
+        io[1] == kOpened);
+  CHECK(NtReadFile(h, 0, 0, 0, io, buf, 10, 0) == 0 && io[1] == 10 && Memeq(buf, "0123456789", 10));
+  CHECK(NtReadFile(h, 0, 0, 0, io, buf, 64, 0) == 0 && io[1] == 22 && buf[0] == 'A' && buf[21] == 'V');
+  CHECK(NtReadFile(h, 0, 0, 0, io, buf, 64, 0) == kStatusEndOfFile && io[1] == 0);
+  CHECK(NtQueryInformationFile(h, io, info, 8, 14) == 0 && info[0] == 32);
+  int64_t at = 4;
+  CHECK(NtReadFile(h, 0, 0, 0, io, buf, 2, &at) == 0 && Memeq(buf, "45", 2));
+  CHECK(NtQueryInformationFile(h, io, info, 0x38, 34) == 0 && info[5] == 32 && (info[6] >> 32) == 0x01);
+  u32 volume[8];
+  CHECK(NtQueryVolumeInformationFile(h, io, volume, sizeof volume, 5) == 0 && volume[2] == 4 &&
+        Memeq(&volume[3], "GDFX", 4));
+  NtClose(h);
+  // Names are case-insensitive; the disc is read-only.
+  CHECK(OpenPath(&h, "GAME:\\SUB\\name.txt", kGenericRead, kOpen, kSync, io) == 0);
+  CHECK(NtReadFile(h, 0, 0, 0, io, buf, 64, 0) == 0 && io[1] == 5 && Memeq(buf, "hello", 5));
+  NtClose(h);
+  CHECK(OpenPath(&h, "d:\\data.bin", kGenericWrite, kOpen, kSync, io) == kStatusAccessDenied);
+  CHECK(OpenPath(&h, "game:\\missing.bin", kGenericRead, kOpen, kSync, io) == kStatusObjectNameNotFound);
+  CHECK(OpenPath(&h, "game:\\nodir\\x.bin", kGenericRead, kOpen, kSync, io) == kStatusObjectPathNotFound);
+  // A backslash after a name names a directory: a file's is invalid, a
+  // directory's opens (and is a directory to a file open).
+  CHECK(OpenPath(&h, "game:\\data.bin\\", kGenericRead, kOpen, kSync, io) == 0xC0000033);
+  CHECK(OpenPath(&h, "game:\\Sub\\", kGenericRead, kOpen, kSync | kNonDirectoryFile, io) == 0xC00000BA);
+  CHECK(OpenPath(&d, "game:\\Sub\\", kGenericRead, kOpen, kSync | kDirectoryFile, io) == 0);
+  NtClose(d);
+  // A directory's entries, through a mask, one per query.
+  u32 entry[32];
+  struct Ansi mask;
+  RtlInitAnsiString(&mask, "*.txt");
+  CHECK(OpenPath(&d, "game:\\Sub", kGenericRead, kOpen, kSync | kDirectoryFile, io) == 0);
+  CHECK(NtQueryDirectoryFile9(d, 0, 0, 0, io, entry, sizeof entry, &mask, 0) == 0 && entry[15] == 8 &&
+        Memeq(&entry[16], "Name.TXT", 8) && entry[11] == 5);
+  CHECK(NtQueryDirectoryFile9(d, 0, 0, 0, io, entry, sizeof entry, 0, 0) == kStatusNoMoreFiles);
+  CHECK(NtQueryDirectoryFile9(d, 0, 0, 0, io, entry, sizeof entry, 0, 1) == 0 && Memeq(&entry[16], "Name.TXT", 8));
+  CHECK(NtQueryDirectoryFile9(d, 0, 0, 0, io, entry, sizeof entry, 0, 0) == 0 && entry[15] == 9 &&
+        Memeq(&entry[16], "other.dat", 9));
+  NtClose(d);
+
+  // Writable storage, through a link the title makes.
+  struct Ansi link, target;
+  RtlInitAnsiString(&link, "\\??\\hdd:");
+  RtlInitAnsiString(&target, "\\Device\\Harddisk0\\Partition1");
+  CHECK(ObCreateSymbolicLink(&link, &target) == 0);
+  CHECK(OpenPath(&d, "hdd:\\dir", kGenericRead, kCreate, kSync | kDirectoryFile, io) == 0 && io[1] == kCreated);
+  CHECK(OpenPath(&h, "hdd:\\dir\\f.bin", kGenericRead | kGenericWrite, kCreate, kSync | kNonDirectoryFile, io) == 0);
+  CHECK(OpenPath(&h, "hdd:\\dir\\f.bin", kGenericRead, kCreate, kSync, io) == kStatusObjectNameCollision);
+  CHECK(NtWriteFile(h, 0, 0, 0, io, "abcdefghij", 10, 0) == 0 && io[1] == 10);
+  uint64_t v = 0;
+  CHECK(NtSetInformationFile(h, io, &v, 8, 14) == 0);
+  CHECK(NtReadFile(h, 0, 0, 0, io, buf, 64, 0) == 0 && io[1] == 10 && Memeq(buf, "abcdefghij", 10));
+  v = 4;
+  CHECK(NtSetInformationFile(h, io, &v, 8, 20) == 0);
+  CHECK(NtFlushBuffersFile(h, io) == 0);
+  // A directory with entries is not deleted; a file to create with a
+  // backslash after its name is invalid.
+  u32 probe = 0;
+  uint8_t remove_dir = 1;
+  CHECK(OpenPath(&probe, "hdd:\\dir", kGenericRead, kOpen, kSync | kDirectoryFile | 0x1000, io) == 0xC0000101);
+  CHECK(NtSetInformationFile(d, io, &remove_dir, 1, 13) == 0xC0000101);
+  CHECK(OpenPath(&probe, "hdd:\\dir\\new\\", kGenericWrite, kCreate, kSync | kNonDirectoryFile, io) == 0xC0000033);
+  // XAPI's root: the DOS devices directory (ObDosDevices, -3), as xam's
+  // GetFileAttributesExA passes it.
+  CHECK(QueryFullIn(0xFFFFFFFD, "D:\\data.bin", info) == 0 && info[5] == 32);
+  CHECK(QueryFull("hdd:\\DIR\\F.BIN", info) == 0 && info[5] == 4 && (info[6] >> 32) == 0x80);
+  // An asynchronous read completes with its event set.
+  u32 e = 0;
+  CHECK(NtCreateEvent(&e, 0, 0, 0) == 0);
+  at = 1;
+  CHECK(NtReadFile(h, e, 0, 0, io, buf, 2, &at) == 0 && io[0] == 0 && io[1] == 2 && Memeq(buf, "bc", 2));
+  int64_t zero = 0;
+  CHECK(NtWaitForSingleObjectEx(e, 1, 0, &zero) == 0);
+  NtClose(e);
+  // Renamed, then deleted when its handle closes.
+  uint8_t remove_now = 1;
+  struct {
+    u32 replace, root;
+    struct Ansi name;
+  } rename = {0, 0, {0, 0, 0}};
+  RtlInitAnsiString(&rename.name, "hdd:\\dir\\g.bin");
+  CHECK(NtSetInformationFile(h, io, &rename, sizeof rename, 10) == 0);
+  // Replace-if-exists is a BOOLEAN: XAPI's MoveFile leaves the padding
+  // after it unset.
+  u32 other = 0;
+  CHECK(OpenPath(&other, "hdd:\\dir\\o.bin", kGenericRead | kGenericWrite, kCreate, kSync | kNonDirectoryFile, io) == 0);
+  RtlInitAnsiString(&rename.name, "hdd:\\dir\\g.bin");
+  rename.replace = 0x00FFFFFF;
+  CHECK(NtSetInformationFile(other, io, &rename, sizeof rename, 10) == kStatusObjectNameCollision);
+  RtlInitAnsiString(&rename.name, "game:\\o.bin");
+  CHECK(NtSetInformationFile(other, io, &rename, sizeof rename, 10) == kStatusNotSameDevice);
+  CHECK(NtSetInformationFile(other, io, &remove_now, 1, 13) == 0);
+  NtClose(other);
+  rename.replace = 0;
+  RtlInitAnsiString(&rename.name, "hdd:\\dir\\g.bin");
+  CHECK(QueryFull("hdd:\\dir\\f.bin", info) == kStatusObjectNameNotFound && QueryFull("hdd:\\dir\\g.bin", info) == 0);
+  CHECK(NtSetInformationFile(h, io, &remove_now, 1, 13) == 0);
+  NtClose(h);
+  CHECK(QueryFull("hdd:\\dir\\g.bin", info) == kStatusObjectNameNotFound);
+  CHECK(NtQueryVolumeInformationFile(d, io, volume, sizeof volume, 5) == 0 && Memeq(&volume[3], "FATX", 4));
+  NtClose(d);
+  CHECK(ObDeleteSymbolicLink(&link) == 0);
+  CHECK(OpenPath(&d, "hdd:\\dir", kGenericRead, kOpen, kSync | kDirectoryFile, io) == kStatusObjectPathNotFound);
+  // Opened through NtOpenFile, by the device's own name.
+  struct Ansi name;
+  RtlInitAnsiString(&name, "\\Device\\Harddisk0\\Partition1\\dir");
+  struct Attributes a = {0, (u32)(uintptr_t)&name, 0};
+  CHECK(NtOpenFile(&d, kGenericRead, &a, io, 7, kSync | kDirectoryFile) == 0 && io[1] == kOpened);
+  NtClose(d);
+}
+
+// ---- the title's module -----------------------------------------------------
+// tests/CMakeLists.txt gives the title's XEX the system flags 0x400 and a
+// title workspace size (header 0x00020401) of 0x123000, and runs it as
+// title.xex; xbox360_elf2xex makes this its resource "Strings".
+const char __xex_resource_Strings[] __attribute__((used)) = "resource data";
+
+static void Modules(void) {
+  u32 h = *At(__imp_XexExecutableModuleHandle);
+  CHECK(h != 0);
+  if (!h) return;
+  u32 headers = At(h)[0x58 / 4], start = (u32)(uintptr_t)_start;
+  CHECK(Memeq((const void*)(uintptr_t)headers, "XEX2", 4));
+  CHECK(At(h)[0x1C / 4] == 0x82000000 && At(h)[0x3C / 4] == start);
+  // Its base name, in UTF-16.
+  CHECK((At(h)[0x2C / 4] >> 16) == 18 && *(volatile uint16_t*)(uintptr_t)At(h)[0x30 / 4] == 't');
+  // Header fields: a value in the table, a dword's address, a missing key.
+  CHECK(RtlImageXexHeaderField(headers, 0x00010100) == start);
+  u32 workspace = RtlImageXexHeaderField(headers, 0x00020401);
+  CHECK(workspace && *At(workspace) == 0x123000);
+  CHECK(RtlImageXexHeaderField(headers, 0x00040006) == 0);
+  CHECK(XexCheckExecutablePrivilege(10) == 1 && XexCheckExecutablePrivilege(9) == 0);
+  u32 other = 1;
+  CHECK(XexGetModuleHandle(0, &other) == 0 && other == h);
+  other = 1;
+  CHECK(XexGetModuleHandle("TITLE.xex", &other) == 0 && other == h);
+  other = 1;
+  CHECK((int32_t)XexGetModuleHandle("xbdm.xex", &other) < 0 && other == 0);
+  u32 data = 0, size = 0;
+  CHECK(XexGetModuleSection(h, "Strings", &data, &size) == 0 &&
+        data == (u32)(uintptr_t)__xex_resource_Strings && size == sizeof __xex_resource_Strings);
+  CHECK((int32_t)XexGetModuleSection(h, "Other", &data, &size) < 0);
+  u32 address = 1;
+  CHECK((int32_t)XexGetProcedureAddress(0, 1, &address) < 0 && address == 0);
+  // The system modules: their exports by address, called through it.
+  u32 xam = 0, krnl = 0;
+  CHECK(XexGetModuleHandle("xam.xex", &xam) == 0 && xam && XexGetModuleHandle("XBOXKRNL.EXE", &krnl) == 0 &&
+        krnl && krnl != xam && krnl != h);
+  CHECK(XexGetProcedureAddress(xam, 75, &address) == 0 && address);
+  CHECK(((u32(*)(u32))(uintptr_t)address)(1) == 0);  // NetDll_XNetGetEthernetLinkStatus: no link
+  CHECK(XexGetProcedureAddress(krnl, 320, &address) == 0 && address);
+  uint64_t time = 0x1da6b158f2a0f87ull;
+  uint16_t f[8] = {0};
+  ((u32(*)(const uint64_t*, uint16_t*))(uintptr_t)address)(&time, f);  // RtlTimeToTimeFields
+  CHECK(f[0] == 2024 && f[1] == 2 && f[2] == 29 && f[7] == 4);
+  CHECK(XexGetProcedureAddress(krnl, 344, &address) == 0 && address == __imp_XboxKrnlVersion);
+  // Any export has an address, a handler or not (only a call without one is fatal).
+  u32 first = 0;
+  CHECK(XexGetProcedureAddress(xam, 1, &first) == 0 && XexGetProcedureAddress(xam, 2, &address) == 0 &&
+        address == first + 4);
+}
+
+// ---- the console --------------------------------------------------------------
+static void Console(void) {
+  u32 v = 0;
+  uint16_t required = 0;
+  CHECK(ExGetXConfigSetting(3, 9, &v, 4, &required) == 0 && v == 1 && required == 4);  // English
+  CHECK(ExGetXConfigSetting(2, 2, &v, 4, &required) == 0 && v == 0x00400100);  // NTSC-M
+  required = 0;
+  CHECK(ExGetXConfigSetting(3, 9, 0, 0, &required) == 0 && required == 4);
+  CHECK(ExGetXConfigSetting(3, 9, &v, 2, &required) == 0xC0000023);
+  // XGetAVPack and XGetVideoMode are the kernel's queries.
+  CHECK(XGetAVPack() == HalGetCurrentAVPack());
+  u32 mode[12], kernel_mode[12];
+  XGetVideoMode(mode);
+  VdQueryVideoMode(kernel_mode);
+  CHECK(Memeq(mode, kernel_mode, sizeof mode));
+  CHECK(mode[0] == 1280 && mode[1] == 720 && mode[3] == 1 && mode[5] == 0x42700000 && mode[6] == 1);
+  CHECK(*At(__imp_VdGpuClockInMHz) == 500 && *At(__imp_VdGlobalDevice) == 0);
+  // The calibration lock is a free critical section.
+  void* lock = (void*)(uintptr_t)__imp_VdHSIOCalibrationLock;
+  CHECK(At(__imp_VdHSIOCalibrationLock)[4] == 0xFFFFFFFF);
+  RtlEnterCriticalSection(lock);
+  CHECK(At(__imp_VdHSIOCalibrationLock)[4] == 0 && RtlTryEnterCriticalSection(lock) == 1);
+  RtlLeaveCriticalSection(lock);
+  RtlLeaveCriticalSection(lock);
+  CHECK(At(__imp_VdHSIOCalibrationLock)[4] == 0xFFFFFFFF);
+  CHECK(Memeq((const void*)(uintptr_t)__imp_ExLoadedCommandLine, "\"title.xex\"", 12));
+  u32 registration[4] = {0x82001000, 0, 0, 0};
+  CHECK(ExRegisterTitleTerminateNotification(registration, 1) == 0);
+  CHECK(ExRegisterTitleTerminateNotification(registration, 0) == 0);
+  CHECK(FscSetCacheElementCount(64) == 0);
+}
+
+// ---- the GPU -----------------------------------------------------------------
+static volatile u32* Reg(u32 r) { return At(0x7FC80000 + 4 * r); }
+static u32 Type0(u32 reg, u32 count) { return (count - 1) << 16 | reg; }
+static u32 Type3(u32 opcode, u32 count) { return 0xC0000000 | (count - 1) << 16 | opcode << 8; }
+
+// The graphics interrupt callback (start.S's interrupt_entry), as a DPC.
+static volatile u32 interrupts[2], interrupt_user, interrupt_irql;
+void GraphicsInterrupt(u32 source, u32 user) {
+  if (source < 2) interrupts[source]++;
+  interrupt_user = user;
+  interrupt_irql = *(volatile uint8_t*)(uintptr_t)(pcr() + 0x18);
+}
+
+// Waits up to a second for *p == v.
+static void Gpu(void) {
+  CHECK(*Reg(0x1961) == (1280u << 16 | 720) && *Reg(0x1951) == 1);
+  // Vertical blanks reach the callback as DPCs.
+  VdSetGraphicsInterruptCallback((void*)interrupt_entry, 0x5678);
+  int64_t hundred_ms = -1000000;
+  KeDelayExecutionThread(1, 0, &hundred_ms);
+  CHECK(interrupts[0] >= 3 && interrupt_user == 0x5678 && interrupt_irql == 2);
+
+  // A 4 KiB ring buffer, then the memory the GPU writes, by physical
+  // address (the GPU's addresses) through another view.
+  u32 ring = MmAllocatePhysicalMemoryEx(0, 0x3000, kPageReadWrite, 0, 0, 0x1000), pa = MmGetPhysicalAddress(ring);
+  u32 data = ring + 0x1000, pdata = pa + 0x1000;
+  CHECK(VdInitializeRingBuffer(pa, 9) == 0);
+  VdEnableRingBufferRPtrWriteBack(pdata, 6);
+  volatile u32* rb = At(ring);
+  u32 w = 0;
+  // Scratch register 0, written back to memory.
+  rb[w++] = Type0(0x1DC, 2);
+  rb[w++] = 1;
+  rb[w++] = pdata + 4;
+  rb[w++] = Type0(0x578, 1);
+  rb[w++] = 0x1234;
+  // Words to memory: the GPU is little-endian, 2 swaps bytes in words.
+  rb[w++] = Type3(0x3D, 2);
+  rb[w++] = (pdata + 0x40) | 2;
+  rb[w++] = 0xCAFEBABE;
+  rb[w++] = Type3(0x3D, 2);
+  rb[w++] = pdata + 0x44;
+  rb[w++] = 0xCAFEBABE;
+  // An indirect buffer with a fence.
+  volatile u32* ib = At(data + 0x100);
+  ib[0] = Type3(0x58, 3);
+  ib[1] = 0;
+  ib[2] = (pdata + 0x60) | 2;
+  ib[3] = 7;
+  rb[w++] = Type3(0x3F, 2);
+  rb[w++] = pdata + 0x100;
+  rb[w++] = 4;
+  // An interrupt for processor 0.
+  rb[w++] = Type3(0x54, 1);
+  rb[w++] = 1;
+  // A wait for the title's flag, then a fence.
+  rb[w++] = Type3(0x3C, 5);
+  rb[w++] = 0x13;
+  rb[w++] = (pdata + 0x80) | 2;
+  rb[w++] = 1;
+  rb[w++] = 0xFFFFFFFF;
+  rb[w++] = 0x100;
+  rb[w++] = Type3(0x58, 3);
+  rb[w++] = 0;
+  rb[w++] = (pdata + 0x64) | 2;
+  rb[w++] = 9;
+  // Occlusion queries: a begin's counts zeroed, an end's (D3D's mark in
+  // a z fail word) samples passed, little-endian.
+  volatile u32* query = At(data + 0xC0);
+  for (u32 k = 0; k < 16; k++) query[k] = 0x11111111;
+  query[3] = 0xFFFFFEED;
+  rb[w++] = Type0(0x2325, 1);
+  rb[w++] = pdata + 0xC0;
+  rb[w++] = Type3(0x5B, 1);
+  rb[w++] = 0x15;
+  rb[w++] = Type0(0x2325, 1);
+  rb[w++] = pdata + 0xE0;
+  rb[w++] = Type3(0x5B, 1);
+  rb[w++] = 0x15;
+  // The swap: VdSwap fills 64 words.
+  u32 fb = ring + 0x2000, fetch[6] = {0, fb, 0, 0, 0, 0}, front = fb, format = 6, color_space = 0, width = 1280,
+      height = 720;
+  u32 swap = w;
+  VdSwap10(&rb[w], fetch, 0, 0, 0, &front, &format, &color_space, &width, &height);
+  w += 64;
+  CHECK(rb[swap] == 0x00054800 && rb[swap + 2] == pa + 0x2000 && rb[swap + 7] == 0xC0036400 &&
+        rb[swap + 8] == 0x53574150 && rb[swap + 9] == pa + 0x2000 && rb[swap + 63] == 0x80000000);
+  *Reg(0x1C5) = w;  // CP_RB_WPTR
+
+  CHECK(WaitFor(At(data + 0x60), 7));
+  CHECK(*At(data + 4) == 0x1234 && *At(data + 0x40) == 0xCAFEBABE && *At(data + 0x44) == 0xBEBAFECA);
+  CHECK(WaitFor(&interrupts[1], 1));
+  // Held at the wait until the flag is set.
+  CHECK(*At(data + 0x64) == 0);
+  *At(data + 0x80) = 1;
+  CHECK(WaitFor(At(data + 0x64), 9) && WaitFor(At(data), w) && *Reg(0x1C4) == w);
+  CHECK(query[0] == 0xE8030000 && query[4] == 0xE8030000 && query[1] == 0 && query[3] == 0 && query[7] == 0);
+  CHECK(query[8] == 0 && query[12] == 0 && query[15] == 0);
+}
+
+// A thread that waits on an event and counts itself through.
+static volatile u32 pulsed;
+static u32 PulseWaiter(void* arg) {
+  NtWaitForSingleObjectEx((u32)(uintptr_t)arg, 1, 0, 0);
+  __sync_fetch_and_add(&pulsed, 1);
+  return 0;
+}
+
+// PulseEvent lets the threads waiting through, all of them for a
+// notification event, one for a synchronization event, and leaves the
+// event unsignalled.
+static void Pulses(void) {
+  int64_t fifty_ms = -500000, zero = 0;
+  for (u32 type = 0; type < 2; type++) {
+    u32 e = 0, threads[2], id, previous = 9;
+    pulsed = 0;
+    CHECK(NtCreateEvent(&e, 0, type, 0) == 0);
+    for (u32 k = 0; k < 2; k++)
+      CHECK(ExCreateThread(&threads[k], 0, &id, (void*)thread_startup, (void*)PulseWaiter, (void*)(uintptr_t)e, 0) == 0);
+    KeDelayExecutionThread(1, 0, &fifty_ms);
+    CHECK(NtPulseEvent(e, &previous) == 0 && previous == 0);
+    CHECK(WaitFor(&pulsed, type ? 1 : 2));
+    KeDelayExecutionThread(1, 0, &fifty_ms);
+    CHECK(pulsed == (type ? 1 : 2) && NtWaitForSingleObjectEx(e, 1, 0, &zero) == 0x102);
+    if (type) {
+      CHECK(NtSetEvent(e, 0) == 0 && WaitFor(&pulsed, 2));
+    }
+    for (u32 k = 0; k < 2; k++) {
+      NtWaitForSingleObjectEx(threads[k], 1, 0, 0);
+      NtClose(threads[k]);
+    }
+    NtClose(e);
+  }
+}
+
+// ---- strings, statuses, the FPU flag ------------------------------------------
+static void Conversions(void) {
+  uint16_t wide[8];
+  u32 written = 0;
+  CHECK(RtlMultiByteToUnicodeN(wide, sizeof wide, &written, "abc\xE9", 4) == 0 && written == 8 && wide[0] == 'a' &&
+        wide[3] == 0xE9);
+  CHECK(RtlMultiByteToUnicodeN(wide, 4, &written, "abcdef", 6) == 0 && written == 4);
+  static const uint16_t hi[3] = {'h', 'i', 0x263A};
+  char narrow[8];
+  CHECK(RtlUnicodeToMultiByteN(narrow, sizeof narrow, &written, hi, 6) == 0 && written == 3 &&
+        Memeq(narrow, "hi?", 3));
+  struct Ansi u = {6, 6, (u32)(uintptr_t)hi}, a = {0, 0, 0};
+  CHECK(RtlUnicodeStringToAnsiString(&a, &u, 1) == 0 && a.length == 3 && Memeq((void*)(uintptr_t)a.buffer, "hi?", 4));
+  RtlFreeAnsiString(&a);
+  char small[2];
+  struct Ansi s = {0, 2, (u32)(uintptr_t)small};
+  CHECK(RtlUnicodeStringToAnsiString(&s, &u, 0) == 0x80000005 && s.length == 1 && Memeq(small, "h", 2));
+  CHECK(RtlNtStatusToDosError(0) == 0 && RtlNtStatusToDosError(0xC0000034) == 2 &&
+        RtlNtStatusToDosError(0x80070005) == 5 && RtlNtStatusToDosError(0xC0000135) == 126 &&
+        RtlNtStatusToDosError(0xC0000240) == 1235 && RtlNtStatusToDosError(0xC00000F0) == 87);
+  uint64_t time = 0;
+  uint16_t f[8];
+  RtlTimeToTimeFields(&time, f);
+  CHECK(f[0] == 1601 && f[1] == 1 && f[2] == 1 && f[3] == 0 && f[6] == 0 && f[7] == 1);  // a Monday
+  time = 0x1da6b158f2a0f87ull;  // 2024-02-29 13:45:30.1234567, a Thursday
+  RtlTimeToTimeFields(&time, f);
+  CHECK(f[0] == 2024 && f[1] == 2 && f[2] == 29 && f[3] == 13 && f[4] == 45 && f[5] == 30 && f[6] == 123 &&
+        f[7] == 4);
+  time = 6 * 864000000000ull;  // 1601-01-07, a Sunday
+  RtlTimeToTimeFields(&time, f);
+  CHECK(f[2] == 7 && f[7] == 0);
+  // And back, the weekday ignored; no such date is FALSE.
+  uint16_t fields[8] = {2006, 11, 7, 12, 34, 56, 789, 6};
+  CHECK(RtlTimeFieldsToTime(fields, &time) == 1 && time == 0x1c7026921f53c50ull);
+  fields[1] = 2, fields[2] = 29;
+  CHECK(RtlTimeFieldsToTime(fields, &time) == 0 && time == 0x1c7026921f53c50ull);
+  uint16_t first[8] = {1601, 1, 1, 0, 0, 0, 0, 0};
+  CHECK(RtlTimeFieldsToTime(first, &time) == 1 && time == 0);
+  volatile uint8_t* fpu = (volatile uint8_t*)(uintptr_t)(*At((u32)pcr() + 0x100) + 0x71);
+  KeEnableFpuExceptions(1);
+  CHECK(*fpu == 1);
+  KeEnableFpuExceptions(0);
+  CHECK(*fpu == 0);
+}
+
+// ---- audio ---------------------------------------------------------------------
+// The render driver's callback (start.S's audio_entry), given a pointer to
+// the client's argument.
+static volatile u32 audio_calls, audio_arg;
+void AudioCallback(u32 arg) {
+  audio_calls++;
+  audio_arg = *At(arg);
+}
+
+static void Audio(void) {
+  u32 registration[2] = {(u32)(uintptr_t)audio_entry, 0x1357}, driver = 0;
+  CHECK(XAudioRegisterRenderDriverClient(registration, &driver) == 0 && (driver >> 16) == 0x4155);
+  // A frame every 256 samples at 48 kHz: about 19 in 100 ms.
+  int64_t hundred_ms = -1000000;
+  KeDelayExecutionThread(1, 0, &hundred_ms);
+  u32 calls = audio_calls;
+  CHECK(calls >= 10 && calls <= 30 && audio_arg == 0x1357);
+  static float frame[6 * 256];
+  CHECK(XAudioSubmitRenderDriverFrame(driver, frame) == 0);
+  u32 mask = 1, volume = 0;
+  CHECK(XAudioGetVoiceCategoryVolumeChangeMask(driver, &mask) == 0 && mask == 0);
+  CHECK(XAudioGetVoiceCategoryVolume(0, &volume) == 0 && volume == 0x3F800000);
+  CHECK(XAudioUnregisterRenderDriverClient(driver) == 0);
+  // At most a callback already under way after that.
+  calls = audio_calls;
+  KeDelayExecutionThread(1, 0, &hundred_ms);
+  CHECK(audio_calls - calls <= 1);
+}
+
+// ---- the XMA decoder -------------------------------------------------------------
+// Its registers are little-endian: the array's physical address at 0x600,
+// a bit per context in the clear registers from 0x6A0.
+static volatile u32* XmaReg(u32 r) { return At(0x7FEA0000 + 4 * r); }
+
+static void Xma(void) {
+  u32 array = __builtin_bswap32(*XmaReg(0x600)), a = 0, b = 0;
+  CHECK(XMACreateContext(&a) == 0 && XMACreateContext(&b) == 0 && a && b && a != b && !(a & 63) && !(b & 63));
+  u32 index = (MmGetPhysicalAddress(a) - array) >> 6;
+  CHECK(index < 320 && ((MmGetPhysicalAddress(b) - array) >> 6) < 320 && At(a)[0] == 0 && At(a)[15] == 0);
+  // A clear: no buffer valid, the read offset past the packet header; the
+  // packet count stays.
+  At(a)[0] = 0x00300FFF;
+  At(a)[1] = 0x80000000;
+  At(a)[2] = 0x12345;
+  *XmaReg(0x6A0 + (index >> 5)) = __builtin_bswap32(1u << (index & 31));
+  CHECK(WaitFor(&At(a)[2], 32) && At(a)[0] == 0x00000FFF && At(a)[1] == 0);
+  // A lock, with nothing decoding, is taken and leaves the context alone.
+  At(a)[0] = 0x00300FFF;
+  *XmaReg(0x690 + (index >> 5)) = __builtin_bswap32(1u << (index & 31));
+  CHECK(WaitFor(XmaReg(0x690 + (index >> 5)), 0) && At(a)[0] == 0x00300FFF && At(a)[2] == 32);
+  // Released contexts are zeroed and handed out again.
+  CHECK(XMAReleaseContext(a) == 0);
+  u32 again = 0;
+  CHECK(XMACreateContext(&again) == 0 && again == a && At(a)[2] == 0);
+  // All 320 in use: STATUS_NO_MEMORY.
+  static u32 contexts[320];
+  u32 n = 0;
+  while (n < 320 && XMACreateContext(&contexts[n]) == 0) n++;
+  u32 none = 1;
+  CHECK(n == 318 && XMACreateContext(&none) == 0xC0000017 && none == 0);
+  for (u32 k = 0; k < n; k++) XMAReleaseContext(contexts[k]);
+  CHECK(XMAReleaseContext(a) == 0 && XMAReleaseContext(b) == 0);
+}
+
+// Decoding. The frames are mono and silent (no coefficients), of a given
+// length in bits, the rest fill bits of the subframe's extended header:
+// WMA Pro's frame layout, as ffmpeg's decoder reads it. Bits go into a
+// buffer of 2 KiB packets, past each packet's 32-bit header.
+static void XmaPut(uint8_t* buffer, u32* at, u32 n, u32 value) {
+  while (n--) {
+    if (*at % 16384 == 0) *at += 32;
+    uint8_t bit = 0x80 >> (*at & 7);
+    buffer[*at >> 3] = (value >> n & 1) ? buffer[*at >> 3] | bit : buffer[*at >> 3] & ~bit;
+    ++*at;
+  }
+}
+
+static void XmaFrame(uint8_t* buffer, u32* at, u32 length, u32 more) {
+  u32 fill = length - 49;
+  XmaPut(buffer, at, 15, length);
+  XmaPut(buffer, at, 2, 2);         // one subframe layout for all channels; one of 512 samples
+  XmaPut(buffer, at, 9, 0);         // dynamic range gain; no trim
+  XmaPut(buffer, at, 7, 0x4C);      // an extended header, its fill length in 12 bits
+  XmaPut(buffer, at, 12, fill - 1);
+  for (u32 k = 0; k < fill; k++) XmaPut(buffer, at, 1, 0);
+  XmaPut(buffer, at, 3, 0);         // reserved; no coefficients; the bit before the last
+  XmaPut(buffer, at, 1, more);      // another frame follows in the packet
+}
+
+// An XMA2 packet header: frames that begin in it, the first one's offset
+// past the header, XMA2 metadata (1), no packets of other streams after it.
+static void XmaHeader(uint8_t* packet, u32 frames, u32 first) {
+  packet[0] = (uint8_t)(frames << 2 | first >> 13);
+  packet[1] = (uint8_t)(first >> 5);
+  packet[2] = (uint8_t)((first & 31) << 3 | 1);
+  packet[3] = 0;
+}
+
+// Kicks a context and waits until the decoder fills the output ring (its
+// valid bit cleared) or writes some of it (the write offset moved). The
+// blocks written.
+static u32 XmaKick(volatile u32* context, u32 index, u32 blocks) {
+  u32 write = context[0] >> 27;
+  *XmaReg(0x650 + (index >> 5)) = __builtin_bswap32(1u << (index & 31));
+  int64_t ms = -10000;
+  for (int k = 0; k < 1000 && context[1] >> 31 && context[0] >> 27 == write; k++) KeDelayExecutionThread(1, 0, &ms);
+  return context[1] >> 31 ? ((context[0] >> 27) + blocks - write) % blocks : blocks;
+}
+
+static int XmaSilent(const uint8_t* p, u32 bytes) {
+  for (u32 k = 0; k < bytes; k++)
+    if (p[k]) return 0;
+  return 1;
+}
+
+static void XmaDecode(void) {
+  u32 array = __builtin_bswap32(*XmaReg(0x600)), va = 0;
+  CHECK(XMACreateContext(&va) == 0);
+  u32 index = (MmGetPhysicalAddress(va) - array) >> 6;
+  volatile u32* c = At(va);
+  // Two packets of eight 4000-bit frames: four whole in the first, the
+  // fifth run on into the second (whose first frame begins after its
+  // 3648 bits; the fifth's last bit, 0, does not end the stream there),
+  // the last followed by padding.
+  u32 memory = MmAllocatePhysicalMemoryEx(0, 0x2000, kPageReadWrite, 0, 0, 0x1000);
+  uint8_t* input = (uint8_t*)(uintptr_t)memory;
+  uint8_t* output = input + 0x1000;
+  for (u32 k = 0; k < 4096; k++) input[k] = 0xFF;
+  XmaHeader(input, 5, 0);
+  XmaHeader(input + 2048, 3, 3648);
+  u32 at = 32;
+  for (u32 f = 0; f < 8; f++) XmaFrame(input, &at, 4000, f < 7 && f != 4);
+  u32 pa = MmGetPhysicalAddress(memory);
+
+  // Mono at 48 kHz into a ring of 8 blocks, 2 at a time. The first frame
+  // gives no samples; a frame is 4 blocks: two frames fill the ring.
+  // The title empties it and sets it valid again.
+  *XmaReg(0x6A0 + (index >> 5)) = __builtin_bswap32(1u << (index & 31));
+  CHECK(WaitFor(&c[2], 32));
+  c[5] = pa;
+  c[7] = pa + 0x1000;
+  c[1] = 1u << 31 | 3u << 27 | 2u << 20;
+  c[0] = 8u << 22 | 1u << 20 | 2;
+  u32 total = 0;
+  for (int round = 0; round < 4; round++) {
+    for (u32 k = 0; k < 2048; k++) output[k] = 0x5A;
+    u32 blocks = XmaKick(c, index, 8);
+    total += blocks;
+    CHECK(XmaSilent(output, blocks * 256) && output[blocks * 256 % 2048] == (blocks == 8 ? 0 : 0x5A));
+    c[1] |= 1u << 31;
+  }
+  // Seven frames out; input buffer 0 left (its valid bit cleared, buffer 1
+  // current), the read offset past the next packet's header.
+  CHECK(total == 28 && (c[0] & 0xF8300000) == 0x20000000 && c[2] == 32 && c[4] >> 31 == 1);
+
+  // A loop, once, from the second frame (bit 4032) to the third (8032),
+  // whose subframes 0 and 1 end it, and which starts again past the second
+  // frame's subframe 0, one block at a time: 4 + 2 + 3 + 4 + 5 * 4 blocks.
+  c[2] = 0;
+  *XmaReg(0x6A0 + (index >> 5)) = __builtin_bswap32(1u << (index & 31));
+  CHECK(WaitFor(&c[2], 32));
+  c[3] = 4032;
+  c[4] = 8032;
+  c[1] = 1u << 31 | 3u << 27 | 1u << 20 | 1u << 17 | 1u << 14;
+  c[0] = 8u << 22 | 1u << 20 | 1u << 12 | 2;
+  total = 0;
+  for (int round = 0; round < 5; round++) {
+    total += XmaKick(c, index, 8);
+    c[1] |= 1u << 31;
+  }
+  CHECK(total == 33 && (c[0] >> 12 & 0xFF) == 0 && !(c[0] >> 20 & 1));
+  CHECK(XMAReleaseContext(va) == 0);
+  MmFreePhysicalMemory(0, memory);
+}
+
+// ---- xam ----------------------------------------------------------------------
+static void Xam(void) {
+  CHECK(XGetGameRegion() == 0x00FF && XamGetSystemVersion() == 0x20449700);
+  CHECK(XGetLanguage() == 1 && XNetLogonGetTitleID(7) == 0);
+  u32 info = 9;  // the title has no execution info
+  CHECK(XamGetExecutionId(&info) == kStatusNotFound && info == 0);
+  u32 size = 1;
+  char buf[16];
+  CHECK(XamLoaderGetLaunchDataSize(&size) == 0x490 && size == 0 && XamLoaderGetLaunchData(buf, 16) == 0x490);
+  uint16_t wsa[0xC8];
+  CHECK(NetDll_WSAStartup(1, 0x0202, wsa) == 0 && wsa[0] == 0x0202 && wsa[1] == 0x0202);
+  CHECK(NetDll_WSAStartup(3, 0x0202, wsa) == 10022 && NetDll_XNetStartup(1, 0) == 0);
+  CHECK(NetDll_XNetGetEthernetLinkStatus(1) == 0);
+  // No controller (player 4 has none): zeroed results,
+  // ERROR_DEVICE_NOT_CONNECTED.
+  uint8_t pad[0x14];
+  memset(pad, 0xAA, sizeof pad);
+  CHECK(XamInputGetCapabilities(3, 0, pad) == 1167 && pad[0] == 0 && pad[0x13] == 0);
+  memset(pad, 0xAA, sizeof pad);
+  CHECK(XamInputGetState(3, 0, pad) == 1167 && pad[0] == 0 && pad[0xF] == 0 && pad[0x10] == 0xAA);
+  uint16_t vibration[2] = {0x8000, 0x8000};
+  CHECK(XamInputSetState(3, 0, vibration) == 1167);
+  // The Ex forms, which titles find through XexGetProcedureAddress.
+  u32 xam = 0, wsa_ex = 0, xnet_ex = 0;
+  CHECK(XexGetModuleHandle("xam.xex", &xam) == 0 && XexGetProcedureAddress(xam, 36, &wsa_ex) == 0 &&
+        XexGetProcedureAddress(xam, 80, &xnet_ex) == 0);
+  wsa[0] = wsa[1] = 0;
+  CHECK(((u32(*)(u32, u32, void*, u32))(uintptr_t)wsa_ex)(1, 0x0101, wsa, 0x200DC900) == 0 && wsa[0] == 0x0101 &&
+        wsa[1] == 0x0202);
+  CHECK(((u32(*)(u32, u32, void*, u32))(uintptr_t)wsa_ex)(0, 0x0202, wsa, 0x200DC900) == 10022);
+  CHECK(((u32(*)(u32, void*, u32))(uintptr_t)xnet_ex)(1, 0, 0x200DC900) == 0 &&
+        ((u32(*)(u32, void*, u32))(uintptr_t)xnet_ex)(5, 0, 0x200DC900) == 10022);
+  u32 p = 0;
+  CHECK(XamAlloc(0, 0x440, &p) == 0 && p && *At(p) == 0 && *At(p + 0x43C) == 0);
+  XamFree(p);
+  // Memory statistics: the totals, what is left.
+  u32 stats[26];
+  stats[0] = 0x68;
+  CHECK(MmQueryStatistics(stats) == 0 && stats[1] == 0x20000 && stats[3] > 0 && stats[3] < 0x20000 && stats[5] > 0);
+  stats[0] = 0x60;
+  CHECK(MmQueryStatistics(stats) == 0xC0000023);
+  // Reserved virtual bytes are at most the title's total.
+  u32 vbase = 0, vsize = 0x30000000, none = 0;
+  CHECK(NtAllocateVirtualMemory(&vbase, &vsize, kMemReserve, kPageReadWrite, 0) == 0);
+  stats[0] = 0x68;
+  CHECK(MmQueryStatistics(stats) == 0 && stats[5] == stats[4]);
+  CHECK(NtFreeVirtualMemory(&vbase, &none, kMemRelease, 0) == 0);
+  // The music player's playback controller, in-process and as a request.
+  u32 controller = 9, locked = 9;
+  u32 get[3] = {2, (u32)(uintptr_t)&controller, (u32)(uintptr_t)&locked};
+  CHECK(XMsgInProcessCall(0xFA, 0x7001B, get, 0) == 0 && controller == 0 && locked == 0);
+  u32 logon = 0;
+  CHECK(XMsgInProcessCall(0xFC, 0x58004, &logon, 0) == 0 && logon == 1);
+  u32 context[6] = {0, 0, 0, 0, 0x8001, 3};  // XUserSetContextEx: user 0, presence 3
+  CHECK(XMsgInProcessCall(0xFB, 0xB0006, context, (void*)sizeof context) == 0);
+  u32 request[4] = {0};
+  CHECK(XMsgInProcessCall(0xFC, 0x58020, (void*)(uintptr_t)logon, request) == 0x80070012);
+  u32 set[3] = {2, 0, 1};
+  CHECK(XMsgStartIORequestEx(0xFA, 0x7001A, 0, set, sizeof set, 0) == 0);
+  u32 e = 0, ov[7] = {0, 0, 0, 0, 0, 0, 0};
+  CHECK(NtCreateEvent(&e, 0, 0, 0) == 0);
+  ov[3] = e;
+  int64_t zero = 0;
+  CHECK(XMsgStartIORequest(0xFA, 0x7001A, ov, set, sizeof set) == 0 && ov[0] == 0 &&
+        NtWaitForSingleObjectEx(e, 1, 0, &zero) == 0);
+  // A refused request: its result and extended error, or the last error.
+  set[1] = 1;
+  CHECK(XMsgStartIORequest(0xFA, 0x7001A, ov, set, sizeof set) == 0 && ov[0] == 87 && ov[6] == 0x80070057);
+  CHECK(XMsgStartIORequest(0xFA, 0x7001A, 0, set, sizeof set) == 0 &&
+        *At(*At((u32)pcr() + 0x100) + 0x160) == 0x80070057);
+  // Requests complete when started: nothing to cancel or wait for.
+  CHECK(XMsgCancelIORequest(ov, 1) == 0 && ov[0] == 87);
+  NtClose(e);
+}
+
+// ---- users, profile settings, notifications ------------------------------------
+// tests/CMakeLists.txt runs the title with the default profile, "Player",
+// signed in as player 1.
+static void Users(void) {
+  CHECK(XamUserGetSigninState(0) == 1 && XamUserGetSigninState(1) == 0);
+  uint64_t xuid = 1;
+  CHECK(XamUserGetXUID(0, 1, &xuid) == 0 && xuid == 0xE000000000000001ull);
+  CHECK(XamUserGetXUID(0, 2, &xuid) == 0x80070525 && xuid == 0);
+  CHECK(XamUserGetXUID(5, 1, &xuid) == 0x80070057);
+  char name[16];
+  CHECK(XamUserGetName(0, name, sizeof name) == 0 && Memeq(name, "Player", 7));
+  CHECK(XamUserGetName(0, name, 4) == 0 && Memeq(name, "Pla", 4));
+  CHECK(XamUserGetName(1, name, sizeof name) == 0x525 && name[0] == 0);
+  // A profile signed in only locally holds no privilege.
+  u32 allowed = 9;
+  CHECK(XamUserCheckPrivilege(0, 254, &allowed) == 1245 && allowed == 0);
+  CHECK(XamUserCheckPrivilege(0xFF, 243, &allowed) == 1245 && allowed == 0);
+  CHECK(XamUserCheckPrivilege(1, 243, &allowed) == 1317 && XamUserCheckPrivilege(4, 243, &allowed) == 87);
+  // Friends are Live's.
+  uint64_t friend_xuid = 0x0009000000000001ull;
+  u32 is_friend = 9;
+  CHECK(XamUserAreUsersFriends(0, &friend_xuid, 1, &is_friend, 0) == 1245 && is_friend == 0);
+  CHECK(XamUserAreUsersFriends(1, &friend_xuid, 1, &is_friend, 0) == 1317 &&
+        XamUserAreUsersFriends(4, &friend_xuid, 1, &is_friend, 0) == 87);
+
+  // Profile settings: the size first, then the settings.
+  u32 ids[4] = {0x1004000C, 0x1004000D, 0x1004000E, 0x10040003}, size = 0;
+  CHECK(XamUserReadProfileSettings9(0xFFFE07D1, 0, 0, 0, 4, ids, &size, 0, 0) == 0x7A && size == 4 * 0x28 + 8);
+  static u32 results[(4 * 0x28 + 8) / 4];
+  CHECK(XamUserReadProfileSettings9(0xFFFE07D1, 0, 0, 0, 4, ids, &size, results, 0) == 0);
+  u32 settings = (u32)(uintptr_t)results + 8;
+  CHECK(results[0] == 4 && results[1] == settings);
+  CHECK(*At(settings) == 0 && *At(settings + 0x10) == 0x1004000C && (*At(settings + 0x18) >> 24) == 1);
+  CHECK(*At(settings + 3 * 0x28) == 1 && *At(settings + 3 * 0x28 + 0x20) == 3);
+  u32 ov[7] = {0, 0, 0, 0, 0, 0, 0};
+  CHECK(XamUserReadProfileSettings9(0xFFFE07D1, 0, 0, 0, 4, ids, &size, results, ov) == 0x3E5 && ov[0] == 0);
+  CHECK(XamUserReadProfileSettings9(0xFFFE07D1, 0, 0, 0, 0, ids, &size, results, 0) == 0x57);
+  u32 gamer[2] = {0x10040002, 0x10040018};  // y axis inverted, control sensitivity: not written
+  size = 2 * 0x28 + 8;
+  CHECK(XamUserReadProfileSettings9(0, 0, 0, 0, 2, gamer, &size, results, 0) == 0 && results[0] == 2 &&
+        *At(settings) == 0 && *At(settings + 0x28) == 0 && *At(settings + 0x28 + 0x10) == 0x10040018);
+  u32 card[3] = {0x10040022, 0x402C0011, 0x5004000B};  // auto aim, motto, reputation: not written
+  size = 3 * 0x28 + 0x2C + 8;
+  CHECK(XamUserReadProfileSettings9(0, 0, 0, 0, 3, card, &size, results, 0) == 0 && results[0] == 3 &&
+        *At(settings) == 0 && *At(settings + 0x28) == 0 && *At(settings + 0x28 + 0x20) == 0 &&
+        *At(settings + 0x50) == 0 && *At(settings + 0x50 + 0x10) == 0x5004000B);
+
+  // Title settings written as a title saves them: the three title-specific
+  // settings at once, the last one empty with an address (a zero-length
+  // copy into an empty buffer has corrupted heaps elsewhere), then read
+  // back, written again and read again. tests/CMakeLists.txt checks the
+  // saved files.
+  static uint8_t big[1000], mid[214], small2[10];
+  for (u32 k = 0; k < sizeof big; k++) big[k] = (uint8_t)k;
+  for (u32 k = 0; k < sizeof mid; k++) mid[k] = (uint8_t)(0xA5 ^ k);
+  for (u32 k = 0; k < sizeof small2; k++) small2[k] = (uint8_t)(0x30 + k);
+  struct {
+    u32 source, pad, user, user_low, id, pad2, type, pad3, size, ptr;
+  } w[3];
+  memset(w, 0, sizeof w);
+  const u32 tids[3] = {0x63E83FFF, 0x63E83FFE, 0x63E83FFD};
+  u32 lens[3] = {sizeof big, sizeof mid, 0}, ptrs[3] = {(u32)(uintptr_t)big, (u32)(uintptr_t)mid, (u32)(uintptr_t)mid};
+  for (int k = 0; k < 3; k++) {
+    w[k].id = tids[k];
+    w[k].type = 6u << 24;
+    w[k].size = lens[k];
+    w[k].ptr = ptrs[k];
+  }
+  CHECK(XamUserWriteProfileSettings(0x54540001, 0, 3, w, 0) == 0);
+  static u32 tr[(3 * 0x28 + 3000 + 8) / 4];
+  u32 trsize = sizeof tr;
+  CHECK(XamUserReadProfileSettings9(0x54540001, 0, 0, 0, 3, (u32*)tids, &trsize, tr, 0) == 0);
+  u32 ts = (u32)(uintptr_t)tr + 8;
+  CHECK(*At(ts) == 2 && *At(ts + 0x20) == 1000 && Memeq((void*)(uintptr_t)*At(ts + 0x24), big, 1000));
+  CHECK(*At(ts + 0x28) == 2 && *At(ts + 0x28 + 0x20) == 214 &&
+        Memeq((void*)(uintptr_t)*At(ts + 0x28 + 0x24), mid, 214));
+  CHECK(*At(ts + 0x50) == 2 && *At(ts + 0x50 + 0x20) == 0);
+  w[1].size = sizeof small2;
+  w[1].ptr = (u32)(uintptr_t)small2;
+  CHECK(XamUserWriteProfileSettings(0x54540001, 0, 2, &w[1], 0) == 0);
+  CHECK(XamUserReadProfileSettings9(0x54540001, 0, 0, 0, 3, (u32*)tids, &trsize, tr, 0) == 0);
+  CHECK(*At(ts + 0x28 + 0x20) == 10 && Memeq((void*)(uintptr_t)*At(ts + 0x28 + 0x24), small2, 10) &&
+        *At(ts + 0x50 + 0x20) == 0 && *At(ts + 0x20) == 1000);
+  // The profile's own settings a title writes are the profile's; a title
+  // may not write another kind.
+  w[0].id = 0x10040002;
+  w[0].type = 1u << 24;
+  w[0].size = 1;
+  CHECK(XamUserWriteProfileSettings(0x54540001, 0, 1, w, 0) == 0);
+  u32 inv = 0x10040002;
+  trsize = sizeof tr;
+  CHECK(XamUserReadProfileSettings9(0xFFFE07D1, 0, 0, 0, 1, &inv, &trsize, tr, 0) == 0 && *At(ts) == 2 &&
+        *At(ts + 0x20) == 1);
+  w[0].id = 0x10040100;
+  CHECK(XamUserWriteProfileSettings(0x54540001, 0, 1, w, 0) == 0x57);
+  // An awarded gamer picture becomes the picture key; none for a slot
+  // without a profile.
+  CHECK(XamWriteGamerTile(0, 0x54540001, 0x10002, 0x20002, 1, 0) == 0);
+  CHECK(XamWriteGamerTile(1, 0x54540001, 0x10002, 0x20002, 1, 0) == 1627);
+  u32 key = 0x4064000F;
+  trsize = sizeof tr;
+  CHECK(XamUserReadProfileSettings9(0xFFFE07D1, 0, 0, 0, 1, &key, &trsize, tr, 0) == 0 && *At(ts) == 2 &&
+        *At(ts + 0x20) == 50);
+  const uint16_t* picture = (const uint16_t*)(uintptr_t)*At(ts + 0x24);
+  const char* expected = "545400010001000200020002";
+  int same = 1;
+  for (int k = 0; k < 25; k++) same &= picture[k] == (uint16_t)expected[k];
+  CHECK(same);
+  // Statistics are Live's: an enumerator sized for its rows and columns,
+  // whose calls fail.
+  struct {
+    u32 view, columns;
+    uint16_t ids[64];
+  } view = {1, 2, {1, 2}};
+  u32 stats_size = 0, stats = 0, rows = 9;
+  CHECK(XamUserCreateStatsEnumerator(0x54540001, 0, 1, 10, 1, &view, &stats_size, &stats) == 0 &&
+        stats_size == (10 * 0x30 + 0x10) + 8 + 2 * 10 * 0x1C);
+  static uint8_t stats_buf[0x428];
+  memset(stats_buf, 0xAA, sizeof stats_buf);
+  CHECK(XamEnumerate(stats, 0, stats_buf, stats_size, &rows, 0) == 1627 && stats_buf[0] == 0 &&
+        stats_buf[stats_size - 1] == 0);
+  NtClose(stats);
+  CHECK(XamUserCreateStatsEnumerator(0x54540001, 0, 1, 101, 1, &view, &stats_size, &stats) == 87);
+
+  // A new listener holds what the system has pending: the UI is not
+  // showing, player 1 signed in; a Live listener: disconnected, no link.
+  u32 h = XamNotifyCreateListener(1, 1), id = 0, value = 9;
+  CHECK(h != 0 && XNotifyGetNext(h, 0, &id, &value) == 1 && id == 9 && value == 0);
+  CHECK(XNotifyGetNext(h, 0, &id, &value) == 1 && id == 0xA && value == 1);
+  CHECK(XNotifyGetNext(h, 0, &id, &value) == 0 && id == 0);
+  int64_t zero = 0;
+  CHECK(NtWaitForSingleObjectEx(h, 1, 0, &zero) == kStatusTimeout);
+  // The sign-in UI: none for online-enabled profiles only; otherwise it
+  // shows and closes with nothing changed, which the listener sees as
+  // XN_SYS_UI 0 (its latest value), no sign-in change.
+  CHECK(XamShowSigninUI(1, 0x400000) == 1627);
+  CHECK(NtWaitForSingleObjectEx(h, 1, 0, &zero) == kStatusTimeout);
+  CHECK(XamShowSigninUI(1, 0) == 0);
+  CHECK(XNotifyGetNext(h, 0, &id, &value) == 1 && id == 9 && value == 0);
+  CHECK(XNotifyGetNext(h, 0, &id, &value) == 0);
+  NtClose(h);
+  h = XamNotifyCreateListener(2, 1);
+  CHECK(NtWaitForSingleObjectEx(h, 1, 0, &zero) == 0);
+  CHECK(XNotifyGetNext(h, 0x02000003, &id, &value) == 1 && id == 0x02000003 && value == 0);
+  CHECK(XNotifyGetNext(h, 0, &id, &value) == 1 && id == 0x02000001 && value == 0x001510F1);
+  NtClose(h);
+  CHECK(XNotifyPositionUI(1) == 0);
+
+  // The system UI: the Live ones are refused, the others show and close
+  // (XN_SYS_UI 1, then 0: a listener holds 0).
+  CHECK(XamShowFriendsUI(0) == 5 && XamShowPlayerReviewUI(0, 0x0009000000000001ull) == 5 &&
+        XamShowPlayerReviewUI(4, 0) == 87);
+  CHECK(XamShowGamerCardUIForXUID(0, 0x0009000000000001ull, 0) == 5 &&
+        XamShowGamerCardUIForXUID(0, 0xE000000000000002ull, 0) == 87);
+  CHECK(XamShowMarketplaceUI(1, 0, 0, 0) == 1317 && XamShowMarketplaceUI(0, 0x19, 0, 0) == 87);
+  h = XamNotifyCreateListener(1, 1);
+  while (XNotifyGetNext(h, 0, &id, &value)) {
+  }
+  CHECK(XamShowAchievementsUI(0, 0) == 0 && XamShowGamerCardUIForXUID(0, 0xE000000000000001ull, 0) == 0 &&
+        XamShowMarketplaceUI(0, 0, 0, 0) == 0 && XamShowDirtyDiscErrorUI() == 0);
+  CHECK(XNotifyGetNext(h, 9, &id, &value) == 1 && value == 0 && XNotifyGetNext(h, 0, &id, &value) == 0);
+  // The keyboard gives its default text back, truncated; the message box
+  // its focused button.
+  static const uint16_t text[] = {'a', 'b', 'c', 'd', 0}, ok[] = {'O', 'K', 0}, no[] = {'N', 'o', 0};
+  uint16_t typed[8] = {9, 9, 9, 9, 9, 9, 9, 9};
+  u32 kov[7] = {0, 0, 0, 0, 0, 0, 0};
+  CHECK(XamShowKeyboardUI(0, 0, text, 0, 0, typed, 3, kov) == 997 && kov[0] == 0 && typed[0] == 'a' &&
+        typed[1] == 'b' && typed[2] == 0 && typed[3] == 9);
+  const uint16_t* buttons[2] = {ok, no};
+  u32 pressed[2] = {9, 9};
+  CHECK(XamShowMessageBoxUIEx9(0, text, text, 2, buttons, 1, 0, pressed, kov) == 997 && kov[0] == 0 &&
+        pressed[0] == 1);
+  CHECK(XamShowMessageBoxUIEx9(0, text, text, 2, buttons, 1, 0, 0, 0) == 0);
+  CHECK(XamShowMessageBoxUIEx9(0, text, text, 2, buttons, 2, 0, pressed, kov) == 87 && kov[6] == 87);
+  CHECK(XamShowMessageBoxUIEx9(0, text, text, 2, buttons, 1, 0, pressed, 0) == 87 &&
+        XamShowMessageBoxUIEx9(0, text, text, 2, buttons, 1, 0x100000, pressed, kov) == 87);
+  NtClose(h);
+
+  // Voice: no headset.
+  u32 voice = 0;
+  CHECK(XamVoiceCreate(0, 3, &voice) == 0 && voice && *At(voice + 4) == 3 && *At(voice + 8) != 0);
+  u32 packet = *At(voice + 0xC), packets = 0;
+  for (; packet; packet = *At(packet + 0xC)) packets += *At(packet + 8) == voice;
+  CHECK(packets == 3 && *At(*At(voice + 0x10) + 0xC) == 0);
+  uint8_t talk[16] = {0};
+  CHECK(XamVoiceHeadsetPresent(voice) == 0 && XamVoiceSubmitPacket(voice, sizeof talk, talk) == 0);
+  CHECK(XamVoiceClose(voice) == 1 && *At(voice + 4) == 0 && *At(voice + 8) == 0);
+}
+
+// ---- content ------------------------------------------------------------------
+struct ContentData {  // XCONTENT_DATA
+  u32 device, type;
+  uint16_t display[128];
+  char file[42];
+  uint8_t pad[2];
+};
+
+static void Data(struct ContentData* d, u32 device, const char* file, const char* display) {
+  memset(d, 0, sizeof *d);
+  d->device = device;
+  d->type = 1;  // a saved game
+  for (int k = 0; display[k]; k++) d->display[k] = (uint16_t)display[k];
+  for (int k = 0; file[k]; k++) d->file[k] = file[k];
+}
+
+static void Content(void) {
+  // The hard disk, device 1.
+  CHECK(XamContentGetDeviceState(1, 0) == 0 && XamContentGetDeviceState(2, 0) == 0x48F);
+  struct {
+    u32 id, type;
+    uint64_t total, free;
+    uint16_t name[28];
+  } device;
+  CHECK(XamContentGetDeviceData(1, &device) == 0 && device.id == 1 && device.type == 1 && device.total > 0 &&
+        device.free <= device.total && device.name[0] == 'H' && device.name[9] == 'e' && device.name[10] == 0);
+  CHECK(XamContentGetDeviceData(2, &device) == 0x48F);
+  // The device selector picks it, through an XOVERLAPPED only.
+  u32 chosen = 0, sel[7] = {9, 9, 0, 0, 0, 0, 9};
+  CHECK(XamShowDeviceSelectorUI(0, 1, 0, 0x10000, &chosen, 0) == 0x57 && chosen == 0);
+  CHECK(XamShowDeviceSelectorUI(4, 1, 0, 0x10000, &chosen, sel) == 0x57 && sel[6] == 0x57 && chosen == 0);
+  CHECK(XamShowDeviceSelectorUI(0xFF, 1, 0x200, 0x10000, &chosen, sel) == 0x3E5 && sel[0] == 0 &&
+        sel[6] == 0 && chosen == 1);
+
+  // No saves yet.
+  static struct ContentData items[4];
+  u32 size = 0, e = 0, n = 9;
+  CHECK(XamContentCreateEnumerator(0, 1, 1, 0, 2, &size, &e) == 0 && size == 2 * sizeof(struct ContentData));
+  CHECK(XamEnumerate(e, 0, items, size, &n, 0) == 0x12 && n == 0);
+  NtClose(e);
+  CHECK(XamEnumerate(e, 0, items, size, &n, 0) == 6);
+
+  // A save made, written and closed.
+  struct ContentData d, d2, d3;
+  Data(&d, 1, "slot1", "Save One");
+  u32 disposition = 9, license = 9, io[2], h = 0;
+  char buf[16];
+  CHECK(XamContentCreateEx9(0, "save", &d, 3, &disposition, &license, 0, 0, 0) == 3 && disposition == 0);
+  CHECK(XamContentCreateEx9(0, "save", &d, 1, &disposition, &license, 0, 0, 0) == 0 && disposition == 1 &&
+        license == 0);
+  CHECK(OpenPath(&h, "save:\\game.dat", kGenericWrite, kCreate, kSync | kNonDirectoryFile, io) == 0);
+  CHECK(NtWriteFile(h, 0, 0, 0, io, "progress", 8, 0) == 0);
+  NtClose(h);
+  CHECK(XamContentClose("save", 0) == 0 && XamContentClose("save", 0) == 2);
+  CHECK(OpenPath(&h, "save:\\game.dat", kGenericRead, kOpen, kSync, io) == kStatusObjectPathNotFound);
+  // Opened again through an XOVERLAPPED: complete at once, the disposition
+  // its length.
+  u32 ov[7] = {9, 9, 0, 0, 0, 0, 9};
+  CHECK(XamContentCreateEx9(0, "save", &d, 4, &disposition, 0, 0, 0, ov) == 0x3E5 && ov[0] == 0 && ov[1] == 2 &&
+        ov[6] == 0 && disposition == 2);
+  CHECK(OpenPath(&h, "save:\\game.dat", kGenericRead, kOpen, kSync, io) == 0);
+  CHECK(NtReadFile(h, 0, 0, 0, io, buf, 16, 0) == 0 && io[1] == 8 && Memeq(buf, "progress", 8));
+  NtClose(h);
+  // Refused: the root in use, the save as new, deleting it while open,
+  // names xam does not take, a root that is no package.
+  Data(&d2, 0, "slot2", "Save Two");
+  CHECK(XamContentCreateEx9(0, "save", &d2, 1, &disposition, 0, 0, 0, 0) == 0x34);
+  CHECK(XamContentCreateEx9(0, "other", &d, 1, &disposition, 0, 0, 0, 0) == 0xB7);
+  CHECK(XamContentDelete(0, &d, 0) == 0x20);
+  CHECK(XamContentCreateEx9(0, "sa.ve", &d2, 1, &disposition, 0, 0, 0, 0) == 0x7B);
+  d2.file[0] = 0;
+  CHECK(XamContentCreateEx9(0, "save2", &d2, 1, &disposition, 0, 0, 0, 0) == 0x57);
+  d2.file[0] = 's';
+  CHECK(XamContentClose("game", 0) == 0x57);
+  // Player 1 made it.
+  u32 is_creator = 9;
+  uint64_t creator = 0;
+  CHECK(XamContentGetCreator(0, &d, &is_creator, &creator, 0) == 0 && is_creator == 1 &&
+        creator == 0xE000000000000001ull);
+  CHECK(XamContentClose("save", 0) == 0);
+  // TRUNCATE_EXISTING empties it.
+  CHECK(XamContentCreateEx9(0, "save", &d, 5, &disposition, 0, 0, 0, 0) == 0 && disposition == 2);
+  CHECK(OpenPath(&h, "save:\\game.dat", kGenericRead, kOpen, kSync, io) == kStatusObjectNameNotFound);
+  CHECK(OpenPath(&h, "save:\\game.dat", kGenericWrite, kCreate, kSync | kNonDirectoryFile, io) == 0);
+  CHECK(NtWriteFile(h, 0, 0, 0, io, "again", 5, 0) == 0);
+  NtClose(h);
+  CHECK(XamContentClose("save", 0) == 0);
+
+  // Another save (on any device: the hard disk), and one no user owns.
+  CHECK(XamContentCreateEx9(0, "save", &d2, 1, &disposition, 0, 0, 0, 0) == 0 && disposition == 1);
+  CHECK(XamContentClose("save", 0) == 0);
+  Data(&d3, 1, "common", "Shared");
+  CHECK(XamContentCreateEx9(0xFF, "save", &d3, 1, &disposition, 0, 0, 0, 0) == 0 && disposition == 1);
+  CHECK(XamContentClose("save", 0) == 0);
+  // Listed: the player's by name, then the one no user owns, its name
+  // marked.
+  CHECK(XamContentCreateEnumerator(0, 0, 1, 0, 4, &size, &e) == 0);
+  CHECK(XamEnumerate(e, 0, items, size, &n, 0) == 0 && n == 2 && items[0].device == 1 && items[0].type == 1 &&
+        Memeq(items[0].file, "slot1", 6) && items[0].display[0] == 'S' && items[0].display[5] == 'O' &&
+        Memeq(items[1].file, "slot2", 6));
+  CHECK(XamEnumerate(e, 0, items, size, &n, 0) == 0 && n == 1 && (uint8_t)items[0].file[0] == ('c' | 0x80) &&
+        Memeq(items[0].file + 1, "ommon", 6));
+  CHECK(XamEnumerate(e, 0, items, size, &n, 0) == 0x12 && n == 0);
+  NtClose(e);
+  // The marked name opens that one.
+  CHECK(XamContentCreateEx9(0, "save", &items[0], 3, &disposition, 0, 0, 0, 0) == 0 && disposition == 2);
+  CHECK(XamContentClose("save", 0) == 0);
+  // One a call through an XOVERLAPPED, without those no user owns
+  // (XCONTENTFLAG_ENUM_EXCLUDECOMMON); the end is ERROR_FUNCTION_FAILED with
+  // ERROR_NO_MORE_FILES as the extended error.
+  CHECK(XamContentCreateEnumerator(0, 1, 1, 0x1000, 1, &size, &e) == 0 && size == sizeof(struct ContentData));
+  CHECK(XamEnumerate(e, 0, items, size, 0, ov) == 0x3E5 && ov[0] == 0 && ov[1] == 1 &&
+        Memeq(items[0].file, "slot1", 6));
+  CHECK(XamEnumerate(e, 0, items, size, 0, ov) == 0x3E5 && ov[1] == 1 && Memeq(items[0].file, "slot2", 6));
+  CHECK(XamEnumerate(e, 0, items, size, 0, ov) == 0x3E5 && ov[0] == 0x65B && ov[1] == 0 && ov[6] == 0x80070012);
+  NtClose(e);
+  // Deleted (by its device: 0 names none).
+  CHECK(XamContentDelete(0, &d2, 0) == 0x48F);
+  d2.device = 1;
+  CHECK(XamContentDelete(0, &d2, 0) == 0 && XamContentDelete(0, &d2, 0) == 2);
+  // Player 2 is not signed in.
+  CHECK(XamContentCreateEnumerator(1, 0, 1, 0, 1, &size, &e) == 0x525);
+}
+
+// ---- timers --------------------------------------------------------------------
+static void Timers(void) {
+  u32 t = 0, previous = 9;
+  int64_t zero = 0, due = -200000, fifty_ms = -500000;  // 20 ms
+  CHECK(NtCreateTimer(&t, 0, 0) == 0);
+  CHECK(NtSetTimerEx(t, &due, 0, 0, 0, 0, 0, &previous) == 0 && previous == 0);
+  CHECK(NtWaitForSingleObjectEx(t, 1, 0, &zero) == kStatusTimeout);
+  CHECK(NtWaitForSingleObjectEx(t, 1, 0, &fifty_ms) == 0);
+  // A notification timer stays signalled.
+  CHECK(NtWaitForSingleObjectEx(t, 1, 0, &zero) == 0);
+  NtClose(t);
+  // A periodic synchronization timer: a signal every 10 ms, one per wait.
+  u32 s = 0, current = 9;
+  int64_t ten_ms = -100000;
+  CHECK(NtCreateTimer(&s, 0, 1) == 0 && NtSetTimerEx(s, &ten_ms, 0, 0, 0, 0, 10, 0) == 0);
+  int fired = 0;
+  for (int k = 0; k < 5; k++) fired += NtWaitForSingleObjectEx(s, 1, 0, &fifty_ms) == 0;
+  CHECK(fired == 5);
+  CHECK(NtCancelTimer(s, &current) == 0 && current == 0);
+  CHECK(NtWaitForSingleObjectEx(s, 1, 0, &fifty_ms) == kStatusTimeout);
+  NtClose(s);
+}
+
+// ---- XGI: contexts, achievements, sessions ---------------------------------
+static u32 Xgi(u32 message, u32* request) { return XMsgInProcessCall(0xFB, message, request, 0); }
+
+static void Sessions(void) {
+  // Achievements, kept with the profile: S_FALSE once already earned.
+  u32 earned[2] = {0, 5}, list[2] = {1, (u32)(uintptr_t)earned};
+  CHECK(Xgi(0xB0008, list) == 0 && Xgi(0xB0008, list) == 1);
+  earned[0] = 1;
+  CHECK(Xgi(0xB0008, list) == 0x80070490);
+
+  u32 h = 0, obj = 0, e = 0;
+  CHECK(XamSessionCreateHandle(&h) == 0 && XamSessionRefObjByHandle(h, &obj) == 0 && obj && *At(obj) == 0);
+  CHECK(NtCreateEvent(&e, 0, 0, 0) == 0 && XamSessionRefObjByHandle(e, &obj) == 6);
+  NtClose(e);
+  u32 info[15], nonce[2];
+  // {object, flags, public slots, private slots, user, *info, *nonce}
+  u32 create[7] = {obj, 2, 1, 1, 0, (u32)(uintptr_t)info, (u32)(uintptr_t)nonce};
+  CHECK(Xgi(0xB0010, create) == 0x80155209);  // presence needs Live
+  create[1] = 0x20 | 0x10;
+  CHECK(Xgi(0xB0010, create) == 0x80155201);  // system link with arbitration
+  create[1] = 0;
+  create[4] = 1;
+  CHECK(Xgi(0xB0010, create) == 0x80070490);  // no such user
+  create[4] = 0;
+  CHECK(Xgi(0xB0010, create) == 0x80155205 && *At(obj) == 0);  // no game type yet
+  u32 context[6] = {0, 0, 0, 0, 0x800A, 1};
+  CHECK(Xgi(0xB0006, context) == 0);
+  CHECK(Xgi(0xB0010, create) == 0 && *At(obj) != 0);
+  // Members: a local user takes its slot once; a remote one finds none left.
+  u32 slots[1] = {0}, want[1] = {0};
+  u32 join[5] = {obj, 1, 0, (u32)(uintptr_t)slots, (u32)(uintptr_t)want};
+  CHECK(Xgi(0xB0012, join) == 0 && Xgi(0xB0012, join) == 0);
+  uint64_t remote[1] = {0xE000000000000002ull};
+  u32 join_remote[5] = {obj, 1, (u32)(uintptr_t)remote, 0, (u32)(uintptr_t)want};
+  CHECK(Xgi(0xB0012, join_remote) == 0x80155202);
+  want[0] = 1;
+  CHECK(Xgi(0xB0012, join_remote) == 0);  // a private slot
+  u32 both[5] = {obj, 1, (u32)(uintptr_t)remote, (u32)(uintptr_t)slots, 0};
+  CHECK(Xgi(0xB0012, both) == 0x80070057);
+  // Start and end.
+  u32 session[3] = {obj, 0, 0};
+  CHECK(Xgi(0xB0014, session) == 0 && Xgi(0xB0014, session) == 0x80155206);
+  CHECK(Xgi(0xB0025, session) == 0x80155204);  // no statistics
+  CHECK(Xgi(0xB0026, session) == 0);
+  CHECK(Xgi(0xB0015, session) == 0 && Xgi(0xB0015, session) == 0x80155206);
+  CHECK(Xgi(0xB0026, session) == 0x80155206);
+  u32 modify[4] = {obj, 2, 1, 1};
+  CHECK(Xgi(0xB0018, modify) == 0x80155204);
+  modify[1] = 0x100;
+  CHECK(Xgi(0xB0018, modify) == 0);
+  u32 leave[4] = {obj, 1, 0, (u32)(uintptr_t)slots};
+  CHECK(Xgi(0xB0013, leave) == 0 && Xgi(0xB0012, join) == 0);  // its slot free again
+  CHECK(Xgi(0xB0011, session) == 0 && Xgi(0xB0014, session) == 0x80155206);
+  ObDereferenceObject(obj);
+  ObDereferenceObject(obj);
+  NtClose(h);
+  // Live's queries fail with no connection.
+  u32 stats[7] = {0, 0, 0, 0, 0, 8, (u32)(uintptr_t)nonce};
+  nonce[0] = nonce[1] = 9;
+  CHECK(Xgi(0xB0021, stats) == 0x80151802 && nonce[0] == 0 && nonce[1] == 0);
+}
+
+// ---- APCs ------------------------------------------------------------------
+// What the APC routines saw, in the order they ran.
+static volatile u32 apc_log[16], apc_count;
+void NormalApc(u32 context, u32 arg1, u32 arg2) {
+  if (apc_count + 3 <= 16) {
+    apc_log[apc_count++] = context;
+    apc_log[apc_count++] = arg1;
+    apc_log[apc_count++] = arg2;
+  }
+}
+// A kernel routine that changes the normal routine's context.
+void KernelApc(u32 apc, u32* normal, u32* context, u32* arg1, u32* arg2) {
+  (void)apc, (void)normal, (void)arg2;
+  *context = *context + 0x100;
+  *arg1 = *arg1 + 1;
+}
+
+static u32 AlertableWaiter(void* event) {
+  int64_t ten_s = -100000000;
+  return KeWaitForSingleObject(event, 3, 1, 1, &ten_s);
+}
+
+static void Apcs(void) {
+  u32 me = *At((u32)pcr() + 0x100);
+  int64_t zero = 0;
+  // A user APC runs in an alertable user-mode wait only, which then
+  // returns STATUS_USER_APC.
+  apc_count = 0;
+  CHECK(NtQueueApcThread(0xFFFFFFFE, (void*)normal_entry, 1, 2, 3) == 0);
+  CHECK(KeDelayExecutionThread(1, 0, &zero) == 0 && apc_count == 0);
+  CHECK(KeDelayExecutionThread(0, 1, &zero) == 0 && apc_count == 0);  // kernel mode
+  CHECK(KeDelayExecutionThread(1, 1, &zero) == 0xC0 && apc_count == 3 && apc_log[0] == 1 && apc_log[1] == 2 &&
+        apc_log[2] == 3);
+  CHECK(KeDelayExecutionThread(1, 1, &zero) == 0);  // none left
+  // A signalled object comes before the APC.
+  u32 e = 0;
+  CHECK(NtCreateEvent(&e, 0, 0, 1) == 0);
+  CHECK(NtQueueApcThread(0xFFFFFFFE, (void*)normal_entry, 4, 5, 6) == 0);
+  CHECK(NtWaitForSingleObjectEx(e, 1, 1, &zero) == 0 && apc_count == 3);
+  u32 unset = 0;  // a kernel-mode wait runs no user APC, alertable or not
+  CHECK(NtCreateEvent(&unset, 0, 0, 0) == 0);
+  CHECK(NtWaitForSingleObjectEx(unset, 0, 1, &zero) == kStatusTimeout && apc_count == 3);
+  NtClose(unset);
+  CHECK(KeDelayExecutionThread(1, 1, &zero) == 0xC0 && apc_count == 6 && apc_log[3] == 4);
+  NtClose(e);
+
+  // A title's own KAPC: its kernel routine first, which may change the
+  // normal routine's arguments; queued once at a time.
+  u32 apc[10];
+  apc_count = 0;
+  KeInitializeApc(apc, me, (void*)kernel_entry, 0, (void*)normal_entry, 1, 7);
+  CHECK((apc[0] >> 24) == 18 && ((apc[0] >> 8) & 0xFF) == 1);
+  CHECK(KeInsertQueueApc(apc, 8, 9, 0) == 1 && KeInsertQueueApc(apc, 8, 9, 0) == 0);
+  CHECK(KeDelayExecutionThread(1, 1, &zero) == 0xC0 && apc_count == 3 && apc_log[0] == 0x107 &&
+        apc_log[1] == 9 && apc_log[2] == 9);
+  CHECK((apc[0] & 0xFF) == 0);  // no longer inserted
+  // A kernel APC runs in any wait, which goes on; not inside a critical
+  // region, but as the region ends.
+  apc_count = 0;
+  KeInitializeApc(apc, me, (void*)kernel_entry, 0, (void*)normal_entry, 0, 0x10);
+  KeEnterCriticalRegion();
+  CHECK(KeInsertQueueApc(apc, 1, 2, 0) == 1);
+  CHECK(KeDelayExecutionThread(1, 0, &zero) == 0 && apc_count == 0);
+  KeLeaveCriticalRegion();
+  CHECK(apc_count == 3 && apc_log[0] == 0x110 && apc_log[1] == 2);
+  CHECK(KeInsertQueueApc(apc, 1, 2, 0) == 1);
+  CHECK(KeDelayExecutionThread(1, 0, &zero) == 0 && apc_count == 6);
+
+  // An APC to another thread wakes its alertable wait.
+  u32 ev[4] = {0, 0, (u32)(uintptr_t)&ev[2], (u32)(uintptr_t)&ev[2]};
+  u32 h = 0;
+  apc_count = 0;
+  CHECK(ExCreateThread(&h, 0, 0, (void*)thread_startup, (void*)AlertableWaiter, ev, 0) == 0);
+  int64_t ten_ms = -100000;
+  KeDelayExecutionThread(1, 0, &ten_ms);
+  CHECK(NtQueueApcThread(h, (void*)normal_entry, 11, 12, 13) == 0);
+  u32 obj = 0;
+  CHECK(NtWaitForSingleObjectEx(h, 1, 0, 0) == 0 && apc_count == 3 && apc_log[0] == 11);
+  CHECK(ObReferenceObjectByHandle(h, __imp_ExThreadObjectType, &obj) == 0 && *At(obj + 0x140) == 0xC0);
+  ObDereferenceObject(obj);
+  // Its thread has ended: nothing more is queued.
+  CHECK(NtQueueApcThread(h, (void*)normal_entry, 1, 2, 3) != 0);
+  NtClose(h);
+
+  // A timer's APC: routine(context, the expiry's system time).
+  u32 t = 0;
+  apc_count = 0;
+  CHECK(NtCreateTimer(&t, 0, 0) == 0);
+  CHECK(NtSetTimerEx(t, &ten_ms, (void*)normal_entry, 1, (void*)(uintptr_t)21, 0, 0, 0) == 0);
+  int64_t second = -10000000;
+  CHECK(KeDelayExecutionThread(1, 1, &second) == 0xC0 && apc_count == 3 && apc_log[0] == 21 &&
+        (apc_log[1] | apc_log[2]) != 0);
+  // Cancelled before it runs, it does not.
+  CHECK(NtSetTimerEx(t, &zero, (void*)normal_entry, 1, (void*)(uintptr_t)22, 0, 0, 0) == 0);
+  KeDelayExecutionThread(1, 0, &ten_ms);
+  u32 current = 0;
+  CHECK(NtCancelTimer(t, &current) == 0);
+  CHECK(KeDelayExecutionThread(1, 1, &zero) == 0 && apc_count == 3);
+  NtClose(t);
+
+  // An I/O's APC routine: routine(context, status block, 0), unless the
+  // I/O failed.
+  u32 f = 0, io[2];
+  char buf[4];
+  apc_count = 0;
+  CHECK(OpenPath(&f, "game:\\data.bin", kGenericRead, kOpen, kSync | kNonDirectoryFile, io) == 0);
+  CHECK(NtReadFile(f, 0, (void*)normal_entry, (void*)(uintptr_t)31, io, buf, 4, 0) == 0);
+  CHECK(KeDelayExecutionThread(1, 1, &zero) == 0xC0 && apc_count == 3 && apc_log[0] == 31 &&
+        apc_log[1] == (u32)(uintptr_t)io && apc_log[2] == 0);
+  int64_t end = 32;
+  CHECK(NtReadFile(f, 0, (void*)normal_entry, (void*)(uintptr_t)32, io, buf, 4, &end) == kStatusEndOfFile);
+  CHECK(KeDelayExecutionThread(1, 1, &zero) == 0 && apc_count == 3);
+  NtClose(f);
+
+  // An XMsg request's completion routine, in place of its event:
+  // routine(result, length, overlapped).
+  u32 set[3] = {2, 1, 1}, ov[7] = {0, 0, 0, 0, (u32)(uintptr_t)normal_entry, 0, 0};
+  apc_count = 0;
+  CHECK(XMsgStartIORequest(0xFA, 0x7001A, ov, set, sizeof set) == 0 && ov[0] == 87 && apc_count == 0);
+  CHECK(KeDelayExecutionThread(1, 1, &zero) == 0xC0 && apc_count == 3 && apc_log[0] == 87 &&
+        apc_log[1] == ov[1] && apc_log[2] == (u32)(uintptr_t)ov);
+}
+
+// XINPUT_STATE.
+typedef struct {
+  u32 packet;
+  uint16_t buttons;
+  uint8_t left_trigger, right_trigger;
+  int16_t lx, ly, rx, ry;
+} PadState;
+
+// Reads player 1's pad until `buttons` are down (the pads are read every
+// few milliseconds); its result.
+static u32 PadWait(PadState* s, uint16_t buttons) {
+  int64_t ms = -10000;
+  u32 r = 0;
+  for (int k = 0; k < 1000; k++) {
+    r = XamInputGetState(0, 0, s);
+    if (r || (s->buttons & buttons) == buttons) break;
+    KeDelayExecutionThread(1, 0, &ms);
+  }
+  return r;
+}
+
+// Rumbles player 1's pad at `speed`, a request to the test program
+// (title_main.cpp), and waits for XN_SYS_INPUTDEVICESCHANGED on h.
+static int PadChange(u32 h, uint16_t speed, int notified) {
+  uint16_t vibration[2] = {speed, 0};
+  int64_t second = -10000000;
+  u32 id = 0, value = 9;
+  if (XamInputSetState(0, 0, vibration) != 0) return 0;
+  if (!notified) return 1;
+  return NtWaitForSingleObjectEx(h, 1, 0, &second) == 0 && XNotifyGetNext(h, 0x12, &id, &value) == 1 &&
+         id == 0x12 && value == 0 && XNotifyGetNext(h, 0, &id, &value) == 0;
+}
+
+// Two pads (title_main.cpp): player 1's holds A, d-pad up, the guide
+// button and the left stick up; player 2's nothing.
+// ---- xam's network stack, with no cable --------------------------------------
+struct SockAddr {
+  uint16_t family, port;
+  u32 addr;
+  uint8_t zero[8];
+};
+static struct SockAddr Addr(u32 addr, uint16_t port) {
+  struct SockAddr a = {2, port, addr, {0}};
+  return a;
+}
+static u32 NetError(u32 result) { return result == 0xFFFFFFFF ? NetDll_WSAGetLastError() : 0; }
+
+static void Net(void) {
+  // inet_addr: decimal, octal and hex parts, short forms, failures.
+  CHECK(NetDll_inet_addr("1.2.3.4") == 0x01020304 && NetDll_inet_addr("0x7f.1") == 0x7F000001 &&
+        NetDll_inet_addr("010.0.0.1") == 0x08000001 && NetDll_inet_addr(" 10 ") == 10 && NetDll_inet_addr("") == 0);
+  CHECK(NetDll_inet_addr("1.2.3.4.5") == 0xFFFFFFFF && NetDll_inet_addr("1..2") == 0xFFFFFFFF &&
+        NetDll_inet_addr("0x") == 0xFFFFFFFF && NetDll_inet_addr("1.a") == 0xFFFFFFFF);
+  CHECK(NetError(NetDll_socket(2, 2, 2, 17)) == 10093 && NetError(NetDll_WSACleanup(3)) == 10093 &&
+        NetDll_XNetCleanup(3) == 10093);
+  CHECK(NetError(NetDll_socket(1, 3, 2, 17)) == 10047 && NetError(NetDll_socket(1, 2, 5, 0)) == 10044 &&
+        NetError(NetDll_socket(1, 2, 2, 6)) == 10043 && NetError(NetDll_socket(1, 2, 1, 17)) == 10043);
+
+  // UDP to this console's own sockets.
+  u32 a = NetDll_socket(1, 2, 2, 17), b = NetDll_socket(1, 0, 0, 17), v = NetDll_socket(1, 2, 0, 254);
+  CHECK(a >> 28 == 1 && b >> 28 == 1 && v >> 28 == 1 && a != b && (a & 0xFFF) == 0 && (b & 0xFFF) == 1);
+  struct SockAddr any = Addr(0, 5000), name;
+  u32 len = 0, n = 0, opt = 0;
+  CHECK(NetDll_bind(1, b, &any, 16) == 0 && NetError(NetDll_bind(1, b, &any, 16)) == 10022);
+  CHECK(NetDll_getsockname(1, b, &name, &len) == 0 && len == 16 && name.family == 2 && name.port == 5000);
+  CHECK(NetError(NetDll_getsockname(1, a, &name, &len)) == 10022);
+  struct SockAddr there = Addr(0x0A000001, 5000), reserved = Addr(0, 3074);
+  CHECK(NetError(NetDll_bind(1, a, &there, 16)) == 10049 && NetError(NetDll_bind(1, a, &reserved, 16)) == 10048 &&
+        NetError(NetDll_bind(1, a, &any, 16)) == 10048);
+  struct SockAddr loop = Addr(0x7F000001, 5000), none = Addr(0, 5000), other_loop = Addr(0x7F000002, 5000),
+                  bcast = Addr(0xFFFFFFFF, 5000), far = Addr(0x01020304, 80), sa = Addr(0x00010203, 80);
+  CHECK(NetDll_sendto(1, a, "hello", 5, 0, &loop, 16) == 5);
+  CHECK(NetDll_getsockname(1, a, &name, &len) == 0 && name.port == 1025);  // bound on the way
+  CHECK(NetDll_ioctlsocket(1, b, 0x4004667F, &n) == 0 && n == 5);
+  char buf[16] = {0};
+  struct SockAddr from;
+  len = 3;
+  CHECK(NetDll_recvfrom(1, b, buf, sizeof buf, 0, &from, &len) == 5 && Memeq(buf, "hello", 5) && len == 16 &&
+        from.family == 2 && from.port == 1025 && from.addr == 0x7F000001);
+  n = 1;
+  CHECK(NetDll_ioctlsocket(1, b, 0x8004667E, &n) == 0 && NetError(NetDll_recv(1, b, buf, 16, 0)) == 10035);
+  n = 0;
+  opt = 50;
+  CHECK(NetDll_ioctlsocket(1, b, 0x8004667E, &n) == 0 && NetDll_setsockopt(1, b, 0xFFFF, 0x1006, &opt, 4) == 0);
+  CHECK(NetError(NetDll_recv(1, b, buf, 16, 0)) == 10060);  // SO_RCVTIMEO
+  CHECK(NetDll_sendto(1, a, "world", 5, 0, &loop, 16) == 5 && NetError(NetDll_recv(1, b, buf, 2, 0)) == 10040 &&
+        buf[0] == 'w' && buf[1] == 'o' && buf[2] == 'l');  // cut short and gone
+  CHECK(NetError(NetDll_sendto(1, a, "x", 1, 0, &none, 16)) == 10049 &&
+        NetError(NetDll_sendto(1, a, "x", 1, 0, &other_loop, 16)) == 10049 &&
+        NetError(NetDll_sendto(1, a, "x", 1, 0, &bcast, 16)) == 10013 &&
+        NetError(NetDll_sendto(1, a, "x", 1, 0, &sa, 16)) == 10065 &&
+        NetDll_sendto(1, a, "x", 1, 0, &far, 16) == 1);  // lost: no link
+  opt = 1;
+  CHECK(NetDll_setsockopt(1, a, 0xFFFF, 0x20, &opt, 4) == 0 && NetDll_sendto(1, a, "x", 1, 0, &bcast, 16) == 1);
+  CHECK(NetError(NetDll_send(1, a, "x", 1, 0)) == 10057 && NetDll_connect(1, a, &loop, 16) == 0 &&
+        NetDll_send(1, a, "abc", 3, 0) == 3 && NetDll_recv(1, b, buf, 16, 0) == 3);
+  CHECK(NetError(NetDll_sendto(1, v, "x", 1, 0, &loop, 16)) == 10040 && NetDll_sendto(1, v, "\0\1x", 3, 0, &loop, 16) == 3);
+  u32 big = 0;
+  CHECK(XamAlloc(0, 0x8001, &big) == 0 &&
+        NetError(NetDll_sendto(1, a, (void*)(uintptr_t)big, 0x8001, 0, &far, 16)) == 10040);
+  XamFree(big);
+  // Options: their values, xam's limits and refusals.
+  len = 4;
+  CHECK(NetDll_getsockopt(1, a, 0xFFFF, 0x1008, &opt, &len) == 0 && opt == 2 && len == 4);
+  CHECK(NetDll_getsockopt(1, a, 0xFFFF, 0x1002, &opt, &len) == 0 && opt == 0x4000);
+  CHECK(NetDll_getsockopt(1, a, 0, 7, &opt, &len) == 0 && opt == 64);
+  uint8_t byte = 0xAA;
+  len = 1;
+  CHECK(NetDll_getsockopt(1, a, 0, 7, &byte, &len) == 0 && byte == 64 && len == 1);
+  len = 4;
+  CHECK(NetError(NetDll_getsockopt(1, a, 6, 1, &opt, &len)) == 10042 &&
+        NetError(NetDll_getsockopt(1, a, 99, 1, &opt, &len)) == 10022);
+  opt = 1 << 20;
+  CHECK(NetDll_setsockopt(1, a, 0xFFFF, 0x1001, &opt, 4) == 0 && NetDll_setsockopt(1, a, 0xFFFF, 0x1002, &opt, 4) == 0);
+  CHECK(NetDll_getsockopt(1, a, 0xFFFF, 0x1001, &opt, &len) == 0 && opt == 0xFC00 &&
+        NetDll_getsockopt(1, a, 0xFFFF, 0x1002, &opt, &len) == 0 && opt == 0xFC00);
+  opt = 1;
+  CHECK(NetDll_setsockopt(1, a, 0xFFFF, 4, &opt, 4) == 0 && NetError(NetDll_setsockopt(1, a, 0xFFFF, 4, &opt, 4)) == 10022);
+  CHECK(NetError(NetDll_setsockopt(1, a, 0xFFFF, 0x5801, &opt, 4)) == 10013 &&  // no privilege
+        NetError(NetDll_setsockopt(1, a, 0xFFFF, 0x5803, &opt, 4)) == 10050);  // no Live
+  opt = 0;
+  CHECK(NetError(NetDll_setsockopt(1, a, 0, 7, &opt, 4)) == 10022 && NetError(NetDll_setsockopt(1, v, 0xFFFF, 0x20, &opt, 4)) == 10042);
+  u32 group = 0xE0000001;
+  CHECK(NetDll_setsockopt(1, a, 0, 5, &group, 8) == 0 && NetError(NetDll_setsockopt(1, a, 0, 5, &group, 8)) == 10022 &&
+        NetDll_setsockopt(1, a, 0, 6, &group, 8) == 0 && NetError(NetDll_setsockopt(1, a, 0, 6, &group, 8)) == 10022);
+  CHECK(NetError(NetDll_ioctlsocket(1, a, 0x1234, &n)) == 10042);
+
+  // TCP: refused by this console, otherwise no answer.
+  u32 t = NetDll_socket(1, 2, 1, 0);
+  uint16_t linger[2];
+  len = 4;
+  CHECK(NetDll_getsockopt(1, t, 0xFFFF, 0x80, linger, &len) == 0 && linger[0] == 0 && linger[1] == 60);
+  CHECK(NetDll_getsockopt(1, t, 0xFFFF, ~0x80u, &opt, &len) == 0 && opt == 1 &&
+        NetDll_getsockopt(1, t, 6, 0x5803, &opt, &len) == 0 && opt == 0x200);
+  CHECK(NetError(NetDll_connect(1, t, &none, 16)) == 10049 && NetError(NetDll_connect(1, t, &loop, 16)) == 10061);
+  CHECK(NetError(NetDll_recv(1, t, buf, 16, 0)) == 10057 && NetError(NetDll_send(1, t, "x", 1, 0)) == 10057);
+  n = 1;
+  CHECK(NetDll_ioctlsocket(1, t, 0x8004667E, &n) == 0 && NetError(NetDll_connect(1, t, &far, 16)) == 10035 &&
+        NetError(NetDll_connect(1, t, &far, 16)) == 10037);
+  CHECK(NetDll_closesocket(1, t) == 0 && NetError(NetDll_closesocket(1, t)) == 10038 &&
+        NetError(NetDll_closesocket(1, 0x10000FFF)) == 10038);
+
+  // The system's stack with its own settings: one datagram socket, a
+  // 1 s connect timeout, 1 s QoS probes with 1 retry.
+  uint8_t params[0x4C] = {0x4C};
+  params[2] = 1;
+  params[9] = 1;
+  params[10] = 1;
+  params[0x45] = 1;
+  uint16_t wsa[0xC8];
+  CHECK(NetDll_XNetStartup(2, params) == 0 && NetDll_WSAStartup(2, 0x0202, wsa) == 0);
+  u32 d = NetDll_socket(2, 2, 2, 17), s2 = NetDll_socket(2, 2, 1, 6);
+  CHECK(d >> 28 == 2 && NetError(NetDll_socket(2, 2, 2, 17)) == 10055);
+  CHECK(NetError(NetDll_connect(2, s2, &far, 16)) == 10060);  // after 1 s
+  CHECK(NetError(NetDll_closesocket(1, d)) == 10038);
+
+  // XNet: this console's address, keys, security associations.
+  uint8_t own[0x24], peer[0x24] = {0}, id[8], key[16];
+  CHECK(NetDll_XNetGetTitleXnAddr(1, own) == 0x8002 && own[10] == 0x00 && own[11] == 0x22 && own[12] == 0x48 &&
+        own[0x20] == 1 && *(u32*)own == 0);
+  CHECK(NetDll_XNetGetDebugXnAddr(1, peer) == 1 && NetDll_XNetRandom(1, buf, 16) == 0);
+  CHECK(NetDll_XNetCreateKey(1, id, key) == 0 && (id[0] & 0xF0) == 0);
+  CHECK(NetDll_XNetRegisterKey(1, id, key) == 0 && NetDll_XNetRegisterKey(1, id, key) == 10037);
+  u32 ina = 1, ina2 = 0;
+  CHECK(NetDll_XNetXnAddrToInAddr(1, own, id, &ina) == 0 && ina == 0x7F000001);
+  CHECK(NetDll_XNetXnAddrToInAddr(1, peer, id, &ina) == 10022 && ina == 0);  // no Ethernet address
+  for (int k = 0; k < 6; k++) peer[10 + k] = (uint8_t)(k + 1);
+  CHECK(NetDll_XNetXnAddrToInAddr(1, peer, id, &ina) == 0 && ina && ina >> 24 == 0 &&
+        NetDll_XNetXnAddrToInAddr(1, peer, id, &ina2) == 0 && ina2 == ina);
+  sa.addr = ina;
+  CHECK(NetDll_sendto(1, a, "x", 1, 0, &sa, 16) == 1);  // through the association, lost
+  uint8_t other[8] = {0x80, 1, 2, 3, 4, 5, 6, 7}, unknown[8] = {0, 9, 9, 9, 9, 9, 9, 9};
+  CHECK(NetDll_XNetXnAddrToInAddr(1, peer, unknown, &ina) == 10022);
+  *(u32*)(peer + 4) = 0x0A000001;
+  CHECK(NetDll_XNetXnAddrToInAddr(1, peer, other, &ina) == 10049);  // online: needs Live
+
+  // QoS: this console answers at once, another console's probes run out.
+  CHECK(NetDll_XNetQosListen(1, id, "data", 4, 0, 5) == 0 && NetDll_XNetQosListen(1, unknown, 0, 0, 0, 1) == 10022);
+  peer[0x20] = 1;  // a console like this one: probed
+  u32 event = NetDll_WSACreateEvent(), xnqos = 0;
+  u32 xnaddrs[2] = {(u32)(uintptr_t)own, (u32)(uintptr_t)peer}, ids[2] = {(u32)(uintptr_t)id, (u32)(uintptr_t)id},
+      keys[2] = {(u32)(uintptr_t)key, (u32)(uintptr_t)key};
+  CHECK(event && NetDll_XNetQosLookup13(2, 2, xnaddrs, ids, keys, 0, 0, 0, 0, 0, 0, event, &xnqos) == 0 && xnqos);
+  CHECK(*At(xnqos) == 2 && *At(xnqos + 4) == 1 && *(uint8_t*)(uintptr_t)(xnqos + 8) == 0xB &&
+        *(uint16_t*)(uintptr_t)(xnqos + 8 + 6) == 4 && Memeq((void*)(uintptr_t)*At(xnqos + 8 + 8), "data", 4) &&
+        *At(xnqos + 8 + 0x10) == 100000000);
+  int64_t ten_ms = -100000, wait = -15000000;
+  KeDelayExecutionThread(1, 0, &wait);
+  CHECK(*At(xnqos + 4) == 1);  // probes for 2 s
+  for (int k = 0; k < 200 && *At(xnqos + 4); k++) KeDelayExecutionThread(1, 0, &ten_ms);
+  CHECK(*At(xnqos + 4) == 0);
+  CHECK(*(uint8_t*)(uintptr_t)(xnqos + 8 + 0x18) == 1);  // complete, never contacted
+  CHECK(NetDll_XNetQosRelease(1, xnqos) == 10022 && NetDll_XNetQosRelease(2, xnqos) == 0);
+
+  // DNS: no server.
+  u32 xndns = 0, dns_event = NetDll_WSACreateEvent();
+  int64_t zero = 0;
+  CHECK(NetDll_XNetDnsLookup(1, "", 0, &xndns) == 10014 && NetDll_XNetDnsLookup(1, ".a", 0, &xndns) == 10014);
+  CHECK(NtWaitForSingleObjectEx(dns_event, 1, 0, &zero) == kStatusTimeout);
+  CHECK(NetDll_XNetDnsLookup(1, "host.example", dns_event, &xndns) == 0 && *At(xndns) == 11001 &&
+        *At(xndns + 4) == 0 && NtWaitForSingleObjectEx(dns_event, 1, 0, &zero) == 0);
+  CHECK(NetDll_XNetDnsRelease(2, xndns) == 10022 && NetDll_XNetDnsRelease(1, xndns) == 0);
+
+  CHECK(NetDll_XNetUnregisterKey(2, id) == 10022 && NetDll_XNetUnregisterKey(1, id) == 0 &&
+        NetDll_XNetUnregisterKey(1, id) == 10022);
+  // Cleanup: the system's sockets go with its Winsock, the stack with the
+  // last caller.
+  CHECK(NetDll_WSACleanup(2) == 0 && NetError(NetDll_closesocket(2, d)) == 10093);
+  CHECK(NetDll_WSAStartup(2, 0x0202, wsa) == 0 && NetError(NetDll_closesocket(2, d)) == 10038 &&
+        NetDll_WSACleanup(2) == 0 && NetDll_XNetCleanup(2) == 0 && NetDll_XNetCleanup(2) == 10093);
+  CHECK(NetDll_WSACleanup(1) == 0 && NetDll_WSACleanup(1) == 0 && NetDll_XNetCleanup(1) == 0 &&
+        NetDll_XNetGetTitleXnAddr(1, own) == 0x8002 && NetDll_XNetCleanup(1) == 0);
+  CHECK(NetDll_XNetGetTitleXnAddr(1, own) == 1 && NetDll_XNetRandom(1, buf, 4) == 10093);
+  CHECK(NtClose(event) == 0 && NtClose(dns_event) == 0);
+}
+
+// ---- structured exception handling (seh.S) ------------------------------
+static void Exceptions(void) {
+  static uint8_t ctx[0xA40] __attribute__((aligned(16)));
+  // The registers at the call, Iar and LR its return address, r3 kept.
+  CHECK(capture(ctx) == 1);
+  const volatile u32* w = (const volatile u32*)ctx;
+  CHECK(w[0] == 7);                                // ContextFlags
+  CHECK(w[2] == seh_log[9] && w[3] == seh_log[9]);  // Iar, Lr
+  CHECK(w[(0x18 + 8 * 1 + 4) / 4] == seh_log[8]);   // r1
+  CHECK(w[(0x18 + 8 * 3 + 4) / 4] == (u32)(uintptr_t)ctx);
+  CHECK(w[(0x18 + 8 * 7 + 4) / 4] == 0x77770000);
+
+  // A filter that takes the exception: its __except block, in its frame,
+  // with r3 the code; the __finally further out then runs normally.
+  for (int k = 0; k < 16; k++) seh_log[k] = 0;
+  CHECK(seh_outer(0xE0000001) == 0x101);
+  CHECK(seh_log[0] == seh_log[4]);  // the filter's frame: seh_try's
+  // seh_outer's frame: seh_try's, 0x80 up.
+  CHECK(seh_log[1] == 1 && seh_log[2] == 0 && seh_log[3] == seh_log[4] + 0x80);
+  // One that searches on: the outer __except, after the __finally ran as
+  // an abnormal termination.
+  for (int k = 0; k < 16; k++) seh_log[k] = 0;
+  CHECK(seh_outer(0xE0000002) == 0x202);
+  CHECK(seh_log[0] == seh_log[4]);
+  CHECK(seh_log[1] == 1 && seh_log[2] == 1 && seh_log[3] == seh_log[4] + 0x80);
+  // One that continues execution: the raise returns.
+  for (int k = 0; k < 16; k++) seh_log[k] = 0;
+  CHECK(seh_outer(0xE0000003) == 7);
+  CHECK(seh_log[1] == 1 && seh_log[2] == 0);
+  // A title's own handler unwinding to the code after the call (its
+  // handler is called again for the unwind's target frame).
+  for (int k = 0; k < 16; k++) seh_log[k] = 0;
+  CHECK(own_frame(0xE0000004) == 0x377);
+  CHECK(seh_log[5] == 2);
+  // An unwind whose target frame's handler puts back a context captured
+  // further down: it returns where that context was captured.
+  for (int k = 0; k < 16; k++) seh_log[k] = 0;
+  CHECK(back_outer() == 0x444);
+  CHECK(seh_log[6] == 1);
+
+  // longjmp: a blr to a frame further up, through a frame in between.
+  CHECK(sj_caller() == 0x505);
+
+  // The L2 window is guest memory.
+  CHECK(KeLockL2(0, 0x7F100000, 0x20000, 1, 1) == 0);
+  *At(0x7F100000) = 0x12345678;
+  CHECK(*At(0x7F100000) == 0x12345678);
+  CHECK(KeUnlockL2(0) == 0);
+}
+
+static void Controllers(void) {
+  uint8_t caps[0x14];
+  memset(caps, 0xAA, sizeof caps);
+  CHECK(XamInputGetCapabilities(0, 0, caps) == 0 && caps[0] == 1 && caps[1] == 1 && caps[2] == 0 &&
+        caps[3] == 0 && caps[4] == 0xF3 && caps[5] == 0xFF && caps[0x13] == 0xFF);
+  CHECK(XamInputGetCapabilities(1, 1, caps) == 0 && caps[0] == 1);
+  // No keyboard, no type 3 context; flags naming no device fail.
+  memset(caps, 0xAA, sizeof caps);
+  CHECK(XamInputGetCapabilities(0, 2, caps) == 1167 && caps[0] == 0 && caps[0x13] == 0);
+  CHECK(XamInputGetCapabilities(0, 9, caps) == 1167 && XamInputGetCapabilities(0, 0x10, caps) == 1167);
+  CHECK(XamInputGetCapabilities(0, 0x40, caps) == 1627 && XamInputGetCapabilities(2, 1, caps) == 1167);
+  CHECK(XamInputGetCapabilities(0xFF, 1, caps) == 1167);
+
+  // The guide button stays clear; the stick's up is positive. The packet
+  // number holds while the state does.
+  PadState s, t;
+  CHECK(PadWait(&s, 0x1001) == 0 && s.buttons == 0x1001 && s.left_trigger == 0 && s.right_trigger == 0 &&
+        s.lx == 0 && s.ly == 32767 && s.rx == 0 && s.ry == 0 && s.packet != 0);
+  CHECK(XamInputGetState(0, 0, &t) == 0 && t.packet == s.packet);
+  CHECK(XamInputGetState(1, 0, &t) == 0 && t.buttons == 0 && XamInputGetState(0, 8, &t) == 1167);
+  CHECK(XamInputGetState(0xFF, 0, &t) == 1167);
+
+  // Player 2's pad unplugged and plugged in again: a notification each
+  // time, and it is player 2's again; player 1 keeps theirs.
+  u32 h = XamNotifyCreateListener(1, 1), id, value;
+  while (XNotifyGetNext(h, 0, &id, &value)) {
+  }
+  CHECK(PadChange(h, 0x1111, 1));
+  CHECK(XamInputGetState(1, 0, &t) == 1167 && XamInputGetCapabilities(1, 1, caps) == 1167);
+  CHECK(XamInputGetState(0, 0, &t) == 0 && t.buttons == 0x1001);
+  CHECK(PadChange(h, 0x2222, 1));
+  CHECK(XamInputGetState(1, 0, &t) == 0 && XamInputGetState(2, 0, &t) == 1167);
+  // B pressed, the left trigger pulled: a new packet.
+  CHECK(PadChange(h, 0x3333, 0));
+  CHECK(PadWait(&t, 0x3001) == 0 && t.buttons == 0x3001 && t.packet > s.packet);
+  int64_t ms = -10000;
+  for (int k = 0; k < 1000 && t.left_trigger != 255; k++) {
+    KeDelayExecutionThread(1, 0, &ms);
+    XamInputGetState(0, 0, &t);
+  }
+  CHECK(t.left_trigger == 255 && t.ly == 32767);
+  NtClose(h);
+}
+
+int main(void) {
+  Modules();
+  Xam();
+  Net();
+  Exceptions();
+  Controllers();
+  Users();
+  Content();
+  Timers();
+  Apcs();
+  Sessions();
+  Console();
+  Gpu();
+  Conversions();
+  Audio();
+  Xma();
+  XmaDecode();
+  Memory();
+  Physical();
+  Threads();
+  Objects();
+  Pulses();
+  Strings();
+  Variables();
+  Files();
+  DbgPrint("runtime test: %d failed\n", failures);
+  return failures;
+}

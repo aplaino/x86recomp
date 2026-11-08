@@ -1,0 +1,551 @@
+# xam: behaviour the runtime reimplements
+
+What xam (2.0.17559.0, which the console's system update ships
+unencrypted) does, as far as the runtime depends on it, and where each
+fact comes from: xam's own code first, then what titles read, then
+Xenia's and ReXGlue's implementations (BSD-3). "Console check" marks what
+only a console can settle.
+
+## The console
+- XGetAVPack and XGetVideoMode are each a single branch to the kernel's
+  HalGetCurrentAVPack and VdQueryVideoMode, so they return what those do
+  (docs/xboxkrnl.md, "Settings and the display").
+- XGetGameRegion returns a halfword the system keeps in memory (xam reads
+  0x8E038602): here 0x00FF, North America, with the NTSC-M AV region
+  (chosen). XamGetSystemVersion packs XboxKrnlVersion: major and minor in
+  4 bits each, the build, the QFE's low byte (xam's code).
+- XGetLanguage: the user's language setting (XConfig 3/9) when it is 1-9;
+  otherwise by region: Japanese (2) in Japan, Korean (7) in the rest of
+  Asia but China when the one-byte setting 3/0xE is 0x38, English (1)
+  elsewhere (xam's code).
+- XamGetExecutionId(*info): the address of the title's execution info
+  (XEX header 0x40006), found through XexExecutableModuleHandle;
+  STATUS_NOT_FOUND and 0 without one (xam's code).
+
+## The loader
+- XamLoaderGetLaunchDataSize writes the size of the launch data (what a
+  title hands the next title it launches) and returns ERROR_NOT_FOUND
+  when there is none; XamLoaderGetLaunchData returns ERROR_NOT_FOUND
+  then too (ERROR_BUFFER_OVERFLOW for a short buffer). A title the system
+  starts from its disc has none (xam's code).
+- XamLoaderLaunchTitle(name, flags) is XamLoaderLaunchTitleEx with flag
+  4: no name, an empty one, flag 2, or a device path (\\...) start the
+  dashboard; XamLoaderTerminateTitle unloads the title and starts the
+  dashboard (xam's code). Starting the dashboard ends the process here,
+  as HalReturnToFirmware does. Another executable is fatal and named:
+  the program is the one title it was lifted from.
+
+## Input
+- Each user (0-3) has device contexts by type, bound by xam to the
+  controller ports; type 0 is the gamepad. A user outside 0-3, 0xFF
+  (any user) among them, has none (xam's code). Here the host's
+  gamepads (SDL) take the users in the order they connect and keep them
+  until they disconnect.
+- XamInputGetCapabilities(user, flags, *caps) zeroes XINPUT_CAPABILITIES
+  (0x14 bytes) and asks the devices the flags name (0 means 3): the
+  gamepad (1; with 8 its type 3 context instead), types 1 (0x10) and 4
+  (0x20), the keyboard (2; xam also asks the HID driver). The first that
+  is there fills it and the call returns 0; if none is,
+  ERROR_DEVICE_NOT_CONNECTED, and with flags naming none of them
+  ERROR_FUNCTION_FAILED (xam's code). Only gamepads exist here, with no
+  type 3 context (console check), and report type 1 (gamepad), subtype 1,
+  no flags, every button but the guide button (0xF3FF) and full trigger,
+  stick and motor ranges, as Xenia has it (console check).
+- XamInputGetState(user, flags, *state) zeroes XINPUT_STATE (16 bytes:
+  packet number, then XINPUT_GAMEPAD: buttons, triggers, sticks X and Y,
+  big-endian, up positive) and returns ERROR_DEVICE_NOT_CONNECTED when
+  the user has no gamepad (flags with 8: no type 3 context); otherwise
+  the driver's state, with the guide button (0x0400) cleared for titles
+  (xam's code). The packet number changes when the state does, as Xenia
+  has it (console check). While the system UI holds input xam gives
+  titles the last packet number and a neutral pad; it never does here.
+- XamInputSetState(user, flags, *vibration) sets the motors (the left,
+  low-frequency one's speed, then the right's) until changed; the flags
+  are not used. ERROR_DEVICE_NOT_CONNECTED when the user has no gamepad,
+  ERROR_BUSY when the driver is (xam's code); here it never is.
+- xam broadcasts XN_SYS_INPUTDEVICESCHANGED (0x12) with value 0 whenever
+  the mask of users with a gamepad changes (xam's code). Here pads are
+  read from the first input call or notification listener on; the pads
+  found then were there before the title and raise nothing.
+
+## Live (XLiveBase, app 0xFC)
+- xam's handler for app 0xFC forwards each message to an object that
+  xlivebase.xex registers (and answers 0 while there is none); that module
+  is in the console's flash, not in the system update, so its behaviour is
+  unknown here. Message 0x58004 (a word in p1) writes 1 and succeeds, as
+  Xenia has it (it calls it XLiveBaseGetLogonId); a title passes the word
+  on to its next online requests. The rest are chosen for a console with
+  no Live connection, as the profiles here have none: 0x58020 (the
+  friends list) ends at once with HRESULT_FROM_WIN32(ERROR_NO_MORE_FILES),
+  an empty list (Xenia fails it with E_FAIL, which titles take for a
+  failure); 0x5800E (is an XUID muted) answers no; 0x58006 (NAT type),
+  0x58009 (marketplace counts), 0x58023 (a service request) fail with
+  0x80151802, which this module gives every Live query (titles' NAT type
+  wrapper then reports open). Console check.
+
+## Networking
+xam has its own TCP/IP stack behind the NetDll_* exports (xam's code,
+decompiled; what is chosen says so). There is no network interface here:
+a console with no cable connected.
+- Startup: NetDll_* take the caller first, a title (1) or the system (2);
+  WSAStartup and XNetStartup refuse others with WSAEINVAL and count per
+  caller, as do their cleanups (WSANOTINITIALISED past zero; XNetCleanup
+  returns the error, WSACleanup sets it). A caller's sockets close when
+  its Winsock count ends; its keys and security associations go when
+  both end; the stack (DNS lookups and QoS included) with the last
+  caller. Winsock calls need WSAStartup (WSANOTINITIALISED). WSADATA: the
+  version asked for, the highest 2.2, empty description and status, no
+  limits. The Ex forms (WSAStartupEx, XNetStartupEx, which titles call
+  through XexGetProcedureAddress) take the title's version too, passed on
+  unchecked. A caller's settings come from its first startup's
+  XNetStartupParams (WSAStartup's: the defaults): a 13- or 0x4C-byte
+  structure, each byte clamped to xam's bounds, 0 the default. The
+  defaults: 8 datagram and 32 stream sockets, 16 KiB buffers, 8 keys, 32
+  security associations, QoS data 256 bytes, probes every 2 s with 3
+  retries, TTL 64, a 20 s TCP connect timeout, 60 s linger.
+- The console's address: NetDll_XNetGetEthernetLinkStatus returns 0, no
+  link (xam does not check the caller). XNetGetTitleXnAddr returns
+  XNET_GET_XNADDR_NONE (1) before startup; after, an XNADDR with no IP,
+  the console's Ethernet address (chosen: 00:22:48:00:00:01, a Microsoft
+  OUI; console check) and byte 0x20 1, and 0x8002 (Ethernet,
+  troubleshoot): the IP configuration's first tick, due at once, finds no
+  link and settles with no address. A stack started with cfgFlags 0x80
+  skips the configuration and stays pending (0). XNetGetDebugXnAddr is a
+  retail system's: XNET_GET_XNADDR_NONE, nothing written.
+- Sockets: socket takes AF_UNSPEC or AF_INET (else WSAEAFNOSUPPORT),
+  SOCK_STREAM or SOCK_DGRAM (WSAESOCKTNOSUPPORT), TCP, UDP or VDP (254)
+  matching the type (WSAEPROTONOSUPPORT), a missing type or protocol
+  taken from the other; past the caller's count WSAENOBUFS. A handle is
+  the caller in its top 4 bits, a sequence number (random start) and the
+  table's slot in the low 12; another is WSAENOTSOCK. bind takes the any
+  address only (WSAEADDRNOTAVAIL), once (WSAEINVAL); a port in use by a
+  socket of the kind is WSAEADDRINUSE unless SO_REUSEADDR and neither is
+  exclusive; datagram sockets cannot have 68, 1256 or 3074; port 0 takes
+  the next of 1025-1255. getsockname needs a bound socket. ioctlsocket:
+  FIONBIO, FIONREAD (the next datagram's size, 1 for an empty one), else
+  WSAENOPROTOOPT.
+- Options: SOL_SOCKET's SO_SNDBUF (1 B to 63 KiB) and SO_RCVBUF (to 255
+  KiB, 63 KiB without TCP window scaling), SO_SNDTIMEO, SO_RCVTIMEO,
+  SO_TYPE, SO_REUSEADDR and SO_EXCLUSIVEADDRUSE (setting either again is
+  WSAEINVAL), SO_BROADCAST (UDP), SO_LINGER and SO_DONTLINGER (TCP),
+  SO_ACCEPTCONN (TCP, never listening), 0x5801 (insecure: the title needs
+  privilege 6, WSAEACCES), 0x5802, 0x5803 (needs a Live logon:
+  WSAENETDOWN); IP_TTL (4 bytes, 1-255), 100 (the TOS's DSCP bits),
+  IP_ADD/DROP_MEMBERSHIP (UDP, 4 groups); TCP_NODELAY, 0x5803 and 0x5804
+  (0x58-0x5B4), 0x5805. Unknown options WSAENOPROTOOPT, unknown levels
+  WSAEINVAL; a value under 4 bytes is a byte. getsockopt clears the
+  value over *length first.
+- UDP: sendto refuses address 0, port 0 and 127.x other than 127.0.0.1
+  (WSAEADDRNOTAVAIL), multicast but on an insecure socket, broadcast
+  without SO_BROADCAST (WSAEACCES), a security association's address
+  (0.x.y.z) the caller holds none for (WSAEHOSTUNREACH), more than 0x8000
+  bytes (0x4F0 to an association; WSAEMSGSIZE), a VDP datagram under 2
+  bytes; it binds the socket first. Datagrams to 127.x go to the socket
+  bound to the port (from that port if it is connected), unless its
+  receive buffer is full (chosen: dropped, console check); all else is
+  lost, with the length returned. send needs a connected socket
+  (WSAENOTCONN). recv and recvfrom need a bound socket; with nothing
+  queued a non-blocking socket, or a second blocking receive, gets
+  WSAEWOULDBLOCK, a blocking one waits up to SO_RCVTIMEO (WSAETIMEDOUT);
+  closesocket ends the wait with WSAENOTSOCK. A datagram larger than the
+  buffer fills it and is lost: WSAEMSGSIZE. recvfrom writes a
+  sockaddr_in (family set before the wait).
+- TCP: no socket listens (titles cannot), so nothing connects: connect to
+  127.0.0.1 is refused at once (WSAECONNREFUSED); anywhere else no answer
+  comes and it times out after the connect timeout (WSAETIMEDOUT). A
+  non-blocking socket gets WSAEWOULDBLOCK, then WSAEALREADY while it
+  tries; afterwards it may connect again. Address 0, port 0, broadcast,
+  multicast and 127.x but 127.0.0.1 are WSAEADDRNOTAVAIL; send and recv
+  WSAENOTCONN.
+- inet_addr: parts decimal, octal (0...) or hex (0x...), spaces around
+  them allowed; fewer than 4 fill the last one's low bytes; INADDR_NONE
+  otherwise, 0 for "". WSAGetLastError is the thread's last error;
+  WSACreateEvent a manual-reset event (NtCreateEvent).
+- XNet keys: XNetCreateKey makes a random XNKID (system link, or
+  cross-platform with privilege 0xE) and key. XNetRegisterKey takes an
+  online key or the system link kind the privilege allows (WSAEINVAL),
+  once across callers (WSAEALREADY), up to the count (WSA_E_NO_MORE);
+  XNetUnregisterKey only the caller's own, with its associations and
+  QoS listener. XNetXnAddrToInAddr: no Ethernet address WSAEINVAL; this
+  console's 127.0.0.1; an online key needs Live (WSAEADDRNOTAVAIL);
+  otherwise a security association under a registered key, its address
+  0.x.y.z (a counter from a random start, then the slot), the same for
+  the same console and key. Nothing answers through one: datagrams are
+  lost, connections time out. XNetRandom gives random bytes.
+- DNS: XNetDnsLookup takes a host name (under 254 characters, labels up
+  to 63, none empty; WSAEFAULT) and an event (WSASYSCALLFAILURE for a
+  handle that is not one); with no DNS server it ends at once:
+  WSAHOST_NOT_FOUND, no addresses, the event set. XNetDnsRelease the
+  caller's own.
+- QoS: XNetQosListen answers probes under a registered key (enable,
+  disable, data up to the limit, bits per second, release).
+  XNetQosLookup's entries for this console complete at once, contacted
+  when it listens (its data, 100 Mbit/s each way, disabled flagged);
+  system link ones to a console like this one (XNADDR byte 0x20 1, or a
+  title's to 0) probe and fail after the probe timeout times the retries
+  + 1; online ones, security gateways and the rest need Live and fail at
+  once. A failed entry is only complete; the event is set as each ends.
+  XNetQosRelease the caller's own.
+- XNetLogonGetTitleID(service): the title Live's logon is for (for some
+  services another title's); only a logon sets it, so 0 here (xam's
+  code).
+
+## Memory
+- XamAlloc(attributes, size, *address) returns an HRESULT (E_INVALIDARG
+  without an address); the attributes pick xam's heaps and physical
+  memory, and only 0 is read here (heap memory, zeroed). XamFree is xam's
+  XMemFree, which frees heap memory below 0xA0000000 and physical memory
+  above (xam's code).
+
+## Messages
+- XMsgInProcessCall(app, message, p1, p2) calls the app's handler and
+  returns its result; XMsgStartIORequest(Ex)(app, message, overlapped,
+  buffer, size[, xparams]) queues the request as a task of the app, which
+  completes it with XMsgCompleteIORequest(overlapped, result, extended
+  error, length): length in the XOVERLAPPED's word 1, extended error in
+  word 6, result in word 0 (ERROR_IO_PENDING until then), then its event
+  set or its completion routine queued as an APC. Without an XOVERLAPPED,
+  xam waits and leaves the extended error as the thread's last error,
+  returning the scheduling's status (xam's code).
+- Here every request completes before the call returns, with the
+  handler's HRESULT as the extended error and its length (a count of
+  items, a disposition). xam's own app (0xFE) completes every failure
+  with the result ERROR_FUNCTION_FAILED (its content handler's code);
+  the others with 0, the code of a FACILITY_WIN32 HRESULT, or
+  ERROR_FUNCTION_FAILED (chosen: each app makes its own result). A
+  completion routine (the XOVERLAPPED's word 4) is queued to the thread
+  that sent the request as a user APC that calls routine(result, length,
+  overlapped) from the XOVERLAPPED (xam's normal routine does), in place
+  of setting the event (xam's code).
+- xam's exports that send a request use XMsgProcessRequest, which returns
+  the extended error without an XOVERLAPPED (a positive last error made
+  HRESULT_FROM_WIN32) and HRESULT_FROM_WIN32(ERROR_IO_PENDING) with one,
+  and return its Win32 code: 0, a FACILITY_WIN32 HRESULT's code, or
+  ERROR_FUNCTION_FAILED (xam's code).
+- XMsgCancelIORequest(overlapped, wait) cancels the task behind a request
+  and with `wait` waits until the XOVERLAPPED is no longer
+  ERROR_IO_PENDING; it returns S_OK (xam's code). Requests here have
+  completed when they were started: nothing to cancel.
+- Apps titles call: 0xFA (the music player, XMP), 0xFB and 0xFC (Xenia's
+  XGI and XLiveBase); xam's own exports call 0xFE, xam's own app.
+
+## Enumerators
+- XamCreateEnumeratorHandle makes an object naming an app, the message
+  that enumerates and the one that closes, the items per call, with the
+  app's state after its 0x18-byte header. XamEnumerate(handle, flags,
+  buffer, size, *items returned, overlapped) sends the enumerating
+  message the request {caller, flags | 0x80000000, the state, buffer,
+  size, items per call, *items returned, overlapped}: ERROR_INVALID_HANDLE
+  for another handle, ERROR_IO_PENDING with an XOVERLAPPED (the length is
+  the items returned). Neither reads the buffer's size (xam's code).
+
+## The music player
+- XMPSetPlaybackController (0x7001A, {client, controller, locked}): xam
+  refuses a title (client 2) any controller but 0 (the title) or 4 (give
+  it back) with E_INVALIDARG; with no user music here the title keeps
+  playback. XMPGetPlaybackController (0x7001B, {client, *controller,
+  *locked}): the title's (0), unlocked. Message names are Xenia's.
+
+## Users
+- Four slots; xam keeps a profile's state per slot: signed in locally
+  (bit 0), to Live (bit 1), with its offline XUID at 8 and online XUID at
+  0x3C. Here the game project's profile (GameConfig::profile, "Player"
+  unless it says otherwise) is signed in locally in slot 0, with the
+  offline XUID 0xE000000000000001 (chosen; offline XUIDs have 0xE0 at the
+  top); none is signed in to Live.
+- XamUserGetSigninState(slot): 0, 1 (locally) or 2 (Live).
+  XamUserGetXUID(slot, types, *xuid) returns an HRESULT: E_INVALIDARG for
+  a slot past 3, ERROR_NO_SUCH_USER (0x80070525) when the slot has no
+  profile or no XUID of the types asked (1 offline, 2 and 4 online), and
+  always writes the XUID (0 on failure). XamUserGetName(slot, buffer,
+  size) converts the name (RtlUnicodeToMultiByteN) into size - 1 bytes
+  and a NUL, returning a Win32 code. All from xam's code.
+
+- XamUserCheckPrivilege(slot or 0xFF, privilege, *result): privileges
+  come with Live (xam asks XLiveBase 0x58008 for a Live user's), so a
+  profile signed in locally holds none: ERROR_NOT_LOGGED_ON and FALSE;
+  ERROR_NO_SUCH_USER for a slot with no profile (0xFF: no profile at
+  all), ERROR_INVALID_PARAMETER past slot 3. xam's code. A title's XAPI
+  wrapper answers the same itself on systems before 0x20096B00.
+- XamShowSigninUI(panes, flags): with 0x400000 (online-enabled profiles
+  only) it fails with ERROR_FUNCTION_FAILED unless a signed-in user holds
+  Live's privilege 0xFE, so always here. Otherwise xam posts its UI app
+  (0xFE) message 0x21001 {0, 0xFF, panes, flags, 0} and returns 0; the
+  UI raises XN_SYS_UI 1, then 0 when it closes, and
+  XN_SYS_SIGNINCHANGED if the profiles changed (xam's code). With no UI
+  here it closes at once with nothing changed (chosen): listeners hold
+  XN_SYS_UI 0, which titles read as a cancelled sign-in.
+- XamUserAreUsersFriends(slot, XUIDs, count, *result, overlapped) asks
+  Live (XLiveBase 0x5800B): ERROR_INVALID_PARAMETER past slot 3,
+  ERROR_NO_SUCH_USER with no profile, ERROR_NOT_LOGGED_ON for a profile
+  not on Live, as all are here; without an XOVERLAPPED *result is FALSE
+  whatever the code (xam's code).
+
+## XGI (app 0xFB)
+xam's own handlers, for the messages titles send (their XDK wrappers
+build the requests; the names are the wrappers'). Most first check a
+field of xam's XGI object (+0xDC) and fail with 0x8056F002 while it is
+0; what sets it was not found, and it is taken as set (console check).
+- XUserSetContextEx (0xB0006 {slot, ?, XUID, context id, value}, the
+  user by XUID unless 0) keeps the value with the user, whether or not
+  there is one, and succeeds; sessions read the game type (0x800A).
+  XUserSetPropertyEx (0xB0007) succeeds; xam keeps properties for
+  presence and Live, which nothing reads here.
+- XUserWriteAchievements (0xB0008 {count, *(slot, id)}): every slot
+  signed in (else HRESULT_FROM_WIN32(ERROR_NOT_FOUND)); each user's
+  achievements go to its profile for the running title
+  (`profiles/<XUID>/achievements/<title id>`, the ids one per line;
+  chosen), S_FALSE if one was earned already. xam checks the ids against
+  the title's achievement table and shows a notification; neither here.
+- Sessions: XamSessionCreateHandle makes an object whose first word is
+  xam's session once created (ERROR_INVALID_HANDLE from
+  XamSessionRefObjByHandle for another object); every message on a
+  session fails with E_INVALIDARG while it has none. XSessionCreate
+  (0xB0010 {object, flags, public slots, private slots, slot, *info,
+  *nonce}): ERROR_NOT_FOUND for a user not signed in; presence,
+  statistics or matchmaking (0xE) need the user on Live (0x80155209); the
+  peer network with any of those or arbitration Live's multiplayer
+  privilege (0x80155201); then the user's game type context, unless
+  arbitrated (0x80155205). A host on the peer network makes an XNet key,
+  a client registers the host's: there is no network here, so they fail
+  as xam does when that fails (0x8015520B, 0x8015520D). Otherwise the
+  session has no session info (zeroed). States: idle, registered (after
+  XSessionArbitrationRegister, 0xB001A, which goes to Live for an
+  arbitrated session), in progress (XSessionStart 0xB0014; an arbitrated
+  one must be registered, 0x8015520C), deleted (XSessionDelete 0xB0011);
+  XSessionEnd (0xB0015) goes back to idle; out of turn 0x80155206.
+  XSessionJoin (0xB0012 {object, count, *XUIDs, *slots, *private}, one
+  list, at most 4 local users, each signed in): new members take a
+  private slot if asked and left, else a public one, or the session is
+  full (0x80155202); a remote offline XUID in a session with Live's
+  features is refused (0x8015520A). XSessionLeave (0xB0013) frees them.
+  XSessionModify (0xB0018 {object, flags, public, private}) may change
+  only flags 0x10 and 0xF00 (else 0x80155204). XSessionWriteStats
+  (0xB0025) needs a session with statistics (0x80155204) in progress;
+  XSessionFlushStats (0xB0026) a session in progress, which with no
+  statistics has nothing to send.
+- Live's queries (XSessionSearch 0xB0016, XSessionSearchByID 0xB001B,
+  XUserReadStats 0xB0021, which first clears its results) fail with
+  0x80151802, as the XLiveBase messages do.
+- XamUserCreateStatsEnumerator(title, kind, pivot, rows, view count,
+  views, *size, *handle): ERROR_INVALID_PARAMETER for no views, rows not
+  1-100, no size or handle pointer; otherwise an enumerator of message
+  0xB0023 (closed with 0xB0024, which the XGI app has no case for:
+  success) returning `rows` rows a call, whose state xam fills (the
+  title through the in-process 0xB0022: the title asked for, else
+  XNetLogonGetTitleID's; the kind, 0 by rank, 1 around a XUID, 3 by
+  rating; the pivot; a rank per view; a copy of the views, 0x88 bytes
+  each), and *size = 8 + per view 0x10 + 0x30 a row + 0x1C a row per
+  column. Each call fails with E_INVALIDARG for flag 1, else clears the
+  buffer and asks Live: 0x80151802 here, ERROR_FUNCTION_FAILED from
+  XamEnumerate. xam's code.
+
+## Profile settings
+- XamUserReadProfileSettings(title, slot, XUID count, XUIDs, count, ids,
+  *size, results, overlapped) is xam's: it inserts a flags argument (0)
+  and calls its Ex form, which refuses no ids, more than 32, a missing
+  size pointer, or a size without a buffer (ERROR_INVALID_PARAMETER); sizes
+  the results (0x28 bytes per setting and user, plus the string's or
+  bytes' size for types 4 and 6, plus 8); writes the size only when the
+  caller passed 0 and returns ERROR_INSUFFICIENT_BUFFER when it is short;
+  then sends the XGI app (0xFB) message 0xB000C with the request {title,
+  slot, XUID count, XUIDs, count, ids, buffer size, results, flags}, and
+  returns ERROR_IO_PENDING with an XOVERLAPPED, otherwise ERROR_SUCCESS or
+  ERROR_FUNCTION_FAILED by the last error.
+- The results: XUSER_READ_PROFILE_SETTING_RESULT (the settings' count,
+  their address), then XUSER_PROFILE_SETTING per setting and user
+  (source, the slot or XUID at 8, the id at 0x10, XUSER_DATA at 0x18: its
+  type byte, the value or a size and an address at 0x20), then the
+  strings' and bytes' space.
+- XamUserWriteProfileSettings(title, slot, count, settings, overlapped)
+  is xam's: it refuses no settings and any id a title may not write
+  (ERROR_INVALID_PARAMETER): the profile's own (number below 0x58) and,
+  for any title but the dashboard, title specific 1-3. It sends the XGI
+  app's message 0xB000D with {?, title, slot, count, settings} (xam leaves
+  the first word unset) and returns as the read does.
+- What a title writes is kept as the profile keeps it: the profile's own
+  settings for the profile (read under 0xFFFE07D1), a title's own for that
+  title, source TITLE when read back. They are saved in the data
+  directory, profiles/<XUID>/<title>/<id>, a file each holding the
+  string's or bytes' own bytes or the 8 bytes XUSER_DATA holds a number
+  in; the console keeps them in the profile's package. A string or bytes
+  of size 0 is stored empty, address or not: a title writes title
+  specific 3 with 0 bytes and an address when it saves its settings, and
+  memcpy into an empty std::vector's data(), which may be null, is
+  undefined even for 0 bytes (another HLE corrupted its heap on exactly
+  that write, rexglue-sdk#502). The runtime test title makes that write;
+  under -O3 and UBSan the planted memcpy is reported.
+- A setting not written reads as NO_VALUE, except controller vibration,
+  DEFAULT 3 (Xenia's); a title's own settings with no bytes. The
+  profile's settings listed are the 24 Xenia and the XDK name: y axis
+  inverted, vibration, the gamercard's (gamer score, reputation, picture
+  key, motto, titles played, achievements, this title's score and
+  achievements), voice muted, through the speakers and volume,
+  difficulty, control sensitivity, preferred colours 1 and 2, auto aim,
+  auto centre, movement control, racing transmission, camera, brake and
+  accelerator. Titles map their own option ids onto all of them and read
+  the ones their own settings do not hold. An id not listed is fatal. Title 0 is the running title (chosen). Console check.
+
+- XamWriteGamerTile(slot, title, large picture, small picture, award,
+  overlapped) sends the XGI app 0xB0033 {award, slot, title, large,
+  small, flags 1, or 0x11 when not an award} with XMsgProcessRequest,
+  returning ERROR_FUNCTION_FAILED for a failure, ERROR_IO_PENDING with
+  an XOVERLAPPED. The XGI app needs a profile in the slot
+  (HRESULT_FROM_WIN32(ERROR_NOT_FOUND)) and makes the picture key
+  setting "%08x%08x%08x" of the title and ids (all three 0: the default,
+  fffe07d1, 0x20000, 0x10000), UTF-16 with its terminator, kept here as
+  the profile's setting 0x4064000F. xam also copies the images from the
+  title's resources (failing for one the title lacks) and shows an award
+  notification; neither here (console check).
+
+## The system UI
+- xam loads its UI app (ERROR_ACCESS_DENIED when another UI holds it)
+  and sends it (0xFE) a message per UI; one that fails unloads the app
+  and returns ERROR_OUTOFMEMORY or ERROR_FUNCTION_FAILED. There is no UI
+  here: one that shows closes at once, raising XN_SYS_UI 1 and 0
+  (chosen, as for the sign-in UI).
+- The Live UIs (XamShowFriendsUI, MessagesUI, PlayersUI, GameInviteUI,
+  FriendRequestUI, PlayerReviewUI, others' gamer cards: messages
+  0x21002, 0x21009) show nothing for a user (with 0xFF: any user) not
+  signed in to Live and return ERROR_ACCESS_DENIED; PlayerReviewUI first
+  refuses a slot past 3 but 0xFD (ERROR_INVALID_PARAMETER). xam's code.
+- XamShowAchievementsUI and the user's own gamer card
+  (XamShowGamerCardUIForXUID with XUID 0 or one of the user's; another
+  online XUID is a Live UI, any other XUID ERROR_INVALID_PARAMETER) send
+  0x21008 in process and return 0. XamShowMarketplaceUI(slot, type,
+  offer, categories) refuses a slot past 3 or a type past 0x18
+  (ERROR_INVALID_PARAMETER) and a slot without a profile (its XUIDs'
+  error, ERROR_NO_SUCH_USER), then sends 0x2100A. xam's code.
+- XamShowKeyboardUI(slot, flags, default text, title, description,
+  buffer, characters, overlapped) sends 0x21005 {slot, characters, flags,
+  default, title, description, buffer, overlapped} as a request and
+  returns ERROR_IO_PENDING, with or without an XOVERLAPPED (xam's code).
+  The keyboard here returns the default text, truncated with its
+  terminator, as Xenia's headless keyboard does (chosen; console check).
+- XamShowMessageBoxUI(Ex)(slot, title, text, button count, buttons,
+  focus, flags, *result, overlapped) refuses a slot past 3 but 0xFF,
+  flags in 0xFFC00EF8, anything but 1-3 buttons with the focus on one
+  (none only with a passcode mode, 0x370000), 0x100000 with 0x200000,
+  0x100000 with more than one button or the focus off the first,
+  0x200000 with more than two or the focus past the second, a result
+  without an XOVERLAPPED and none with one (ERROR_INVALID_PARAMETER, the
+  XOVERLAPPED's extended error too). It clears the result unless a
+  passcode mode and sends 0x2100D (0x47C bytes: the slot, the strings,
+  the buttons, focus, flags, result, overlapped): ERROR_IO_PENDING with
+  an XOVERLAPPED, 0 without. xam's code. The box here presses the
+  focused button, as Xenia's headless one does (chosen; console check).
+- XamShowDirtyDiscErrorUI shows xam's message box with its own strings
+  and waits for it, returning its result: 0 here.
+
+## Voice
+- XamVoiceCreate(slot, packets, *voice) resets the user's entry in xam's
+  table (0x38 bytes): the packet count, the packets (0x10 bytes each,
+  each naming the voice, linked first to last), an empty list, the time
+  it was made; E_OUTOFMEMORY and no voice when the packets cannot be
+  allocated. XamVoiceClose frees the packets and returns TRUE. xam's
+  code. The headset itself is the kernel's (XVoiced*, not in the system
+  update): no headset here, XamVoiceHeadsetPresent returns 0 and
+  XamVoiceSubmitPacket drops the packet and returns 0 (chosen; console
+  check).
+
+## Notifications
+- An id is an area (bits 25-30), a version (16-24) and a number.
+  XamNotifyCreateListener(areas, highest version) makes a listener for
+  the areas of the mask, up to that version (10 at most): an object with
+  an event (synchronization, signalled while a notification is pending)
+  and a pending set holding each id once with its latest value, walked by
+  area and number (xam's code). A broadcast reaches each listener whose
+  areas and version take it.
+- A new listener gets what the system's own listener still holds pending
+  (xam copies it). What that is when a title starts is Xenia's choice for
+  a title's first listeners: XN_SYS_UI (9) 0, XN_SYS_SIGNINCHANGED (0xA)
+  the signed-in slots' mask, XN_LIVE_CONNECTIONCHANGED (0x02000001)
+  XONLINE_S_LOGON_DISCONNECTED (0x001510F1), XN_LIVE_LINKSTATE_CHANGED
+  (0x02000003) 0. Console check.
+- XNotifyGetNext(listener, id or 0, *id, *value) zeroes both, then takes
+  the first pending notification (of that id) and returns TRUE; the event
+  is cleared when none is left. XNotifyPositionUI positions the system's
+  notification popups, of which there are none here.
+
+## Content
+- A content package is an STFS file at
+  `Partition1\Content\<XUID>\<title id>\<content type>\<file name>`
+  (XUID and title id in hex, 16 and 8 digits; XUID 0 for content no one
+  user owns), with a header holding its display name and its creator's
+  XUID (xam's path format). Here a package is a host directory there, and
+  its header a file beside it, `<file name>.header`: the XCONTENT_DATA
+  it was created with (0x134 bytes) and the creator's XUID (8 bytes, big
+  endian). Opening a package mounts it as a device
+  (`\Device\Package_...`, as xam names them, the numbers chosen) and links
+  the title's root to it (`\??\<root>:`); open files keep it until the
+  process ends.
+- XCONTENT_DATA: device id, content type, display name (128 UTF-16
+  characters), file name (42). In what an enumeration returns, the file
+  name's first character has bit 7 set for content no one user owns, and
+  a package so named opens as that content (xam's code).
+- The device: one, the hard disk's data partition, id 1 and type 1
+  (XCONTENTDEVICETYPE_HDD) as Xenia gives it, named "Hard Drive"
+  (chosen). xam keeps a table of 20 devices and finds one by id and its
+  class (titles see class 3); a device id of 0 in XamContentCreateEx's
+  data means the first such device. XamContentGetDeviceState(id,
+  overlapped) is 0 or ERROR_DEVICE_NOT_CONNECTED;
+  XamContentGetDeviceData(id, *data) fills XCONTENT_DEVICE_DATA (0x50
+  bytes: id, type, size and free bytes, as the partition's volume
+  reports them, a name of 27 UTF-16 characters, the last 0). xam reports
+  a device of type 0x10 as 2 to titles (xam's code).
+- XamShowDeviceSelectorUI(user, content type, flags, bytes wanted,
+  *device id, overlapped) is xam's: ERROR_INVALID_PARAMETER (also the
+  XOVERLAPPED's extended error) for a user past slot 3 but 0xFF, flags in
+  0x83F00008, no device id pointer or no XOVERLAPPED; flag 0x10000 adds
+  0x200 (XCONTENTFLAG_FORCE_SHOW_UI). It loads its UI app, sends it
+  {0, user, type, flags, bytes (8), *device id, overlapped, 0} as app
+  0xFE's message 0x2100B and returns ERROR_IO_PENDING, leaving
+  XMsgStartIORequest's result as the extended error. With no UI here
+  the selector picks the one device, id 1, at once, as Xenia does,
+  whatever the flags (chosen). Console check: what the console's
+  selector does with one device and no FORCE_SHOW_UI.
+- XamContentCreateEx(user, root, data, flags, *disposition, *license
+  mask, cache size, content size, overlapped): ERROR_INVALID_PARAMETER
+  for an empty file name or one with a character past 0x7F (but for
+  the first's bit 7) and a cache size past 0xEF000, ERROR_INVALID_NAME
+  for a root (after a `\??\` or `\System??\` prefix) with any of
+  ``:;<=>?@!"#$%&'()*+,-./[\]``; zeroes *disposition and *license (xam
+  sets no license bits for a title's own content), then sends xam's app
+  0x20001. The flags' low 4 bits are CREATE_NEW..TRUNCATE_EXISTING:
+  CREATE_NEW refuses an existing package (ERROR_ALREADY_EXISTS),
+  CREATE_ALWAYS deletes it and makes it anew, OPEN_EXISTING and
+  TRUNCATE_EXISTING refuse a missing one (ERROR_PATH_NOT_FOUND),
+  TRUNCATE_EXISTING empties it, OPEN_ALWAYS makes it when missing; others
+  are E_INVALIDARG. The disposition is 1 (created) or 2 (opened), also
+  the XOVERLAPPED's length. Titles may create only some content types
+  (1, 3, 0x4000, 0x10000-0x40000, 0x60000, 0xA0000, 0xB0000, 0xE0000,
+  0xF0000 and 0x100000 up); others, and flag 0x40, open read-only and
+  are ERROR_ACCESS_DENIED to create. The user's XUID owns the package (no
+  user, 0, past slot 3) and is its creator; a slot with no profile is
+  ERROR_NO_SUCH_USER (xam's code). A root already in use is
+  ERROR_DUP_NAME before the package is touched (chosen: xam finds it when
+  it links the root, and then undoes what it made). A file name FATX
+  refuses (`\/:*?"<>|`, "." and "..") is ERROR_INVALID_NAME (chosen).
+- XamContentClose(root, overlapped): ERROR_INVALID_NAME as above; the
+  root's link goes. A root with no link is ERROR_FILE_NOT_FOUND, one that
+  names no package E_INVALIDARG (xam's code).
+- XamContentDelete(user, data, overlapped) deletes the package and its
+  header: ERROR_DEVICE_NOT_CONNECTED for a device id not found (0
+  included), ERROR_FILE_NOT_FOUND for no package (xam's code), and
+  ERROR_SHARING_VIOLATION while it is open (chosen; console check).
+- XamContentGetCreator(user, data, *is creator, *creator XUID,
+  overlapped): E_INVALIDARG without *is creator; whether the user's XUID
+  is the creator, set also when the package cannot be read (then whether
+  the user is none) (xam's code).
+- XamContentCreateEnumerator(user, device id (0 for any), content type,
+  flags, items per call, *buffer size, *handle): an enumerator of xam's
+  app (0x20005), the buffer size items * 0x134; ERROR_NO_SUCH_USER for
+  a slot with no profile. XamEnumerate returns up to the items per call,
+  ERROR_NO_MORE_FILES when there are none left: the user's packages of
+  the type, then, unless the enumerator's flags have any of 0x7FFFF000
+  (XCONTENTFLAG_ENUM_EXCLUDECOMMON is 0x1000), those no one user owns,
+  which xam's second enumerator returns once the first has none; never
+  both in one call. XamEnumerate's flag 0x80 leaves the display names
+  out (xam's code). Packages come by name here (chosen: FATX lists
+  entries in the order they were made). The enumerator flags 0x10000000,
+  0x20000000 and 0x40000000 (directories and more) are fatal.

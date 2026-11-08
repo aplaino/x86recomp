@@ -32,6 +32,12 @@
       }
     },
     {
+      "name": "xbox360",
+      "inherits": "debug",
+      "binaryDir": "${sourceDir}/out/build/xbox360",
+      "cacheVariables": { "RECOMP_X86": "OFF", "RECOMP_PLATFORM_WIN32": "OFF", "RECOMP_PLATFORM_XBOX360": "ON" }
+    },
+    {
       "name": "a64",
       "inherits": "debug",
       "binaryDir": "${sourceDir}/out/build/a64",
@@ -57,6 +63,7 @@
     { "name": "release", "configurePreset": "release" },
     { "name": "x86", "configurePreset": "x86" },
     { "name": "ppc", "configurePreset": "ppc" },
+    { "name": "xbox360", "configurePreset": "xbox360" },
     { "name": "a64", "configurePreset": "a64" },
     { "name": "a64-aarch64-qemu", "configurePreset": "a64-aarch64-qemu" },
     { "name": "horizon", "configurePreset": "horizon" }

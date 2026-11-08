@@ -59,6 +59,11 @@ if(RECOMP_PLATFORM_WIN32 AND NOT RECOMP_X86)
 endif()
 # Consoles with a PowerPC CPU.
 option(RECOMP_PPC "PowerPC core: lifter and CPU model (a PowerPC platform turns it on)" OFF)
+# The Xbox 360, on the PowerPC core.
+option(RECOMP_PLATFORM_XBOX360 "Xbox 360 platform module" OFF)
+if(RECOMP_PLATFORM_XBOX360)
+  set(RECOMP_PPC ON)
+endif()
 
 # Consoles with an AArch64 CPU.
 option(RECOMP_A64 "AArch64 core: lifter and CPU model (an AArch64 platform turns it on)" OFF)
@@ -98,7 +103,7 @@ set_target_properties(softfloat PROPERTIES EXCLUDE_FROM_ALL ON)
 
 # --- PowerPC core ----------------------------------------------------------
 # The PowerPC lifter and CPU model, for the platforms with a PowerPC CPU
-# (RECOMP_PPC, which they turn on), and its tests.
+# (RECOMP_PPC, which they turn on), its tests, then those platforms.
 if(RECOMP_PPC)
   # The base's SoftFloat under the exact floating-point unit
   # (src/ppc/fp.cpp), which applies the PowerPC's own NaN rules.
@@ -140,6 +145,10 @@ if(RECOMP_PPC)
   endfunction()
 
   add_subdirectory(tests/ppc)
+
+  if(RECOMP_PLATFORM_XBOX360)
+    add_subdirectory(platforms/xbox360)
+  endif()
 endif()
 
 # --- AArch64 core ----------------------------------------------------------

@@ -29,8 +29,10 @@ OS or middleware API goes here, even when a game is where it came up.
   the core does not depend on a platform.
 - Platform modules (platforms/<name>) are built only with their
   RECOMP_PLATFORM_<NAME> option; their own rules are in
-  platforms/<name>/CLAUDE.md. The Switch and its AArch64 core alone:
-  `cmake --preset horizon && cmake --build --preset horizon && ctest --test-dir out/build/horizon`.
+  platforms/<name>/CLAUDE.md. Each one with its core alone:
+  `cmake --preset <preset> && cmake --build --preset <preset> && ctest --test-dir out/build/<preset>`
+  with xbox360 (the Xbox 360 on the PowerPC core) or horizon (the Switch
+  on the AArch64 core).
 - Real validation happens in the game projects: after a change here,
   rebuild each one listed under Layout, re-lift if the lifter changed, and
   run its ctest (with <ID>_GAME_EXE set, the EXE-derived oracle tests run
