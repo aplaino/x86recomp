@@ -1,7 +1,8 @@
 // libSceVideoOut HLE: the main display port. Buffers are guest memory
 // the game registers; a flip queues one, and at the vblank the flip rate
-// allows, the host thread (orbis/host.h) shows it in the window through
-// gfx::Device, clears its label and triggers the flip events. Behaviour
+// allows (in flip mode 2, as soon as the GPU is done), the host thread
+// (orbis/host.h) shows it in the window through gfx::Device, clears its
+// label and triggers the flip events. Behaviour
 // from libSceVideoOut 11.00's exports: the handle, the error codes, the
 // buffer attribute's layout and the flip event's ident and data;
 // docs/hle.md has what is not measured.
@@ -12,6 +13,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <deque>
 #include <memory>
@@ -46,6 +48,13 @@ constexpr int kBuffers = 16;
 constexpr int16_t kFilterVideoOut = -13;
 constexpr uint64_t kFlipIdent = uint64_t(6) << 48;
 
+// Flip modes: 1 at a vblank; 2 as soon as the buffer is ready, anywhere
+// in the frame (on a base console with 11.00, mode 2's flips came 20 to
+// 140 us after the submission's end of pipe, at any point between two
+// vblanks and up to three in one; mode 1's at the vblank, every one).
+constexpr uint32_t kFlipVsync = 1;
+constexpr uint32_t kFlipImmediate = 2;
+
 // Pixel formats.
 constexpr uint32_t kA8R8G8B8Srgb = 0x80000000;
 constexpr uint32_t kA8B8G8R8Srgb = 0x80002200;
@@ -57,6 +66,7 @@ struct Attr {  // SceVideoOutBufferAttribute
 
 struct Flip {
   int index;  // -1: blank
+  uint32_t mode;
   int64_t arg;
   uint64_t after = 0;  // graphics submissions done first (gpu/cp.h)
   gaddr addr = 0;  // the buffer and its attribute, when it runs
@@ -78,6 +88,7 @@ struct Port {
 };
 
 std::mutex g_mu;
+std::condition_variable g_cv;  // a flip was queued
 Port g_port;
 std::shared_ptr<const ui::Canvas> g_overlay;
 
@@ -166,33 +177,61 @@ show:
   hle::PresentFrame(*p.dev, w, h);
 }
 
-// Vblanks at 59.94 Hz (60000/1001, a console's 1080p output); a flip
-// queued before one runs at it if the flip rate allows, on the host thread.
-void VblankThread() {
-  const auto start = Clock::now();
-  for (uint64_t vblank = 1;; vblank++) {
-    std::this_thread::sleep_until(start + std::chrono::nanoseconds(vblank * 1001000000 / 60000));
+// Runs the flip at the head of the queue (g_mu held): shows it on the host
+// thread, clears its label and triggers the flip event.
+void RunFlip() {
+  Flip f = g_port.queue.front();
+  g_port.queue.pop_front();
+  if (f.index >= 0) {
+    f.addr = g_port.buffers[f.index];
+    f.attr = g_port.attrs[f.index];
+  }
+  PostToHost([f] {
+    Show(g_port, f);
+    GuestSyncPoint sync;
     std::lock_guard<std::mutex> l(g_mu);
-    if (g_port.queue.empty() || vblank % (g_port.rate + 1)) continue;
-    // The GPU first finishes what was submitted before the flip, as it
-    // would by the vblank on the console.
-    if (g_port.queue.front().after > gpu::GraphicsCompleted()) continue;
-    Flip f = g_port.queue.front();
-    g_port.queue.pop_front();
-    if (f.index >= 0) {
-      f.addr = g_port.buffers[f.index];
-      f.attr = g_port.attrs[f.index];
+    if (f.index >= 0) Wr64(g_port.labels + 8 * uint64_t(f.index), 0);
+    g_port.flips++;
+    // data: the flip's argument from bit 16, the number of flips the
+    // event reports (1: each is reported) in bits 12-15.
+    kernel::TriggerEvent(kFlipIdent, kFilterVideoOut, (f.arg << 16) | (1 << 12));
+  });
+}
+
+// Vblanks at 59.94 Hz (60000/1001, a console's 1080p output); a mode 1
+// flip queued before one runs at it if the flip rate allows, a mode 2 flip
+// once it is at the head of the queue, both after the GPU has finished
+// what was submitted before them (as the console's has by then). The GPU
+// signals no one when it finishes, so a mode 2 flip waiting on it is
+// checked every 100 us.
+void FlipThread() {
+  const auto start = Clock::now();
+  uint64_t vblank = 1;
+  auto next = start + std::chrono::nanoseconds(1001000000 / 60000);
+  std::unique_lock<std::mutex> l(g_mu);
+  for (;;) {
+    auto until = next;
+    if (!g_port.queue.empty() && g_port.queue.front().mode == kFlipImmediate)
+      until = std::min(until, Clock::now() + std::chrono::microseconds(100));
+    g_cv.wait_until(l, until);
+    const bool at_vblank = Clock::now() >= next;
+    while (!g_port.queue.empty() && g_port.queue.front().after <= gpu::GraphicsCompleted()) {
+      const Flip& f = g_port.queue.front();
+      if (f.mode == kFlipImmediate) {
+        if (g_port.rate)
+          FatalF("sceVideoOutSubmitFlip: flip mode 2 at flip rate %u not implemented yet",
+                 g_port.rate);
+      } else if (!at_vblank || vblank % (g_port.rate + 1)) {
+        break;
+      }
+      const bool vsync = f.mode == kFlipVsync;
+      RunFlip();
+      if (vsync) break;  // one flip per vblank
     }
-    PostToHost([f] {
-      Show(g_port, f);
-      GuestSyncPoint sync;
-      std::lock_guard<std::mutex> l(g_mu);
-      if (f.index >= 0) Wr64(g_port.labels + 8 * uint64_t(f.index), 0);
-      g_port.flips++;
-      // data: the flip's argument from bit 16, the number of flips the
-      // event reports (1: each is reported) in bits 12-15.
-      kernel::TriggerEvent(kFlipIdent, kFilterVideoOut, (f.arg << 16) | (1 << 12));
-    });
+    if (at_vblank) {
+      vblank++;
+      next = start + std::chrono::nanoseconds(vblank * 1001000000 / 60000);
+    }
   }
 }
 
@@ -209,9 +248,11 @@ int32_t SubmitFlip(int handle, int index, uint32_t mode, int64_t arg, uint64_t a
   if (handle != kHandle || !g_port.open) return kErrInvalidHandle;
   if (index < -1 || index >= kBuffers || (index >= 0 && !g_port.buffers[index]))
     FatalF("sceVideoOutSubmitFlip: buffer %d is not registered", index);
-  if (mode != 1) FatalF("sceVideoOutSubmitFlip: flip mode %u not implemented yet", mode);
+  if (mode != kFlipVsync && mode != kFlipImmediate)
+    FatalF("sceVideoOutSubmitFlip: flip mode %u not implemented yet", mode);
   if (index >= 0) Wr64(g_port.labels + 8 * uint64_t(index), 1);
-  g_port.queue.push_back({index, arg, after});
+  g_port.queue.push_back({index, mode, arg, after});
+  g_cv.notify_all();
   return 0;
 }
 
@@ -242,7 +283,7 @@ ORBIS_HLE("libSceVideoOut", sceVideoOutOpen, 4) {
       if (!g_port.labels ||
           !recomp::g_proc->vm.Commit(g_port.labels, recomp::GuestMemory::kPageSize, recomp::Prot::RW))
         recomp::FatalF("sceVideoOutOpen: out of guest memory");
-      std::thread(VblankThread).detach();
+      std::thread(FlipThread).detach();
     }
   }
   // The window and its device now: the GPU draws with it before the
@@ -368,8 +409,8 @@ ORBIS_HLE("libSceVideoOut", sceVideoOutRegisterBuffers, 5) {
 }
 
 // int sceVideoOutSubmitFlip(int handle, int index, int mode, int64_t arg):
-// index -1 blanks the display. After what the game has submitted to the
-// GPU so far.
+// index -1 blanks the display; mode 1 flips at a vblank, 2 at once. After
+// what the game has submitted to the GPU so far.
 ORBIS_HLE("libSceVideoOut", sceVideoOutSubmitFlip, 4) {
   return uint32_t(SubmitFlip(int(Arg(c, 0)), int(Arg(c, 1)), uint32_t(Arg(c, 2)),
                              int64_t(Arg(c, 3)), recomp::orbis::gpu::GraphicsSubmitted()));

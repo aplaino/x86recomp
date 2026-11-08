@@ -77,9 +77,13 @@ library.
   that first runs them (below its call, as 11.00 does). The SceFiber
   block gets 11.00's magic words and idle state only.
 - recomp_orbis_videoout: libSceVideoOut's main port (handle 1). Flips
-  queue and run at the vblank the flip rate allows, on the host thread
-  (orbis/host.h); the flip event's ident is 6 << 48 | handle << 40 and
-  its data the flip argument << 16 | 1 << 12 (one flip reported). Linear
+  queue and run in order on the host thread (orbis/host.h): flip mode 1
+  at the vblank the flip rate allows, mode 2 as soon as it is ready,
+  between vblanks (measured on a base console with 11.00: mode 2's flips
+  20-140 us after the submission's end of pipe, anywhere in the frame, up
+  to three per vblank; mode 2 at a flip rate other than 0 is not
+  measured and fatal). The flip event's ident is 6 << 48 | handle << 40
+  and its data the flip argument << 16 | 1 << 12 (one flip reported). Linear
   A8R8G8B8 and A8B8G8R8 buffers are shown; tiled ones are the GPU's
   colour target at that address (black before it has drawn one). A flip
   submitted from the CPU waits until the GPU has finished what was
