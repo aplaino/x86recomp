@@ -22,6 +22,10 @@ const int64_t* Timeout(uint32_t ptr, int64_t& storage) {
 
 uint32_t Pcr(const ppc::Ctx& c) { return uint32_t(c.r[13]); }
 
+// A wait's mode and alertable flag: an alertable wait in user mode runs
+// user APCs (Wait).
+bool UserAlertable(uint32_t mode, uint32_t alertable) { return mode == kUserMode && alertable; }
+
 uint32_t NewObject(uint32_t size, ObjectType type, int32_t state, void (*destroy)(uint32_t) = SystemFree) {
   uint32_t obj = SystemAlloc(size);
   InitObject(obj, type, state);
@@ -67,7 +71,7 @@ uint32_t Publish(ppc::Ctx& c, uint32_t handle, uint32_t attributes, uint32_t obj
 
 // A timer goes with its last reference, stopped first.
 void DestroyTimer(uint32_t timer) {
-  CancelTimer(timer);
+  DeleteTimer(timer);
   SystemFree(timer);
 }
 
@@ -114,15 +118,14 @@ HLE(kKrnl, 215, NtCreateTimer) {
 
 // NtSetTimerEx(handle, *due, APC routine, APC mode, APC context, resume,
 // period in ms, *previous state): the timer is due at *due (a wait's
-// timeout); the previous state is whether it was signalled. Timer APCs
-// are not supported yet; resuming the console from standby does not
-// apply.
+// timeout), its APC routine queued to this thread at each expiry; the
+// previous state is whether it was signalled. Resuming the console from
+// standby does not apply.
 HLE(kKrnl, 250, NtSetTimerEx) {
   uint32_t obj = HandleObject(Arg(c, 0));
   if (!obj) return kStatusInvalidHandle;
-  if (Arg(c, 2)) ppc::Fatal(&c, "NtSetTimerEx with an APC routine: APCs are not supported yet");
   uint32_t signalled = Rd32(obj + 4) != 0;
-  SetTimer(obj, int64_t(Rd64(Arg(c, 1))), Arg(c, 6));
+  SetTimer(obj, int64_t(Rd64(Arg(c, 1))), Arg(c, 6), Arg(c, 2), uint8_t(Arg(c, 3)), Arg(c, 4));
   if (Arg(c, 7)) Wr32(Arg(c, 7), signalled);
   return kStatusSuccess;
 }
@@ -198,7 +201,7 @@ HLE(kKrnl, 242, NtReleaseMutant) {
 HLE(kKrnl, 176, KeWaitForSingleObject) {
   uint32_t obj = Arg(c, 0);
   int64_t t;
-  return Wait(&obj, 1, false, Timeout(Arg(c, 4), t), Arg(c, 3) != 0);
+  return Wait(&obj, 1, false, Timeout(Arg(c, 4), t), UserAlertable(Arg(c, 2), Arg(c, 3)));
 }
 
 // KeWaitForMultipleObjects(count, objects[], wait type (0 all, 1 any),
@@ -209,7 +212,7 @@ HLE(kKrnl, 175, KeWaitForMultipleObjects) {
   uint32_t objs[kMaxWaitObjects];
   for (uint32_t i = 0; i < count; i++) objs[i] = Rd32(list + 4 * i);
   int64_t t;
-  return Wait(objs, count, Arg(c, 2) == 0, Timeout(Arg(c, 6), t), Arg(c, 5) != 0);
+  return Wait(objs, count, Arg(c, 2) == 0, Timeout(Arg(c, 6), t), UserAlertable(Arg(c, 4), Arg(c, 5)));
 }
 
 // NtWaitForSingleObjectEx(handle, mode, alertable, *timeout).
@@ -217,7 +220,7 @@ HLE(kKrnl, 253, NtWaitForSingleObjectEx) {
   uint32_t obj = HandleObject(Arg(c, 0));
   if (!obj) return kStatusInvalidHandle;
   int64_t t;
-  return Wait(&obj, 1, false, Timeout(Arg(c, 3), t), Arg(c, 2) != 0);
+  return Wait(&obj, 1, false, Timeout(Arg(c, 3), t), UserAlertable(Arg(c, 1), Arg(c, 2)));
 }
 
 // NtWaitForMultipleObjectsEx(count, handles[], wait type, mode, alertable, *timeout).
@@ -228,7 +231,7 @@ HLE(kKrnl, 254, NtWaitForMultipleObjectsEx) {
   for (uint32_t i = 0; i < count; i++)
     if (!(objs[i] = HandleObject(Rd32(list + 4 * i)))) return kStatusInvalidHandle;
   int64_t t;
-  return Wait(objs, count, Arg(c, 2) == 0, Timeout(Arg(c, 5), t), Arg(c, 4) != 0);
+  return Wait(objs, count, Arg(c, 2) == 0, Timeout(Arg(c, 5), t), UserAlertable(Arg(c, 3), Arg(c, 4)));
 }
 
 // ---- handles and object references -----------------------------------------

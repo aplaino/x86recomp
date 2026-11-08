@@ -63,6 +63,8 @@ constexpr size_t kHostStack = 16 << 20;
 // Below the top of a new guest stack, room for the parameter area of the
 // call into the start routine, which the routine may write.
 constexpr uint32_t kStackTopReserve = 0x100;
+// The same for a nested call (CallGuestNested), below the caller's r1.
+constexpr uint32_t kNestedFrame = 0x100;
 // VSCR[NJ], set for new threads as the operating systems for this VMX set
 // it (a console check is pending).
 constexpr uint32_t kVscrNj = 0x00010000;
@@ -87,6 +89,7 @@ void Destroy(uint32_t kthread) {
     t = g_by_kthread.at(kthread);
     g_by_kthread.erase(kthread);
   }
+  ForgetApcs(kthread);
   Release(t->stack_alloc);
   SystemFree(t->tls);
   SystemFree(t->pcr);
@@ -97,6 +100,7 @@ void Destroy(uint32_t kthread) {
 // The thread's end: its exit status, its KTHREAD signalled, the process's
 // end with its last thread.
 void Finish(Thread* t, uint32_t status) {
+  RundownApcs();
   Wr32(t->kthread + kKtExitStatus, status);
   SetSignal(t->kthread, 1);
   bool last;
@@ -230,6 +234,21 @@ uint32_t CallGuest(uint32_t fn, uint32_t a0, uint32_t a1) {
   c.r[4] = a1;
   ppc::Dispatch(c, fn, 0);
   return uint32_t(c.r[3]);
+}
+
+uint32_t CallGuestNested(uint32_t fn, std::initializer_list<uint32_t> args) {
+  ppc::Ctx& c = t_current->c;
+  const ppc::Ctx saved = c;
+  // The caller's frame is above r1; the callee may write the parameter
+  // area of the frame it is called from (up to 0x54 above its r1).
+  c.r[1] = (uint32_t(c.r[1]) - kNestedFrame) & ~0xFu;
+  uint32_t reg = 3;
+  for (uint32_t a : args) c.r[reg++] = a;
+  ppc::Dispatch(c, fn, 0);
+  uint32_t r = uint32_t(c.r[3]);
+  c = saved;
+  c.resv_valid = false;
+  return r;
 }
 
 uint32_t CallDpc(uint32_t fn, uint32_t a0, uint32_t a1, uint32_t cpu) {

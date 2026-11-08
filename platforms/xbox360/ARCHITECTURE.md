@@ -172,8 +172,10 @@ returns.
   memory and their headers are their state: guest code initialises
   events itself. Every signal and every check of a wait is made under one
   dispatcher lock, and any change wakes every waiter to look again.
-  Timers are signalled by a host thread at their due time and period;
-  queues and APCs are not there yet, and alertable waits are not woken.
+  Timers are signalled by a host thread at their due time and period.
+  APCs queue per thread under the same lock and run inside the thread's
+  waits (a host thread cannot be interrupted), called below the frame of
+  the code that waits; queues (KQUEUE) are not there yet.
 - Handles name objects by guest address and hold references; objects the
   kernel created (NtCreateEvent, threads) go with their last reference.
 - Critical sections follow the kernel's algorithm on the guest structure;
@@ -274,8 +276,8 @@ each a host directory, and symbolic links to them.
 - A file handle names a kernel object (a notification event, signalled
   as each I/O on the file completes) with the host file behind it. I/O
   is carried out at once: an asynchronous request completes before it
-  returns, its event set and its status block written. APC completion
-  routines are not supported yet (fatal).
+  returns, its event set and its status block written, its APC routine
+  queued to the thread.
 - NtQueryDirectoryFile returns one entry per call, the mask applying
   from the first query, in name order. FileFsAttributeInformation names
   the disc's file system GDFX and the hard disk's FATX; their allocation

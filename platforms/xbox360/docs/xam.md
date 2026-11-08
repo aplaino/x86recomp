@@ -73,8 +73,11 @@ only a console can settle.
   items, a disposition). xam's own app (0xFE) completes every failure
   with the result ERROR_FUNCTION_FAILED (its content handler's code);
   the others with 0, the code of a FACILITY_WIN32 HRESULT, or
-  ERROR_FUNCTION_FAILED (chosen: each app makes its own result).
-  Completion routines are fatal (no APCs yet).
+  ERROR_FUNCTION_FAILED (chosen: each app makes its own result). A
+  completion routine (the XOVERLAPPED's word 4) is queued to the thread
+  that sent the request as a user APC that calls routine(result, length,
+  overlapped) from the XOVERLAPPED (xam's normal routine does), in place
+  of setting the event (xam's code).
 - xam's exports that send a request use XMsgProcessRequest, which returns
   the extended error without an XOVERLAPPED (a positive last error made
   HRESULT_FROM_WIN32) and HRESULT_FROM_WIN32(ERROR_IO_PENDING) with one,

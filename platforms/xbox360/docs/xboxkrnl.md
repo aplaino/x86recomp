@@ -263,10 +263,40 @@ here; on the console a KPCR belongs to a hardware thread.
   wait's timeout: negative relative, otherwise absolute), then every
   period milliseconds; the previous state is whether it was signalled.
   NtCancelTimer(handle, *current) stops it. A synchronization timer is
-  reset by the wait it satisfies. Timer APCs are not supported yet
-  (fatal); resume (waking the console from standby) does not apply. A
-  title's waitable timers (CreateWaitableTimer, SetWaitableTimer) come
-  here.
+  reset by the wait it satisfies. With an APC routine each expiry queues
+  routine(context, system time low, high) to the thread that set the
+  timer (NT's timer APC: the timer holds one KAPC, so an expiry while the
+  last one is still queued has none); setting the timer again or
+  cancelling it takes a queued one back. Resume (waking the console
+  from standby) does not apply. A title's waitable timers
+  (CreateWaitableTimer, SetWaitableTimer) come here.
+
+## APCs
+- KAPC (0x28 bytes): type 18 (byte 0), mode (2: 0 kernel, 1 user),
+  inserted (3), KTHREAD (4), list links (8), kernel routine (0x10),
+  rundown routine (0x14), normal routine (0x18), normal context (0x1C),
+  system arguments (0x20, 0x24): Xenia's layout. KeInitializeApc(apc,
+  thread, kernel routine, rundown routine, normal routine, mode, context)
+  makes an APC with no normal routine a kernel one, as NT does.
+  KeInsertQueueApc(apc, argument 1, 2, increment) is FALSE for an APC
+  already queued or a thread that has ended. NtQueueApcThread(thread,
+  routine, context, argument 1, 2) queues a user APC of the kernel's own.
+- An APC runs on its thread as NT runs it: the kernel routine with the
+  APC and pointers to the normal routine, its context and the two
+  arguments (it may change them, and may free the APC), then the normal
+  routine with those. A host thread cannot be interrupted, so a kernel
+  APC runs in the thread's next wait or delay (on the console at once),
+  outside a critical region (KeLeaveCriticalRegion runs those queued
+  inside one), and the wait goes on; user APCs run in an alertable
+  user-mode wait or delay, which then returns STATUS_USER_APC (0xC0). An
+  object already signalled satisfies the wait first. The queues are the
+  kernel's own: the KAPC's list links are not written.
+- A thread's end runs its queued APCs' rundown routines (the kernel's
+  own APCs are freed), and nothing more can be queued to it.
+- I/O: the APC routine of NtReadFile, NtWriteFile and
+  NtQueryDirectoryFile is queued as a user APC, routine(context, status
+  block, 0), unless the I/O failed (an NTSTATUS error), as NT's I/O
+  manager does; XAPI's ReadFileEx and WriteFileEx come here.
 
 ## Files
 - FscSetCacheElementCount sizes the file system cache; file data is

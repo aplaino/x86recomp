@@ -79,6 +79,28 @@ audio_entry:
   blr
   .size audio_entry, .-audio_entry
 
+// APC routines, into title.c's: a normal routine (context, argument 1,
+// argument 2) and a kernel routine (APC, then pointers to the normal
+// routine, its context and the arguments).
+  .macro CALLBACK name, target
+  .globl \name
+  .type \name, @function
+\name:
+  mflr 0
+  std 0, 16(1)
+  stdu 1, -32(1)
+  TOC
+  bl \target
+  nop
+  addi 1, 1, 32
+  ld 0, 16(1)
+  mtlr 0
+  blr
+  .size \name, .-\name
+  .endm
+  CALLBACK normal_entry, NormalApc
+  CALLBACK kernel_entry, KernelApc
+
 // mftb, for the time base check.
   .globl time_base
   .type time_base, @function

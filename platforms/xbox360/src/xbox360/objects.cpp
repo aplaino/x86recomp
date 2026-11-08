@@ -4,6 +4,8 @@
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -23,6 +25,28 @@ using Clock = std::chrono::steady_clock;
 // again.
 std::mutex g_dispatch;
 std::condition_variable g_wake;
+
+// Each thread's queued APCs, kernel and user, by KTHREAD; under the
+// dispatcher lock. A thread that has ended keeps an entry, closed, until
+// its KTHREAD goes.
+struct QueuedApc {
+  uint32_t apc;
+  bool owned;
+};
+struct ApcQueues {
+  std::deque<QueuedApc> q[2];  // [kKernelMode], [kUserMode]
+  bool closed = false;
+};
+std::unordered_map<uint32_t, ApcQueues> g_apcs;
+
+// Whether a wait of the current thread has an APC to run: a kernel one
+// outside a critical region, a user one in an alertable wait.
+bool ApcDue(uint32_t kthread, bool alertable) {
+  auto it = g_apcs.find(kthread);
+  if (it == g_apcs.end()) return false;
+  if (!it->second.q[kKernelMode].empty() && int32_t(Rd32(kthread + kKtKernelApcDisable)) >= 0) return true;
+  return alertable && !it->second.q[kUserMode].empty();
+}
 
 int32_t State(uint32_t o) { return int32_t(Rd32(o + 4)); }
 void SetState(uint32_t o, int32_t v) { Wr32(o + 4, uint32_t(v)); }
@@ -138,9 +162,12 @@ uint32_t ReleaseMutant(uint32_t mutant, int32_t& previous) {
 }
 
 namespace {
-uint32_t WaitObjects(const uint32_t* objs, uint32_t count, bool wait_all, const int64_t* timeout) {
+// What WaitObjects returns when the wait has an APC to run first.
+constexpr uint32_t kApcDue = 0xFFFFFFFF;
+
+uint32_t WaitObjects(const uint32_t* objs, uint32_t count, bool wait_all, Clock::time_point deadline,
+                     bool alertable) {
   uint32_t me = KThread(CurrentThread());
-  Clock::time_point deadline = timeout ? Deadline(*timeout) : Clock::time_point::max();
   std::unique_lock<std::mutex> l(g_dispatch);
   for (bool last = false;; last = Clock::now() >= deadline) {
     if (wait_all) {
@@ -155,30 +182,151 @@ uint32_t WaitObjects(const uint32_t* objs, uint32_t count, bool wait_all, const 
       for (uint32_t i = 0; i < count; i++)
         if (Signaled(objs[i], me)) return (Acquire(objs[i], me) ? kStatusAbandoned : 0) + i;
     }
+    if (ApcDue(me, alertable)) return kApcDue;
     if (last) return kStatusTimeout;
     if (deadline == Clock::time_point::max()) g_wake.wait(l);
     else g_wake.wait_until(l, deadline);
   }
 }
 
-}  // namespace
+// Runs the current thread's due APCs, kernel ones first; true if a user
+// one ran.
+bool RunApcs(bool alertable) {
+  uint32_t me = KThread(CurrentThread());
+  bool user = false;
+  for (;;) {
+    QueuedApc a;
+    uint32_t kernel_routine, values[4];  // normal routine, context, arguments
+    {
+      std::lock_guard<std::mutex> g(g_dispatch);
+      if (!ApcDue(me, alertable)) return user;
+      auto& queues = g_apcs[me].q;
+      bool kernel = !queues[kKernelMode].empty() && int32_t(Rd32(me + kKtKernelApcDisable)) >= 0;
+      auto& q = queues[kernel ? kKernelMode : kUserMode];
+      a = q.front();
+      q.pop_front();
+      Wr8(a.apc + 3, 0);
+      user |= !kernel;
+      kernel_routine = Rd32(a.apc + 0x10);
+      for (uint32_t k = 0; k < 4; k++) values[k] = Rd32(a.apc + 0x18 + 4 * k);
+    }
+    // The routines' arguments, which the kernel routine may change (and
+    // the APC may be freed by it).
+    uint32_t args = SystemAlloc(16);
+    for (uint32_t k = 0; k < 4; k++) Wr32(args + 4 * k, values[k]);
+    if (kernel_routine) CallGuestNested(kernel_routine, {a.apc, args, args + 4, args + 8, args + 12});
+    uint32_t normal = Rd32(args), context = Rd32(args + 4), arg1 = Rd32(args + 8), arg2 = Rd32(args + 12);
+    SystemFree(args);
+    if (a.owned) SystemFree(a.apc);
+    if (normal) CallGuestNested(normal, {context, arg1, arg2});
+  }
+}
 
-uint32_t Wait(const uint32_t* objs, uint32_t count, bool wait_all, const int64_t* timeout,
-              bool /*alertable*/) {
+uint32_t WaitWithApcs(const uint32_t* objs, uint32_t count, bool wait_all, Clock::time_point deadline,
+                      bool alertable) {
   HoldIfSuspended();
-  uint32_t status = WaitObjects(objs, count, wait_all, timeout);
+  uint32_t status;
+  while ((status = WaitObjects(objs, count, wait_all, deadline, alertable)) == kApcDue)
+    if (RunApcs(alertable)) {
+      status = kStatusUserApc;
+      break;
+    }
   HoldIfSuspended();
   return status;
 }
 
-uint32_t Delay(int64_t timeout, bool /*alertable*/) {
-  HoldIfSuspended();
-  Clock::time_point deadline = Deadline(timeout);
+}  // namespace
+
+uint32_t Wait(const uint32_t* objs, uint32_t count, bool wait_all, const int64_t* timeout, bool alertable) {
+  return WaitWithApcs(objs, count, wait_all, timeout ? Deadline(*timeout) : Clock::time_point::max(), alertable);
+}
+
+uint32_t Delay(int64_t timeout, bool alertable) {
   if (timeout == 0) std::this_thread::yield();
-  else if (deadline == Clock::time_point::max()) for (;;) std::this_thread::sleep_for(std::chrono::hours(24));
-  else std::this_thread::sleep_until(deadline);
-  HoldIfSuspended();
-  return kStatusSuccess;
+  uint32_t status = WaitWithApcs(nullptr, 0, false, Deadline(timeout), alertable);
+  return status == kStatusTimeout ? kStatusSuccess : status;
+}
+
+// ---- APCs ---------------------------------------------------------------
+void InitApc(uint32_t apc, uint32_t kthread, uint32_t kernel_routine, uint32_t rundown_routine,
+             uint32_t normal_routine, uint8_t mode, uint32_t normal_context) {
+  std::memset(Mem() + apc, 0, kApcSize);
+  Wr8(apc, kApcObject);
+  Wr8(apc + 2, normal_routine ? mode : kKernelMode);
+  Wr32(apc + 4, kthread);
+  Wr32(apc + 0x10, kernel_routine);
+  Wr32(apc + 0x14, rundown_routine);
+  Wr32(apc + 0x18, normal_routine);
+  Wr32(apc + 0x1C, normal_routine ? normal_context : 0);
+}
+
+bool InsertApc(uint32_t apc, uint32_t arg1, uint32_t arg2, bool owned) {
+  std::lock_guard<std::mutex> g(g_dispatch);
+  uint32_t kthread = Rd32(apc + 4);
+  ApcQueues& queues = g_apcs[kthread];
+  if (Rd8(apc + 3) || queues.closed) return false;
+  Wr32(apc + 0x20, arg1);
+  Wr32(apc + 0x24, arg2);
+  Wr8(apc + 3, 1);
+  queues.q[Rd8(apc + 2) == kUserMode ? kUserMode : kKernelMode].push_back({apc, owned});
+  g_wake.notify_all();
+  return true;
+}
+
+uint32_t QueueApc(uint32_t kthread, uint32_t normal_routine, uint8_t mode, uint32_t normal_context,
+                  uint32_t arg1, uint32_t arg2) {
+  uint32_t apc = SystemAlloc(kApcSize);
+  InitApc(apc, kthread, 0, 0, normal_routine, mode, normal_context);
+  if (InsertApc(apc, arg1, arg2, true)) return apc;
+  SystemFree(apc);
+  return 0;
+}
+
+bool RemoveApc(uint32_t apc) {
+  bool owned = false;
+  {
+    std::lock_guard<std::mutex> g(g_dispatch);
+    auto it = g_apcs.find(Rd32(apc + 4));
+    if (it == g_apcs.end() || !Rd8(apc + 3)) return false;
+    for (auto& q : it->second.q)
+      for (auto a = q.begin(); a != q.end(); ++a)
+        if (a->apc == apc) {
+          owned = a->owned;
+          q.erase(a);
+          Wr8(apc + 3, 0);
+          goto removed;
+        }
+    return false;
+  }
+removed:
+  if (owned) SystemFree(apc);
+  return true;
+}
+
+void RunKernelApcs() { RunApcs(false); }
+
+void RundownApcs() {
+  std::deque<QueuedApc> left;
+  {
+    std::lock_guard<std::mutex> g(g_dispatch);
+    ApcQueues& queues = g_apcs[KThread(CurrentThread())];
+    queues.closed = true;
+    for (auto& q : queues.q) {
+      left.insert(left.end(), q.begin(), q.end());
+      q.clear();
+    }
+  }
+  for (const QueuedApc& a : left) {
+    Wr8(a.apc + 3, 0);
+    uint32_t rundown = Rd32(a.apc + 0x14);
+    if (a.owned) SystemFree(a.apc);
+    else if (rundown) CallGuestNested(rundown, {a.apc});
+  }
+}
+
+void ForgetApcs(uint32_t kthread) {
+  std::lock_guard<std::mutex> g(g_dispatch);
+  g_apcs.erase(kthread);
 }
 
 // ---- timers -------------------------------------------------------------
@@ -191,6 +339,7 @@ struct Due {
 std::mutex g_timers;
 std::condition_variable g_timers_changed;
 std::unordered_map<uint32_t, Due> g_due;  // timer -> when
+std::unordered_map<uint32_t, uint32_t> g_timer_apcs;  // timer -> its KAPC, if it has a routine
 bool g_timer_thread = false;
 
 void Timers() {
@@ -213,16 +362,39 @@ void Timers() {
     else
       g_due.erase(next);
     SetSignal(timer, 1);
+    // Its APC, with the system time it expired at; one still queued from
+    // an earlier period keeps its place (that period's APC is lost).
+    auto apc = g_timer_apcs.find(timer);
+    if (apc != g_timer_apcs.end()) {
+      uint64_t now = SystemTime();
+      InsertApc(apc->second, uint32_t(now), uint32_t(now >> 32));
+    }
   }
+}
+
+// Takes a timer's APC off its thread's queue if it is still there.
+void Unqueue(uint32_t timer) {
+  auto apc = g_timer_apcs.find(timer);
+  if (apc != g_timer_apcs.end()) RemoveApc(apc->second);
 }
 }  // namespace
 
-bool SetTimer(uint32_t timer, int64_t due, uint32_t period_ms) {
+bool SetTimer(uint32_t timer, int64_t due, uint32_t period_ms, uint32_t apc_routine, uint8_t apc_mode,
+              uint32_t apc_context) {
   SetSignal(timer, 0);
   std::lock_guard<std::mutex> g(g_timers);
   if (!g_timer_thread) {
     std::thread(Timers).detach();
     g_timer_thread = true;
+  }
+  Unqueue(timer);
+  if (apc_routine) {
+    uint32_t& apc = g_timer_apcs[timer];
+    if (!apc) apc = SystemAlloc(kApcSize);
+    InitApc(apc, KThread(CurrentThread()), 0, 0, apc_routine, apc_mode, apc_context);
+  } else if (auto apc = g_timer_apcs.find(timer); apc != g_timer_apcs.end()) {
+    SystemFree(apc->second);
+    g_timer_apcs.erase(apc);
   }
   bool was = g_due.count(timer) != 0;
   g_due[timer] = {Deadline(due), period_ms};
@@ -232,7 +404,17 @@ bool SetTimer(uint32_t timer, int64_t due, uint32_t period_ms) {
 
 bool CancelTimer(uint32_t timer) {
   std::lock_guard<std::mutex> g(g_timers);
+  Unqueue(timer);
   return g_due.erase(timer) != 0;
+}
+
+void DeleteTimer(uint32_t timer) {
+  CancelTimer(timer);
+  std::lock_guard<std::mutex> g(g_timers);
+  if (auto apc = g_timer_apcs.find(timer); apc != g_timer_apcs.end()) {
+    SystemFree(apc->second);
+    g_timer_apcs.erase(apc);
+  }
 }
 
 // ---- handles ------------------------------------------------------------

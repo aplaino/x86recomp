@@ -104,6 +104,11 @@ u32 MmQueryStatistics(u32* statistics);
 u32 NtCreateTimer(u32* handle, void* attributes, u32 type);
 u32 NtSetTimerEx(u32 handle, int64_t* due, void* apc, u32 mode, void* context, u32 resume, u32 period, u32* previous);
 u32 NtCancelTimer(u32 handle, u32* current);
+u32 KeInitializeApc(void* apc, u32 thread, void* kernel, void* rundown, void* normal, u32 mode, u32 context);
+u32 KeInsertQueueApc(void* apc, u32 arg1, u32 arg2, u32 increment);
+u32 NtQueueApcThread(u32 thread, void* routine, u32 context, u32 arg1, u32 arg2);
+u32 KeEnterCriticalRegion(void);
+u32 KeLeaveCriticalRegion(void);
 u32 XGetAVPack(void);     // xam
 u32 XGetVideoMode(u32* mode);  // xam
 u32 XGetGameRegion(void);
@@ -159,6 +164,8 @@ u32 XamContentCreateEx9(u32 user, const char* root, void* data, u32 flags, u32* 
 u32 VdSwap10(volatile u32* words, u32* fetch, u32 writeback, void* system, u32 value, u32* front, u32* format,
              u32* color_space, u32* width, u32* height);
 void interrupt_entry(void);
+void normal_entry(void);
+void kernel_entry(void);
 void audio_entry(void);
 uint64_t time_base(void);
 uint64_t pcr(void);
@@ -1361,12 +1368,136 @@ static void Timers(void) {
   NtClose(s);
 }
 
+// ---- APCs ------------------------------------------------------------------
+// What the APC routines saw, in the order they ran.
+static volatile u32 apc_log[16], apc_count;
+void NormalApc(u32 context, u32 arg1, u32 arg2) {
+  if (apc_count + 3 <= 16) {
+    apc_log[apc_count++] = context;
+    apc_log[apc_count++] = arg1;
+    apc_log[apc_count++] = arg2;
+  }
+}
+// A kernel routine that changes the normal routine's context.
+void KernelApc(u32 apc, u32* normal, u32* context, u32* arg1, u32* arg2) {
+  (void)apc, (void)normal, (void)arg2;
+  *context = *context + 0x100;
+  *arg1 = *arg1 + 1;
+}
+
+static u32 AlertableWaiter(void* event) {
+  int64_t ten_s = -100000000;
+  return KeWaitForSingleObject(event, 3, 1, 1, &ten_s);
+}
+
+static void Apcs(void) {
+  u32 me = *At((u32)pcr() + 0x100);
+  int64_t zero = 0;
+  // A user APC runs in an alertable user-mode wait only, which then
+  // returns STATUS_USER_APC.
+  apc_count = 0;
+  CHECK(NtQueueApcThread(0xFFFFFFFE, (void*)normal_entry, 1, 2, 3) == 0);
+  CHECK(KeDelayExecutionThread(1, 0, &zero) == 0 && apc_count == 0);
+  CHECK(KeDelayExecutionThread(0, 1, &zero) == 0 && apc_count == 0);  // kernel mode
+  CHECK(KeDelayExecutionThread(1, 1, &zero) == 0xC0 && apc_count == 3 && apc_log[0] == 1 && apc_log[1] == 2 &&
+        apc_log[2] == 3);
+  CHECK(KeDelayExecutionThread(1, 1, &zero) == 0);  // none left
+  // A signalled object comes before the APC.
+  u32 e = 0;
+  CHECK(NtCreateEvent(&e, 0, 0, 1) == 0);
+  CHECK(NtQueueApcThread(0xFFFFFFFE, (void*)normal_entry, 4, 5, 6) == 0);
+  CHECK(NtWaitForSingleObjectEx(e, 1, 1, &zero) == 0 && apc_count == 3);
+  u32 unset = 0;  // a kernel-mode wait runs no user APC, alertable or not
+  CHECK(NtCreateEvent(&unset, 0, 0, 0) == 0);
+  CHECK(NtWaitForSingleObjectEx(unset, 0, 1, &zero) == kStatusTimeout && apc_count == 3);
+  NtClose(unset);
+  CHECK(KeDelayExecutionThread(1, 1, &zero) == 0xC0 && apc_count == 6 && apc_log[3] == 4);
+  NtClose(e);
+
+  // A title's own KAPC: its kernel routine first, which may change the
+  // normal routine's arguments; queued once at a time.
+  u32 apc[10];
+  apc_count = 0;
+  KeInitializeApc(apc, me, (void*)kernel_entry, 0, (void*)normal_entry, 1, 7);
+  CHECK((apc[0] >> 24) == 18 && ((apc[0] >> 8) & 0xFF) == 1);
+  CHECK(KeInsertQueueApc(apc, 8, 9, 0) == 1 && KeInsertQueueApc(apc, 8, 9, 0) == 0);
+  CHECK(KeDelayExecutionThread(1, 1, &zero) == 0xC0 && apc_count == 3 && apc_log[0] == 0x107 &&
+        apc_log[1] == 9 && apc_log[2] == 9);
+  CHECK((apc[0] & 0xFF) == 0);  // no longer inserted
+  // A kernel APC runs in any wait, which goes on; not inside a critical
+  // region, but as the region ends.
+  apc_count = 0;
+  KeInitializeApc(apc, me, (void*)kernel_entry, 0, (void*)normal_entry, 0, 0x10);
+  KeEnterCriticalRegion();
+  CHECK(KeInsertQueueApc(apc, 1, 2, 0) == 1);
+  CHECK(KeDelayExecutionThread(1, 0, &zero) == 0 && apc_count == 0);
+  KeLeaveCriticalRegion();
+  CHECK(apc_count == 3 && apc_log[0] == 0x110 && apc_log[1] == 2);
+  CHECK(KeInsertQueueApc(apc, 1, 2, 0) == 1);
+  CHECK(KeDelayExecutionThread(1, 0, &zero) == 0 && apc_count == 6);
+
+  // An APC to another thread wakes its alertable wait.
+  u32 ev[4] = {0, 0, (u32)(uintptr_t)&ev[2], (u32)(uintptr_t)&ev[2]};
+  u32 h = 0;
+  apc_count = 0;
+  CHECK(ExCreateThread(&h, 0, 0, (void*)thread_startup, (void*)AlertableWaiter, ev, 0) == 0);
+  int64_t ten_ms = -100000;
+  KeDelayExecutionThread(1, 0, &ten_ms);
+  CHECK(NtQueueApcThread(h, (void*)normal_entry, 11, 12, 13) == 0);
+  u32 obj = 0;
+  CHECK(NtWaitForSingleObjectEx(h, 1, 0, 0) == 0 && apc_count == 3 && apc_log[0] == 11);
+  CHECK(ObReferenceObjectByHandle(h, __imp_ExThreadObjectType, &obj) == 0 && *At(obj + 0x140) == 0xC0);
+  ObDereferenceObject(obj);
+  // Its thread has ended: nothing more is queued.
+  CHECK(NtQueueApcThread(h, (void*)normal_entry, 1, 2, 3) != 0);
+  NtClose(h);
+
+  // A timer's APC: routine(context, the expiry's system time).
+  u32 t = 0;
+  apc_count = 0;
+  CHECK(NtCreateTimer(&t, 0, 0) == 0);
+  CHECK(NtSetTimerEx(t, &ten_ms, (void*)normal_entry, 1, (void*)(uintptr_t)21, 0, 0, 0) == 0);
+  int64_t second = -10000000;
+  CHECK(KeDelayExecutionThread(1, 1, &second) == 0xC0 && apc_count == 3 && apc_log[0] == 21 &&
+        (apc_log[1] | apc_log[2]) != 0);
+  // Cancelled before it runs, it does not.
+  CHECK(NtSetTimerEx(t, &zero, (void*)normal_entry, 1, (void*)(uintptr_t)22, 0, 0, 0) == 0);
+  KeDelayExecutionThread(1, 0, &ten_ms);
+  u32 current = 0;
+  CHECK(NtCancelTimer(t, &current) == 0);
+  CHECK(KeDelayExecutionThread(1, 1, &zero) == 0 && apc_count == 3);
+  NtClose(t);
+
+  // An I/O's APC routine: routine(context, status block, 0), unless the
+  // I/O failed.
+  u32 f = 0, io[2];
+  char buf[4];
+  apc_count = 0;
+  CHECK(OpenPath(&f, "game:\\data.bin", kGenericRead, kOpen, kSync | kNonDirectoryFile, io) == 0);
+  CHECK(NtReadFile(f, 0, (void*)normal_entry, (void*)(uintptr_t)31, io, buf, 4, 0) == 0);
+  CHECK(KeDelayExecutionThread(1, 1, &zero) == 0xC0 && apc_count == 3 && apc_log[0] == 31 &&
+        apc_log[1] == (u32)(uintptr_t)io && apc_log[2] == 0);
+  int64_t end = 32;
+  CHECK(NtReadFile(f, 0, (void*)normal_entry, (void*)(uintptr_t)32, io, buf, 4, &end) == kStatusEndOfFile);
+  CHECK(KeDelayExecutionThread(1, 1, &zero) == 0 && apc_count == 3);
+  NtClose(f);
+
+  // An XMsg request's completion routine, in place of its event:
+  // routine(result, length, overlapped).
+  u32 set[3] = {2, 1, 1}, ov[7] = {0, 0, 0, 0, (u32)(uintptr_t)normal_entry, 0, 0};
+  apc_count = 0;
+  CHECK(XMsgStartIORequest(0xFA, 0x7001A, ov, set, sizeof set) == 0 && ov[0] == 87 && apc_count == 0);
+  CHECK(KeDelayExecutionThread(1, 1, &zero) == 0xC0 && apc_count == 3 && apc_log[0] == 87 &&
+        apc_log[1] == ov[1] && apc_log[2] == (u32)(uintptr_t)ov);
+}
+
 int main(void) {
   Modules();
   Xam();
   Users();
   Content();
   Timers();
+  Apcs();
   Console();
   Gpu();
   Conversions();

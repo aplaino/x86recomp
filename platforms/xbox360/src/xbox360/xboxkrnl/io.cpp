@@ -102,12 +102,22 @@ void SetIoStatus(uint32_t io_status, uint32_t status, uint32_t information) {
   Wr32(io_status + 4, information);
 }
 
+// An I/O's file, event, APC routine and context, and status block.
+struct Request {
+  uint32_t handle, event, apc, context, io_status;
+};
+Request RequestOf(ppc::Ctx& c) { return {Arg(c, 0), Arg(c, 1), Arg(c, 2), Arg(c, 3), Arg(c, 4)}; }
+
 // The end of an I/O: its status block, its event and the file object
-// signalled.
-uint32_t Complete(uint32_t handle, uint32_t event, uint32_t io_status, uint32_t status, uint32_t info) {
-  SetIoStatus(io_status, status, info);
-  if (uint32_t e = event ? HandleObject(event) : 0) SetSignal(e, 1);
-  SetSignal(HandleObject(handle), 1);
+// signalled, and unless it failed (an NTSTATUS error) its APC routine
+// queued to the thread as a user APC, routine(context, status block, 0),
+// as NT's I/O manager does. Every I/O here ends in its call.
+uint32_t Complete(const Request& r, uint32_t status, uint32_t info) {
+  SetIoStatus(r.io_status, status, info);
+  if (uint32_t e = r.event ? HandleObject(r.event) : 0) SetSignal(e, 1);
+  SetSignal(HandleObject(r.handle), 1);
+  if (r.apc && status < 0xC0000000)
+    QueueApc(KThread(CurrentThread()), r.apc, kUserMode, r.context, r.io_status, 0);
   return status;
 }
 
@@ -129,10 +139,6 @@ uint32_t ResolveIn(uint32_t root, std::string name, Location& loc) {
 // The path OBJECT_ATTRIBUTES name (RootDirectory, ObjectName, Attributes).
 uint32_t PathOf(uint32_t attributes, Location& loc) {
   return ResolveIn(Rd32(attributes), ReadAnsiString(Rd32(attributes + 4)), loc);
-}
-
-void RefuseApc(ppc::Ctx& c, uint32_t apc, const char* what) {
-  if (apc) ppc::Fatal(&c, "%s with an APC routine: APCs are not supported yet", what);
 }
 
 // The guest's byte offset of an I/O: the file's position when there is
@@ -223,28 +229,28 @@ HLE(kKrnl, 223, NtOpenFile) { return Open(Arg(c, 0), Arg(c, 1), Arg(c, 2), Arg(c
 // NtReadFile(handle, event, APC routine, APC context, *io_status, buffer,
 // length, *byte offset).
 HLE(kKrnl, 240, NtReadFile) {
-  uint32_t handle = Arg(c, 0), event = Arg(c, 1), io_status = Arg(c, 4), buf = Arg(c, 5), len = Arg(c, 6);
-  RefuseApc(c, Arg(c, 2), "NtReadFile");
+  uint32_t handle = Arg(c, 0), buf = Arg(c, 5), len = Arg(c, 6);
+  Request r = RequestOf(c);
   File* f = FileOf(handle);
   if (!f) return kStatusInvalidHandle;
-  if (f->fd < 0) return Complete(handle, event, io_status, kStatusFileIsADirectory, 0);
+  if (f->fd < 0) return Complete(r, kStatusFileIsADirectory, 0);
   std::lock_guard<std::mutex> g(f->lock);
   uint64_t off = Offset(*f, Arg(c, 7));
   ssize_t n = pread(f->fd, Mem() + buf, len, off_t(off));
-  if (n < 0) return Complete(handle, event, io_status, StatusFromErrno(errno), 0);
+  if (n < 0) return Complete(r, StatusFromErrno(errno), 0);
   f->position = off + uint64_t(n);
-  return Complete(handle, event, io_status, n == 0 && len ? kStatusEndOfFile : kStatusSuccess, uint32_t(n));
+  return Complete(r, n == 0 && len ? kStatusEndOfFile : kStatusSuccess, uint32_t(n));
 }
 
 // NtWriteFile(handle, event, APC routine, APC context, *io_status, buffer,
 // length, *byte offset): FILE_WRITE_TO_END_OF_FILE (-1) appends.
 HLE(kKrnl, 255, NtWriteFile) {
-  uint32_t handle = Arg(c, 0), event = Arg(c, 1), io_status = Arg(c, 4), buf = Arg(c, 5), len = Arg(c, 6);
-  RefuseApc(c, Arg(c, 2), "NtWriteFile");
+  uint32_t handle = Arg(c, 0), buf = Arg(c, 5), len = Arg(c, 6);
+  Request r = RequestOf(c);
   File* f = FileOf(handle);
   if (!f) return kStatusInvalidHandle;
-  if (f->fd < 0) return Complete(handle, event, io_status, kStatusFileIsADirectory, 0);
-  if (!f->loc.device->writable) return Complete(handle, event, io_status, kStatusAccessDenied, 0);
+  if (f->fd < 0) return Complete(r, kStatusFileIsADirectory, 0);
+  if (!f->loc.device->writable) return Complete(r, kStatusAccessDenied, 0);
   std::lock_guard<std::mutex> g(f->lock);
   uint64_t off = Offset(*f, Arg(c, 7));
   if (off == ~0ull) {
@@ -253,9 +259,9 @@ HLE(kKrnl, 255, NtWriteFile) {
     off = uint64_t(st.st_size);
   }
   ssize_t n = pwrite(f->fd, Mem() + buf, len, off_t(off));
-  if (n < 0) return Complete(handle, event, io_status, StatusFromErrno(errno), 0);
+  if (n < 0) return Complete(r, StatusFromErrno(errno), 0);
   f->position = off + uint64_t(n);
-  return Complete(handle, event, io_status, kStatusSuccess, uint32_t(n));
+  return Complete(r, kStatusSuccess, uint32_t(n));
 }
 
 // NtQueryInformationFile(handle, *io_status, info, length, class).
@@ -429,14 +435,14 @@ HLE(kKrnl, 239, NtQueryVolumeInformationFile) {
 // FILE_DIRECTORY_INFORMATION per call, its name in ANSI at 0x40. The mask
 // applies from the first query (or a restart) on.
 HLE(kKrnl, 228, NtQueryDirectoryFile) {
-  uint32_t handle = Arg(c, 0), event = Arg(c, 1), io_status = Arg(c, 4), info = Arg(c, 5), len = Arg(c, 6);
+  uint32_t handle = Arg(c, 0), info = Arg(c, 5), len = Arg(c, 6);
   uint32_t mask_ptr = Arg(c, 7);
   bool restart = Arg(c, 8) != 0;
-  RefuseApc(c, Arg(c, 2), "NtQueryDirectoryFile");
+  Request r = RequestOf(c);
   File* f = FileOf(handle);
   if (!f) return kStatusInvalidHandle;
-  if (f->fd >= 0) return Complete(handle, event, io_status, kStatusNotADirectory, 0);
-  if (len < 0x48) return Complete(handle, event, io_status, kStatusInfoLengthMismatch, 0);
+  if (f->fd >= 0) return Complete(r, kStatusNotADirectory, 0);
+  if (len < 0x48) return Complete(r, kStatusInfoLengthMismatch, 0);
   std::lock_guard<std::mutex> g(f->lock);
   if (!f->listed || restart) {
     std::string mask = mask_ptr ? ReadAnsiString(mask_ptr) : "";
@@ -453,11 +459,11 @@ HLE(kKrnl, 228, NtQueryDirectoryFile) {
     std::sort(f->entries.begin(), f->entries.end());
     f->next = 0;
     f->listed = true;
-    if (f->entries.empty()) return Complete(handle, event, io_status, kStatusNoSuchFile, 0);
+    if (f->entries.empty()) return Complete(r, kStatusNoSuchFile, 0);
   }
-  if (f->next >= f->entries.size()) return Complete(handle, event, io_status, kStatusNoMoreFiles, 0);
+  if (f->next >= f->entries.size()) return Complete(r, kStatusNoMoreFiles, 0);
   const std::string& name = f->entries[f->next];
-  if (0x40 + name.size() > len) return Complete(handle, event, io_status, kStatusBufferOverflow, 0);
+  if (0x40 + name.size() > len) return Complete(r, kStatusBufferOverflow, 0);
   struct stat st{};
   stat((f->loc.host / name).c_str(), &st);
   const Device& d = *f->loc.device;
@@ -476,7 +482,7 @@ HLE(kKrnl, 228, NtQueryDirectoryFile) {
   Wr32(info + 0x3C, uint32_t(name.size()));
   std::memcpy(Mem() + info + 0x40, name.data(), name.size());
   f->next++;
-  return Complete(handle, event, io_status, kStatusSuccess, uint32_t(0x40 + name.size()));
+  return Complete(r, kStatusSuccess, uint32_t(0x40 + name.size()));
 }
 
 // NtFlushBuffersFile(handle, *io_status).

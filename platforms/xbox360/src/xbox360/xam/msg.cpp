@@ -64,9 +64,11 @@ HLE(kXam, 500, XMsgInProcessCall) { return CallXMsg(c, Arg(c, 0), Arg(c, 1), Arg
 // the request runs at once here. With an XOVERLAPPED it is complete when
 // this returns, as XMsgCompleteIORequest leaves it: the result (a Win32
 // code) in word 0, the handler's length in word 1, the HRESULT as the
-// extended error in word 6, its event set. Without one xam waits for the
-// request and leaves the HRESULT as the thread's last error, returning
-// S_OK.
+// extended error in word 6, its event set, or with a completion routine
+// (word 4) that queued to the thread as a user APC:
+// routine(result, length, overlapped), which xam's own normal routine
+// calls from the XOVERLAPPED. Without one xam waits for the request and
+// leaves the HRESULT as the thread's last error, returning S_OK.
 uint32_t StartXMsgRequest(ppc::Ctx& c, uint32_t app, uint32_t message, uint32_t ov, uint32_t buffer,
                           uint32_t size) {
   uint32_t length = 0, hr = Send(c, app, message, buffer, size, length);
@@ -74,11 +76,12 @@ uint32_t StartXMsgRequest(ppc::Ctx& c, uint32_t app, uint32_t message, uint32_t 
     SetLastError(hr);
     return 0;
   }
-  if (Rd32(ov + 0x10)) ppc::Fatal(&c, "XMsg: completion routines (APCs) are not supported yet");
   Wr32(ov + 4, length);
   Wr32(ov + 0x18, hr);
   Wr32(ov, Win32Result(app, hr));
-  if (uint32_t event = Rd32(ov + 0xC)) {
+  if (uint32_t routine = Rd32(ov + 0x10)) {
+    QueueApc(KThread(CurrentThread()), routine, kUserMode, Rd32(ov), length, ov);
+  } else if (uint32_t event = Rd32(ov + 0xC)) {
     uint32_t obj = HandleObject(event);
     if (!obj) ppc::Fatal(&c, "XMsg: the XOVERLAPPED's event %x is not a handle", event);
     SetSignal(obj, 1);

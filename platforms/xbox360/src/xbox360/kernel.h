@@ -5,6 +5,7 @@
 // through r13 and the kernel's own threads, the title's module, and time.
 
 #include <cstdint>
+#include <initializer_list>
 #include <string>
 
 #include "ppc/ctx.h"
@@ -15,7 +16,8 @@ struct XexModule;
 
 // NTSTATUS values.
 constexpr uint32_t kStatusSuccess = 0, kStatusAbandoned = 0x80, kStatusAlerted = 0x101,
-                   kStatusTimeout = 0x102, kStatusPending = 0x103, kStatusObjectNameExists = 0x40000000,
+                   kStatusUserApc = 0xC0, kStatusTimeout = 0x102, kStatusPending = 0x103,
+                   kStatusObjectNameExists = 0x40000000,
                    kStatusUnsuccessful = 0xC0000001, kStatusNotImplemented = 0xC0000002,
                    kStatusInvalidHandle = 0xC0000008, kStatusInvalidParameter = 0xC000000D,
                    kStatusBufferTooSmall = 0xC0000023, kStatusInvalidParameter2 = 0xC00000F0,
@@ -83,20 +85,66 @@ void InitCriticalSection(uint32_t cs, uint32_t spin_count);
 // count, NT's LARGE_INTEGER: negative relative, otherwise an absolute
 // system time; nullptr waits forever. Returns the index of the object
 // that satisfied a wait-any (plus kStatusAbandoned for an abandoned
-// mutant), 0 for a wait-all, or kStatusTimeout. Alertable waits are not
-// woken by APCs yet (none are queued).
+// mutant), 0 for a wait-all, or kStatusTimeout. Kernel APCs queued to the
+// thread run during any wait (outside a critical region), which then goes
+// on; `alertable` (an alertable user-mode wait) also runs its user APCs,
+// after which it returns kStatusUserApc. A signalled object comes first.
 uint32_t Wait(const uint32_t* objs, uint32_t count, bool wait_all, const int64_t* timeout,
               bool alertable);
-// KeDelayExecutionThread: a wait on nothing.
+// KeDelayExecutionThread: a wait on nothing; kStatusSuccess at its end.
 uint32_t Delay(int64_t timeout, bool alertable);
+
+// ---- APCs ---------------------------------------------------------------
+// KAPC (0x28 bytes): type (byte 0, 18), mode (2: 0 kernel, 1 user),
+// inserted (3), KTHREAD (4), list links (8), kernel routine (0x10),
+// rundown routine (0x14), normal routine (0x18), normal context (0x1C),
+// system arguments (0x20, 0x24). A queued APC runs on its thread in one of
+// its waits: kernel_routine(apc, &normal_routine, &normal_context, &arg1,
+// &arg2), which may change them, then normal_routine(normal_context, arg1,
+// arg2) if there is one. The queues are the kernel's own (the list links
+// are not kept).
+constexpr uint32_t kApcSize = 0x28;
+constexpr uint8_t kApcObject = 18, kKernelMode = 0, kUserMode = 1;
+// KTHREAD's kernel APC disable count (critical regions: negative inside).
+constexpr uint32_t kKtKernelApcDisable = 0xB0;
+// KeInitializeApc; without a normal routine the APC is a kernel one.
+void InitApc(uint32_t apc, uint32_t kthread, uint32_t kernel_routine, uint32_t rundown_routine,
+             uint32_t normal_routine, uint8_t mode, uint32_t normal_context);
+// KeInsertQueueApc: queues apc to its thread with its system arguments
+// and wakes the thread if a wait of it can run it; false if it is queued
+// already or its thread has ended. `owned`: the kernel's own APC (from
+// SystemAlloc), freed once it has run or is discarded.
+bool InsertApc(uint32_t apc, uint32_t arg1, uint32_t arg2, bool owned = false);
+// An APC of the kernel's own with no kernel routine, queued to kthread
+// (NtQueueApcThread, I/O completion and timer APCs): the APC, 0 if the
+// thread has ended.
+uint32_t QueueApc(uint32_t kthread, uint32_t normal_routine, uint8_t mode, uint32_t normal_context,
+                  uint32_t arg1, uint32_t arg2);
+// Takes a queued APC that has not run off its queue (KeRemoveQueueApc),
+// freeing it if it is the kernel's own; false if it was not queued.
+bool RemoveApc(uint32_t apc);
+// Runs the current thread's kernel APCs if it is outside a critical region
+// (KeLeaveCriticalRegion).
+void RunKernelApcs();
+// The current thread's end: its queued APCs' rundown routines run (the
+// kernel's own are freed), and nothing more can be queued to it.
+void RundownApcs();
+// A KTHREAD's end: its queues go.
+void ForgetApcs(uint32_t kthread);
 // KTIMER (0x28 bytes): a notification or synchronization timer's header.
 // SetTimer (KeSetTimerEx) clears it and signals it at `due` (as a wait's
 // timeout: negative relative, otherwise absolute), then every `period_ms`
-// if that is not 0; it returns whether the timer was already set.
-// CancelTimer stops it, returning the same.
+// if that is not 0; it returns whether the timer was already set. With an
+// APC routine (NtSetTimerEx) each expiry also queues
+// routine(context, system time low, high) to the setting thread, as NT's
+// timer APC; a new setting or a cancel takes a queued one back.
+// CancelTimer stops it, returning the same; DeleteTimer also frees what
+// the timer holds, before the timer goes.
 constexpr uint32_t kTimerSize = 0x28;
-bool SetTimer(uint32_t timer, int64_t due, uint32_t period_ms);
+bool SetTimer(uint32_t timer, int64_t due, uint32_t period_ms, uint32_t apc_routine = 0,
+              uint8_t apc_mode = 0, uint32_t apc_context = 0);
 bool CancelTimer(uint32_t timer);
+void DeleteTimer(uint32_t timer);
 
 // ---- handles ------------------------------------------------------------
 // A handle names a dispatcher object (or another kernel object) by its
@@ -167,6 +215,11 @@ Thread* CreateSystemThread(void (*body)(void* arg), void* arg);
 // r3: CallGuest as a thread does, CallDpc as a DPC does (at
 // DISPATCH_LEVEL, the KPCR's DPC-active flag set, on processor `cpu`).
 uint32_t CallGuest(uint32_t fn, uint32_t a0, uint32_t a1);
+// Calls guest fn(args...) on the current guest thread from inside a
+// handler (an APC during a wait): on the thread's stack below the frame of
+// the code that called the handler, with the thread's registers saved
+// around the call. Returns r3.
+uint32_t CallGuestNested(uint32_t fn, std::initializer_list<uint32_t> args);
 uint32_t CallDpc(uint32_t fn, uint32_t a0, uint32_t a1, uint32_t cpu);
 
 // The title process (KeGetCurrentProcessType): kTitleProcess.

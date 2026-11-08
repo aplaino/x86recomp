@@ -12,7 +12,7 @@ namespace recomp::xbox360 {
 namespace {
 
 constexpr const char* kKrnl = "xboxkrnl.exe";
-constexpr uint32_t kKtApcDisable = 0xB0, kKtFpuExceptions = 0x71, kCreateKThread = 0x80;
+constexpr uint32_t kKtFpuExceptions = 0x71, kCreateKThread = 0x80;
 
 Thread* ThreadArg(ppc::Ctx& c, uint32_t kthread) {
   Thread* t = ThreadOf(kthread);
@@ -118,21 +118,44 @@ HLE(kKrnl, 252, NtSuspendThread) {
   return kStatusSuccess;
 }
 
-// KeDelayExecutionThread(mode, alertable, *interval).
+// KeDelayExecutionThread(mode, alertable, *interval): STATUS_USER_APC if
+// an alertable user-mode delay ran user APCs.
 HLE(kKrnl, 90, KeDelayExecutionThread) {
-  return Delay(int64_t(Rd64(Arg(c, 2))), Arg(c, 1) != 0);
+  return Delay(int64_t(Rd64(Arg(c, 2))), Arg(c, 0) == kUserMode && Arg(c, 1));
 }
 
-// Critical regions disable kernel APCs (none are delivered yet): the
-// thread's count goes negative while inside one.
+// ---- APCs ---------------------------------------------------------------
+// KeInitializeApc(apc, thread, kernel routine, rundown routine, normal
+// routine, mode, normal context).
+HLE(kKrnl, 109, KeInitializeApc) {
+  InitApc(Arg(c, 0), Arg(c, 1), Arg(c, 2), Arg(c, 3), Arg(c, 4), uint8_t(Arg(c, 5)), Arg(c, 6));
+  return 0;
+}
+
+// KeInsertQueueApc(apc, system argument 1, 2, priority increment): TRUE
+// if queued.
+HLE(kKrnl, 122, KeInsertQueueApc) { return InsertApc(Arg(c, 0), Arg(c, 1), Arg(c, 2)) ? 1 : 0; }
+
+// NtQueueApcThread(thread handle, routine, context, argument 1, 2): a user
+// APC of the kernel's own, routine(context, argument 1, argument 2).
+HLE(kKrnl, 227, NtQueueApcThread) {
+  uint32_t kthread = HandleObject(Arg(c, 0));
+  if (!kthread || Rd8(kthread) != kThreadObject) return kStatusInvalidHandle;
+  return QueueApc(kthread, Arg(c, 1), kUserMode, Arg(c, 2), Arg(c, 3), Arg(c, 4)) ? kStatusSuccess
+                                                                                   : kStatusUnsuccessful;
+}
+
+// Critical regions disable kernel APCs: the thread's count goes negative
+// while inside one; leaving the last runs those queued meanwhile.
 HLE(kKrnl, 95, KeEnterCriticalRegion) {
-  uint32_t k = KThread(CurrentThread()) + kKtApcDisable;
+  uint32_t k = KThread(CurrentThread()) + kKtKernelApcDisable;
   Wr32(k, Rd32(k) - 1);
   return 0;
 }
 HLE(kKrnl, 125, KeLeaveCriticalRegion) {
-  uint32_t k = KThread(CurrentThread()) + kKtApcDisable;
+  uint32_t k = KThread(CurrentThread()) + kKtKernelApcDisable;
   Wr32(k, Rd32(k) + 1);
+  if (Rd32(k) == 0) RunKernelApcs();
   return 0;
 }
 

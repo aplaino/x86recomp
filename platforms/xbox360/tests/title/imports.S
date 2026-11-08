@@ -41,8 +41,12 @@ __xex_import_slot_\name:
   FUNCTION 44, InterlockedPopEntrySList
   FUNCTION 90, KeDelayExecutionThread
   FUNCTION 93, KeEnableFpuExceptions
+  FUNCTION 95, KeEnterCriticalRegion
   FUNCTION 102, KeGetCurrentProcessType
+  FUNCTION 109, KeInitializeApc
   FUNCTION 116, KeInitializeSemaphore
+  FUNCTION 122, KeInsertQueueApc
+  FUNCTION 125, KeLeaveCriticalRegion
   FUNCTION 131, KeQueryPerformanceFrequency
   FUNCTION 132, KeQuerySystemTime
   FUNCTION 136, KeReleaseSemaphore
@@ -62,6 +66,7 @@ __xex_import_slot_\name:
   FUNCTION 210, NtCreateFile
   FUNCTION 219, NtFlushBuffersFile
   FUNCTION 223, NtOpenFile
+  FUNCTION 227, NtQueueApcThread
   FUNCTION 228, NtQueryDirectoryFile
   FUNCTION 231, NtQueryFullAttributesFile
   FUNCTION 232, NtQueryInformationFile
