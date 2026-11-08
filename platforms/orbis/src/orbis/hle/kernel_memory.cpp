@@ -421,6 +421,14 @@ ORBIS_HLE("libkernel", sceKernelCheckedReleaseDirectMemory, 2) {
   return 0;
 }
 
+bool recomp::orbis::kernel::MemoryType(recomp::gaddr a, int* type) {
+  std::lock_guard<std::mutex> l(g_vma_mu);
+  auto it = g_vma.upper_bound(a);
+  if (it == g_vma.begin() || (--it)->second.end <= a) return false;
+  *type = it->second.type;
+  return true;
+}
+
 // int sceKernelVirtualQuery(const void* addr, int flags, SceKernelVirtual-
 // QueryInfo* info, size_t size): in 11.00's libkernel a bare syscall
 // (572). The mapping holding addr, as a 0x48-byte record: start, end,

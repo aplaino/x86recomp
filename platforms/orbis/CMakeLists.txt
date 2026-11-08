@@ -66,12 +66,14 @@ target_link_libraries(recomp_orbis_font PUBLIC recomp_orbis PRIVATE Freetype::Fr
 # libSceAvPlayer on ffmpeg.
 add_library(recomp_orbis_avplayer SHARED src/orbis/hle/avplayer.cpp)
 target_link_libraries(recomp_orbis_avplayer PUBLIC recomp_orbis PRIVATE PkgConfig::FFMPEG)
+add_library(recomp_orbis_videodec SHARED src/orbis/hle/videodec2.cpp)
+target_link_libraries(recomp_orbis_videodec PUBLIC recomp_orbis_kernel PRIVATE PkgConfig::FFMPEG)
 # Networking (libSceNet, libSceNetCtl): no connection.
 add_library(recomp_orbis_net SHARED src/orbis/hle/net.cpp)
 target_link_libraries(recomp_orbis_net PUBLIC recomp_orbis_kernel)
 # PSN (libSceNp*): a user not signed in.
 add_library(recomp_orbis_np SHARED src/orbis/hle/np_manager.cpp src/orbis/hle/np_webapi.cpp
-            src/orbis/hle/np_trophy.cpp)
+            src/orbis/hle/np_trophy.cpp src/orbis/hle/np_tus.cpp)
 target_link_libraries(recomp_orbis_np PUBLIC recomp_orbis)
 add_library(recomp_orbis_videoout SHARED src/orbis/hle/videoout.cpp)
 target_link_libraries(recomp_orbis_videoout PUBLIC recomp_orbis_kernel recomp_orbis_gpu recomp_ui)
@@ -93,6 +95,7 @@ target_link_libraries(recomp_orbis_savedata_dialog PUBLIC recomp_orbis_system
 recomp_bundle(recomp_orbis_image recomp_orbis recomp_orbis_kernel recomp_orbis_libc_internal
               recomp_orbis_system recomp_orbis_fiber recomp_orbis_audio recomp_orbis_ajm
               recomp_orbis_ngs2 recomp_orbis_savedata recomp_orbis_pad recomp_orbis_font recomp_orbis_avplayer
+              recomp_orbis_videodec
               recomp_orbis_net recomp_orbis_np recomp_orbis_videoout recomp_orbis_gpu
               recomp_orbis_gnm recomp_orbis_savedata_dialog)
 
@@ -102,7 +105,7 @@ add_library(recomp_orbis_hle INTERFACE)
 target_link_libraries(recomp_orbis_hle INTERFACE recomp_orbis recomp_orbis_kernel
   recomp_orbis_libc_internal recomp_orbis_system recomp_orbis_fiber recomp_orbis_audio
   recomp_orbis_ajm recomp_orbis_ngs2 recomp_orbis_savedata recomp_orbis_pad recomp_orbis_font
-  recomp_orbis_avplayer recomp_orbis_net recomp_orbis_np recomp_orbis_videoout
+  recomp_orbis_avplayer recomp_orbis_videodec recomp_orbis_net recomp_orbis_np recomp_orbis_videoout
   recomp_orbis_gnm recomp_orbis_savedata_dialog)
 
 # orbis_app (tools/orbis_app.cpp): the modules a game starts with, for
@@ -154,7 +157,7 @@ if(RECOMP_LD_LLD AND Python3_FOUND AND CMAKE_C_COMPILER_ID MATCHES "Clang")
     COMMAND Python3::Interpreter "${_src}/build.py" "${_e2e}" "${CMAKE_C_COMPILER}"
             "${RECOMP_LD_LLD}"
     DEPENDS "${_src}/build.py" "${_src}/eboot.c" "${_src}/kernel.c" "${_src}/system.c"
-            "${_src}/libc.c" "${_src}/ajm.c" "${_src}/prx.c" "${_src}/load.c" "${_src}/stubs.c"
+            "${_src}/libc.c" "${_src}/ajm.c" "${_src}/videodec2.c" "${_src}/h264.py" "${_src}/prx.c" "${_src}/load.c" "${_src}/stubs.c"
             "${RECOMP_ROOT}/tools/orbis_sce_elf.py"
     VERBATIM)
   set(_gen "${_e2e}/gen/gen_000.cpp" "${_e2e}/gen/gen_prx_000.cpp" "${_e2e}/gen/gen_load_000.cpp"
@@ -171,8 +174,8 @@ if(RECOMP_LD_LLD AND Python3_FOUND AND CMAKE_C_COMPILER_ID MATCHES "Clang")
   target_link_libraries(orbis_process_test PRIVATE orbis_process_lifted recomp_orbis
                         recomp_orbis_kernel recomp_orbis_fiber recomp_orbis_gnm
                         recomp_orbis_savedata recomp_orbis_audio recomp_orbis_pad recomp_orbis_np
-                        recomp_orbis_ngs2 recomp_orbis_ajm recomp_orbis_savedata_dialog
-                        recomp_orbis_libc_internal)
+                        recomp_orbis_ngs2 recomp_orbis_ajm recomp_orbis_videodec
+                        recomp_orbis_savedata_dialog recomp_orbis_libc_internal)
   recomp_bundle(orbis_process_test)
   add_test(NAME orbis_process COMMAND orbis_process_test "${_e2e}/eboot.elf" "${_e2e}/prx.elf"
            "${_e2e}/app0/sce_module/libTestLoad.prx")

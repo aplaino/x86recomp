@@ -323,6 +323,24 @@ library.
   by the player's clock; audio as 16-bit chunks of 1024 frames; ready,
   play and stop events. Its structures are 11.00's; the pixels are
   ffmpeg's decoders'.
+- recomp_orbis_videodec: libSceVideodec2 (AVC) on ffmpeg's H.264
+  decoder. The checks, codes and structures are 11.00's libSceVideodec2
+  (with libSceVdecCore's compute queue handle: the memory + 0x290500);
+  the memory sizes and the pipeline's delay per configuration are
+  measured (below), others are fatal, as are HEVC, the other decoder
+  kinds and the 56-byte output info. A decoder takes in delay - 1 access
+  units, then hands out one picture per access unit in output order,
+  written into the frame buffer passed with it; a flush hands out the
+  rest one per call (a decode during one: 0x811D0100). The handle is the
+  CPU memory; the memory the console's decoder uses is never touched.
+  Picture info comes from the stream's SPS; the VUI is only known for
+  the measured streams' shape (timing, bitstream restrictions,
+  max_dec_frame_buffering = max_num_ref_frames), others are fatal, as
+  are field coding, scaling matrices, POC type 1 and pictures smaller
+  than the decoder's maximum (their pitch). The console's own record in
+  the frame buffer's last KiB is not written. Pointers other than null
+  are taken as mapped; memory types are checked from libkernel's
+  records (memory the process maps itself: fatal).
 - recomp_orbis_savedata: libSceSaveData on DataDir()/savedata/<user>/
   (each directory with a .meta of its blocks and SceSaveDataParam, and
   its icon .png); a mount maps /savedataN onto it through libkernel's
@@ -335,7 +353,9 @@ library.
   network connection: NetCtl's state is disconnected and never changes.
 - recomp_orbis_np: libSceNpManager and libSceNpWebApi for a user not
   signed in to PSN: the state is signed out, what the PSN service would
-  answer fails with SCE_NP_ERROR_SIGNED_OUT.
+  answer fails with SCE_NP_ERROR_SIGNED_OUT. libSceNpTus (initialized
+  by its own module_start in 11.00): no title context exists; the calls
+  that create one are not implemented.
 - recomp_orbis_font: libSceFont and libSceFontFt on the host's FreeType:
   libSceFont's structures, checks, codes and the objects it allocates
   through the game's memory interface are 11.00's. Glyphs follow
@@ -429,6 +449,13 @@ noted:
 - libScePad's touch pad (44.86 dots/mm, 1920 x 942) and stick dead zones
   (13), a DualShock 4 connected locally.
 - The GPU's core clock: 800 MHz (in a payload's process).
+- libSceVideodec2 for AVC High 4.2, 1920 x 1088, DPB -1, pipeline depth
+  4: CPU memory 0x334CC00, GPU 0x48EAE00, CPU+GPU 0x304B000, frame
+  buffer 0x331400 aligned to 0x100; the first picture with the 8th
+  access unit, in display order; pictures as NV12 at a pitch of 1920,
+  chroma after the 1088 coded rows, byte for byte ffmpeg's (three
+  pictures compared). The picture info of a stream with timing and
+  bitstream restrictions only in its VUI.
 - sceKernelGetTscFrequency: the console reports 1,593,756,095 Hz (its
   CPU clock; rdtsc against the process clock agrees). The HLE reports
   3 GHz instead, the rate of the core's rdtsc model (lifted.h kTscHz),

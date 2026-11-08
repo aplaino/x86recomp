@@ -954,8 +954,14 @@ static int appcontent_checks(void) {
   return failed;
 }
 
+// libSceNpTus: no title context exists (the user is not signed in).
+int sceNpTusDeleteNpTitleCtx(int ctx);
+static int tus_checks(void) {
+  return test_check(456, (unsigned)sceNpTusDeleteNpTitleCtx(1), 0x8055070E);
+}
+
 int system_checks(void) {
   return fiber_checks() + dir_checks() + user_event_checks() + gpu_checks() + packet_checks() + save_checks() + audio_checks() +
          pad_checks() + dialog_checks() + msg_dialog_checks() + trophy_checks() + ngs2_checks() +
-         appcontent_checks();
+         appcontent_checks() + tus_checks();
 }

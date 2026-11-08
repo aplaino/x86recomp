@@ -46,6 +46,11 @@ bool DeleteEvent(uint32_t eq, uint64_t ident, int16_t filter);
 // Triggers (ident, filter) in every queue it was added to.
 void TriggerEvent(uint64_t ident, int16_t filter, int64_t data);
 
+// The memory type of the game's mapping that holds a (what
+// sceKernelVirtualQuery reports); false for an address no mapping of the
+// game's holds (memory the process maps itself is not recorded).
+bool MemoryType(gaddr a, int* type);
+
 // Mount points other libraries make (save data's /savedataN): guest_root
 // (e.g. "/savedata0") maps onto host_dir.
 void Mount(const std::string& guest_root, const std::string& host_dir, bool read_only);

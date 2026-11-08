@@ -116,6 +116,20 @@ STUB(sceMsgDialogGetStatus) STUB(sceMsgDialogGetResult) STUB(sceMsgDialogClose)
 STUB(sceMsgDialogTerminate) STUB(sceMsgDialogProgressBarSetValue) STUB(sceMsgDialogProgressBarInc)
 #endif
 
+#ifdef LIB_NPTUS
+void sceNpTusDeleteNpTitleCtx(void) {}
+#endif
+
+#ifdef LIB_VIDEODEC2
+#define STUB(name) \
+  void name(void) {}
+STUB(sceVideodec2QueryComputeMemoryInfo) STUB(sceVideodec2AllocateComputeQueue)
+STUB(sceVideodec2ReleaseComputeQueue) STUB(sceVideodec2QueryDecoderMemoryInfo)
+STUB(sceVideodec2CreateDecoder) STUB(sceVideodec2DeleteDecoder) STUB(sceVideodec2Decode)
+STUB(sceVideodec2Flush) STUB(sceVideodec2Reset) STUB(sceVideodec2GetPictureInfo)
+#undef STUB
+#endif
+
 #ifdef LIB_AJM
 #define STUB(name) \
   void name(void) {}
