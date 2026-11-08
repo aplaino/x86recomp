@@ -8,6 +8,13 @@ int test_check(int id, long got, long want);
 
 typedef void* Handle;  // ScePthread, ScePthreadMutex, SceKernelSema, ...
 typedef struct {
+  unsigned long start, end, offset;
+  int prot, type;
+  unsigned char flags;  // 1 flexible, 2 direct, 4 stack, 8 pooled, 0x10 committed
+  char name[32];
+} VirtualQueryInfo;  // 0x48 bytes
+
+typedef struct {
   int state;
   void* mutex;
 } Once;
@@ -48,6 +55,18 @@ int sceKernelClose(int fd);
 int sceKernelStat(const char* path, void* st);
 void* mmap(void* addr, unsigned long len, int prot, int flags, int fd, long off);
 int munmap(void* addr, unsigned long len);
+int sceKernelAllocateDirectMemory(long start, long end, unsigned long len, unsigned long align,
+                                  int type, long* out);
+int sceKernelMapNamedDirectMemory(void** addr, unsigned long len, int prot, int flags, long off,
+                                  unsigned long align, const char* name);
+int sceKernelMapNamedFlexibleMemory(void** addr, unsigned long len, int prot, int flags,
+                                    const char* name);
+int sceKernelMprotect(void* addr, unsigned long len, int prot);
+int sceKernelMunmap(void* addr, unsigned long len);
+int sceKernelMapDirectMemory(void** addr, unsigned long len, int prot, int flags, long off,
+                             unsigned long align);
+int sceKernelReleaseDirectMemory(long start, unsigned long len);
+int sceKernelVirtualQuery(const void* addr, int flags, void* info, unsigned long size);
 int sceKernelUsleep(unsigned us);
 unsigned long sceKernelGetProcessTime(void);
 int clock_gettime(int clock, long ts[2]);
@@ -259,6 +278,45 @@ int kernel_checks(void) {
   p[0] = 42;
   p[0x1FFF] = 43;
   failed += test_check(59, p[0] + p[0x1FFF] + munmap(p, 0x10000), 85);
+
+  // 64-69: sceKernelVirtualQuery of direct memory (type 3) mapped with a
+  // name, then of its last page after an mprotect splits it, then of
+  // flexible memory.
+  long off = 0;
+  void* d = 0;
+  VirtualQueryInfo vq;
+  sceKernelAllocateDirectMemory(0, 0x10000000, 0x20000, 0x10000, 3, &off);
+  sceKernelMapNamedDirectMemory(&d, 0x20000, 0x33, 0, off, 0x10000, "dmem");
+  int r = sceKernelVirtualQuery((char*)d + 0x5000, 0, &vq, sizeof vq);
+  failed += test_check(64, r == 0 && vq.start == (unsigned long)d && vq.end == vq.start + 0x20000 &&
+                               vq.offset == (unsigned long)off, 1);
+  failed += test_check(65, vq.prot * 1000 + vq.type * 100 + vq.flags, 0x33 * 1000 + 300 + 0x12);
+  failed += test_check(66, vq.name[0] == 'd' && vq.name[3] == 'm' && vq.name[4] == 0, 1);
+  sceKernelMprotect((char*)d + 0x1C000, 0x4000, 1);
+  r = sceKernelVirtualQuery((char*)d + 0x1C000, 0, &vq, sizeof vq);
+  failed += test_check(67, r == 0 && vq.start == (unsigned long)d + 0x1C000 && vq.prot == 1 &&
+                               vq.offset == (unsigned long)off + 0x1C000, 1);
+  // 32-34: two of its pages unmapped (the second's first word zero) and their
+  // offset mapped again elsewhere keep what was written; the old
+  // mapping's neighbours are untouched.
+  int* w = (int*)((char*)d + 0x4000);
+  w[0] = 0x1234;
+  w[0x1000 + 5] = 0x5678;
+  ((int*)d)[0] = 7;
+  failed += test_check(32, sceKernelMunmap((char*)d + 0x4000, 0x8000), 0);
+  void* m = 0;
+  r = sceKernelMapDirectMemory(&m, 0x8000, 0x33, 0, off + 0x4000, 0x4000);
+  int* mw = (int*)m;
+  failed += test_check(33, r == 0 && m != (char*)d + 0x4000 && mw[0] == 0x1234 &&
+                               mw[0x1000 + 5] == 0x5678 && mw[0x1000] == 0 && mw[1] == 0, 1);
+  r = sceKernelVirtualQuery(m, 0, &vq, sizeof vq);
+  failed += test_check(34, r == 0 && vq.offset == (unsigned long)off + 0x4000 && ((int*)d)[0] == 7, 1);
+  sceKernelReleaseDirectMemory(off, 0x20000);
+  void* f = 0;
+  sceKernelMapNamedFlexibleMemory(&f, 0x8000, 3, 0, "flex");
+  r = sceKernelVirtualQuery(f, 0, &vq, sizeof vq);
+  failed += test_check(68, r == 0 && vq.start == (unsigned long)f && vq.end == vq.start + 0x8000, 1);
+  failed += test_check(69, vq.flags * 100 + vq.prot, 0x11 * 100 + 3);
 
   // 60-61: clocks.
   long a[2], b[2];

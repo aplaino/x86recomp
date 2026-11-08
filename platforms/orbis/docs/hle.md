@@ -12,8 +12,15 @@ library.
   thread's TCB, orbis/process.h kTcbErrno); pthread_* return the errno.
   - Memory: flexible memory and anonymous mmap from the guest allocator;
     direct memory as offsets into a pool, each mapped to fresh guest
-    memory (aliasing one range twice is fatal). File-backed mmap is
-    fatal.
+    memory (one range mapped twice at once, aliasing, is fatal; a range
+    unmapped and mapped again keeps its contents). File-backed mmap is
+    fatal. The mappings these make are recorded for
+    sceKernelVirtualQuery (an mprotect or a range name splits a record,
+    as FreeBSD's map entries split); not measured on hardware: whether
+    the kernel merges neighbouring entries, the memory type of flexible
+    memory (0 here) and the name of an unnamed mapping (empty here).
+    Memory the process maps itself (images, stacks), FIND_NEXT and an
+    address no mapping holds are fatal.
   - pthreads: FreeBSD semantics (error-checking mutexes by default,
     static initialisers 0, 1 recursive, 2 adaptive); a normal mutex
     locked twice by its owner is fatal (a self-deadlock) instead of
