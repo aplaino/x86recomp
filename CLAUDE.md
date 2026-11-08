@@ -17,7 +17,8 @@ OS or middleware API goes here, even when a game is where it came up.
   - ~/Documents/Programming/Recomp/KEX/Q2E (Quake II Enhanced, x64)
 - The base is src/runtime (with cmake/host.cmake); the x86 core is
   src/x86, tools/lifter_x86 and tests/x86, the PowerPC core src/ppc,
-  tools/lifter_ppc and tests/ppc; each platform module is
+  tools/lifter_ppc and tests/ppc, the AArch64 core src/a64,
+  tools/lifter_a64 and tests/a64; each platform module is
   platforms/<name> (Win32: platforms/win32).
 
 ## Build and test
@@ -158,3 +159,39 @@ platform module too.
 - Test fixtures are source (assembly and C built by clang and LLD for
   big-endian PowerPC64) checked in with their build rule; never a binary
   from the internet, never anything from a game or a console's firmware.
+
+## AArch64 core (src/a64, tools/lifter_a64, tests/a64)
+Design in src/a64/ARCHITECTURE.md. These rules hold for every AArch64
+platform module too.
+- Alone: `cmake --preset a64 && cmake --build --preset a64 && ctest --test-dir out/build/a64`
+  (no x86 core, no host layer). The oracle tests need clang, ld.lld and
+  the repository's `.venv/` Python with unicorn (override with
+  -DRECOMP_PYTHON=...), never a system Python.
+- arm64 host build on x86-64: `cmake --preset a64-aarch64-qemu`
+  (crossdev's aarch64-unknown-linux-gnu sysroot, run under
+  qemu-aarch64; CPU-only, as the sysroot has no SDL3, ffmpeg or LLVM).
+  Run its ctest after changes to a64/lifted.h, the emitter or the
+  runtime. The host layer on arm64 is checked on macOS.
+- Lifter output must not change unintentionally: when touching
+  tools/lifter_a64, diff the fixture's and a platform's lifted code
+  before and after.
+- Nothing in src/a64, tools/lifter_a64 or tests/a64 knows a console:
+  executable formats come through the lifter's ImageReader (static-PIE
+  ELF is its own), the kernel through Svc; the tests' fixture has a
+  test platform of its own (tests/a64/fixture_platform.cpp).
+- Unicorn and emulators are references and test oracles only, never
+  linked, never shipped.
+- Floating point is modelled exactly (SoftFloat ARM specialisation under
+  the thread's FPCR; FPSR flags). Host float/double only inside
+  proven-exact fast paths, each with its proof next to the code, a
+  fallback to the model outside the proof's conditions, and a fuzz test
+  that mutations of the path make fail.
+- What POSIX does not cover the same way on Linux and macOS goes in the
+  platform layer (src/a64/platform.h; guard with #ifdef), nowhere else.
+- a64/lifted.h semantics changes must keep the a64_lift_forms tests
+  passing (Unicorn on x86-64 hosts, the host CPU on arm64), with a
+  planted bug (RECOMP_A64_MUTATION) for each new helper that a test
+  catches.
+- Test fixtures are source (assembly and C built by clang's integrated
+  assembler and LLD for aarch64-none-elf) checked in with their build
+  rule; never a binary from the internet, never anything from a game.

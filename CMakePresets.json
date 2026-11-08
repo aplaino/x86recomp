@@ -30,12 +30,28 @@
       "cacheVariables": {
         "RECOMP_X86": "OFF", "RECOMP_PLATFORM_WIN32": "OFF", "RECOMP_HOST": "OFF", "RECOMP_PPC": "ON"
       }
+    },
+    {
+      "name": "a64",
+      "inherits": "debug",
+      "binaryDir": "${sourceDir}/out/build/a64",
+      "cacheVariables": {
+        "RECOMP_X86": "OFF", "RECOMP_PLATFORM_WIN32": "OFF", "RECOMP_HOST": "OFF", "RECOMP_A64": "ON"
+      }
+    },
+    {
+      "name": "a64-aarch64-qemu",
+      "inherits": "a64",
+      "binaryDir": "${sourceDir}/out/build/a64-aarch64-qemu",
+      "toolchainFile": "${sourceDir}/cmake/aarch64-linux-qemu.cmake"
     }
   ],
   "buildPresets": [
     { "name": "debug", "configurePreset": "debug" },
     { "name": "release", "configurePreset": "release" },
     { "name": "x86", "configurePreset": "x86" },
-    { "name": "ppc", "configurePreset": "ppc" }
+    { "name": "ppc", "configurePreset": "ppc" },
+    { "name": "a64", "configurePreset": "a64" },
+    { "name": "a64-aarch64-qemu", "configurePreset": "a64-aarch64-qemu" }
   ]
 }
