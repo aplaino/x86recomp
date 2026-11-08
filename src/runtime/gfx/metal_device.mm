@@ -26,7 +26,8 @@
 // Formats as in gpu_device.cpp: colour textures and targets B8G8R8A8 (other
 // D3D colour formats converted on upload), DXT as BC1-3, float formats as
 // is. Depth: D16 as Depth16Unorm, 24-bit depth as 32-bit float (Apple GPUs
-// have no 24-bit depth), with stencil as Depth32Float_Stencil8.
+// have no 24-bit depth), with stencil as Depth32Float_Stencil8; float depth
+// stored reversed (1 - d, gfx/reversed_z.h) unless RECOMP_REVERSED_Z=0.
 
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -70,6 +71,7 @@
 #include "runtime/gfx/smaa/SearchTex.h"
 #include "smaa_hlsl.h"
 #include "runtime/gfx/metal_prelude.h"
+#include "runtime/gfx/reversed_z.h"
 #include "runtime/gfx/shader_compile.h"
 #include "runtime/log.h"
 
@@ -315,8 +317,9 @@ fragment DepthOut depth_copy_fs(TriOut in [[stage_in]], depth2d<float> src [[tex
 }
 // Motion from the camera alone: each pixel's point (from its depth) where
 // the last frame's camera saw it, in texture coordinates (previous - now).
-// m: this frame's clip space to the last frame's. The depth is copied in
-// the same pass (MetalFX's depth input: the scene's own may have stencil).
+// m: this frame's clip space (the depth as stored) to the last frame's.
+// The depth is copied in the same pass (MetalFX's depth input: the
+// scene's own may have stencil).
 struct MotionOut { float2 mv [[color(0)]]; float d [[depth(any)]]; };
 fragment MotionOut motion_fs(TriOut in [[stage_in]], depth2d<float> depth [[texture(0)]],
                              constant float4x4& m [[buffer(0)]]) {
@@ -350,6 +353,7 @@ struct TaaParams {
   float gamma;         // the clip box's half size, in standard deviations
   uint reset;
   uint direct;     // write the result to `out` too (no sharpening after)
+  uint reversed;   // depth stored as 1 - d (m takes it so): the nearest is the largest
 };
 half3 rgb_to_ycocg(half3 c) {
   return half3(0.25h * (c.r + 2.0h * c.g + c.b), 0.5h * (c.r - c.b), 0.25h * (2.0h * c.g - c.r - c.b));
@@ -399,7 +403,7 @@ kernel void taa_cs(texture2d<half, access::read> color [[texture(0)]],
     for (int k = 0; k < 4; k++) {
       const int2 n = clamp(int2(gid) + int2(k & 1 ? 1 : -1, k & 2 ? 1 : -1), 0, last);
       const float dn = depth.read(uint2(n));
-      if (dn < d) { d = dn; q = n; }
+      if (p.reversed ? dn > d : dn < d) { d = dn; q = n; }
     }
     const float2 uq = (float2(q) + 0.5) * p.inv_size;
     const float4 prev = p.m * float4(uq.x * 2.0 - 1.0, 1.0 - uq.y * 2.0, d, 1.0);
@@ -620,6 +624,15 @@ class MetalDevice final : public Device {
       if (gp && *gp == '1') SetUpPassTimes();
       const char* sync = std::getenv("RECOMP_METAL_SYNC");
       sync_ = sync && *sync && *sync != '0';
+      // RECOMP_REVERSED_Z=0: float depth buffers hold D3D9's values, not
+      // 1 - d (reversed_z.h).
+      const char* rz = std::getenv("RECOMP_REVERSED_Z");
+      reversed_z_ = !(rz && *rz == '0');
+      if (!reversed_z_) std::fprintf(stderr, "gfx: reversed depth off\n");
+      // RECOMP_DEPTH_FROM_W=0: perspective draws keep z (reversed_z.h).
+      const char* dw = std::getenv("RECOMP_DEPTH_FROM_W");
+      depth_from_w_ = reversed_z_ && !(dw && *dw == '0');
+      if (reversed_z_ && !depth_from_w_) std::fprintf(stderr, "gfx: depth from w off\n");
       if (!sync_) encoder_ = std::thread([this] { EncoderMain(); });
       // A game: no App Nap, timers not coalesced. Without it, in a window
       // not in front, the benchmark street had twice the hitches.
@@ -739,15 +752,17 @@ class MetalDevice final : public Device {
     const double busy = double(enc_busy_ns_.exchange(0));
     const uint64_t pipes = pipe_compiles_.exchange(0), pipe_ns = pipe_ns_.exchange(0),
                    pipe_max = pipe_max_ns_.exchange(0), prebuilt = pipe_prebuilt_.exchange(0);
-    char b[640];
+    char b[768];
     std::snprintf(b, sizeof b,
-                  "per frame %.0f draws (%.2f ms recording them, %.2f us each), %.0f recorded ops, "
+                  "per frame %.0f draws (%.0f of them depth from w, %.0f not for another projection; %.2f ms "
+                  "recording them, %.2f us each), "
+                  "%.0f recorded ops, "
                   "%.1f render passes, %.1f uploads ahead + %.1f in order (%.2f MB, %.2f MB in "
                   "order); encoder busy %.0f%% (%.2f ms a frame); in %.0f frames: %llu textures + "
                   "%llu depth buffers created, %llu arena buffers (%.0f MB) + %llu made ahead, %llu shaders (%.1f ms, "
                   "%llu MSL compiles), %llu pipelines compiled while drawing (%.1f ms, max %.1f), "
                   "%llu built ahead used",
-                  double(c.draws) / f, double(c.draw_ns) / f / 1e6,
+                  double(c.draws) / f, double(c.w_draws) / f, double(c.w_other) / f, double(c.draw_ns) / f / 1e6,
                   c.draws ? double(c.draw_ns) / double(c.draws) / 1e3 : 0.0, double(c.ops) / f,
                   double(c.passes) / f, double(c.uploads_ahead) / f, double(c.uploads_in_order) / f,
                   double(c.upload_bytes) / f / 1048576.0, double(c.in_order_bytes) / f / 1048576.0,
@@ -1143,6 +1158,12 @@ class MetalDevice final : public Device {
       }
     }
     if (todo.empty()) return;
+    if (pass_.reversed) z = 1.0f - z;
+    // A new content of the whole buffer: the next draw from w sets its
+    // projection.
+    if ((flags & 2) && todo.size() == 1 && todo[0].left == 0 && todo[0].top == 0 &&
+        todo[0].right == pass_.w && todo[0].bottom == pass_.h)
+      if (auto dit = depths_.find(pass_.depth_id); dit != depths_.end()) dit->second.wd.fresh = true;
     // A clear of the whole target before anything was drawn is the render
     // pass's load action.
     if (!enc_open_ && todo.size() == 1 && todo[0].left == 0 && todo[0].top == 0 &&
@@ -1240,6 +1261,12 @@ class MetalDevice final : public Device {
     }
   }
 
+  void SetDepthFromW(int reg, DepthPlanes planes) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    wvp_reg_ = depth_from_w_ && reg >= 0 && reg <= 252 ? reg : -1;
+    depth_planes_ = planes;
+  }
+
   void SetMinAnisotropy(int level) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     min_aniso_ = std::clamp(level, 0, 16);
@@ -1263,10 +1290,13 @@ class MetalDevice final : public Device {
     int32_t in[16][4];  // per input slot: byte offset of vertex 0, stride, D3DDECLTYPE (-1: none), 0
     float pixel[4];     // 1 / viewport width, 1 / viewport height; jitter (clip space)
     float clip[6][4];   // SetClipPlane's, clip space
-    int32_t clip_mask[4];  // CLIPPLANEENABLE
+    int32_t clip_mask[4];  // CLIPPLANEENABLE; depth (r_position: 0 D3D9's, 1 reversed, 2 from w)
+    float depth[4];        // depth from w: k0, k1 (reversed_z.h)
   };
   struct PsState {
-    int32_t alpha[4];  // D3DCMPFUNC (ALWAYS when the test is off), ALPHAREF
+    int32_t alpha[4];  // D3DCMPFUNC (ALWAYS when the test is off), ALPHAREF,
+                       // bit n: sampler n reads a reversed depth texture (R_DEPTH_TEX),
+                       // 1 if the depth buffer is reversed (R_DEPTH_OUT)
     float bias[16];    // per sampler register: MIPMAPLODBIAS (R_BIAS)
     float vscale[4];   // game pixels per pixel of the target (r_vpos)
   };
@@ -1281,6 +1311,9 @@ class MetalDevice final : public Device {
       sh.stage = prog.stage;
       sh.inputs = prog.inputs.size();
       sh.float_regs = prog.float_regs;
+      sh.position_matrix = prog.position_matrix;
+      sh.position_note = prog.position_note;
+      sh.float_reads = prog.float_reads;
       sh.sampler_type.fill(hlsl::ParamType::Void);
       for (const hlsl::Sampler& smp : prog.samplers) {
         if (smp.reg >= 16) FatalF("gfx: shader sampler register %u", smp.reg);
@@ -1473,10 +1506,11 @@ class MetalDevice final : public Device {
     DepthKey dk{};
     dk.func = dk.sfunc = dk.bfunc = uint8_t(MTLCompareFunctionAlways);
     float bias = 0, slope = 0;
+    clip_bias_ = 0;
     if (pass_.depth) {
       dk.test = rs_[7] ? 1 : 0;
       dk.write = (rs_[7] && rs_[14]) ? 1 : 0;
-      dk.func = uint8_t(CompareOp(rs_[23]));
+      dk.func = uint8_t(CompareOp(pass_.reversed ? MirrorDepthCompare(rs_[23]) : rs_[23]));
       if (pass_.stencil && rs_[52]) {
         dk.stencil = 1;
         dk.fail = uint8_t(StencilOp(rs_[53]));
@@ -1491,9 +1525,16 @@ class MetalDevice final : public Device {
         dk.read = uint8_t(rs_[58]);
         dk.wmask = uint8_t(rs_[59]);
       }
-      bias = (AsFloat(rs_[195]) - float(rs_[47]) * (1.0f / 65535.0f)) * pass_.bias_scale;
-      slope = AsFloat(rs_[175]);
+      // DEPTHBIAS (less the legacy ZBIAS) and SLOPESCALEDEPTHBIAS; on a
+      // reversed buffer the constant part from the vertex shader
+      // (reversed_z.h).
+      const DepthBias db = DepthBiasOf(AsFloat(rs_[195]) - float(rs_[47]) * (1.0f / 65535.0f), AsFloat(rs_[175]),
+                                       pass_.reversed, viewport_.min_z, viewport_.max_z, pass_.bias_scale);
+      bias = db.constant;
+      slope = db.slope;
+      clip_bias_ = db.clip;
     }
+    depth_used_ = dk.test || dk.write;
     BindDepth(dk);
 
     // Rasterizer: D3D culls by screen winding, CW (2) or CCW (3); front
@@ -1503,9 +1544,10 @@ class MetalDevice final : public Device {
     if (tri && rs_[22] == 2) cull = MTLCullModeFront;
     else if (tri && rs_[22] == 3) cull = MTLCullModeBack;
     Raster(cull, rs_[8] != 3 ? MTLTriangleFillModeLines : MTLTriangleFillModeFill, bias, slope);
+    const DepthRange zr = pass_.reversed ? ReversedViewportDepth(viewport_.min_z, viewport_.max_z)
+                                         : DepthRange{viewport_.min_z, viewport_.max_z};
     ViewportOf({double(viewport_.x), double(viewport_.y), double(std::max(viewport_.width, 1u)),
-                double(std::max(viewport_.height, 1u)), double(viewport_.min_z),
-                double(viewport_.max_z)});
+                double(std::max(viewport_.height, 1u)), double(zr.min_z), double(zr.max_z)});
     ScissorOf(sc);
     StencilRef(uint8_t(rs_[57]));
     float blend[4];
@@ -1573,7 +1615,7 @@ class MetalDevice final : public Device {
       st.in[i][2] = int32_t(in.type);
     }
     PixelState(st.pixel);
-    ClipState(st);
+    ClipState(st, d, vs);
     VertexBuffer(3, vb.buf, 0);
 
     ShaderResources(d, vs, ps, st);
@@ -1607,11 +1649,19 @@ class MetalDevice final : public Device {
   }
 
  private:
+  struct Shader;  // (below)
+
   // ---- the scene at an internal resolution, upscaled (RECOMP_UPSCALER)
 
   enum class Upscaler { Off, Bilinear, MetalFX, MetalFXSpatial, Taa, Smaa };
   // Temporal: the scene is jittered and resolved with its history.
   bool Temporal() const { return upscaler_ == Upscaler::MetalFX || upscaler_ == Upscaler::Taa; }
+
+  // A depth buffer of format `pf` stores 1 - d (reversed_z.h): float ones,
+  // unless RECOMP_REVERSED_Z=0.
+  bool ReversedDepth(MTLPixelFormat pf) const {
+    return reversed_z_ && (pf == MTLPixelFormatDepth32Float || pf == MTLPixelFormatDepth32Float_Stencil8);
+  }
 
   // The size a game's render target or depth buffer of w x h is made at:
   // the back buffer's and its halves and quarters (the scene's buffers and
@@ -1669,10 +1719,69 @@ class MetalDevice final : public Device {
     px[3] = jitter_draw_ ? 2.0f * jitter_[1] / h : 0.0f;
   }
 
-  // The vertex state's user clip planes (D3D9 with shaders: clip space).
-  void ClipState(VsState& st) const {
+  // The vertex state's user clip planes (D3D9 with shaders: clip space),
+  // how depth is made (r_position): reversed, its bias, and from w where
+  // the draw qualifies (reversed_z.h); and the vertex samplers that read a
+  // reversed depth texture (R_DEPTH_TEX).
+  void ClipState(VsState& st, const ShaderDraw& d, const Shader& vs) {
     st.clip_mask[0] = int32_t(rs_[152] & 0x3F);
     if (st.clip_mask[0]) std::memcpy(st.clip, clip_planes_, sizeof st.clip);
+    for (uint32_t r = 0; r < vs.samplers && r < 4; r++)
+      if (const Tex* t = FindTex(d.textures[16 + r]); t && t->depth && ReversedDepth(t->tex.pixelFormat))
+        st.clip_mask[2] |= int32_t(1u << r);
+    st.clip_mask[1] = pass_.reversed ? 1 : 0;
+    st.depth[2] = clip_bias_;
+    if (!pass_.reversed || wvp_reg_ < 0 || !d.vs_float) return;
+    if (vs.position_matrix != wvp_reg_) {
+      NoteNotFromW(vs);
+      return;
+    }
+    WProjection p;
+    if (!PerspectiveOf(d.vs_float + wvp_reg_, &p)) return;
+    auto dit = depths_.find(pass_.depth_id);
+    if (dit == depths_.end()) return;
+    WDepth& wd = dit->second.wd;
+    // The first after a clear: the game's planes, where it knows them.
+    WProjection exact;
+    float n, f;
+    const bool fresh = wd.fresh && depth_used_;
+    const bool planes = fresh && depth_planes_ && depth_planes_(&n, &f) && n > 0 && f > n;
+    if (planes) exact = PerspectiveOfPlanes(n, f);
+    if (!wd.Use(p, planes ? &exact : nullptr, depth_used_)) {
+      // Tests or writes depth, with another projection than the content's.
+      if (perf_ && depth_used_) pc_.w_other++;
+      return;
+    }
+    // The first few contents' projections, for the log.
+    if (fresh && w_logged_ < 4) {
+      w_logged_++;
+      std::fprintf(stderr, "gfx: depth from w: a %.9g, n %.6g (%s)\n", wd.a, wd.n,
+                   !planes ? "the matrix's" : wd.n == exact.n ? "the game's" : "the matrix's: the game's disagree");
+    }
+    st.clip_mask[1] = 2;
+    st.depth[0] = wd.K0();
+    st.depth[1] = wd.K1();
+    if (perf_) pc_.w_draws++;
+  }
+
+  // A vertex shader drawn into a reversed buffer, testing or writing
+  // depth, that reads the world-view-projection's registers but does not
+  // qualify for depth from w: once per shader, why (the first 256).
+  void NoteNotFromW(const Shader& vs) {
+    if (!depth_used_ || !vs.hash || w_noted_.size() > 256) return;
+    bool reads = false;
+    for (int k = 0; k < 4; k++) reads = reads || vs.float_reads.test(size_t(wvp_reg_ + k));
+    if (!reads || !w_noted_.insert(vs.hash).second) return;
+    if (w_noted_.size() > 256) {
+      std::fprintf(stderr, "gfx: depth from w: more vertex shaders kept w - z, not logged\n");
+      return;
+    }
+    char other[64] = "";
+    if (vs.position_matrix >= 0)
+      std::snprintf(other, sizeof other, "its position is from c%d-c%d", vs.position_matrix, vs.position_matrix + 3);
+    std::fprintf(stderr, "gfx: depth from w: vertex shader %016llx reads c%d-c%d, keeps w - z: %s\n",
+                 (unsigned long long)vs.hash, wvp_reg_, wvp_reg_ + 3,
+                 *other ? other : vs.position_note.empty() ? "(no analysis)" : vs.position_note.c_str());
   }
 
   // The camera (world to clip space, D3D's row vectors) from a scene
@@ -1847,11 +1956,18 @@ class MetalDevice final : public Device {
   // last frame, or a cut (cutscenes, respawns, camera switches): a point
   // 20 m into the scene (its depth value from the camera's planes) moved by
   // more than a third of the screen.
-  bool CameraMotion(float mf[16]) {
+  // With `reversed`, mf takes the depth as stored (1 - d, reversed_z.h):
+  // R * m, R taking (x, y, 1 - d, 1) to (x, y, d, 1).
+  bool CameraMotion(float mf[16], bool reversed) {
     double inv[16], m[16];
     const bool moved = have_prev_ && Invert4(vp_cur_, inv);
     if (moved) Mul4(inv, vp_prev_, m);
     for (int i = 0; i < 16; i++) mf[i] = moved ? float(m[i]) : (i % 5 == 0 ? 1.0f : 0.0f);
+    if (reversed)
+      for (int k = 0; k < 4; k++) {
+        mf[12 + k] += mf[8 + k];
+        mf[8 + k] = -mf[8 + k];
+      }
     double cut_z = 0.99, n, f;
     if (NearFar(vp_cur_, &n, &f)) {
       const double d = std::clamp(20.0, n * 2.0, f * 0.5);
@@ -2229,10 +2345,12 @@ void main() {
         float inv_size[2];
         float jitter[2];
         float w_min, w_max, w_per_px, gamma;
-        uint32_t reset, direct, pad[2];
+        uint32_t reset, direct, reversed, pad;
       } tp = {};
       static_assert(sizeof tp == 112);
-      tp.reset = CameraMotion(tp.m) ? 1 : 0;
+      const bool reversed = ReversedDepth(scene_depth_.pixelFormat);
+      tp.reversed = reversed ? 1 : 0;
+      tp.reset = CameraMotion(tp.m, reversed) ? 1 : 0;
       tp.inv_size[0] = 1.0f / float(lw);
       tp.inv_size[1] = 1.0f / float(lh);
       tp.jitter[0] = jitter_[0];  // r_position: +x right, +y down, in pixels
@@ -2278,7 +2396,9 @@ void main() {
       struct M16 {
         float v[16];
       } mm;
-      const bool reset = CameraMotion(mm.v);
+      // The depth MetalFX takes is the scene's as stored.
+      const bool reversed = ReversedDepth(scene_depth_.pixelFormat);
+      const bool reset = CameraMotion(mm.v, reversed);
       __unsafe_unretained id<MTLTexture> depth = scene_depth_, motion = motion_tex_, fxd = fx_depth_,
                                          out = fx_out_ ? fx_out_ : back;
       __unsafe_unretained id<MTLRenderPipelineState> mp = motion_pipe_;
@@ -2310,6 +2430,7 @@ void main() {
         sc.jitterOffsetY = jy;
         sc.motionVectorScaleX = mvs * float(lw);
         sc.motionVectorScaleY = mvs * float(lh);
+        sc.depthReversed = reversed;
         sc.reset = reset;
         [sc encodeToCommandBuffer:cmd_];
         if (out == back) return;
@@ -2379,6 +2500,7 @@ void main() {
     bool stencil = false;
     float bias_scale = 8388608.0f;  // float depth: 2^23 per unit of depth range
     bool scaled = false;  // at the internal resolution (ScaledSize)
+    WDepth wd;            // the projection draws from w use (reversed_z.h)
   };
   // A texture by id (null if none): through tex_at_, not the map.
   Tex* FindTex(TextureId tid) const { return tid < tex_at_.size() ? tex_at_[tid] : nullptr; }
@@ -2405,6 +2527,9 @@ void main() {
     uint32_t samplers = 0;  // highest register used + 1
     ShaderId without_depth = 0;  // (PixelShaderWithoutDepth)
     uint32_t float_regs = 0;
+    int position_matrix = -1;  // hlsl::Program's, vertex shaders
+    std::string position_note;
+    std::bitset<256> float_reads;
     uint64_t hash = 0;  // of its translation: the same from run to run (0: the device's own)
     uint32_t varyings = 0;  // locations written (vertex) or read (pixel): hlsl::VaryingMask
     // Pixel shaders: the translation, and its variants for vertex shaders
@@ -2476,6 +2601,8 @@ void main() {
     bool low = false;    // the back buffer, drawn to low_color_ for the upscaler
     bool scene = false;  // a scene buffer (not a shadow map or reflection)
     bool proxy = false;  // depth drawn as its full-size copy (DepthProxy)
+    bool reversed = false;  // depth stored as 1 - d (ReversedDepth)
+    DepthId depth_id = 0;
     bool Same(const Pass& o) const {
       for (int i = 0; i < 4; i++)
         if (color[i] != o.color[i] || level[i] != o.level[i]) return false;
@@ -2538,7 +2665,7 @@ void main() {
       st.in[i][2] = int32_t(in.type);
     }
     PixelState(st.pixel);
-    ClipState(st);
+    ClipState(st, d, vs);
     VertexBuffer(3, shared_buf_, 0);
     ShaderResources(d, vs, ps, st);
 
@@ -2639,6 +2766,11 @@ void main() {
     PsState pst{};
     pst.alpha[0] = rs_[15] ? int32_t(rs_[25]) : 8;
     pst.alpha[1] = int32_t(rs_[24] & 0xFF);
+    pst.alpha[3] = pass_.reversed ? 1 : 0;
+    // Depth textures sampled: read back as D3D9 stores depth (R_DEPTH_TEX).
+    for (uint32_t r = 0; r < ps.samplers; r++)
+      if (const Tex* t = FindTex(d.textures[r]); t && t->depth && ReversedDepth(t->tex.pixelFormat))
+        pst.alpha[2] |= int32_t(1u << r);
     const float lod_bias = jitter_draw_ && upscaler_ == Upscaler::Taa ? kTaaLodBias : 0.0f;
     for (uint32_t r = 0; r < 16 && d.sampler_states; r++) pst.bias[r] = AsFloat(d.sampler_states[r][8]) + lod_bias;
     pst.vscale[0] = 1.0f / pass_.sx;
@@ -2658,10 +2790,12 @@ void main() {
                            : want == hlsl::ParamType::Sampler3D ? dummy_3d_
                                                                 : dummy_2d_;
       Tex* t = FindTex(d.textures[r]);
+      bool reversed = false;  // a reversed depth texture: its border colour mirrored
       if (t && t->cube == (want == hlsl::ParamType::SamplerCube) &&
           want != hlsl::ParamType::Sampler3D) {
         tex = t->tex;
         t->used = serial_;
+        reversed = t->depth && ReversedDepth(tex.pixelFormat);
       }
       // The sampler made from the row last time, while the row's change
       // counter has not moved.
@@ -2670,15 +2804,19 @@ void main() {
       SlotSampler& cached = slot_sampler_[r];
       if (!version || cached.version != version || cached.row != row)
         cached = {row, version, Sampler(D3D9Sampler(row))};
-      if (pass_.scaled && Attached(tex)) {
+      const bool nearest = pass_.scaled && Attached(tex);
+      if (nearest || reversed) {
+        SamplerKey k = D3D9Sampler(row);
         // A target the pass draws to, read at the pixel being drawn (the
         // game's lighting reads its accumulation and depth so): at the
         // internal resolution the game's coordinates fall off the texel
         // centres, and linear filtering then reads the neighbours, which
         // across a GPU tile's edge another tile may be writing (NaN rows
         // and columns on a 32-pixel grid). Nearest, as at full size.
-        SamplerKey k = D3D9Sampler(row);
-        k.min = k.mag = uint8_t(MTLSamplerMinMagFilterNearest);
+        if (nearest) k.min = k.mag = uint8_t(MTLSamplerMinMagFilterNearest);
+        // Read as 1 - rgb (R_DEPTH_TEX): the border's black and white
+        // swapped, so it reads as D3D9's.
+        if (reversed) k.border = ReversedDepthBorder(k.border);
         TextureAndSampler(vertex, reg, tex, Sampler(k));
         continue;
       }
@@ -3115,7 +3253,9 @@ void main() {
     auto dit = depths_.find(current_depth_);
     if (dit != depths_.end()) {
       p.depth = dit->second.tex;
+      p.depth_id = current_depth_;
       p.depth_fmt = p.depth.pixelFormat;
+      p.reversed = ReversedDepth(p.depth_fmt);
       p.stencil = dit->second.stencil;
       p.bias_scale = dit->second.bias_scale;
       // A depth buffer at the internal resolution with a full-size target
@@ -4076,6 +4216,16 @@ void main() {
   uint64_t submitted_ = 0, done_ = 0;
   bool stop_ = false;
   bool sync_ = false;  // RECOMP_METAL_SYNC: closures run as recorded
+  bool reversed_z_ = true;  // RECOMP_REVERSED_Z: float depth stored as 1 - d
+  bool depth_from_w_ = true;  // RECOMP_DEPTH_FROM_W
+  int wvp_reg_ = -1;  // SetDepthFromW's; -1 also with depth from w off
+  DepthPlanes depth_planes_ = nullptr;
+  int w_logged_ = 0;
+  std::unordered_set<uint64_t> w_noted_;  // NoteNotFromW's shaders
+  // The draw being recorded: a reversed buffer's depth bias for
+  // r_position (DepthBiasOf's clip), and whether it tests or writes depth.
+  float clip_bias_ = 0;
+  bool depth_used_ = false;
   // RECOMP_GPU_PASSES: a timestamp buffer per frame in flight (one more
   // than the slots), the passes it timed, and the totals by pass number.
   struct PassTimes {
@@ -4301,6 +4451,8 @@ void main() {
   // the encoding thread's atomic.
   struct PerfCounts {
     uint64_t frames = 0, draws = 0, draw_ns = 0, ops = 0, passes = 0;
+    uint64_t w_draws = 0;  // with depth from w
+    uint64_t w_other = 0;  // that would be, but have another projection than the buffer content's
     uint64_t uploads_ahead = 0, uploads_in_order = 0, upload_bytes = 0, in_order_bytes = 0;
     // Arena buffers: made while drawing, and taken ready (made ahead).
     uint64_t textures = 0, depths = 0, arena_buffers = 0, arena_bytes = 0, arena_ahead = 0;

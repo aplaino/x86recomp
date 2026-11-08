@@ -112,6 +112,8 @@ class Emitter {
     }
     h += "\n";
     for (const auto& name : helper_order_) h += helpers_[name];
+    if (out_->writes_depth) h += kDepthOutDefault;
+    if (depth_tex_) h += kDepthTexDefault;
     out_->glsl = h + "\n" + funcs + init + main;
   }
 
@@ -660,11 +662,20 @@ class Emitter {
     Fail(s.loc, "unsupported sampler expression");
   }
 
+  // A 2D sampler register's read, as the shader expects it (R_DEPTH_TEX,
+  // hlsl.h: a depth texture may be stored otherwise).
   std::string Texture(const Expr& e, const std::vector<std::string>& a) {
+    const std::string s = SamplerName(*e.args[0]);
+    std::string v = TextureRead(e, a, s);
+    if (Dim(1 + (e.intrinsic - kTex1D) / 5) != Dim::D2 || s.rfind("r_s", 0) != 0) return v;
+    depth_tex_ = true;
+    return "R_DEPTH_TEX(" + s.substr(3) + ", " + v + ")";
+  }
+
+  std::string TextureRead(const Expr& e, const std::vector<std::string>& a, const std::string& s) {
     int k = e.intrinsic - kTex1D;
     Dim dim = Dim(1 + k / 5);
     int variant = k % 5;  // plain, bias, grad, lod, proj
-    std::string s = SamplerName(*e.args[0]);
     const char* sampler = dim == Dim::D3 ? "sampler3D" : dim == Dim::Cube ? "samplerCube" : "sampler2D";
     // The coordinate swizzle of a float4 argument, and the coordinates
     // built from a 1D one (a 1D texture is a 2D one of height 1).
@@ -949,7 +960,7 @@ class Emitter {
     }
     if (s.usage == kDepth && s.index == 0) {
       out_->writes_depth = true;
-      return "  gl_FragDepth = float(" + v + ");\n";
+      return "  gl_FragDepth = R_DEPTH_OUT(float(" + v + "));\n";
     }
     if (s.usage != kColor || s.index > 3) Fail(loc, "pixel shader outputs are COLOR0-3 and DEPTH");
     if (out_->color_outputs & (1u << s.index)) Fail(loc, "two outputs to one render target");
@@ -992,6 +1003,7 @@ class Emitter {
   int indent_ = 0;
   std::map<std::string, std::string> helpers_;
   std::vector<std::string> helper_order_;
+  bool depth_tex_ = false;  // R_DEPTH_TEX used
   uint32_t max_c_ = 0;
   bool uses_int_ = false;
   bool has_init_ = false;

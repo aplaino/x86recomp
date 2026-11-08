@@ -22,7 +22,15 @@
 //                                   implicit level (0.0 if the backend's
 //                                   samplers apply D3D9's MIPMAPLODBIAS);
 //   void r_color0(inout vec4 c)     pixel shaders that write COLOR0: called
-//                                   last with it (the alpha test).
+//                                   last with it (the alpha test);
+// and may define
+//   float R_DEPTH_OUT(d)            pixel shaders: the depth a shader writes
+//                                   (DEPTH, oDepth) as the depth buffer
+//                                   stores it ((d) if not defined);
+//   vec4 R_DEPTH_TEX(n, v)          what a 2D sampler register n read: v
+//                                   as the shader expects it (a depth
+//                                   texture stored otherwise than D3D9
+//                                   does; (v) if not defined).
 // The body declares, if it reads them:
 //   layout(std140, R_FLOAT_BINDING) uniform r_float_regs { vec4 c[n]; };
 //   layout(std140, R_INT_BINDING) uniform r_int_regs { ivec4 r_i[16];
@@ -32,12 +40,19 @@
 // and varyings at fixed locations per semantic (VaryingLocation), so any
 // vertex shader pairs with any pixel shader without linking.
 
+#include <bitset>
 #include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace recomp::hlsl {
+
+// The body's defaults for the optional R_DEPTH_OUT and R_DEPTH_TEX.
+inline constexpr const char* kDepthOutDefault =
+    "#ifndef R_DEPTH_OUT\n#define R_DEPTH_OUT(d) (d)\n#endif\n";
+inline constexpr const char* kDepthTexDefault =
+    "#ifndef R_DEPTH_TEX\n#define R_DEPTH_TEX(n, v) (v)\n#endif\n";
 
 struct Define {
   std::string name, value;
@@ -99,6 +114,18 @@ struct Program {
   bool writes_depth = false, writes_point_size = false;
   std::vector<Sampler> samplers;
   uint32_t float_regs = 0;  // c registers the GLSL declares
+  // Vertex shaders from bytecode: b if the POSITION output's z and w are
+  // the vertex times the matrix in float registers c[b]..c[b + 3] (rows,
+  // D3D's row vectors: c[b + 3] the translation, added once), z and w
+  // alike: z = sum of s_k c[b + k].z and w = the same sum of the .w, for
+  // the same scalars s_k (s_3 = 1), nothing else added to either. A
+  // backend may then compute the depth from w alone (gfx/reversed_z.h).
+  // -1: not known to be so, and position_note says why.
+  int position_matrix = -1;
+  std::string position_note;
+  // Bytecode: the float registers c0-c255 read by number (not through a0
+  // or aL, not ones the shader defines).
+  std::bitset<256> float_reads;
 };
 
 // D3DXSHADER flags that change the translation.

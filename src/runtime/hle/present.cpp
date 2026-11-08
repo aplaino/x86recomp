@@ -267,6 +267,7 @@ std::unique_ptr<gfx::Device> CreateGfxDevice(SDL_Window* w) {
   if (perf::On()) d->EnablePerfStats();
   const char* aniso = Env("ANISO");
   d->SetMinAnisotropy(aniso ? std::atoi(aniso) : Game().anisotropy);
+  d->SetDepthFromW(Game().wvp_register, Game().depth_planes);
   // <ID>_NO_BC=1: DXT decoded on upload, as on a GPU without BC sampling.
   if (const char* e = Env("NO_BC"); e && *e == '1') d->DecodeDxtOnUpload();
   return d;
