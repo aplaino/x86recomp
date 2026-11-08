@@ -36,8 +36,14 @@ only a console can settle.
   is in the console's flash, not in the system update, so its behaviour is
   unknown here. Message 0x58004 (a word in p1) writes 1 and succeeds, as
   Xenia has it (it calls it XLiveBaseGetLogonId); a title passes the word
-  on to its next online requests. 0x58020, which enumerates the friends
-  list, fails with E_FAIL, as in Xenia. Console check.
+  on to its next online requests. The rest are chosen for a console with
+  no Live connection, as the profiles here have none: 0x58020 (the
+  friends list) ends at once with HRESULT_FROM_WIN32(ERROR_NO_MORE_FILES),
+  an empty list (Xenia fails it with E_FAIL, which titles take for a
+  failure); 0x5800E (is an XUID muted) answers no; 0x58006 (NAT type),
+  0x58009 (marketplace counts), 0x58023 (a service request) fail with
+  0x80151802, which this module gives every Live query (titles' NAT type
+  wrapper then reports open). Console check.
 
 ## Networking
 - There is no network interface: a console with no cable. NetDll_* take
@@ -132,9 +138,53 @@ only a console can settle.
   XN_SYS_SIGNINCHANGED if the profiles changed (xam's code). With no UI
   here it closes at once with nothing changed (chosen): listeners hold
   XN_SYS_UI 0, which titles read as a cancelled sign-in.
-- XUserSetContextEx (XGI 0xB0006: user, XUID, context id, value)
-  succeeds, as xam's does whether or not the user exists; xam keeps the
-  value for presence and Live sessions, which nothing reads here.
+
+## XGI (app 0xFB)
+xam's own handlers, for the messages titles send (their XDK wrappers
+build the requests; the names are the wrappers'). Most first check a
+field of xam's XGI object (+0xDC) and fail with 0x8056F002 while it is
+0; what sets it was not found, and it is taken as set (console check).
+- XUserSetContextEx (0xB0006 {slot, ?, XUID, context id, value}, the
+  user by XUID unless 0) keeps the value with the user, whether or not
+  there is one, and succeeds; sessions read the game type (0x800A).
+  XUserSetPropertyEx (0xB0007) succeeds; xam keeps properties for
+  presence and Live, which nothing reads here.
+- XUserWriteAchievements (0xB0008 {count, *(slot, id)}): every slot
+  signed in (else HRESULT_FROM_WIN32(ERROR_NOT_FOUND)); each user's
+  achievements go to its profile for the running title
+  (`profiles/<XUID>/achievements/<title id>`, the ids one per line;
+  chosen), S_FALSE if one was earned already. xam checks the ids against
+  the title's achievement table and shows a notification; neither here.
+- Sessions: XamSessionCreateHandle makes an object whose first word is
+  xam's session once created (ERROR_INVALID_HANDLE from
+  XamSessionRefObjByHandle for another object); every message on a
+  session fails with E_INVALIDARG while it has none. XSessionCreate
+  (0xB0010 {object, flags, public slots, private slots, slot, *info,
+  *nonce}): ERROR_NOT_FOUND for a user not signed in; presence,
+  statistics or matchmaking (0xE) need the user on Live (0x80155209); the
+  peer network with any of those or arbitration Live's multiplayer
+  privilege (0x80155201); then the user's game type context, unless
+  arbitrated (0x80155205). A host on the peer network makes an XNet key,
+  a client registers the host's: there is no network here, so they fail
+  as xam does when that fails (0x8015520B, 0x8015520D). Otherwise the
+  session has no session info (zeroed). States: idle, registered (after
+  XSessionArbitrationRegister, 0xB001A, which goes to Live for an
+  arbitrated session), in progress (XSessionStart 0xB0014; an arbitrated
+  one must be registered, 0x8015520C), deleted (XSessionDelete 0xB0011);
+  XSessionEnd (0xB0015) goes back to idle; out of turn 0x80155206.
+  XSessionJoin (0xB0012 {object, count, *XUIDs, *slots, *private}, one
+  list, at most 4 local users, each signed in): new members take a
+  private slot if asked and left, else a public one, or the session is
+  full (0x80155202); a remote offline XUID in a session with Live's
+  features is refused (0x8015520A). XSessionLeave (0xB0013) frees them.
+  XSessionModify (0xB0018 {object, flags, public, private}) may change
+  only flags 0x10 and 0xF00 (else 0x80155204). XSessionWriteStats
+  (0xB0025) needs a session with statistics (0x80155204) in progress;
+  XSessionFlushStats (0xB0026) a session in progress, which with no
+  statistics has nothing to send.
+- Live's queries (XSessionSearch 0xB0016, XSessionSearchByID 0xB001B,
+  XUserReadStats 0xB0021, which first clears its results) fail with
+  0x80151802, as the XLiveBase messages do.
 
 ## Profile settings
 - XamUserReadProfileSettings(title, slot, XUID count, XUIDs, count, ids,

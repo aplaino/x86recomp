@@ -133,6 +133,8 @@ u32 XamNotifyCreateListener(uint64_t areas, u32 version);
 u32 XNotifyGetNext(u32 listener, u32 match, u32* id, u32* value);
 u32 XamUserCheckPrivilege(u32 slot, u32 privilege, u32* result);
 u32 XamShowSigninUI(u32 panes, u32 flags);
+u32 XamSessionCreateHandle(u32* handle);
+u32 XamSessionRefObjByHandle(u32 handle, u32* object);
 u32 XNotifyPositionUI(u32 position);
 u32 XMsgStartIORequest(u32 app, u32 message, u32* overlapped, void* buffer, u32 size);
 u32 XMsgStartIORequestEx(u32 app, u32 message, u32* overlapped, void* buffer, u32 size, void* xparams);
@@ -1089,7 +1091,7 @@ static void Xam(void) {
   u32 context[6] = {0, 0, 0, 0, 0x8001, 3};  // XUserSetContextEx: user 0, presence 3
   CHECK(XMsgInProcessCall(0xFB, 0xB0006, context, (void*)sizeof context) == 0);
   u32 request[4] = {0};
-  CHECK(XMsgInProcessCall(0xFC, 0x58020, (void*)(uintptr_t)logon, request) == 0x80004005);
+  CHECK(XMsgInProcessCall(0xFC, 0x58020, (void*)(uintptr_t)logon, request) == 0x80070012);
   u32 set[3] = {2, 0, 1};
   CHECK(XMsgStartIORequestEx(0xFA, 0x7001A, 0, set, sizeof set, 0) == 0);
   u32 e = 0, ov[7] = {0, 0, 0, 0, 0, 0, 0};
@@ -1368,6 +1370,68 @@ static void Timers(void) {
   NtClose(s);
 }
 
+// ---- XGI: contexts, achievements, sessions ---------------------------------
+static u32 Xgi(u32 message, u32* request) { return XMsgInProcessCall(0xFB, message, request, 0); }
+
+static void Sessions(void) {
+  // Achievements, kept with the profile: S_FALSE once already earned.
+  u32 earned[2] = {0, 5}, list[2] = {1, (u32)(uintptr_t)earned};
+  CHECK(Xgi(0xB0008, list) == 0 && Xgi(0xB0008, list) == 1);
+  earned[0] = 1;
+  CHECK(Xgi(0xB0008, list) == 0x80070490);
+
+  u32 h = 0, obj = 0, e = 0;
+  CHECK(XamSessionCreateHandle(&h) == 0 && XamSessionRefObjByHandle(h, &obj) == 0 && obj && *At(obj) == 0);
+  CHECK(NtCreateEvent(&e, 0, 0, 0) == 0 && XamSessionRefObjByHandle(e, &obj) == 6);
+  NtClose(e);
+  u32 info[15], nonce[2];
+  // {object, flags, public slots, private slots, user, *info, *nonce}
+  u32 create[7] = {obj, 2, 1, 1, 0, (u32)(uintptr_t)info, (u32)(uintptr_t)nonce};
+  CHECK(Xgi(0xB0010, create) == 0x80155209);  // presence needs Live
+  create[1] = 0x20 | 0x10;
+  CHECK(Xgi(0xB0010, create) == 0x80155201);  // system link with arbitration
+  create[1] = 0;
+  create[4] = 1;
+  CHECK(Xgi(0xB0010, create) == 0x80070490);  // no such user
+  create[4] = 0;
+  CHECK(Xgi(0xB0010, create) == 0x80155205 && *At(obj) == 0);  // no game type yet
+  u32 context[6] = {0, 0, 0, 0, 0x800A, 1};
+  CHECK(Xgi(0xB0006, context) == 0);
+  CHECK(Xgi(0xB0010, create) == 0 && *At(obj) != 0);
+  // Members: a local user takes its slot once; a remote one finds none left.
+  u32 slots[1] = {0}, want[1] = {0};
+  u32 join[5] = {obj, 1, 0, (u32)(uintptr_t)slots, (u32)(uintptr_t)want};
+  CHECK(Xgi(0xB0012, join) == 0 && Xgi(0xB0012, join) == 0);
+  uint64_t remote[1] = {0xE000000000000002ull};
+  u32 join_remote[5] = {obj, 1, (u32)(uintptr_t)remote, 0, (u32)(uintptr_t)want};
+  CHECK(Xgi(0xB0012, join_remote) == 0x80155202);
+  want[0] = 1;
+  CHECK(Xgi(0xB0012, join_remote) == 0);  // a private slot
+  u32 both[5] = {obj, 1, (u32)(uintptr_t)remote, (u32)(uintptr_t)slots, 0};
+  CHECK(Xgi(0xB0012, both) == 0x80070057);
+  // Start and end.
+  u32 session[3] = {obj, 0, 0};
+  CHECK(Xgi(0xB0014, session) == 0 && Xgi(0xB0014, session) == 0x80155206);
+  CHECK(Xgi(0xB0025, session) == 0x80155204);  // no statistics
+  CHECK(Xgi(0xB0026, session) == 0);
+  CHECK(Xgi(0xB0015, session) == 0 && Xgi(0xB0015, session) == 0x80155206);
+  CHECK(Xgi(0xB0026, session) == 0x80155206);
+  u32 modify[4] = {obj, 2, 1, 1};
+  CHECK(Xgi(0xB0018, modify) == 0x80155204);
+  modify[1] = 0x100;
+  CHECK(Xgi(0xB0018, modify) == 0);
+  u32 leave[4] = {obj, 1, 0, (u32)(uintptr_t)slots};
+  CHECK(Xgi(0xB0013, leave) == 0 && Xgi(0xB0012, join) == 0);  // its slot free again
+  CHECK(Xgi(0xB0011, session) == 0 && Xgi(0xB0014, session) == 0x80155206);
+  ObDereferenceObject(obj);
+  ObDereferenceObject(obj);
+  NtClose(h);
+  // Live's queries fail with no connection.
+  u32 stats[7] = {0, 0, 0, 0, 0, 8, (u32)(uintptr_t)nonce};
+  nonce[0] = nonce[1] = 9;
+  CHECK(Xgi(0xB0021, stats) == 0x80151802 && nonce[0] == 0 && nonce[1] == 0);
+}
+
 // ---- APCs ------------------------------------------------------------------
 // What the APC routines saw, in the order they ran.
 static volatile u32 apc_log[16], apc_count;
@@ -1498,6 +1562,7 @@ int main(void) {
   Content();
   Timers();
   Apcs();
+  Sessions();
   Console();
   Gpu();
   Conversions();

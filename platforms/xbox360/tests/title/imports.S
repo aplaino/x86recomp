@@ -160,6 +160,8 @@ __xex_import_slot_\name:
   FUNCTION 610, XamContentGetCreator, 1
   FUNCTION 613, XamContentGetDeviceState, 1
   FUNCTION 715, XamShowDeviceSelectorUI, 1
+  FUNCTION 790, XamSessionCreateHandle, 1
+  FUNCTION 791, XamSessionRefObjByHandle, 1
   VARIABLE 27, ExThreadObjectType
   VARIABLE 173, KeTimeStampBundle
   VARIABLE 344, XboxKrnlVersion

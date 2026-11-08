@@ -87,11 +87,4 @@ HLE(kXam, 700, XamShowSigninUI) {
   return 0;
 }
 
-// XUserSetContextEx {user, ?, xuid (a user by XUID unless 0), context id,
-// value} (XGI 0xB0006): xam keeps the value with the user's other contexts
-// for presence and Live sessions, and succeeds whether or not there is
-// such a user. Nothing here reads contexts back (no Live), so only the
-// result is xam's.
-XMSG(kXgiApp, 0xB0006, XUserSetContextEx) { return 0; }
-
 }  // namespace recomp::xbox360
