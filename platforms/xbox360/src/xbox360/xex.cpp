@@ -159,13 +159,19 @@ bool ReadPe(XexModule& m, std::string& err) {
     m.sections.push_back(x);
   }
   // Data directory 3, the exception table: .pdata entries of the
-  // function's start and, in bits 8-29 of the second word, its length in
-  // instructions.
+  // function's start and a word of its prologue's length in instructions
+  // (bits 0-7), its own (bits 8-29), bit 30 (set on every function but the
+  // register save and restore routines, whose prologue is all of them) and
+  // bit 31, an exception handler.
   uint32_t pdata = Le32(d, opt + 96 + 8 * 3), pdata_size = Le32(d, opt + 100 + 8 * 3);
+  m.pdata = m.base + pdata;
+  m.pdata_count = pdata_size / 8;
   for (uint32_t off = pdata; off + 8 <= pdata + pdata_size && off + 8 <= d.size(); off += 8) {
     uint32_t begin = Be32(d, off), info = Be32(d, off + 4);
     uint32_t len = (info >> 8) & 0x3FFFFF;
-    if (begin && len) m.functions.push_back({begin, len * 4});
+    bool bit30 = info >> 30 & 1;
+    if (begin && len)
+      m.functions.push_back({begin, len * 4, (info & 0xFF) * 4, bit30, bit30 && info >> 31});
   }
   return true;
 }

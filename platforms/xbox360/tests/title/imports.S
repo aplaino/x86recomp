@@ -43,6 +43,8 @@ __xex_import_slot_\name:
   FUNCTION 93, KeEnableFpuExceptions
   FUNCTION 95, KeEnterCriticalRegion
   FUNCTION 102, KeGetCurrentProcessType
+  FUNCTION 107, KeLockL2
+  FUNCTION 108, KeUnlockL2
   FUNCTION 109, KeInitializeApc
   FUNCTION 116, KeInitializeSemaphore
   FUNCTION 122, KeInsertQueueApc
@@ -111,7 +113,11 @@ __xex_import_slot_\name:
   FUNCTION 339, KeTlsFree
   FUNCTION 340, KeTlsGetValue
   FUNCTION 341, KeTlsSetValue
+  FUNCTION 281, RtlCaptureContext
+  FUNCTION 310, RtlRaiseException
+  FUNCTION 327, RtlUnwind
   FUNCTION 404, XexCheckExecutablePrivilege
+  FUNCTION 421, __C_specific_handler
   FUNCTION 405, XexGetModuleHandle
   FUNCTION 406, XexGetModuleSection
   FUNCTION 407, XexGetProcedureAddress

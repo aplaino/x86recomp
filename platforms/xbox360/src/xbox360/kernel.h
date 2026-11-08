@@ -184,6 +184,8 @@ struct ThreadParams {
 // KTHREAD until it ends.
 Thread* CreateThread(const ThreadParams& p);
 Thread* CurrentThread();
+// The current thread's guest stack, [limit, base).
+void GuestStackRange(uint32_t& limit, uint32_t& base);
 // The guest KTHREAD of a thread (its dispatcher object) and back.
 uint32_t KThread(const Thread* t);
 Thread* ThreadOf(uint32_t kthread);
@@ -257,6 +259,9 @@ void LoadSystemModules();
 uint32_t SystemModule(const std::string& name);
 const char* SystemModuleName(uint32_t handle);
 uint32_t ExecutableTitleId();  // its XEX's execution info's
+// The guest address of the title's .pdata entry for the function holding
+// pc, 0 if none does.
+uint32_t FunctionEntry(uint32_t pc);
 const std::string& ExecutableModuleName();
 // Export `ordinal` of the title's module, 0 if it has none.
 uint32_t ExecutableExport(uint32_t ordinal);

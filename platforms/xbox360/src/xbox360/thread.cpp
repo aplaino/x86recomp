@@ -139,6 +139,9 @@ void* Run(void* arg) {
     if (t->p.main) ExitProcess(int(status));
   } catch (const Exit& e) {
     status = e.status;
+  } catch (const ppc::GuestResume& g) {
+    Fatal(&t->c, "an unwind to %x in frame %x found no lifted activation to continue in", g.target,
+          g.frame);
   }
   Finish(t, status);
   return nullptr;
@@ -264,6 +267,10 @@ uint32_t CallDpc(uint32_t fn, uint32_t a0, uint32_t a1, uint32_t cpu) {
 }
 
 Thread* CurrentThread() { return t_current; }
+void GuestStackRange(uint32_t& limit, uint32_t& base) {
+  limit = Rd32(t_current->kthread + kKtStackLimit);
+  base = Rd32(t_current->kthread + kKtStackBase);
+}
 uint32_t KThread(const Thread* t) { return t ? t->kthread : 0; }
 uint32_t ThreadId(const Thread* t) { return t->id; }
 uint32_t TlsSlots(const Thread* t) { return t->tls + g_process.tls_data_size; }

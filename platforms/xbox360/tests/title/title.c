@@ -22,6 +22,8 @@ u32 InterlockedFlushSList(void* head);
 u32 InterlockedPopEntrySList(void* head);
 u32 KeDelayExecutionThread(u32 mode, u32 alertable, int64_t* interval);
 u32 KeGetCurrentProcessType(void);
+u32 KeLockL2(u32 index, u32 va, u32 size, u32 a, u32 b);
+u32 KeUnlockL2(u32 index);
 u32 KeInitializeSemaphore(void* sem, u32 count, u32 limit);
 uint64_t KeQueryPerformanceFrequency(void);
 u32 KeQuerySystemTime(uint64_t* time);
@@ -96,6 +98,12 @@ u32 RtlUnicodeStringToAnsiString(void* ansi, void* unicode, u32 allocate);
 u32 RtlFreeAnsiString(void* ansi);
 u32 RtlNtStatusToDosError(u32 status);
 u32 RtlTimeToTimeFields(const uint64_t* time, uint16_t* fields);
+// seh.S
+u32 seh_outer(u32 code);
+u32 own_frame(u32 code);
+u32 capture(void* context);
+u32 back_outer(void);
+extern u32 seh_log[16];
 u32 XAudioRegisterRenderDriverClient(u32* registration, u32* driver);
 u32 XAudioUnregisterRenderDriverClient(u32 driver);
 u32 XAudioSubmitRenderDriverFrame(u32 driver, float* samples);
@@ -2092,6 +2100,53 @@ static void Net(void) {
   CHECK(NtClose(event) == 0 && NtClose(dns_event) == 0);
 }
 
+// ---- structured exception handling (seh.S) ------------------------------
+static void Exceptions(void) {
+  static uint8_t ctx[0xA40] __attribute__((aligned(16)));
+  // The registers at the call, Iar and LR its return address, r3 kept.
+  CHECK(capture(ctx) == 1);
+  const volatile u32* w = (const volatile u32*)ctx;
+  CHECK(w[0] == 7);                                // ContextFlags
+  CHECK(w[2] == seh_log[9] && w[3] == seh_log[9]);  // Iar, Lr
+  CHECK(w[(0x18 + 8 * 1 + 4) / 4] == seh_log[8]);   // r1
+  CHECK(w[(0x18 + 8 * 3 + 4) / 4] == (u32)(uintptr_t)ctx);
+  CHECK(w[(0x18 + 8 * 7 + 4) / 4] == 0x77770000);
+
+  // A filter that takes the exception: its __except block, in its frame,
+  // with r3 the code; the __finally further out then runs normally.
+  for (int k = 0; k < 16; k++) seh_log[k] = 0;
+  CHECK(seh_outer(0xE0000001) == 0x101);
+  CHECK(seh_log[0] == seh_log[4]);  // the filter's frame: seh_try's
+  // seh_outer's frame: seh_try's, 0x80 up.
+  CHECK(seh_log[1] == 1 && seh_log[2] == 0 && seh_log[3] == seh_log[4] + 0x80);
+  // One that searches on: the outer __except, after the __finally ran as
+  // an abnormal termination.
+  for (int k = 0; k < 16; k++) seh_log[k] = 0;
+  CHECK(seh_outer(0xE0000002) == 0x202);
+  CHECK(seh_log[0] == seh_log[4]);
+  CHECK(seh_log[1] == 1 && seh_log[2] == 1 && seh_log[3] == seh_log[4] + 0x80);
+  // One that continues execution: the raise returns.
+  for (int k = 0; k < 16; k++) seh_log[k] = 0;
+  CHECK(seh_outer(0xE0000003) == 7);
+  CHECK(seh_log[1] == 1 && seh_log[2] == 0);
+  // A title's own handler unwinding to the code after the call (its
+  // handler is called again for the unwind's target frame).
+  for (int k = 0; k < 16; k++) seh_log[k] = 0;
+  CHECK(own_frame(0xE0000004) == 0x377);
+  CHECK(seh_log[5] == 2);
+  // An unwind whose target frame's handler puts back a context captured
+  // further down: it returns where that context was captured.
+  for (int k = 0; k < 16; k++) seh_log[k] = 0;
+  CHECK(back_outer() == 0x444);
+  CHECK(seh_log[6] == 1);
+
+  // The L2 window is guest memory.
+  CHECK(KeLockL2(0, 0x7F100000, 0x20000, 1, 1) == 0);
+  *At(0x7F100000) = 0x12345678;
+  CHECK(*At(0x7F100000) == 0x12345678);
+  CHECK(KeUnlockL2(0) == 0);
+}
+
 static void Controllers(void) {
   uint8_t caps[0x14];
   memset(caps, 0xAA, sizeof caps);
@@ -2140,6 +2195,7 @@ int main(void) {
   Modules();
   Xam();
   Net();
+  Exceptions();
   Controllers();
   Users();
   Content();

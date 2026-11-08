@@ -47,6 +47,7 @@ recomp_bundle(recomp_xbox360)
 # them.
 add_library(recomp_xbox360_xboxkrnl SHARED
   src/xbox360/xboxkrnl/audio.cpp
+  src/xbox360/xboxkrnl/exception.cpp
   src/xbox360/xboxkrnl/io.cpp
   src/xbox360/xboxkrnl/memory.cpp
   src/xbox360/xboxkrnl/modules.cpp

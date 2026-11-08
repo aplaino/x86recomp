@@ -13,7 +13,8 @@ set(_bin "${CMAKE_CURRENT_BINARY_DIR}/ppc")
 # lifted module and run on the runtime and the kernel's HLE module: it
 # checks what the kernel gives it and exits with the number of failed
 # checks.
-ppc_objects(_title_objs "${_src}/title/start.S" "${_src}/title/imports.S" "${_src}/title/title.c")
+ppc_objects(_title_objs "${_src}/title/start.S" "${_src}/title/imports.S" "${_src}/title/seh.S"
+             "${_src}/title/title.c")
 add_custom_command(OUTPUT "${_bin}/title.elf"
   COMMAND "${RECOMP_LD_LLD}" -static -T "${RECOMP_ROOT}/tests/ppc/fixture/fixture.ld" -o "${_bin}/title.elf" ${_title_objs}
   DEPENDS ${_title_objs} "${RECOMP_ROOT}/tests/ppc/fixture/fixture.ld"

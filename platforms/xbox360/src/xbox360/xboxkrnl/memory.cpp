@@ -187,4 +187,15 @@ HLE(kKrnl, 15, ExFreePool) {
   return 0;
 }
 
+// KeLockL2(index, va, size, a, b) and KeUnlockL2(index): lock part of the
+// CPU's L2 cache for a title to fill at `va` (titles' graphics code passes
+// 0, 0x7F100000, 0x20000, 1, 1, zeroes the window with DCBZ128, and
+// unlocks it once the GPU has read it). There is no cache to lock here:
+// the window is guest memory like any other address in the arena. The
+// GPU's reads from it (procedural geometry) are not modelled. The result
+// (0, as ReXGlue returns) and the arguments' meaning beyond that are a
+// console check.
+HLE(kKrnl, 107, KeLockL2) { return 0; }
+HLE(kKrnl, 108, KeUnlockL2) { return 0; }
+
 }  // namespace recomp::xbox360

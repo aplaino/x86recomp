@@ -317,6 +317,82 @@ here; on the console a KPCR belongs to a hardware thread.
 - ExLoadedCommandLine is the title's name in quotes (Xenia's), 1024
   bytes; a title's C runtime splits it into argv. Console check.
 
+## Exceptions
+The kernel's code is not available: dispatch follows Windows NT's design
+for its RISC processors, which the 360's structures and titles' own C
+runtime match, with what titles show filled in. Console checks are
+marked.
+- `.pdata` entries: the function's start, then a word of its prologue's
+  length in instructions (bits 0-7), its length (8-29), bit 30 (set on
+  every function but the register save and restore routines) and bit 31,
+  an exception handler: then the two words before the function are the
+  handler and its data. Titles' prologues save LR at -8 from r1 on entry,
+  then registers (directly or through a save routine), then `stwu`.
+- CONTEXT is 0xA40 bytes. From titles' C runtime, which restores
+  registers from one and copies them: CTR at 0x10 (8 bytes), GPRs from
+  0x18 (8 each), CR at 0x118, XER at 0x11C, FPSCR at 0x120 (as a double,
+  MFFS's), FPRs from 0x128; Iar at 8. Chosen: ContextFlags at 0
+  (7, NT's CONTEXT_FULL for the PowerPC), MSR at 4, LR at 0xC, VSCR in the
+  last word of the quadword at 0x230, the 128 vector registers from 0x240.
+  Console check for the chosen ones.
+- EXCEPTION_RECORD: code, flags, nested record, address, parameter count,
+  15 parameters (0x50 bytes). DISPATCHER_CONTEXT: ControlPc,
+  FunctionEntry (the `.pdata` entry), EstablisherFrame, ContextRecord, as
+  NT's for the PowerPC; titles' frame handler reads the first three.
+- A frame's establisher frame is r1 on entry to its function: titles'
+  `__finally` blocks get it in r12 and compute their parent's frame
+  pointer from it, as the parent's own code passes it on its normal path.
+  ControlPc is the address of the call the frame is in (its return
+  address less 4), chosen; Iar of a context captured at a call, and an
+  exception's address, are the return address, as on NT. Console check.
+- RtlCaptureContext(context): the caller's registers at the call; r3
+  comes back unchanged (titles' C runtime passes it on as the context's
+  address).
+- RtlRaiseException(record): the first pass, from the caller's frame up:
+  each handler is called (record, frame, context, dispatcher context). A
+  handler that continues execution continues at the context it leaves
+  (the call's return when it is that); a noncontinuable exception
+  continued is fatal (NT raises STATUS_NONCONTINUABLE_EXCEPTION). An
+  exception raised in a handler is searched from the outer exception's
+  start again with EXCEPTION_NESTED_CALL until the frame whose handler
+  raised it, as on NT. No handler: the title stops here, with the code
+  and address (console check: what the console does then).
+- RtlUnwind(target frame, target address, record, value): the second
+  pass, from the caller's frame: each frame's handler is called with
+  EXCEPTION_UNWINDING (and the target frame's with
+  EXCEPTION_TARGET_UNWIND, whose handler may change the context it is
+  given), then the target frame continues at the target address with r3
+  the value, from the context, as NT's RISC RtlUnwind restores it. No
+  record: STATUS_UNWIND's (0xC0000027). Titles' C runtime relies on the
+  target frame's handler replacing the context: its handler copies a
+  context captured further down, so that RtlUnwind returns to the code
+  that called it. A target frame not on the stack, an exit unwind (no
+  target) reaching the end of the stack, and an unwind or an exception
+  in a handler during an unwind (collided unwinds) are fatal here.
+- __C_specific_handler, the handler of `__try` blocks, as NT's for RISC:
+  its data is a count and per scope its range, its filter (1: always) or
+  `__finally` block, and its `__except` block (0 for a `__finally`),
+  innermost first; scopes holding ControlPc apply. Dispatching, a filter
+  is called with r3 the EXCEPTION_POINTERS (record, context), r4 and r12
+  the frame: more than 0 unwinds to the `__except` block (r3 the code),
+  less continues execution, 0 searches on. Unwinding, each `__finally` is
+  called with r3 1 (abnormal termination), r4 and r12 the frame, up to the
+  `__except` block the unwind targets in that frame. r12 is what titles'
+  funclets read; r4 is NT's (console check).
+- KeBugCheck(code) and KeBugCheckEx(code, p1-p4) stop the system: here the
+  run ends with the code and parameters (console check: what the console
+  shows).
+- Traps (`tw`, `twi`, a debug break among them) and faults are not raised
+  as exceptions: either stops the run, with its address.
+
+## The L2 cache
+- KeLockL2(index, address, size, a, b), KeUnlockL2(index): titles'
+  graphics code locks 0x20000 bytes at 0x7F100000 (0, 1, 1 for the
+  rest), zeroes them with DCBZ128, and unlocks them once the GPU has read
+  them. With no cache to lock the window is guest memory as any other;
+  the GPU's reads of it are not modelled. Both return 0 (ReXGlue's;
+  console check).
+
 ## Timers
 - NtCreateTimer(*handle, attributes, type): a KTIMER (0x28 bytes), a
   notification (0) or synchronization (1) timer, not set; a name as for

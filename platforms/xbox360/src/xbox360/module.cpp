@@ -34,6 +34,7 @@ uint32_t g_ldr, g_title_id;
 std::string g_name;
 std::vector<uint32_t> g_exports;
 uint32_t g_export_base;
+uint32_t g_pdata, g_pdata_count;
 
 // A UNICODE_STRING at `at` (length and capacity in bytes, buffer) holding
 // the ASCII name s, its buffer in kernel memory.
@@ -82,6 +83,8 @@ void LoadExecutableModule(const XexModule& m, const std::string& name) {
   g_name = name;
   g_exports = m.exports;
   g_export_base = m.export_base;
+  g_pdata = m.pdata;
+  g_pdata_count = m.pdata_count;
 }
 
 // The system modules' entries: the area of their exports' addresses as
@@ -109,6 +112,20 @@ const char* SystemModuleName(uint32_t handle) {
 }
 
 uint32_t ExecutableModule() { return g_ldr; }
+
+uint32_t FunctionEntry(uint32_t pc) {
+  // Entries in address order: the last that starts at or below pc.
+  uint32_t lo = 0, hi = g_pdata_count;
+  while (lo < hi) {
+    uint32_t mid = (lo + hi) / 2;
+    if (Rd32(g_pdata + 8 * mid) <= pc) lo = mid + 1;
+    else hi = mid;
+  }
+  if (!lo) return 0;
+  uint32_t e = g_pdata + 8 * (lo - 1);
+  uint32_t begin = Rd32(e), len = (Rd32(e + 4) >> 8 & 0x3FFFFF) * 4;
+  return pc - begin < len ? e : 0;
+}
 uint32_t ExecutableTitleId() { return g_title_id; }
 const std::string& ExecutableModuleName() { return g_name; }
 

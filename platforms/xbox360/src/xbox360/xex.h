@@ -18,9 +18,14 @@ struct XexSection {
   bool code = false;
 };
 
-// One entry of .pdata: a function's start and its length in bytes.
+// One entry of .pdata: a function's start, its length and its prologue's
+// in bytes, and whether it has an exception handler: then the two words
+// before its start are the handler's address and the data it is given.
+// Entries that do not set bit 30 (the register save and restore routines,
+// whose prologue is all of them) describe no prologue.
 struct XexFunction {
-  uint32_t va = 0, size = 0;
+  uint32_t va = 0, size = 0, prologue = 0;
+  bool described = false, handler = false;
 };
 
 // One record of an import library. Each import has a variable record (its
@@ -54,6 +59,7 @@ struct XexModule {
   std::vector<uint8_t> image;  // the loaded image, `base` at offset 0
   std::vector<XexSection> sections;
   std::vector<XexFunction> functions;
+  uint32_t pdata = 0, pdata_count = 0;  // .pdata's VA and its 8-byte entries
   std::vector<XexImport> imports;
   // Exports by ordinal (system modules): the table the XEX security info
   // points at. Function and variable exports alike; 0 where none.

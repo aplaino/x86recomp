@@ -54,6 +54,12 @@ VMX128, the lifter and the oracle tests. A XEX's code is the Xenon's
 recomp_lift_ppc that CPU and its function starts, from the entry point,
 `.pdata` (each entry's start and length), the code exports and the
 import thunks, which become calls to `Import(c, module, ordinal, va)`.
+From `.pdata` too: each function's prologue length, for the lifter's
+frame descriptions, and the functions with an exception handler, which
+the lifter makes resumable; for those whose handler is the import of
+`__C_specific_handler`, their `__except` blocks from its scope table
+(src/ppc/ARCHITECTURE.md, "Unwinding"; the kernel's side in
+docs/xboxkrnl.md, "Exceptions").
 
 ## XEX2
 `src/xbox360/xex.{h,cpp}` reads the headers, the file format info, the
@@ -315,7 +321,10 @@ builds and runs them too.
   mode, the GPU's registers, interrupts and a ring buffer's packets,
   string conversions, an audio client, xam's startup exports and messages,
   users, profile settings, notifications, content packages, timers,
-  controllers) and exits with the number of failed checks. It runs with
+  controllers, the network stack, structured exceptions) and exits with
+  the number of failed checks. Its exception fixtures (seh.S) are
+  functions laid out as titles' compiler lays them out, with their
+  prologues and handlers in `.pdata` (`__xex_pdata_` symbols). It runs with
   SDL's dummy audio driver; its controllers are two virtual SDL gamepads
   (the host's are ignored), which the test program unplugs, plugs in and
   presses when the title rumbles them. The test writes the disc's files and empties the data directory
@@ -336,7 +345,8 @@ builds and runs them too.
    the audio render driver, timers, the kernel exports and xam's startup
    ones (the loader, networking, memory, messages, the music player's,
    users, profile settings, notifications, content), APCs, the XGI and
-   XLiveBase messages titles send, XMA decoding, the kernel's edge cases
-   and controllers are done; next the imports no title has called yet.
+   XLiveBase messages titles send, XMA decoding, the kernel's edge cases,
+   controllers, and the imports no title had called yet (xam's network
+   stack, structured exceptions, bug checks) are done.
 5. Xenos: drawing, shaders and presentation through gfx::Device, behind
    the command processor (which runs the ring buffer already).

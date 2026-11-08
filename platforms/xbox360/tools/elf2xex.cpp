@@ -9,7 +9,11 @@
 // record as a title's are (type << 24 | library << 16 | ordinal, type 0 a
 // variable's slot, 1 a function's thunk), the library being the index of
 // a --import module in the order given. Resources are the sized symbols
-// named __xex_resource_<name> (a name of up to 8 characters). --header
+// named __xex_resource_<name> (a name of up to 8 characters). A symbol
+// named __xex_pdata_* at a function's start sets the other bits of its
+// .pdata entry to its size: the prologue's length in instructions (bits
+// 0-7), bit 30 and bit 31 (an exception handler, whose address and data
+// the function puts in the two words before its start). --header
 // adds an optional header whose value is held in the header table (a key
 // whose low byte is 0 or 1).
 
@@ -100,6 +104,7 @@ int main(int argc, char** argv) {
     uint32_t va, size;
   };
   std::vector<Resource> resources;
+  std::vector<std::pair<uint32_t, uint32_t>> pdata_bits;  // function start, bits
   for (uint32_t k = 0; k < shnum; k++) {
     uint32_t type = uint32_t(sh(k, 4, 4));
     uint64_t flags = sh(k, 8, 8), addr = sh(k, 16, 8), off = sh(k, 24, 8), size = sh(k, 32, 8);
@@ -111,6 +116,7 @@ int main(int argc, char** argv) {
         if ((info & 0xF) == 2 && sz && value) funcs.emplace_back(uint32_t(value), uint32_t(sz));
         const char* name = reinterpret_cast<const char*>(&e.d[names + e.U(s, 4)]);
         if (!std::strncmp(name, "__xex_import", 12)) records.push_back(uint32_t(value));
+        if (!std::strncmp(name, "__xex_pdata_", 12)) pdata_bits.emplace_back(uint32_t(value), uint32_t(sz));
         if (!std::strncmp(name, "__xex_resource_", 15)) {
           if (std::strlen(name + 15) > 8 || !sz) {
             std::fprintf(stderr, "xbox360_elf2xex: %s: a resource needs a size and a name of up to 8 characters\n", name);
@@ -147,9 +153,17 @@ int main(int argc, char** argv) {
   img.resize((img.size() + kPage - 1) & ~size_t(kPage - 1));
   uint32_t pdata_rva = uint32_t(img.size());
   for (size_t k = 0; k < funcs.size(); k++) {
+    uint32_t bits = 0;
+    for (const auto& [va, b] : pdata_bits)
+      if (va == funcs[k].first) bits = b & 0xC00000FFu;
     PutBe(img, pdata_rva + 8 * k, funcs[k].first, 4);
-    PutBe(img, pdata_rva + 8 * k + 4, uint64_t(funcs[k].second / 4) << 8, 4);
+    PutBe(img, pdata_rva + 8 * k + 4, uint64_t(funcs[k].second / 4) << 8 | bits, 4);
   }
+  for (const auto& [va, b] : pdata_bits)
+    if (std::none_of(funcs.begin(), funcs.end(), [va = va](const auto& f) { return f.first == va; })) {
+      std::fprintf(stderr, "xbox360_elf2xex: __xex_pdata_ symbol at %x is not at a sized function's start\n", va);
+      return 1;
+    }
   uint32_t pdata_size = uint32_t(8 * funcs.size());
   img.resize((img.size() + kPage - 1) & ~size_t(kPage - 1));
 
