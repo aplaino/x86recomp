@@ -1,0 +1,8 @@
+# libSceFios2.prx, SHA-256 8d52cf49b87b8127a071d8a66f12af7e49277bcde6c8c87d4a0a59aab8211f32
+# (tools/lift.sh adds it to the lift of a module with that hash). VAs at
+# the link address.
+
+# The scheduler kicks, counted also for an empty queue (src/orbis/fios2.cpp).
+host 2A150 recomp_orbis_fios2_kick_all
+host 2A1D0 recomp_orbis_fios2_kick
+host 2A240 recomp_orbis_fios2_kick_others

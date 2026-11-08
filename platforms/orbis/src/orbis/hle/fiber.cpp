@@ -1,0 +1,287 @@
+// libSceFiber HLE: fibers as host coroutines (platform::Coroutine), one
+// host stack each, since lifted code keeps its call frames on the host
+// stack. A fiber's guest stack is the context memory the game gives it.
+// Each fiber has registers of its own (a Ctx, which its lifted frames
+// refer to), so a fiber can be resumed on another thread than the one it
+// last ran on, as libSceFiber allows; resuming gives it the running
+// thread's TLS base and thread. A fiber that switches away is leaving
+// until its host stack is left: another thread that runs or switches to
+// it meanwhile waits for that (a few instructions on the console) instead
+// of finding it running. The SceFiber block (256 bytes, 8-aligned) is the
+// game's: it gets the magic words libSceFiber 11.00 checks and its idle
+// state; the rest of its fields are libSceFiber's own and stay unwritten.
+// Checks and error codes are 11.00's. A fiber made without context memory
+// runs on the stack of the thread that first runs it, below that call's
+// frame, as libSceFiber starts it.
+
+#include <sys/mman.h>
+
+#include <atomic>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+
+#include "orbis/hle.h"
+#include "runtime/log.h"
+#include "runtime/platform.h"
+#include "x86/runtime.h"
+
+namespace recomp::orbis::fiber {
+namespace {
+
+constexpr uint32_t kErrNull = 0x80590001, kErrAlignment = 0x80590002, kErrRange = 0x80590003,
+                   kErrInvalid = 0x80590004, kErrPermission = 0x80590005, kErrState = 0x80590006;
+constexpr uint32_t kMagicStart = 0xDEF1649C, kMagicEnd = 0xB37592A0, kOptMagic = 0xBB40E64D;
+constexpr uint32_t kStateIdle = 2;  // the SceFiber block's
+constexpr size_t kNameMax = 31;     // 11.00 keeps a name's first 31 characters
+enum : int { kIdle, kRunning, kLeaving };
+constexpr size_t kHostStack = 64u << 20;
+
+struct Fiber {
+  gaddr guest = 0, entry = 0, context = 0;
+  uint64_t arg_init = 0, context_size = 0;
+  std::string name;
+  void* host_stack = nullptr;
+  platform::Coroutine* co = nullptr;
+  Ctx ctx;  // its registers
+  std::atomic<int> state{kIdle};  // kIdle, kRunning or kLeaving
+  uint64_t arg_in = 0;  // what the switch that resumes it passes
+  gaddr stack_top = 0;  // without context memory: where it starts
+};
+
+// The calling thread's fibers: its own context, the running fiber, what
+// it returns to the thread, and the fiber this thread just switched away
+// from (idle once its host stack is left: Settle).
+struct ThreadFibers {
+  platform::Coroutine* self = nullptr;
+  Fiber* current = nullptr;
+  uint64_t ret_arg = 0;
+  Fiber* leaving = nullptr;
+};
+thread_local ThreadFibers* t_fibers = nullptr;
+
+std::mutex g_mu;
+std::map<gaddr, std::unique_ptr<Fiber>> g_fibers;
+
+// Not inlined: a fiber may resume on another thread, so the thread's
+// fibers are looked up anew after every switch.
+[[gnu::noinline]] ThreadFibers& Mine() {
+  if (!t_fibers) {
+    t_fibers = new ThreadFibers;
+    t_fibers->self = platform::ThreadCoroutine();
+  }
+  return *t_fibers;
+}
+
+// The fiber at f, or an error.
+uint32_t Lookup(gaddr f, Fiber** out) {
+  if (!f) return kErrNull;
+  if (f & 7) return kErrAlignment;
+  if (Rd32(f) != kMagicStart || Rd32(f + 0xFC) != kMagicEnd) return kErrInvalid;
+  std::lock_guard<std::mutex> l(g_mu);
+  auto it = g_fibers.find(f);
+  if (it == g_fibers.end()) return kErrInvalid;
+  *out = it->second.get();
+  return 0;
+}
+
+// Marks f running (true), once it has left its host stack if it was
+// leaving; false if it is running.
+bool Claim(Fiber* f) {
+  for (;;) {
+    int s = kIdle;
+    if (f->state.compare_exchange_weak(s, kRunning)) return true;
+    if (s == kRunning) return false;
+    std::this_thread::yield();
+  }
+}
+
+// Run on the thread right after a switch lands on it: the fiber it
+// switched away from no longer uses its host stack.
+void Settle() {
+  ThreadFibers& t = Mine();
+  if (t.leaving) t.leaving->state = kIdle;
+  t.leaving = nullptr;
+}
+
+// A fiber's first run, on its coroutine: entry(arg_init, arg_on_run) on
+// its context memory.
+void Start(void* arg) {
+  Settle();
+  Fiber* f = static_cast<Fiber*>(arg);
+  Ctx& c = f->ctx;
+  c.rsp = f->context ? (f->context + f->context_size) & ~uint64_t(15) : f->stack_top;
+  CallGuest(c, f->entry, {f->arg_init, f->arg_in});
+  FatalF("fiber %s returned from its entry function", f->name.c_str());
+}
+
+// Switches the thread from `from` (with registers c; `leaving` the fiber
+// it runs, if any) to fiber `to`, already marked running, delivering arg;
+// returns once something switches back to `from`.
+void SwitchTo(Ctx& c, platform::Coroutine* from, Fiber* leaving, Fiber* to, uint64_t arg) {
+  ThreadFibers& t = Mine();
+  t.current = to;
+  t.leaving = leaving;
+  if (leaving) leaving->state = kLeaving;
+  to->arg_in = arg;
+  if (!to->co) {
+    to->ctx = c;  // FPU and SSE control as the thread has them
+    // Below the frame of the call that starts it (a red zone further).
+    if (!to->context) to->stack_top = (c.rsp - 0x100) & ~uint64_t(15);
+    to->host_stack = mmap(nullptr, kHostStack, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (to->host_stack == MAP_FAILED) FatalF("fiber %s: no host stack", to->name.c_str());
+    to->co = platform::NewCoroutine(to->host_stack, kHostStack, Start, to);
+  }
+  to->ctx.fs_base = c.fs_base;
+  to->ctx.thread = c.thread;
+  platform::SwitchCoroutine(from, to->co);
+  Settle();
+}
+
+}  // namespace
+}  // namespace recomp::orbis::fiber
+
+using namespace recomp::orbis::fiber;
+using recomp::gaddr;
+using recomp::hle::Arg;
+
+// int _sceFiberInitializeImpl(SceFiber* fiber, const char* name,
+// SceFiberEntry entry, uint64_t arg_on_init, void* context, uint64_t
+// context_size, const SceFiberOptParam* opt, uint32_t build_version)
+ORBIS_HLE("libSceFiber", _sceFiberInitializeImpl, 8) {
+  const gaddr f = Arg(c, 0), name = Arg(c, 1), entry = Arg(c, 2), context = Arg(c, 4);
+  const uint64_t size = Arg(c, 5);
+  const gaddr opt = Arg(c, 6);
+  if (!f || !entry || !name) return kErrNull;
+  if (f & 7 || context & 15 || (opt && opt & 7)) return kErrAlignment;
+  if (size - 1 < 0x1FF) return kErrRange;
+  if (!context != !size || size & 15) return kErrInvalid;
+  if (opt && recomp::Rd32(opt) != kOptMagic) return kErrInvalid;
+  auto fb = std::make_unique<Fiber>();
+  fb->guest = f;
+  fb->entry = entry;
+  fb->arg_init = Arg(c, 3);
+  fb->context = context;
+  fb->context_size = size;
+  fb->name = recomp::GStr(name).substr(0, kNameMax);
+  recomp::Wr32(f, kMagicStart);
+  recomp::Wr32(f + 4, kStateIdle);
+  recomp::Wr32(f + 0xFC, kMagicEnd);
+  std::lock_guard<std::mutex> l(g_mu);
+  g_fibers[f] = std::move(fb);
+  return 0;
+}
+
+ORBIS_HLE("libSceFiber", sceFiberFinalize, 1) {
+  Fiber* f;
+  if (uint32_t e = Lookup(Arg(c, 0), &f)) return e;
+  while (f->state == kLeaving) std::this_thread::yield();
+  if (f->state == kRunning) return kErrState;
+  if (f->co) {
+    recomp::platform::FreeCoroutine(f->co);
+    munmap(f->host_stack, kHostStack);
+  }
+  std::lock_guard<std::mutex> l(g_mu);
+  g_fibers.erase(Arg(c, 0));
+  return 0;
+}
+
+// int sceFiberRun(SceFiber* fiber, uint64_t arg_on_run_to, uint64_t*
+// arg_on_return): from a thread; returns when the fibers it leads to
+// return to the thread.
+ORBIS_HLE("libSceFiber", sceFiberRun, 3) {
+  Fiber* f;
+  if (uint32_t e = Lookup(Arg(c, 0), &f)) return e;
+  ThreadFibers& t = Mine();
+  if (t.current) return kErrPermission;
+  if (!Claim(f)) return kErrState;
+  SwitchTo(c, t.self, nullptr, f, Arg(c, 1));
+  // Back on the thread.
+  if (Arg(c, 2)) recomp::Wr64(Arg(c, 2), Mine().ret_arg);
+  return 0;
+}
+
+// int sceFiberSwitch(SceFiber* fiber, uint64_t arg_on_run_to, uint64_t*
+// arg_on_run): from a fiber to another.
+ORBIS_HLE("libSceFiber", sceFiberSwitch, 3) {
+  Fiber* to;
+  if (uint32_t e = Lookup(Arg(c, 0), &to)) return e;
+  ThreadFibers& t = Mine();
+  if (!t.current) return kErrPermission;
+  if (!Claim(to)) return kErrState;
+  Fiber* self = t.current;
+  SwitchTo(c, self->co, self, to, Arg(c, 1));
+  if (Arg(c, 2)) recomp::Wr64(Arg(c, 2), self->arg_in);
+  return 0;
+}
+
+// int sceFiberReturnToThread(uint64_t arg_on_return, uint64_t* arg_on_run)
+ORBIS_HLE("libSceFiber", sceFiberReturnToThread, 2) {
+  ThreadFibers& t = Mine();
+  Fiber* self = t.current;
+  if (!self) return kErrPermission;
+  t.ret_arg = Arg(c, 0);
+  t.current = nullptr;
+  t.leaving = self;
+  self->state = kLeaving;
+  recomp::platform::SwitchCoroutine(self->co, t.self);
+  // Resumed by sceFiberRun or sceFiberSwitch, perhaps on another thread.
+  Settle();
+  if (Arg(c, 1)) recomp::Wr64(Arg(c, 1), self->arg_in);
+  return 0;
+}
+
+ORBIS_HLE("libSceFiber", sceFiberGetSelf, 1) {
+  if (!Arg(c, 0)) return kErrNull;
+  ThreadFibers& t = Mine();
+  if (!t.current) return kErrPermission;
+  recomp::Wr64(Arg(c, 0), t.current->guest);
+  return 0;
+}
+
+// int sceFiberOptParamInitialize(SceFiberOptParam* opt): 11.00 zeroes
+// its 128 bytes and writes the magic.
+ORBIS_HLE("libSceFiber", sceFiberOptParamInitialize, 1) {
+  const gaddr opt = Arg(c, 0);
+  if (!opt) return kErrNull;
+  if (opt & 7) return kErrAlignment;
+  for (uint32_t i = 0; i < 0x80; i += 8) recomp::Wr64(opt + i, 0);
+  recomp::Wr32(opt, kOptMagic);
+  return 0;
+}
+
+// int sceFiberRename(SceFiber* fiber, const char* name): any state.
+ORBIS_HLE("libSceFiber", sceFiberRename, 2) {
+  if (!Arg(c, 0) || !Arg(c, 1)) return kErrNull;
+  Fiber* f;
+  if (uint32_t e = Lookup(Arg(c, 0), &f)) return e;
+  std::lock_guard<std::mutex> l(g_mu);
+  f->name = recomp::GStr(Arg(c, 1)).substr(0, kNameMax);
+  return 0;
+}
+
+// int sceFiberGetInfo(SceFiber* fiber, SceFiberInfo* info): info's first
+// field is its size, 128. 11.00 fills entry, arg_on_init, the context and
+// its size, the name (32 bytes; here zero past its end) and the context's
+// peak use, measured only under the context-size check (never on here):
+// -1 otherwise. The rest of info is left as it is.
+ORBIS_HLE("libSceFiber", sceFiberGetInfo, 2) {
+  const gaddr fa = Arg(c, 0), info = Arg(c, 1);
+  if (!fa || !info) return kErrNull;
+  if (fa & 7 || info & 7) return kErrAlignment;
+  if (recomp::Rd64(info) != 0x80) return kErrInvalid;
+  Fiber* f;
+  if (uint32_t e = Lookup(fa, &f)) return e;
+  recomp::Wr64(info + 0x08, f->entry);
+  recomp::Wr64(info + 0x10, f->arg_init);
+  recomp::Wr64(info + 0x18, f->context);
+  recomp::Wr64(info + 0x20, f->context_size);
+  std::lock_guard<std::mutex> l(g_mu);
+  for (uint32_t i = 0; i < 32; ++i)
+    recomp::Wr8(info + 0x28 + i, i < f->name.size() ? uint8_t(f->name[i]) : 0);
+  recomp::Wr64(info + 0x48, ~uint64_t(0));
+  return 0;
+}

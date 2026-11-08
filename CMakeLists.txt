@@ -73,17 +73,32 @@ if(RECOMP_PLATFORM_HORIZON)
   set(RECOMP_A64 ON)
 endif()
 
+# The PS4, an x86-64 guest: on the x86 core too. Off unless a game project
+# for it turns it on.
+option(RECOMP_PLATFORM_ORBIS "PS4 (Orbis OS) platform module" OFF)
+if(RECOMP_PLATFORM_ORBIS AND NOT RECOMP_X86)
+  message(FATAL_ERROR "RECOMP_PLATFORM_ORBIS needs RECOMP_X86")
+endif()
+
 # The host layer (cmake/host.cmake): what a native program needs on its
 # host, whatever its guest CPU. SDL3 (windows, input, audio output),
-# ffmpeg (movies, compressed audio), LLVM's demanglers (Microsoft and
-# Itanium names), gfx::Device on Vulkan or Metal with the shader
+# ffmpeg (movies, compressed audio), FreeType (console font libraries),
+# LLVM's demanglers (Microsoft and Itanium names), gfx::Device on Vulkan or Metal with the shader
 # compilers, the software mixer and logging; the guests' libraries and
 # platform modules link what they use. Off leaves a CPU-only build (a
 # lifter's tests cross built for a host whose sysroot has none of those
 # libraries); no product builds without it.
-option(RECOMP_HOST "Host layer: SDL3, ffmpeg, LLVM demangling, gfx::Device, audio" ON)
+option(RECOMP_HOST "Host layer: SDL3, ffmpeg, FreeType, LLVM demangling, gfx::Device, audio" ON)
 if(RECOMP_X86 AND NOT RECOMP_HOST)
   message(FATAL_ERROR "RECOMP_X86 needs RECOMP_HOST")
+endif()
+# Pictures the runtime draws itself over a game's frames (runtime/ui: a
+# console's system dialogs), with text in the host's font through
+# fontconfig: part of the host layer, built only for the platforms that
+# draw them, so other games do not need fontconfig.
+set(RECOMP_UI OFF)
+if(RECOMP_PLATFORM_ORBIS)
+  set(RECOMP_UI ON)
 endif()
 if(RECOMP_HOST)
   include(cmake/host.cmake)
@@ -213,14 +228,20 @@ add_library(recomp_base SHARED
   src/runtime/guest_alloc.cpp
   src/runtime/lazy_mem.cpp
   src/runtime/platform.cpp
-  src/runtime/pacing.cpp)
+  src/runtime/pacing.cpp
+  src/runtime/write_watch.cpp)
 target_include_directories(recomp_base PUBLIC src)
 target_compile_features(recomp_base PUBLIC cxx_std_20)
 target_link_libraries(recomp_base PUBLIC recomp_log Threads::Threads)
 
 # --- x86 core --------------------------------------------------------------
 # x87 and SSE models (SoftFloat 3e, from the base).
-add_library(recomp_x87 SHARED src/x86/x87.cpp src/x86/sse.cpp)
+add_library(recomp_x87 SHARED src/x86/x87.cpp src/x86/sse.cpp src/x86/sse_ext.cpp
+            src/x86/atomic128.cpp)
+# CMPXCHG16B's compare-exchange inlined as one instruction (no libatomic).
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+  set_source_files_properties(src/x86/atomic128.cpp PROPERTIES COMPILE_OPTIONS -mcx16)
+endif()
 target_include_directories(recomp_x87 PUBLIC src)
 target_compile_features(recomp_x87 PUBLIC cxx_std_20)
 target_link_libraries(recomp_x87 PRIVATE softfloat recomp_base)
@@ -255,20 +276,45 @@ if(DXVK_NATIVE_DIR)
   target_compile_definitions(recomp_x86 PUBLIC RECOMP_HAVE_D3D9)
 endif()
 
-# recomp_add_lifted(<target> <dir>): an OBJECT library of the lifter's
-# output in <dir> (globbed, so re-run cmake after lifting), with the
-# registration of its function table (x86/lifted_table.cpp). Defines
-# nothing when <dir> has no lifted code yet.
+# recomp_add_lifted(<target> <dir> [LINK <platform library>]): the
+# lifter's output in <dir> (globbed, so re-run cmake after lifting), with
+# the registration of its function table (x86/lifted_table.cpp).
+# Defines nothing when <dir> has no lifted code yet. Without LINK, an
+# OBJECT library the game's executable takes in. With LINK (the console
+# platforms), a shared library of its own, a lifted module, linked to the
+# platform library under what lifted code calls: its symbols stay inside
+# it (calls between lifted functions are direct, and the dynamic symbol
+# table holds none of them), recomp_bundle() puts it beside the program,
+# and the program links it --no-as-needed, as nothing in it refers to it.
 function(recomp_add_lifted target dir)
   file(GLOB _gen CONFIGURE_DEPENDS "${dir}/*.cpp")
   if(NOT _gen)
     return()
   endif()
-  # Lifted code is always optimised: at -O0 it would be unusably slow and
-  # debug info for 100+ MB of generated source is not useful.
-  add_library(${target} OBJECT ${_gen} "${RECOMP_ROOT}/src/x86/lifted_table.cpp")
+  recomp_add_lifted_files(${target} ${_gen} ${ARGN})
+endfunction()
+# The same over a known list of generated files (a build-time lift):
+# recomp_add_lifted_files(<target> <file>... [LINK <platform library>]).
+function(recomp_add_lifted_files target)
+  cmake_parse_arguments(PARSE_ARGV 1 _l "" "" "LINK")
+  if(_l_LINK)
+    add_library(${target} SHARED ${_l_UNPARSED_ARGUMENTS}
+                "${RECOMP_ROOT}/src/x86/lifted_table.cpp")
+    set_target_properties(${target} PROPERTIES CXX_VISIBILITY_PRESET hidden
+                          VISIBILITY_INLINES_HIDDEN ON)
+    target_link_libraries(${target} PRIVATE ${_l_LINK})
+    if(NOT APPLE)
+      target_link_options(${target} INTERFACE "LINKER:--no-as-needed")
+    endif()
+    recomp_bundle(${target})
+  else()
+    add_library(${target} OBJECT ${_l_UNPARSED_ARGUMENTS}
+                "${RECOMP_ROOT}/src/x86/lifted_table.cpp")
+  endif()
   target_include_directories(${target} PRIVATE "${RECOMP_ROOT}/src")
   target_compile_features(${target} PRIVATE cxx_std_20)
+  # Lifted code is always optimised: at -O0 it would be unusably slow and
+  # debug info for 100+ MB of generated source is not useful.
   # -fnon-call-exceptions: guest access violations are raised from the
   # SIGSEGV handler and may unwind (GuestResume) out of the faulting frame.
   target_compile_options(${target} PRIVATE -O2 -g0 -fno-strict-aliasing
@@ -331,6 +377,9 @@ endfunction()
 add_subdirectory(tests/x86)
 if(RECOMP_PLATFORM_WIN32)
   add_subdirectory(platforms/win32)
+endif()
+if(RECOMP_PLATFORM_ORBIS)
+  add_subdirectory(platforms/orbis)
 endif()
 
 # --- base tests and tools --------------------------------------------------

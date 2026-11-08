@@ -5,6 +5,8 @@
 
 #include <cstdio>
 
+#include "runtime/write_watch.h"
+
 namespace recomp {
 
 namespace {
@@ -66,6 +68,7 @@ bool GuestMemory::HostPageInUse(uint64_t host_off) const {
 bool GuestMemory::Commit(gaddr va, uint64_t size, Prot prot) {
   if (!size) return true;
   if (!InRange(va, size)) return false;
+  watch::Release(va, size);
   uint64_t s, e;
   HostRange(va, size, &s, &e);
   // Host pages are only ever "accessible" or not; guest protection is
@@ -93,6 +96,7 @@ bool GuestMemory::Protect(gaddr va, uint64_t size, Prot prot) {
 
 void GuestMemory::Decommit(gaddr va, uint64_t size, bool zero) {
   if (!size || !InRange(va, size)) return;
+  watch::Release(va, size);
   uint64_t first = va / kPageSize, last = (uint64_t(va) + size - 1) / kPageSize;
   for (uint64_t g = first; g <= last; g++) {
     if (zero && (pages_[g] & kCommitted))

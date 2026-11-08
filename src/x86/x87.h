@@ -107,6 +107,10 @@ void StoreSt(State& s, int i); // FST st(i)
 int16_t StoreI16(State& s);    // FIST m16: RC, indefinite 0x8000 + IE
 int32_t StoreI32(State& s);    // FIST m32: RC, indefinite 0x80000000
 int64_t StoreI64(State& s);    // FISTP m64: RC, indefinite INT64_MIN
+// FISTTP m16/m32/m64 (SSE3): the same, always truncating (CW's RC unused).
+int16_t StoreI16Trunc(State& s);
+int32_t StoreI32Trunc(State& s);
+int64_t StoreI64Trunc(State& s);
 void Pop(State& s);            // mark st0 empty, ++TOP
 
 // --- arithmetic ------------------------------------------------------
@@ -783,5 +787,12 @@ void StoreEnv(State& s, uint8_t out[28]);       // FNSTENV, then masks all
 void LoadEnv(State& s, const uint8_t in[28]);   // FLDENV
 void Save(State& s, uint8_t out[108]);          // FNSAVE, then FNINIT
 void Restore(State& s, const uint8_t in[108]);  // FRSTOR
+// The x87 part (bytes 0-23 and 32-159) of an FXSAVE area, both forms
+// (the REX.W one's 64-bit pointers hold the model's 32-bit ones). As on
+// AMD CPUs of the family modelled, the pointers and opcode are stored
+// (and restored) only while an exception is pending (FSW.ES); otherwise
+// they are written as zero (and kept). FXSAVE leaves the state alone.
+void FxSave(const State& s, uint8_t* out);
+void FxRestore(State& s, const uint8_t* in);
 
 }  // namespace recomp::x87

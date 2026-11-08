@@ -137,6 +137,15 @@ emit that function's body as `f_<VA>_lifted`; every call site and the
 dispatch table still reach `f_<VA>`, which the game project defines (in
 `recomp::gen`) and which may call the lifted body.
 
+Fixes to middleware a game ships (a race in a library build, not in the
+game) belong to the platform module instead, for every game with that
+build. `host <va> <symbol>` replaces the function the same way, but the
+lifter defines `f_<VA>` itself, calling the platform's
+`extern "C" void <symbol>(Ctx&, uint64_t module_base)`: the module's base
+is where the game's loader put it, so the fix reaches the module's other
+functions by offset (through Dispatch). The platform's lift script picks
+those manifests by the module file's SHA-256.
+
 ### Shared native functions
 Code that many programs link statically (a compiler's runtime library
 above all) is replaced once, here, and bound to each program's copy:
@@ -166,8 +175,9 @@ Win32 memory semantics (4 KiB commit granularity, 64 KiB allocation
 granularity, page protections, VirtualQuery) are tracked in a per-guest-
 page table. Host protection is only "accessible or not" at host page
 granularity (4 KiB on x86 Linux, 16 KiB on Apple Silicon and Asahi), so
-nothing depends on host page faults for guest behaviour, with two
-exceptions: lazy regions (below, Lazy guest memory), and games that demand-page reserved memory from an exception
+nothing depends on host page faults for guest behaviour, with three
+exceptions: lazy regions (below, Lazy guest memory), write watches
+(below, Write watches), and games that demand-page reserved memory from an exception
 filter (commit and fill one page per access violation). On a host with
 larger pages, committing one guest page makes its whole host page
 accessible, and the other guest pages in it would never fault. So after a
@@ -295,7 +305,11 @@ lifter is tractable (rexglue-style: one C++ function per guest function).
     is the setjmp caller's. Matching by EBP assumes the setjmp caller has
     a frame of its own or that no deeper function with the same EBP also
     catches; an FPO setjmp caller inherits its caller's EBP. Calls to
-    setjmp through a pointer are not recognised.
+    setjmp through a pointer are not recognised. In x64 images the
+    `resume` site may also be longjmp's final `ret` (to the return
+    address it stored at the restored rsp), and the key is the rsp the
+    setjmp caller has once setjmp returns: the caller keeps it after each
+    setjmp call, and the site throws the rsp it would continue with.
 - Oracle tests (dev-time only): every x87 and integer instruction form
   found in a game EXE is run lifted and natively from the same random
   state (tests/lift_*_test.cpp, `recomp_add_lift_tests`).
@@ -562,9 +576,12 @@ live in Ctx and are used in place (never cached in locals).
   one NaN operand is returned quieted, two give the first source, SNaN
   raises IE; invalid operations give the default NaN. Rounding control,
   every sticky flag (IE DE ZE OE UE PE) and precedence (a zero divisor
-  suppresses DE for a denormal dividend) match the hardware.
-- Not modelled, fatal if reached: unmasked SIMD exceptions (#XM), and
-  FTZ/DAZ actually changing a result.
+  suppresses DE for a denormal dividend) match the hardware. Under FTZ
+  (underflow masked) a denormal result is the zero of its sign, with UE
+  and PE. Under DAZ a denormal operand is the zero of its sign before
+  anything else (NaN rules, precedence), with no DE; tests/x86/
+  sse_ftz_test checks both against the host.
+- Not modelled, fatal if reached: unmasked SIMD exceptions (#XM).
 - Integer and data-movement forms are plain portable C++.
 - tests/x86/lift_sse_test runs every SSE form in a game EXE lifted and
   natively from random states rich in special values (for a game whose
@@ -758,6 +775,39 @@ ddraw.cpp):
 - A fault on a lazy page while that thread holds the region lock (a
   runtime bug) is not handled but reported like any other fault.
 
+### Write watches (GPU copies of guest memory)
+Console GPUs read textures and vertex buffers straight from memory the
+CPU writes; the host GPU needs copies. Comparing every source with its
+copy for each submission (a hash of each, once per submission) cost
+gigabytes a second of hashing, nearly all of it on memory that never
+changed. A write watch (src/runtime/write_watch.{h,cpp}) answers "was
+this range written since" without reading it:
+- Arming a watch makes the host pages of its range read-only. The first
+  write to one of them, from any thread, lifted or host code, faults; the
+  fault handler offers it to the watches before anything else, which
+  disarm every watch on that page and make their pages writable again,
+  and the write is retried. Watches overlapping a disarmed one (sharing a
+  page with it) are disarmed with it, so read-only pages are always
+  exactly the armed watches' pages.
+- A fault can outlive its watch: another thread may disarm it (writing
+  the same page, a Release) between the fault and its handling. Disarms
+  reopen pages while holding the registry lock, so once the handler holds
+  it, a fault on a page no watch covers that the guest may write (its
+  bookkeeping, after the watches and lazy regions had their turn) is
+  retried; one that keeps faulting at the same address is reported.
+- Guest protection is bookkeeping, so watches never conflict with it;
+  GuestMemory releases the watches on a range before changing its host
+  protection (Commit, Decommit), and HLE handlers that pass a guest
+  buffer to the kernel to fill (read(2)) release it first: the kernel
+  fails with EFAULT on a read-only page instead of faulting.
+- A user arms a watch before reading the range it guards (hashing,
+  uploading), so a write after the read disarms it, and only once the
+  range has been found unchanged a few times: memory rewritten every
+  frame would cost a fault and an mprotect per frame for nothing.
+- Faults on a watched page while that thread holds the registry lock (a
+  runtime bug: nothing writes guest memory with it held) are reported
+  like any other fault.
+
 ### Display modes, fullscreen and presentation
 Display modes are virtual: the host's mode never changes behind the
 game's back. What games see and what the host shows:
@@ -843,7 +893,7 @@ late-frame rule; on an idle host wake-ups land 15-30 us (Linux) or
 - mss32 (Miles): our own mixer on an SDL3 audio stream (runtime/audio):
   resampling, loop counts, gain ramps, the "Miles Fast 2D Positional
   Audio" model of the game's Miles version (6.1c or 6.5;
-  platforms/win32/docs/miles.md), MP3 through libavcodec. Miles' EAX
+  platforms/win32/platforms/win32/platforms/win32/platforms/win32/platforms/win32/docs/miles.md), MP3 through libavcodec. Miles' EAX
   providers (EAX 1.0, 2.0, 3.0, with
   Msseax.m3d's attribute names and struct layouts): voices pan like
   DirectSound3D hardware and get an LF level and a 5 kHz level
@@ -858,7 +908,7 @@ late-frame rule; on an idle host wake-ups land 15-30 us (Linux) or
   master reverb (room types, reverb time/predelay/damping, driver and
   sample/stream wet levels) is our Miles-compatible Schroeder reverb
   (runtime/audio/digital_reverb), written from a behavioural description
-  of mss32 6.5e's (platforms/win32/docs/miles.md) and bit-exact with it:
+  of mss32 6.5e's (platforms/win32/platforms/win32/platforms/win32/platforms/win32/platforms/win32/docs/miles.md) and bit-exact with it:
   recomp_add_digital_reverb_test lifts the original routines from the
   user's installed DLL at build time (`recomp_lift --only`) and compares;
   tests/digital_reverb_test checks a hash of our output on every host.
@@ -965,9 +1015,27 @@ lock would be correct on x86-64 hosts and racy on Apple Silicon.
   the user32 queue mutex: acquire/release, so a message's payload
   written before posting is visible to the receiver.
 
-Still open: a lock-free hand-off in a game's own threads (a plain flag
-polled without any of the calls above) needs explicit barriers via the
-manifest once one is found.
+A lock-free hand-off in a game's own threads (a plain flag polled
+without any of the calls above) is a polling loop, below.
+
+### Polling loops
+A loop that waits for another thread to change memory, polling it with
+plain loads (`mov al, [flag]; cmp al, 2; jnz` back to the load), is
+lifted to a loop the C++ compiler may assume ends: a loop with no side
+effects, volatile access or atomic operation must terminate, so it may
+hoist the load out (and spin forever) or, where the loop is entered only
+when the flag has not changed yet, treat the path into it as unreachable
+and drop it, on any host. The lifter (FindPollLoops) finds such loops by
+their shape, needing no manifest: up to 8 instructions in a row, from a
+branch target to a conditional branch back to it, that only load into
+registers, compare, test and pause, at addresses whose registers the
+loop does not write. Their loads are acquire atomics (lift::RdPoll),
+which is what an x86 load is under TSO: one plain load on x86-64, `ldar`
+on ARM64. Loops that also store or call are not matched: a call is
+opaque to the compiler, and a waiting loop that stores has not been seen
+yet (one would need the same treatment). orbis_process's check 63 is
+such a loop in a test program; without RdPoll the path into it is
+dropped.
 
 ### 64-bit guests (x86-64, PE32+) — in progress
 A mode of the same lifter, runtime and HLE, not a second codebase. The
@@ -1040,16 +1108,6 @@ Lifter:
   a function's tables inside its range, after the code. Two adjacent
   tables then read as one, which only adds labels that are real case
   targets of the same function.
-- Clang's tables hold signed offsets from the table itself: `lea rB,
-  [table]` ... `movsxd rT, [rB + idx*4]; add rT, rB; jmp rT`. Both forms
-  are "target = B + entry", with B (and the load's base) the value a
-  RIP-relative lea gives the register on every path to the jmp (through
-  register copies; paths around a loop back to it do not count), else
-  the image base. The bounds check may sit in another block that
-  branches to the table code (a taken jbe/jb counts like a ja/jae
-  falling through), and the index may be a copy (mov, movsxd, movzx) of
-  the register that was compared. Tables outside .text are read from
-  the module's read-only data (an ELF's .rodata).
 - Clang's tables hold signed offsets from the table itself: `lea rB,
   [table]` ... `movsxd rT, [rB + idx*4]; add rT, rB; jmp rT`. Both forms
   are "target = B + entry", with B (and the load's base) the value a
@@ -1137,21 +1195,41 @@ lifted, not avoided:
 - The YMM upper halves live in Ctx::ymm_hi; VEX instructions are lifted
   one 128-bit half at a time on the same lane functions (AVX has almost
   no operation that crosses halves; vperm2f128, vinsertf128 and
-  vextractf128 move whole halves).
+  vextractf128 move whole halves, and the 256-bit vcvtps2pd and
+  vcvtpd2ps convert between one half of floats and two of doubles, two
+  lanes at a time).
 - CPUID for x64 processes is a fixed CPU of its own, never the host's:
   AMD family 16h (the Jaguar class, which the console targets also
   have), with only the feature bits the lifter implements bit-exactly
   with oracle tests set, growing towards that part's set (SSE3, SSSE3,
-  SSE4.1/4.2, POPCNT, LZCNT, AVX, F16C, BMI1, MOVBE, AES, PCLMUL; no
-  AVX2 or FMA). AVX is claimed (OSXSAVE, XCR0 = 7 through XGETBV) once
-  its forms hold. Games read CPUID themselves (MSVC's CRT fills
-  __isa_available from it), so which paths they take follows from this
-  table.
+  SSE4.1/4.2, POPCNT, LZCNT, CMPXCHG16B, AVX, F16C, BMI1, MOVBE, AES,
+  PCLMUL; no AVX2 or FMA). Claimed now: all of those but AVX and F16C.
+  AVX is claimed (OSXSAVE, XCR0 = 7
+  through XGETBV) once all its forms hold. Games read CPUID themselves
+  (MSVC's CRT fills __isa_available from it), so which paths they take
+  follows from this table.
+- VEX forms of SSE instructions go through the legacy emitter: `v op
+  dst, src1, src2` is `dst = src1; op dst, src2` (a source aliasing dst
+  copied first), the VEX.128 form then zeroes the destination's upper
+  half, and a 256-bit form of an operation that works within 128-bit
+  lanes (AVX's float ones) runs once per half. VEX memory operands need
+  no alignment but for the aligned moves. Forms with no legacy
+  counterpart (vblendv*, vmaskmov*, vperm*, 256-bit vptest, ...) are
+  emitted on their own.
 - Oracle tests (tests/x86/lift_x64_test.cpp) run every integer and SSE/AVX
-  form found in an x64 image natively and lifted from random states:
+  form found in an x64 image, or listed in tests/x86/x64_isa/forms.s (the
+  model's extensions, lift_isa64_*), natively and lifted from random states:
   all 16 general registers, the full YMM registers, flags, MXCSR and a
   memory buffer. The native stub keeps its state pointer in a
-  RIP-relative slot, so forms may use any register but rsp.
+  RIP-relative slot, so forms may use any register but rsp. Every other
+  trial of a compare-exchange form has the accumulator in its memory
+  operand, so both outcomes run.
+- CMPXCHG16B is the host compiler's own 16-byte atomic compare-exchange
+  (x86/atomic128.cpp: one instruction on x86-64 with -mcx16 and on
+  arm64). FXSAVE/FXRSTOR write and read the x87 and SSE models' state
+  in the 512-byte layout, as the modelled family does: the x87 pointers
+  and opcode only while an exception is pending, MXCSR_MASK 0xFFFF;
+  tests/x86/fxsave_test compares both against the host CPU.
 
 Graphics, audio, platform: Direct3D 11 / DXGI (and D3DCompiler_47) as
 HLE over gfx::Device; XAudio2 on the mixer; SDL2 imports on host SDL3;
@@ -1169,8 +1247,12 @@ only those below it.
 - The base (src/runtime, cmake/host.cmake): what any guest's program
   needs on its host. The host layer (RECOMP_HOST, on by default): SDL3,
   ffmpeg, LLVM's demanglers, gfx::Device on Vulkan or Metal with the
-  shader compilers, HLSL, the software mixer and logging (recomp_log,
-  recomp_gfx, recomp_hlsl, recomp_audio). The guest address space
+  shader compilers, HLSL, the software mixer, pictures the runtime
+  draws itself over a game's frames (runtime/ui: a console's system
+  dialogs, text in the host's font through fontconfig and FreeType;
+  built only for the platforms that draw them, RECOMP_UI) and
+  logging (recomp_log, recomp_gfx, recomp_hlsl, recomp_audio,
+  recomp_ui). The guest address space
   (guest_memory, guest_alloc, lazy_mem), the host platform layer
   (platform.h) and frame pacing (recomp_base). OpenGL's state machine
   (gl/), which a graphics API front end drives. SoftFloat
@@ -1234,9 +1316,23 @@ process's hooks and runs the main thread (RunMainThread):
 - pump_events: the host's window events after each presented frame
   (Win32 turns them into window messages).
 Process::sysv selects the System V ABI for HLE arguments and CallGuest,
-Process::fpu_control new threads' x87 control word. The `x86` preset
-builds the core without Win32 (RECOMP_PLATFORM_WIN32 off), which shows
-that nothing in it depends on Windows.
+Process::fpu_control new threads' x87 control word. A guest with no UI
+thread of its own (a console's) runs its main thread beside the host
+loop instead (RunMainThreadBeside: the process main thread runs the
+platform's loop, its window, events and presentation). Guest fibers run
+on coroutines (platform.h), contexts with stacks of their own on one host
+thread, since lifted code keeps its call frames on the host stack. The
+`x86` preset builds the core without Win32 (RECOMP_PLATFORM_WIN32 off),
+and the `orbis` preset the PS4 without it, which shows that nothing in
+the core depends on Windows.
+
+A console platform's programs are directories of shared libraries: its
+lifted code is a lifted module, a shared library of its own with hidden
+symbols (`recomp_add_lifted(<target> <dir> LINK <platform library>)`),
+the executable holds `main()` and little else, and recomp_bundle() puts
+them beside the platform's libraries, the core and the host layer, each
+replaced alone. The PS4 (platforms/orbis, RECOMP_PLATFORM_ORBIS) is the
+first; its design is platforms/orbis/ARCHITECTURE.md.
 
 What belongs to a core: the CPU (every ISA extension the model claims is
 core lifter work, tested by the core's tests), lifted.h, the unwinder's
@@ -1256,7 +1352,8 @@ independent, so one tree can build several together (CMakePresets:
 debug for the x86 core with Win32, x86 for the x86 core alone, ppc for
 the PowerPC core alone, xbox360 for the Xbox 360 alone, a64 for the
 AArch64 core alone, a64-aarch64-qemu for the same on an arm64 host under
-qemu-aarch64, horizon for the Switch alone).
+qemu-aarch64, horizon for the Switch alone, orbis for the PS4 on the
+x86 core).
 
 ## Roadmap
 - 64-bit guests (above).

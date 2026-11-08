@@ -3,13 +3,16 @@
 
 include(FetchContent)
 
-find_package(SDL3 REQUIRED CONFIG)
+find_package(SDL3 3.4 REQUIRED CONFIG)  # SDL_GPUVulkanOptions
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 # ffmpeg (LGPL, linked dynamically): MP3 for Miles streams, Bink and
 # console movies.
 pkg_check_modules(FFMPEG IMPORTED_TARGET
   libavformat libavcodec libavutil libswscale)
+# FreeType (FTL, linked dynamically): the font engine of consoles whose
+# font libraries are built on it (the PS4's libSceFontFt).
+find_package(Freetype REQUIRED)
 if(APPLE)
   set(_llvm_default "/opt/homebrew/opt/llvm@22")  # Homebrew
 else()
@@ -115,6 +118,19 @@ if(DXVK_NATIVE_DIR)
     TARGET_DIRECTORY recomp_gfx PROPERTIES
     INCLUDE_DIRECTORIES "${DXVK_NATIVE_DIR}/include/dxvk"
     COMPILE_DEFINITIONS "DXVK_WSI_SDL3")
+endif()
+
+if(RECOMP_UI)
+  # Pictures the runtime draws itself (runtime/ui/canvas.h): system
+  # dialogs over a game's frames. fontconfig (MIT, linked dynamically)
+  # finds the host's user interface font.
+  find_package(Fontconfig REQUIRED)
+  add_library(recomp_ui SHARED src/runtime/ui/canvas.cpp)
+  target_include_directories(recomp_ui PUBLIC src)
+  target_compile_features(recomp_ui PUBLIC cxx_std_20)
+  target_link_libraries(recomp_ui PRIVATE recomp_log Freetype::Freetype Fontconfig::Fontconfig)
+  set_source_files_properties(src/runtime/ui/canvas.cpp
+    TARGET_DIRECTORY recomp_ui PROPERTIES COMPILE_OPTIONS "-O2")
 endif()
 
 if(FFMPEG_FOUND)

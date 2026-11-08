@@ -47,11 +47,22 @@ set_tests_properties(pacing PROPERTIES RUN_SERIAL TRUE)
 add_executable(lazy_mem_test lazy_mem_test.cpp
                ${PROJECT_SOURCE_DIR}/src/runtime/lazy_mem.cpp
                ${PROJECT_SOURCE_DIR}/src/runtime/guest_memory.cpp
+               ${PROJECT_SOURCE_DIR}/src/runtime/write_watch.cpp
                ${PROJECT_SOURCE_DIR}/src/runtime/guest_alloc.cpp)
 target_include_directories(lazy_mem_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_compile_features(lazy_mem_test PRIVATE cxx_std_20)
 target_link_libraries(lazy_mem_test PRIVATE Threads::Threads)
 add_test(NAME lazy_mem COMMAND lazy_mem_test)
+
+# write_watch_test: write watches through real page faults; portable.
+add_executable(write_watch_test write_watch_test.cpp
+               ${PROJECT_SOURCE_DIR}/src/runtime/write_watch.cpp
+               ${PROJECT_SOURCE_DIR}/src/runtime/guest_memory.cpp
+               ${PROJECT_SOURCE_DIR}/src/runtime/guest_alloc.cpp)
+target_include_directories(write_watch_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_features(write_watch_test PRIVATE cxx_std_20)
+target_link_libraries(write_watch_test PRIVATE Threads::Threads)
+add_test(NAME write_watch COMMAND write_watch_test)
 
 # HLSL translator: each shader in hlsl/ through recomp_hlslc, then
 # glslangValidator (the GLSL must compile for Vulkan), with the reflection
@@ -82,3 +93,13 @@ add_executable(hlsl_bytecode_test hlsl_bytecode_test.cpp)
 target_link_libraries(hlsl_bytecode_test PRIVATE recomp_hlsl)
 add_test(NAME hlsl_bytecode COMMAND hlsl_bytecode_test ${RECOMP_GLSLANG}
          ${CMAKE_CURRENT_SOURCE_DIR}/hlsl/prelude.glsl ${CMAKE_CURRENT_BINARY_DIR})
+
+# gfx_program_test: gfx::Device's programs (the console GPUs' path) on
+# SDL_GPU; needs a Vulkan device (lavapipe will do), skipped without one.
+if(RECOMP_HOST)
+  add_executable(gfx_program_test gfx_program_test.cpp)
+  target_link_libraries(gfx_program_test PRIVATE recomp_gfx recomp_log)
+  add_test(NAME gfx_program COMMAND gfx_program_test)
+  set_tests_properties(gfx_program PROPERTIES SKIP_RETURN_CODE 77
+                       ENVIRONMENT "SDL_VIDEO_DRIVER=offscreen;SDL_GPU_DRIVER=vulkan")
+endif()

@@ -1,4 +1,6 @@
-// sse::RsqrtLane (RSQRTPS) is the correctly rounded 1/sqrt(x) (see sse.h).
+// sse::RsqrtLane (RSQRTPS) is the correctly rounded 1/sqrt(x), and
+// sse::RcpLane (RCPPS) the correctly rounded 1/x flushed to zero below the
+// normal range (see sse.h).
 //
 // - Every positive normal significand, at an even and an odd exponent
 //   (1 <= x < 4: the rest follows from rsqrt(4x) = rsqrt(x) / 2): the
@@ -78,9 +80,59 @@ bool Nearest(uint32_t x, uint32_t r) {
   return below && above;
 }
 
+// True if the normal float r is the float nearest to 1/x (both positive):
+// m_lo * x < 1 < m_hi * x for the midpoints m_lo, m_hi around r.
+bool NearestRcp(uint32_t x, uint32_t r) {
+  uint32_t rexp = r >> 23, rm = (r & 0x7FFFFF) | 0x800000;
+  uint32_t xexp = x >> 23, xm = (x & 0x7FFFFF) | 0x800000;
+  int er = int(rexp) - 150, ex = int(xexp) - 150;
+  u128 lo, hi = 2 * u128(rm) + 1;
+  int elo, ehi = er - 1;
+  if (rm == 0x800000) {
+    lo = 4 * u128(rm) - 1;
+    elo = er - 2;
+  } else {
+    lo = 2 * u128(rm) - 1;
+    elo = er - 1;
+  }
+  return Cmp(lo * xm, elo + ex, 1, 0) < 0 && Cmp(hi * xm, ehi + ex, 1, 0) > 0;
+}
+
+void TestRcp() {
+  using recomp::sse::RcpLane;
+  // Exhaustive over 1 <= x < 2, and the scaling rcp(x * 2^k) = rcp(x) /
+  // 2^k while the result stays normal.
+  for (uint32_t m = 0; m < 0x800000; m++) {
+    uint32_t x = (127u << 23) | m, r = RcpLane(x);
+    if (!NearestRcp(x, r)) Fail("rcp nearest", x, r);
+    if (NearestRcp(x, r - 1) || NearestRcp(x, r + 1)) Fail("rcp check rejects neighbours", x, r);
+    if (m % 4093) continue;
+    for (int k = -126; k <= 127; k++) {
+      int e = 127 + k, re = int(r >> 23) - k;
+      uint32_t got = RcpLane((uint32_t(e) << 23) | m), sign = RcpLane((uint32_t(e) << 23) | m | 0x80000000u);
+      uint32_t want = re >= 1 ? r - uint32_t(k << 23) : 0;  // below normal: flushed
+      if (got != want || sign != (want | 0x80000000u)) Fail("rcp scaling", (uint32_t(e) << 23) | m, got);
+    }
+  }
+  struct {
+    uint32_t x, want;
+  } special[] = {
+      {0x00000000, 0x7F800000}, {0x80000000, 0xFF800000},  // ±0 -> ±inf
+      {0x00000001, 0x7F800000}, {0x807FFFFF, 0xFF800000},  // denormals as ±0
+      {0x7F800000, 0x00000000}, {0xFF800000, 0x80000000},  // ±inf -> ±0
+      {0x7F7FFFFF, 0x00000000},                            // tiny result: flushed
+      {0x7FC00001, 0x7FC00001}, {0x7F800001, 0x7FC00001},  // QNaN, SNaN quieted
+  };
+  for (const auto& s : special) {
+    uint32_t got = RcpLane(s.x);
+    if (got != s.want) Fail("rcp special", s.x, got);
+  }
+}
+
 }  // namespace
 
 int main() {
+  TestRcp();
   using recomp::sse::RsqrtLane;
 
   // Exhaustive over 1 <= x < 4.
@@ -131,7 +183,7 @@ int main() {
     if (got != s.want) Fail("special", s.x, got);
   }
 
-  std::printf("rsqrt: %llu significands, worst rel. error %.3g (bound %.3g), %d failures\n",
+  std::printf("rsqrt (and rcp): %llu significands, worst rel. error %.3g (bound %.3g), %d failures\n",
               (unsigned long long)n, worst, 1.5 / 4096, g_fail);
   return g_fail ? 1 : 0;
 }

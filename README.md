@@ -50,7 +50,7 @@ every guest shares (`src/runtime`), a core per guest CPU (the x86 core:
   GLSL, for the programmable pipeline on SDL_GPU.
 - **Tools**: Ghidra export scripts (`tools/ghidra`), a PE symbol dumper
   (`tools/pe_symbols.py`), dev-time reference checks
-  (`platforms/win32/tools/layout`, `platforms/win32/tools/undname`), and
+  (`platforms/win32/platforms/win32/tools/layout`, `platforms/win32/platforms/win32/tools/undname`), and
   EAX reference measurement (`tools/eax_capture`: a Windows 98 recorder
   for Creative hardware, the same cases rendered by the runtime, and
   their comparison).
@@ -65,7 +65,7 @@ builds with the x86 core and Win32 switched off.
 
 [ARCHITECTURE.md](ARCHITECTURE.md) describes the design; each platform's
 `docs/` the observed behaviour of what it reimplements
-([platforms/win32/docs/miles.md](platforms/win32/docs/miles.md)).
+([platforms/win32/platforms/win32/docs/miles.md](platforms/win32/platforms/win32/docs/miles.md)).
 
 ## Using it from a game project
 
@@ -97,8 +97,10 @@ game.dll --symbols dir [--manifest file]`, repeated) and listed in
 ## Requirements
 
 Linux x86-64, or macOS on Apple Silicon. Clang and LLVM (the static
-`libLLVMDemangle.a` for dbghelp), CMake 3.25+, Ninja, SDL3 (3.2+ for
-SDL_GPU); ffmpeg for Miles/Bink and XMA; glslang (`glslangValidator`) for the
+`libLLVMDemangle.a` for dbghelp), CMake 3.25+, Ninja, SDL3 (3.4+: SDL_GPU
+on Vulkan 1.1); ffmpeg for Miles/Bink and XMA; FreeType for fonts, and for
+the PS4 platform fontconfig too (the system dialogs the runtime draws);
+glslang (`glslangValidator`) for the
 shaders, and on macOS SPIRV-Cross (`spirv-cross`) too. Graphics (D3D7
 and OpenGL) use SDL_GPU: Vulkan on Linux, native Metal on macOS. On
 Linux a dxvk-native build (Direct3D 9 only, SDL3 window system) is
@@ -106,7 +108,7 @@ optional: it adds the d3d9 backend (`<ID>_GFX=d3d9`), the reference
 image for SDL_GPU.
 
 On macOS with Homebrew
-(`brew install cmake ninja sdl3 ffmpeg llvm@22 glslang spirv-cross`):
+(`brew install cmake ninja sdl3 ffmpeg freetype fontconfig llvm@22 glslang spirv-cross`):
 
 ```sh
 cmake --preset debug -DRECOMP_LLVM_ROOT=/opt/homebrew/opt/llvm@22
@@ -117,5 +119,5 @@ cmake --preset debug -DRECOMP_LLVM_ROOT=/opt/homebrew/opt/llvm@22
 MIT (see [LICENSE](LICENSE)). Dependencies keep their own licences:
 Berkeley SoftFloat 3e (BSD-3-Clause) and Zydis (MIT) are fetched at
 build time; SDL3 (zlib), DXVK (zlib), ffmpeg (LGPL, linked
-dynamically) and LLVM's demangler (Apache-2.0 with LLVM
+dynamically), FreeType (FTL), fontconfig (MIT) and LLVM's demangler (Apache-2.0 with LLVM
 exception) come from your system.

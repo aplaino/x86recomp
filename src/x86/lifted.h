@@ -34,7 +34,8 @@ void RegisterLiftedFunctions(const LiftedFn* fns, uint32_t count);
 // __except blocks, longjmp to a setjmp return point). Caught by the lifted
 // function owning that frame, which continues there with Resume(). In x64
 // guests `ebp` is the frame's establisher frame (ARCHITECTURE.md, "64-bit
-// guests"), thrown by the unwinder at the end of an exception's unwind.
+// guests"), thrown by the unwinder at the end of an exception's unwind, or
+// for longjmp the rsp a setjmp caller has once setjmp returns.
 struct GuestResume {
   uint64_t target, ebp, from;
 };
@@ -69,6 +70,7 @@ void Xgetbv(Ctx& c);                           // ecx in, edx:eax out
 #endif
 void Cpuid(Ctx& c);                            // eax/ecx in, eax..edx out
 uint64_t Rdtsc(Ctx& c);
+inline constexpr uint64_t kTscHz = 3000000000;  // the rate Rdtsc counts at
 
 namespace lift {
 
@@ -93,6 +95,17 @@ inline T Rd(const uint8_t* b, uint64_t a) {
 template <typename T>
 inline void Wr(uint8_t* b, uint64_t a, T v) {
   std::memcpy(b + a, &v, sizeof(T));
+}
+// Loads in polling loops (ARCHITECTURE.md, "Polling loops"): acquire
+// atomics, which the compiler can neither drop nor hoist out of the loop,
+// as an x86 load is under TSO. A misaligned one (no atomic load on ARM64)
+// is a plain load after an acquire fence, which also keeps it in the loop.
+template <typename T>
+inline T RdPoll(const uint8_t* b, uint64_t a) {
+  if (a % sizeof(T) == 0)
+    return __atomic_load_n(reinterpret_cast<const T*>(b + a), __ATOMIC_ACQUIRE);
+  __atomic_thread_fence(__ATOMIC_ACQUIRE);
+  return Rd<T>(b, a);
 }
 inline x87::F80 RdF80(const uint8_t* b, uint64_t a) {
   x87::F80 v;
@@ -544,6 +557,52 @@ template <int N>
   return r;
 }
 
+// ---- BMI1 and POPCNT (N = 4 or 8) ----------------------------------------
+// Flags the SDM leaves undefined (AF, PF; SF for bextr) are set from the
+// result like SF/ZF; nothing may depend on them.
+template <int N>
+[[gnu::always_inline]] inline U<N> Andn(Flags& f, U<N> a, U<N> b) {
+  return Logic<N>(f, ~a & b);
+}
+// bextr: the ctrl[15:8] bits of src from bit ctrl[7:0].
+template <int N>
+[[gnu::always_inline]] inline U<N> Bextr(Flags& f, U<N> src, U<N> ctrl) {
+  const uint32_t start = ctrl & 0xFF, len = (ctrl >> 8) & 0xFF;
+  U<N> r = start < W<N>::kBits ? U<N>(src >> start) : U<N>(0);
+  if (len < W<N>::kBits) r &= (U<N>(1) << len) - 1;
+  return Logic<N>(f, r);
+}
+template <int N>
+[[gnu::always_inline]] inline U<N> Blsi(Flags& f, U<N> src) {
+  const U<N> r = Logic<N>(f, U<N>(0 - src) & src);
+  f.cf = src != 0;
+  return r;
+}
+template <int N>
+[[gnu::always_inline]] inline U<N> Blsr(Flags& f, U<N> src) {
+  const U<N> r = Logic<N>(f, U<N>(src - 1) & src);
+  f.cf = src == 0;
+  return r;
+}
+template <int N>
+[[gnu::always_inline]] inline U<N> Blsmsk(Flags& f, U<N> src) {
+  const U<N> r = Logic<N>(f, U<N>(src - 1) ^ src);
+  f.cf = src == 0;
+  f.zf = false;
+  return r;
+}
+// popcnt clears every flag but ZF (set for a zero source); N = 2, 4 or 8.
+template <int N>
+[[gnu::always_inline]] inline U<N> Popcnt(Flags& f, U<N> src) {
+  src &= W<N>::kMask;
+  f.cf = f.of = f.sf = f.af = f.pf = false;
+  f.zf = src == 0;
+  if constexpr (N == 8)
+    return U<N>(__builtin_popcountll(src));
+  else
+    return U<N>(__builtin_popcount(src));
+}
+
 // ---- partial registers --------------------------------------------------
 inline uint32_t SetLo8(uint32_t r, uint32_t v) {
   return (r & ~0xFFu) | (v & 0xFFu);
@@ -582,6 +641,10 @@ template <typename T>
 inline T* AtomicPtr(uint8_t* b, uint64_t a) {
   return reinterpret_cast<T*>(b + a);
 }
+// CMPXCHG16B: if the 16 bytes at p (16-byte aligned) equal hi:lo, stores
+// new_hi:new_lo and returns true; otherwise loads them into hi:lo.
+// Atomic (x86/atomic128.cpp).
+bool Cas128(uint8_t* p, uint64_t* lo, uint64_t* hi, uint64_t new_lo, uint64_t new_hi);
 
 }  // namespace lift
 }  // namespace recomp
@@ -589,7 +652,9 @@ inline T* AtomicPtr(uint8_t* b, uint64_t a) {
 // Register/flag caching. Lifted functions keep guest registers in locals
 // (which nothing can alias) and write them back before anything that may
 // observe or change them. Files lifted from x64 images define
-// RECOMP_LIFT_X64 before including this header.
+// RECOMP_LIFT_X64 before including this header. Their segment bases are
+// read from c at each use, not kept: a fiber resumed on another thread
+// (libSceFiber) must see that thread's TLS, as its fs reads do.
 #ifndef RECOMP_LIFT_X64
 #define LIFT_ENTER                                                       \
   uint8_t* const B = ::recomp::g_guest_base;                                \
@@ -608,7 +673,7 @@ inline T* AtomicPtr(uint8_t* b, uint64_t a) {
            r13 = c.r13, r14 = c.r14, r15 = c.r15;                        \
   ::recomp::Flags F;                                                        \
   ::recomp::UnpackEFlags(F, c.eflags);                                   \
-  const uint64_t FS = c.fs_base, GS = c.gs_base;                         \
+  const uint64_t &FS = c.fs_base, &GS = c.gs_base;                       \
   (void)FS, (void)GS;
 #endif
 

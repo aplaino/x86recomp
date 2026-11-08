@@ -24,6 +24,7 @@
 #include "runtime/lazy_mem.h"
 #include "runtime/log.h"
 #include "runtime/platform.h"
+#include "runtime/write_watch.h"
 #include "x86/hle.h"
 #include "x86/lifted.h"
 #include "x86/runtime.h"
@@ -168,12 +169,13 @@ const bool kFatalReportSet = (g_fatal_report = FatalReport, true);
 
 
 // Host faults (SIGSEGV/SIGBUS) in guest memory are first offered to the
-// lazy regions (lazy_mem.h), whose pages fault by design, on any thread
-// and from host code too. Others are guest access violations: they go to
-// the platform's exception dispatch (Process::guest_fault; Win32 games
-// may demand-page data from an exception filter). Anything unhandled, or
-// a fault outside the arena (a runtime bug), is reported with the host
-// call chain (lifted functions are named f_<guest va>) and exits.
+// write watches (write_watch.h) and the lazy regions (lazy_mem.h), whose
+// pages fault by design, on any thread and from host code too. Others are
+// guest access violations: they go to the platform's exception dispatch
+// (Process::guest_fault; Win32 games may demand-page data from an
+// exception filter). Anything unhandled, or a fault outside the arena (a
+// runtime bug), is reported with the host call chain (lifted functions
+// are named f_<guest va>) and exits.
 
 namespace {
 // Faults can nest: an exception filter may itself touch a not-yet-paged
@@ -200,8 +202,20 @@ void FaultHandler(int sig, siginfo_t* si, void* uc) {
   // x64 guests: no guest exception dispatch yet (ARCHITECTURE.md, "64-bit
   // guests"), so their faults are reported below.
   const bool guest32 = a - base < (1ull << 32) && g_proc && !g_proc->x64;
+  if (g_proc && a - base < g_proc->mem.size() && watch::HandleFault(a - base))
+    return;  // a watched page, writable now: retry the write
   if (guest32 && lazy::HandleFault(uint32_t(a - base)))
     return;  // filled: retry the faulting instruction
+  // A watch another thread disarmed after this fault was raised: the page
+  // is writable now. A page that faults again and again is reported below
+  // instead (host protection the guest's does not explain).
+  static thread_local uintptr_t t_reopened_at = 0;
+  static thread_local int t_reopened_n = 0;
+  if (g_proc && a - base < g_proc->mem.size() && watch::Reopened(g_proc->mem, a - base)) {
+    t_reopened_n = a == t_reopened_at ? t_reopened_n + 1 : 1;
+    t_reopened_at = a;
+    if (t_reopened_n <= 16) return;
+  }
   platform::FaultContext fc = platform::ReadFaultContext(uc);
   if (guest32 && g_proc->guest_fault && CurrentThread() &&
       t_fault_depth < kMaxFaultDepth && hle::t_hle_depth == 0) {
@@ -423,7 +437,7 @@ static void Cpuid64(Ctx& c) {
   uint32_t a = 0, b = 0, cx = 0, d = 0;
   switch (leaf) {
     case 0:
-      a = 1;
+      a = 7;
       b = 0x68747541;  // "AuthenticAMD"
       d = 0x69746E65;
       cx = 0x444D4163;
@@ -431,8 +445,14 @@ static void Cpuid64(Ctx& c) {
     case 1:
       a = 0x00700F01;  // family 16h (0Fh + 07h), model 0, stepping 1
       b = (GuestProcessorCount() << 16) | (8u << 8);  // CLFLUSH: 64 bytes
-      cx = 0;
+      // SSE3, PCLMULQDQ, SSSE3, CMPXCHG16B, SSE4.1, SSE4.2, MOVBE,
+      // POPCNT, AES (tests/x86/x64_isa/forms.s); not yet AVX/OSXSAVE, F16C.
+      cx = (1u << 0) | (1u << 1) | (1u << 9) | (1u << 13) | (1u << 19) | (1u << 20) |
+           (1u << 22) | (1u << 23) | (1u << 25);
       d = 0x0783F9FF;  // fpu tsc cx8 cmov mmx fxsr sse sse2 (as 32-bit)
+      break;
+    case 7:
+      if (uint32_t(c.rcx) == 0) b = 1u << 3;  // BMI1
       break;
     case 0x80000000:
       a = 0x80000001;
@@ -496,6 +516,7 @@ void Cpuid(Ctx& c) {
 uint64_t Rdtsc(Ctx& c) {
   (void)c;
   using namespace std::chrono;
+  static_assert(kTscHz == 3000000000);
   return 3 * uint64_t(
       duration_cast<nanoseconds>(steady_clock::now().time_since_epoch())
           .count());

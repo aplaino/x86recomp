@@ -175,7 +175,7 @@ void OnFault(int sig) {
 }
 
 uint64_t RandomValue(std::mt19937_64& g) {
-  switch (g() % 14) {
+  switch (g() % 15) {
     case 0: return 0;
     case 1: return ~0ull;
     case 2: return 0x8000000000000000ull >> (g() % 8 * 8);
@@ -187,6 +187,10 @@ uint64_t RandomValue(std::mt19937_64& g) {
     case 8: return 0x80000000u;                      // and sign-extended
     case 9: return uint64_t(int64_t(int32_t(g())));
     case 10: return uint32_t(g());
+    case 11: {  // edges in the low two bytes: bit-field controls (bextr)
+      static const uint8_t k[] = {0, 1, 7, 8, 15, 16, 31, 32, 33, 63, 64, 65, 127, 128, 255};
+      return (g() & ~0xFFFFull) | uint64_t(k[g() % 15]) << 8 | k[g() % 15];
+    }
     default: return g();
   }
 }
@@ -336,6 +340,7 @@ int main(int argc, char** argv) {
     is_string = is_string && mn != "movsx" && mn != "movsxd" && mn != "movss" &&
                 mn != "movsd" && text.find("xmm") == std::string::npos;
     bool is_bt = mn.rfind("bt", 0) == 0 && f.base >= 0;
+    bool is_cas = text.find("cmpxchg") != std::string::npos && f.base >= 0;
     uint32_t defined = (0x1u | 0x4u | 0x10u | 0x40u | 0x80u | 0x400u | 0x800u) & ~f.undef;
     int fails = 0;
     for (int t = 0; t < trials; t++) {
@@ -355,6 +360,7 @@ int main(int argc, char** argv) {
       in.mxcsr = 0x1F80;
 #ifdef LIFT_X64_SSE
       in.mxcsr |= uint32_t(g() % 4) << 13 | (g() % 4 == 0 ? uint32_t(g()) & 0x3F : 0);
+      if (g() % 4 == 0) in.mxcsr |= 0x8000;  // FTZ
       for (int i = 0; i < 16; i++) Fill16(g, in.xmm[i]);
       for (int i = 0; i < 16; i++) Fill16(g, in.ymm_hi[i]);
       for (uint32_t o = 0; o < kBufSize; o += 16) Fill16(g, &init[o]);
@@ -363,6 +369,13 @@ int main(int argc, char** argv) {
         for (int k = 0; k < 16; k++) in.xmm[i][k] = uint8_t(g());
       for (auto& b : init) b = uint8_t(g());
 #endif
+
+      // Compare-exchange forms: every other trial the memory operand holds
+      // the accumulator (rdx:rax for cmpxchg16b), so both outcomes run.
+      if (is_cas && t % 2) {
+        std::memcpy(&init[0x1000], &in.r[0], 8);
+        std::memcpy(&init[0x1008], &in.r[2], 8);
+      }
 
       Regs hw = in;
       std::memcpy(native_buf, init.data(), kBufSize);
