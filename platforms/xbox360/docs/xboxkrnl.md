@@ -206,9 +206,9 @@ here; on the console a KPCR belongs to a hardware thread.
   offsets 0) are Xenia's. Console check.
 - Titles' audio libraries lock a context whenever a voice stops or
   changes, then poll register 0x606 and read the context's buffer-valid
-  bits back. A lock stops the context's decoding (Xenia's); with no
-  decoder there is none to stop, so it is taken and leaves the context as
-  it was.
+  bits back. A lock stops the context's decoding (Xenia's); here a kick
+  decodes within the poll that takes it, so there is none to stop: it is
+  taken and leaves the context as it was.
 - 320 contexts of 64 bytes; XMACreateContext(*context) writes a free
   one's address, or 0 with STATUS_NO_MEMORY when none is free;
   XMAReleaseContext zeroes it. Xenia's (which allocates the array in its
@@ -217,8 +217,54 @@ here; on the console a KPCR belongs to a hardware thread.
 - The console's decoder takes a write to a command register at once;
   here a thread polls them (yielding, then every 50 us when idle), so a
   title's later writes to a context can race a clear the thread has not
-  taken yet. Before the decoder lands, commands have to reach it in the
-  order the title wrote them (open: at eieio, or by another route).
+  taken yet. Within a poll it takes locks, then clears, then kicks, so a
+  context cleared and kicked between two polls is cleared first. Commands
+  reaching it in the order the title wrote them stays open (at eieio, or
+  by another route).
+- The context's fields are Xenia's layout (word 0: input buffer 0's
+  packets, the loop count, both input buffers' valid bits, the output
+  ring's blocks and write offset; word 1: buffer 1's packets, the loop's
+  subframe end and skip, subframe_decode_count, the output padding, the
+  sample rate (24, 32, 44.1, 48 kHz), stereo, the output's valid bit;
+  word 2 the input read offset in bits; 3 and 4 the loop's start and end
+  offsets, word 4's top bit the current input buffer; 5 to 7 the input
+  buffers' and the output ring's physical addresses; word 9 the output
+  read offset). Console check.
+- Input is packets of 2 KiB: a 32-bit header (the frames that begin in
+  it, the first one's bit offset past the header, metadata, the packets
+  of other streams before this stream's next) and frames' bits; a frame
+  starts with its length in bits (15 bits, 0x7FFF none: padding) and may
+  run on into the stream's next packet, the next buffer's when it passes
+  the end of its own. Its last bit says whether another frame follows in
+  the packet; a frame that runs on into the next packet is followed by
+  that packet's first frame whatever that bit (ffmpeg's xma decoders and
+  Xenia ignore it). A skip count of 0xFF is the next packet (Xenia's).
+- A kick decodes frames from the read offset (past the packet's header
+  and the end of a frame begun before it) into the output ring, 16-bit
+  big-endian samples, channels interleaved, in blocks of 256 bytes (a
+  frame is 512 samples a channel: 4 blocks mono, 8 stereo), until the
+  ring has no room for subframe_decode_count blocks (at least one) plus
+  the padding, which each frame written reserves too, or no frame is
+  available (its packets' buffer not valid). It writes the read offset,
+  the current buffer, the write offset and clears the valid bit of an
+  input buffer it has left; when the ring is full (the write offset back
+  at the title's read offset) it clears the output's valid bit, which the
+  title sets again once it has read the ring. A frame partly written
+  goes on at the next kick. All of this is Xenia's (one pass a kick, as
+  there). Console check.
+- A frame is decoded by ffmpeg's wmapro decoder (XMA's frames are WMA
+  Pro's, with the decode flags 0x10D6 that ffmpeg's xma decoders use),
+  one frame to a packet built for it. The first frame after a clear (or a
+  change of rate or channels) gives no samples, as there (and in Xenia):
+  the overlap it would complete is with nothing. Samples are saturated
+  to [-1, 1] and rounded to 16 bits; a frame's trim is not applied, every
+  frame is written whole. Console check.
+- Loops (loop count nonzero; 255 is endless): the frame at the loop end
+  offset is the loop's last, written up to its subframe loop_subframe_end
+  (counting from 0, a subframe a block a channel); decoding goes on at the
+  loop start offset, whose first loop_subframe_skip subframes are left
+  out, and the count goes down by one. Offsets below 32 are 32. The
+  loop's subframe start is not used (as in Xenia). Console check.
 
 ## Strings and statuses
 - RtlMultiByteToUnicodeN and RtlUnicodeToMultiByteN convert as many

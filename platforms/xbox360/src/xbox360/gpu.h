@@ -49,7 +49,4 @@ void WriteSwapPackets(uint32_t va, const uint32_t fetch[6], uint32_t width, uint
 // Frames swapped so far.
 uint64_t SwapCount();
 
-// A guest address of physical address pa (in the 64 KiB view).
-inline uint32_t PhysicalToVirtual(uint32_t pa) { return 0xA0000000 + (pa & 0x1FFFFFFF); }
-
 }  // namespace recomp::xbox360

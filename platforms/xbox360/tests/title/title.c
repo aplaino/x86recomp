@@ -1045,6 +1045,117 @@ static void Xma(void) {
   CHECK(XMAReleaseContext(a) == 0 && XMAReleaseContext(b) == 0);
 }
 
+// Decoding. The frames are mono and silent (no coefficients), of a given
+// length in bits, the rest fill bits of the subframe's extended header:
+// WMA Pro's frame layout, as ffmpeg's decoder reads it. Bits go into a
+// buffer of 2 KiB packets, past each packet's 32-bit header.
+static void XmaPut(uint8_t* buffer, u32* at, u32 n, u32 value) {
+  while (n--) {
+    if (*at % 16384 == 0) *at += 32;
+    uint8_t bit = 0x80 >> (*at & 7);
+    buffer[*at >> 3] = (value >> n & 1) ? buffer[*at >> 3] | bit : buffer[*at >> 3] & ~bit;
+    ++*at;
+  }
+}
+
+static void XmaFrame(uint8_t* buffer, u32* at, u32 length, u32 more) {
+  u32 fill = length - 49;
+  XmaPut(buffer, at, 15, length);
+  XmaPut(buffer, at, 2, 2);         // one subframe layout for all channels; one of 512 samples
+  XmaPut(buffer, at, 9, 0);         // dynamic range gain; no trim
+  XmaPut(buffer, at, 7, 0x4C);      // an extended header, its fill length in 12 bits
+  XmaPut(buffer, at, 12, fill - 1);
+  for (u32 k = 0; k < fill; k++) XmaPut(buffer, at, 1, 0);
+  XmaPut(buffer, at, 3, 0);         // reserved; no coefficients; the bit before the last
+  XmaPut(buffer, at, 1, more);      // another frame follows in the packet
+}
+
+// An XMA2 packet header: frames that begin in it, the first one's offset
+// past the header, XMA2 metadata (1), no packets of other streams after it.
+static void XmaHeader(uint8_t* packet, u32 frames, u32 first) {
+  packet[0] = (uint8_t)(frames << 2 | first >> 13);
+  packet[1] = (uint8_t)(first >> 5);
+  packet[2] = (uint8_t)((first & 31) << 3 | 1);
+  packet[3] = 0;
+}
+
+// Kicks a context and waits until the decoder fills the output ring (its
+// valid bit cleared) or writes some of it (the write offset moved). The
+// blocks written.
+static u32 XmaKick(volatile u32* context, u32 index, u32 blocks) {
+  u32 write = context[0] >> 27;
+  *XmaReg(0x650 + (index >> 5)) = __builtin_bswap32(1u << (index & 31));
+  int64_t ms = -10000;
+  for (int k = 0; k < 1000 && context[1] >> 31 && context[0] >> 27 == write; k++) KeDelayExecutionThread(1, 0, &ms);
+  return context[1] >> 31 ? ((context[0] >> 27) + blocks - write) % blocks : blocks;
+}
+
+static int XmaSilent(const uint8_t* p, u32 bytes) {
+  for (u32 k = 0; k < bytes; k++)
+    if (p[k]) return 0;
+  return 1;
+}
+
+static void XmaDecode(void) {
+  u32 array = __builtin_bswap32(*XmaReg(0x600)), va = 0;
+  CHECK(XMACreateContext(&va) == 0);
+  u32 index = (MmGetPhysicalAddress(va) - array) >> 6;
+  volatile u32* c = At(va);
+  // Two packets of eight 4000-bit frames: four whole in the first, the
+  // fifth run on into the second (whose first frame begins after its
+  // 3648 bits; the fifth's last bit, 0, does not end the stream there),
+  // the last followed by padding.
+  u32 memory = MmAllocatePhysicalMemoryEx(0, 0x2000, kPageReadWrite, 0, 0, 0x1000);
+  uint8_t* input = (uint8_t*)(uintptr_t)memory;
+  uint8_t* output = input + 0x1000;
+  for (u32 k = 0; k < 4096; k++) input[k] = 0xFF;
+  XmaHeader(input, 5, 0);
+  XmaHeader(input + 2048, 3, 3648);
+  u32 at = 32;
+  for (u32 f = 0; f < 8; f++) XmaFrame(input, &at, 4000, f < 7 && f != 4);
+  u32 pa = MmGetPhysicalAddress(memory);
+
+  // Mono at 48 kHz into a ring of 8 blocks, 2 at a time. The first frame
+  // gives no samples; a frame is 4 blocks: two frames fill the ring.
+  // The title empties it and sets it valid again.
+  *XmaReg(0x6A0 + (index >> 5)) = __builtin_bswap32(1u << (index & 31));
+  CHECK(WaitFor(&c[2], 32));
+  c[5] = pa;
+  c[7] = pa + 0x1000;
+  c[1] = 1u << 31 | 3u << 27 | 2u << 20;
+  c[0] = 8u << 22 | 1u << 20 | 2;
+  u32 total = 0;
+  for (int round = 0; round < 4; round++) {
+    for (u32 k = 0; k < 2048; k++) output[k] = 0x5A;
+    u32 blocks = XmaKick(c, index, 8);
+    total += blocks;
+    CHECK(XmaSilent(output, blocks * 256) && output[blocks * 256 % 2048] == (blocks == 8 ? 0 : 0x5A));
+    c[1] |= 1u << 31;
+  }
+  // Seven frames out; input buffer 0 left (its valid bit cleared, buffer 1
+  // current), the read offset past the next packet's header.
+  CHECK(total == 28 && (c[0] & 0xF8300000) == 0x20000000 && c[2] == 32 && c[4] >> 31 == 1);
+
+  // A loop, once, from the second frame (bit 4032) to the third (8032),
+  // whose subframes 0 and 1 end it, and which starts again past the second
+  // frame's subframe 0, one block at a time: 4 + 2 + 3 + 4 + 5 * 4 blocks.
+  c[2] = 0;
+  *XmaReg(0x6A0 + (index >> 5)) = __builtin_bswap32(1u << (index & 31));
+  CHECK(WaitFor(&c[2], 32));
+  c[3] = 4032;
+  c[4] = 8032;
+  c[1] = 1u << 31 | 3u << 27 | 1u << 20 | 1u << 17 | 1u << 14;
+  c[0] = 8u << 22 | 1u << 20 | 1u << 12 | 2;
+  total = 0;
+  for (int round = 0; round < 5; round++) {
+    total += XmaKick(c, index, 8);
+    c[1] |= 1u << 31;
+  }
+  CHECK(total == 33 && (c[0] >> 12 & 0xFF) == 0 && !(c[0] >> 20 & 1));
+  CHECK(XMAReleaseContext(va) == 0);
+  MmFreePhysicalMemory(0, memory);
+}
+
 // ---- xam ----------------------------------------------------------------------
 static void Xam(void) {
   CHECK(XGetGameRegion() == 0x00FF && XamGetSystemVersion() == 0x20449700);
@@ -1568,6 +1679,7 @@ int main(void) {
   Conversions();
   Audio();
   Xma();
+  XmaDecode();
   Memory();
   Physical();
   Threads();

@@ -98,6 +98,8 @@ MemoryUse QueryMemoryUse();
 // The physical address of va in a physical view. False in the others:
 // here no physical page backs virtual memory.
 bool PhysicalAddress(uint32_t va, uint32_t& pa);
+// A guest address of physical address pa (in the 64 KiB view).
+inline uint32_t PhysicalToVirtual(uint32_t pa) { return 0xA0000000 + (pa & 0x1FFFFFFF); }
 
 // The kernel's own objects (threads, events of handles, variables):
 // committed, zeroed, 16-byte aligned guest memory in the 4 KiB image heap,

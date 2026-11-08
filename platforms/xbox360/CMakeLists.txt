@@ -5,6 +5,9 @@
 if(NOT RECOMP_HOST)
   message(FATAL_ERROR "RECOMP_PLATFORM_XBOX360 needs RECOMP_HOST (audio output)")
 endif()
+if(NOT FFMPEG_FOUND)
+  message(FATAL_ERROR "RECOMP_PLATFORM_XBOX360 needs ffmpeg (XMA decoding)")
+endif()
 
 # XEX2 parsing and LZX decompression, for the lifter and the runtime.
 add_library(recomp_xbox360_image SHARED src/xbox360/lzx.cpp src/xbox360/xex.cpp)
@@ -15,8 +18,10 @@ recomp_bundle(recomp_xbox360_image)
 # The runtime (ARCHITECTURE.md, "Runtime"): guest memory, the HLE registry
 # and Import(), threads, dispatcher objects, handles and time, the file
 # namespace, the title's module, the console's settings, the GPU, audio
-# output (SDL3, from the host layer), the XMA decoder, process bring-up (xbox360/process.h). Lifted modules link it for what lifted
-# code calls (recomp_add_lifted_ppc ... LINK recomp_xbox360).
+# output (SDL3, from the host layer), the XMA decoder (ffmpeg's wmapro
+# decoder, LGPL, linked dynamically), process bring-up
+# (xbox360/process.h). Lifted modules link it for what lifted code calls
+# (recomp_add_lifted_ppc ... LINK recomp_xbox360).
 find_package(Threads REQUIRED)
 add_library(recomp_xbox360 SHARED
   src/xbox360/audio.cpp
@@ -33,7 +38,7 @@ add_library(recomp_xbox360 SHARED
   src/xbox360/thread.cpp
   src/xbox360/xma.cpp)
 target_link_libraries(recomp_xbox360 PUBLIC recomp_ppc recomp_xbox360_image Threads::Threads
-                      PRIVATE SDL3::SDL3 recomp_log)
+                      PRIVATE SDL3::SDL3 PkgConfig::FFMPEG recomp_log)
 recomp_bundle(recomp_xbox360)
 
 # The HLE modules, one shared library per system module, found by nothing

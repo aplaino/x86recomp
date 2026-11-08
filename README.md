@@ -95,7 +95,7 @@ game.dll --symbols dir [--manifest file]`, repeated) and listed in
 
 Linux x86-64, or macOS on Apple Silicon. Clang and LLVM (the static
 `libLLVMDemangle.a` for dbghelp), CMake 3.25+, Ninja, SDL3 (3.2+ for
-SDL_GPU); ffmpeg for Miles/Bink; glslang (`glslangValidator`) for the
+SDL_GPU); ffmpeg for Miles/Bink and XMA; glslang (`glslangValidator`) for the
 shaders, and on macOS SPIRV-Cross (`spirv-cross`) too. Graphics (D3D7
 and OpenGL) use SDL_GPU: Vulkan on Linux, native Metal on macOS. On
 Linux a dxvk-native build (Direct3D 9 only, SDL3 window system) is

@@ -244,15 +244,21 @@ callbacks keep their pace.
 ### The XMA decoder
 The XMA decoder (`src/xbox360/xma.{h,cpp}`, docs/xboxkrnl.md "XMA") is
 what the kernel's XMA* exports and titles' audio libraries see of the
-hardware, without decoding yet:
+hardware:
 - 320 contexts of 64 bytes in uncached physical memory, which
   XMACreateContext hands out and XMAReleaseContext zeroes and frees.
 - Its registers are guest memory at 0x7FEA0000, little-endian, as for
   the GPU: the context array's physical address is set at power-on.
 - A kernel thread polls the command registers, a bit per context, and
   takes each word written (leaving 0). A clear resets the context's
-  buffers and offsets; a lock, with nothing decoding, changes nothing; a
-  kick needs the decoder and is fatal.
+  buffers and offsets; a kick decodes into the context's output ring
+  what it has room for; a lock, with decoding done within the poll,
+  changes nothing.
+- Decoding walks the context's packets, input buffers and loops itself
+  and hands each frame to ffmpeg's wmapro decoder (LGPL, linked
+  dynamically): XMA's frames are WMA Pro's. ffmpeg's xma2 decoder takes
+  whole packets and holds samples back for streams in step; one frame at
+  a time is what the context's offsets need.
   Polling leaves a gap between a title's write and the command, which a
   clear only narrows by running fast; the decoder settles how commands
   reach it (docs/xboxkrnl.md, "XMA").
@@ -317,8 +323,9 @@ builds and runs them too.
    command processor that executes the ring buffer without drawing, and
    the audio render driver, timers, the kernel exports and xam's startup
    ones (the loader, networking, memory, messages, the music player's,
-   users, profile settings, notifications, content) are done; next the
-   XGI and XLiveBase messages, XMA decoding (the contexts and their
-   registers are there) and APCs.
+   users, profile settings, notifications, content), APCs, the XGI and
+   XLiveBase messages titles send and XMA decoding are done; next host
+   controllers, the kernel's remaining edge cases and the imports no
+   title has called yet.
 5. Xenos: drawing, shaders and presentation through gfx::Device, behind
    the command processor (which runs the ring buffer already).
