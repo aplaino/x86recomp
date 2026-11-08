@@ -330,8 +330,9 @@ HLE(kKrnl, 321, RtlTryEnterCriticalSection) {
 }
 
 // ---- spin locks and IRQL ---------------------------------------------------
-// A spin lock holds its owner's KPCR (0 free). Raising IRQL changes only
-// the KPCR's byte: no interrupt or DPC runs on these threads.
+// A spin lock holds its owner's KPCR (0 free); a release stores 0 whoever
+// holds it, as the kernel's does. Raising IRQL changes only the KPCR's
+// byte: no interrupt or DPC runs on these threads.
 HLE(kKrnl, 177, KfAcquireSpinLock) {
   uint32_t lock = Arg(c, 0), pcr = Pcr(c);
   while (!Cas(lock, 0, pcr)) std::this_thread::yield();
@@ -340,7 +341,7 @@ HLE(kKrnl, 177, KfAcquireSpinLock) {
   return old;
 }
 HLE(kKrnl, 180, KfReleaseSpinLock) {
-  Cas(Arg(c, 0), Pcr(c), 0);
+  __atomic_store_n(Word(Arg(c, 0)), 0, __ATOMIC_SEQ_CST);
   Wr8(Pcr(c) + kPcrIrql, uint8_t(Arg(c, 1)));
   return 0;
 }
@@ -349,7 +350,7 @@ HLE(kKrnl, 77, KeAcquireSpinLockAtRaisedIrql) {
   return 0;
 }
 HLE(kKrnl, 137, KeReleaseSpinLockFromRaisedIrql) {
-  Cas(Arg(c, 0), Pcr(c), 0);
+  __atomic_store_n(Word(Arg(c, 0)), 0, __ATOMIC_SEQ_CST);
   return 0;
 }
 HLE(kKrnl, 133, KeRaiseIrqlToDpcLevel) {

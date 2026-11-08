@@ -66,6 +66,7 @@ __xex_import_slot_\name:
   FUNCTION 210, NtCreateFile
   FUNCTION 219, NtFlushBuffersFile
   FUNCTION 223, NtOpenFile
+  FUNCTION 226, NtPulseEvent
   FUNCTION 227, NtQueueApcThread
   FUNCTION 228, NtQueryDirectoryFile
   FUNCTION 231, NtQueryFullAttributesFile
@@ -100,12 +101,14 @@ __xex_import_slot_\name:
   FUNCTION 307, RtlMultiByteToUnicodeN
   FUNCTION 309, RtlNtStatusToDosError
   FUNCTION 315, sprintf
+  FUNCTION 319, RtlTimeFieldsToTime
   FUNCTION 320, RtlTimeToTimeFields
   FUNCTION 321, RtlTryEnterCriticalSection
   FUNCTION 322, RtlUnicodeStringToAnsiString
   FUNCTION 323, RtlUnicodeToMultiByteN
   FUNCTION 333, _vsnprintf
   FUNCTION 338, KeTlsAlloc
+  FUNCTION 339, KeTlsFree
   FUNCTION 340, KeTlsGetValue
   FUNCTION 341, KeTlsSetValue
   FUNCTION 404, XexCheckExecutablePrivilege

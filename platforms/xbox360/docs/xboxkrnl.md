@@ -64,7 +64,8 @@ here; on the console a KPCR belongs to a hardware thread.
   header); without one 1 MiB, as Xenia chose. At least 16 KiB, in whole
   4 KiB pages. Console check.
 - Dynamic TLS: the XEX's slot count, 1024 without TLS info (ReXGlue's
-  choice). Console check.
+  choice). KeTlsAlloc zeroes the slot it hands out in every thread, so a
+  slot freed and allocated again reads 0 (NT's TlsAlloc). Console check.
 - VSCR[NJ] is set in new threads, as operating systems for this VMX set
   it. Console check.
 
@@ -75,7 +76,8 @@ here; on the console a KPCR belongs to a hardware thread.
 - MmAllocatePhysicalMemoryEx(flags, size, protect, min, max, alignment):
   the protection's MEM_LARGE_PAGES (0x20000000) picks 64 KiB pages,
   MEM_16MB_PAGES (0x80000000) 16 MiB pages, otherwise 4 KiB; the
-  alignment and the bounds apply to the physical address.
+  alignment and the bounds apply to the physical address. The size is
+  committed in whole pages of that size.
 - NtAllocateVirtualMemory and NtFreeVirtualMemory follow NT: base and
   size in and out, MEM_RESERVE / MEM_COMMIT, MEM_DECOMMIT / MEM_RELEASE
   (size 0 releases the whole reservation; a size releases that range of
@@ -112,6 +114,14 @@ here; on the console a KPCR belongs to a hardware thread.
   STATUS_OBJECT_TYPE_MISMATCH if it is another type. Names compare
   exactly unless OBJ_CASE_INSENSITIVE (0x40) is set, as on NT, and go
   with the object's last reference. Other roots are fatal.
+- PulseEvent lets the threads waiting on the event when it is called
+  through, every one for a notification event, the first to begin
+  waiting for a synchronization event, and leaves the event unsignalled
+  (NT's). A thread in a wait-all that the pulse does not complete loses
+  it, as on NT.
+- Spin locks hold the owner's KPCR, 0 when free; KfReleaseSpinLock and
+  KeReleaseSpinLockFromRaisedIrql store 0 whoever holds the lock, as the
+  kernel's do.
 
 ## Modules
 - XexExecutableModuleHandle holds the address of the title's loader entry
@@ -172,6 +182,12 @@ here; on the console a KPCR belongs to a hardware thread.
   modes, apart), the rate at 0x14 and the standard at 0x18. The rate is
   50 Hz with the AV region's bit 23, the standard its bits 8-15 (Xenia).
 - The AV pack is 8, HDMI in Xenia's numbering. Console check.
+- VdInitializeScalerCommandBuffer fills the words the title passes (its
+  last argument) with type-2 no-ops and returns their count: titles'
+  Direct3D sizes its ring buffer by the count, which must not exceed
+  them. Ordinal 479 (KiApcNormalRoutineNop) is called by titles'
+  Direct3D as fn(packet, dwords) with the ME_INIT packet before it is
+  copied into the ring, and does nothing.
 - VdGpuClockInMHz is 500 (the Xenos's clock); VdGlobalDevice starts 0
   (titles store their device there); VdHSIOCalibrationLock is a critical
   section, which titles enter (spin count 10000, Xenia's).
@@ -284,8 +300,9 @@ here; on the console a KPCR belongs to a hardware thread.
   (Xenia's), the title's available pages (what no committed page or
   physical frame uses: on the console every committed page takes a
   physical one), its 0x2FFE0000 virtual bytes (Xenia's) and those
-  reserved in the virtual heaps, the highest physical page; pages by use
-  are 0. A title reads the totals and the title's available pages and
+  reserved in the virtual heaps, at most as many (the heaps hold more,
+  and XAPI's GlobalMemoryStatus subtracts the reserved bytes from the
+  total), the highest physical page; pages by use are 0. A title reads the totals and the title's available pages and
   virtual bytes. Console check.
 - KeEnableFpuExceptions(enable) sets the KTHREAD's flag at 0x71 (Xenia's
   layout); the C runtime's floating-point control calls it with whether
@@ -373,6 +390,15 @@ here; on the console a KPCR belongs to a hardware thread.
   42 characters), 512-byte sectors (Xenia notes code that needs that).
 - Files on the disc are read-only (FILE_ATTRIBUTE_READONLY), as on a
   disc image in Xenia.
+- A name with a backslash after it names a directory: XAPI's CreateFile
+  turns STATUS_FILE_IS_A_DIRECTORY into ERROR_PATH_NOT_FOUND for such a
+  name and ERROR_ACCESS_DENIED otherwise. Such a name of a file, or of
+  something to create that is not a directory, is
+  STATUS_OBJECT_NAME_INVALID, as on NT. Console check.
+- A directory with entries is not deleted: an open with
+  FILE_DELETE_ON_CLOSE and FileDispositionInformation set to delete fail
+  with STATUS_DIRECTORY_NOT_EMPTY, as NT's FAT driver does. Console
+  check.
 
 ## Calls
 - Arguments past the eighth are 8-byte slots of the caller's parameter

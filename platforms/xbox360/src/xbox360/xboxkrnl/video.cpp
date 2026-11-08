@@ -140,7 +140,8 @@ HLE(kKrnl, 603, VdSwap) {
 // output size, front buffer size, vertical filter, its parameters,
 // horizontal filter, its parameters, ?, buffer, words): the scaler's
 // commands; here the display is not scaled, so the words are type-2
-// no-ops. Returns the count.
+// no-ops. Returns the count, never more than `words`: titles' Direct3D
+// sizes its ring buffer by it.
 HLE(kKrnl, 453, VdInitializeScalerCommandBuffer) {
   uint32_t dest = Arg(c, 10), words = Arg(c, 11);
   for (uint32_t k = 0; k < words; k++) Wr32(dest + 4 * k, 0x80000000);
@@ -169,7 +170,9 @@ HLE(kKrnl, 454, VdIsHSIOTrainingSucceeded) { return 1; }
 HLE(kKrnl, 617, VdRetrainEDRAM) { return 0; }
 HLE(kKrnl, 618, VdRetrainEDRAMWorker) { return 0; }
 
-// KiApcNormalRoutineNop: an APC normal routine that does nothing.
+// KiApcNormalRoutineNop (the export's name): titles' Direct3D calls it as
+// fn(packet, dwords) with the ME_INIT packet it then copies into the ring
+// buffer. It does nothing, as its name says.
 HLE(kKrnl, 479, KiApcNormalRoutineNop) { return 0; }
 
 }  // namespace recomp::xbox360

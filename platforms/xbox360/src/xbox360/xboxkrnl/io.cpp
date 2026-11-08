@@ -185,6 +185,16 @@ uint32_t Open(uint32_t handle_ptr, uint32_t access, uint32_t attributes, uint32_
   if (exists && disposition == kCreate) return fail(kStatusObjectNameCollision);
   if (is_dir && (options & kNonDirectoryFile)) return fail(kStatusFileIsADirectory);
   if (exists && !is_dir && (options & kDirectoryFile)) return fail(kStatusNotADirectory);
+  // A name with a backslash after it is a directory's (XAPI's CreateFile
+  // tells ERROR_PATH_NOT_FOUND from ERROR_ACCESS_DENIED by it); a file's
+  // is invalid, as on NT. Console check.
+  if (loc.trailing_backslash && (exists ? !is_dir : !(options & kDirectoryFile)))
+    return fail(kStatusObjectNameInvalid);
+  // A directory with entries is not deleted: NT's FAT driver refuses it at
+  // the open, and at FileDispositionInformation. Console check.
+  std::error_code ec;
+  if (is_dir && (options & kDeleteOnClose) && !std::filesystem::is_empty(loc.host, ec) && !ec)
+    return fail(kStatusDirectoryNotEmpty);
   bool create = !exists, truncate = exists && !is_dir && disposition != kOpen && disposition != kOpenIf &&
                                     disposition != kCreate;
   if (!loc.device->writable && ((access & kWriteAccess) || create || truncate))
@@ -340,7 +350,14 @@ HLE(kKrnl, 247, NtSetInformationFile) {
         return done(StatusFromErrno(errno), 0);
       break;
     }
-    case kFileDisposition: f->delete_on_close = Rd8(info) != 0; break;
+    case kFileDisposition: {
+      bool remove = Rd8(info) != 0;
+      std::error_code ec;
+      if (remove && f->fd < 0 && !std::filesystem::is_empty(f->loc.host, ec) && !ec)
+        return done(kStatusDirectoryNotEmpty, 0);
+      f->delete_on_close = remove;
+      break;
+    }
     case kFileBasic: {
       // Times only: the attributes of a host file are its own.
       uint64_t write = Rd64(info + 0x10);

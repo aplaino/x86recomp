@@ -109,7 +109,8 @@ HLE(kKrnl, 238, NtQueryVirtualMemory) {
 // committed memory in the physical view the protection's page size picks
 // (MEM_LARGE_PAGES: 64 KiB at 0xA0000000, MEM_16MB_PAGES: 0xC0000000,
 // otherwise 4 KiB at 0xE0000000), its physical pages within [min, max]
-// (max 0: anywhere). Returns the address, 0 if none is free.
+// (max 0: anywhere), in whole pages of the view. Returns the address, 0 if
+// none is free.
 HLE(kKrnl, 186, MmAllocatePhysicalMemoryEx) {
   uint32_t size = Arg(c, 1), protect = Arg(c, 2), lo = Arg(c, 3), hi = Arg(c, 4), align = Arg(c, 5);
   Heap h = protect & kMemLargePages ? Heap::kPhysical64k
@@ -118,7 +119,7 @@ HLE(kKrnl, 186, MmAllocatePhysicalMemoryEx) {
   if (!hi) hi = kPhysicalSize - 1;
   uint32_t va = ReservePhysical(h, size, align, lo, hi, false);
   if (!va) return 0;
-  Commit(va, size, protect & ~(kMemLargePages | kMem16MbPages));
+  Commit(va, ReservationSize(va), protect & ~(kMemLargePages | kMem16MbPages));
   return va;
 }
 
@@ -156,9 +157,12 @@ HLE(kKrnl, 197, MmQueryAllocationSize) {
 // then pages by use), the highest physical page. A title reads the totals
 // and the title's available pages and virtual bytes (GlobalMemoryStatus).
 // The kernel's 0x100 pages and the title's 0x2FFE0000 virtual bytes are
-// Xenia's; the pages by use are left 0. Console check.
+// Xenia's; the reserved bytes are at most those (the virtual heaps hold
+// more, and GlobalMemoryStatus subtracts them from the total); the pages
+// by use are left 0. Console check.
 HLE(kKrnl, 198, MmQueryStatistics) {
-  constexpr uint32_t kSize = 0x68, kTotalPages = kPhysicalSize / 0x1000, kKernelPages = 0x100;
+  constexpr uint32_t kSize = 0x68, kTotalPages = kPhysicalSize / 0x1000, kKernelPages = 0x100,
+                     kTitleVirtual = 0x2FFE0000;
   uint32_t s = Arg(c, 0);
   if (!s) return kStatusInvalidParameter;
   if (Rd32(s) != kSize) return kStatusBufferTooSmall;
@@ -168,8 +172,8 @@ HLE(kKrnl, 198, MmQueryStatistics) {
   Wr32(s + 0x4, kTotalPages);
   Wr32(s + 0x8, kKernelPages);
   Wr32(s + 0xC, kTotalPages - kKernelPages - std::min(u.pages_in_use, kTotalPages - kKernelPages));
-  Wr32(s + 0x10, 0x2FFE0000);
-  Wr32(s + 0x14, u.virtual_reserved);
+  Wr32(s + 0x10, kTitleVirtual);
+  Wr32(s + 0x14, std::min(u.virtual_reserved, kTitleVirtual));
   Wr32(s + 0x64, kTotalPages - 1);
   return kStatusSuccess;
 }

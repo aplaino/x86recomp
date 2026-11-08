@@ -57,6 +57,9 @@ u32 RtlLeaveCriticalSection(void* cs);
 u32 RtlTryEnterCriticalSection(void* cs);
 u32 KeTlsAlloc(void);
 u32 KeTlsGetValue(u32 index);
+u32 KeTlsFree(u32 index);
+u32 NtPulseEvent(u32 handle, u32* previous);
+u32 RtlTimeFieldsToTime(const uint16_t* fields, uint64_t* time);
 u32 KeTlsSetValue(u32 index, u32 value);
 u32 sprintf(char* buf, const char* fmt, ...);
 u32 NtCreateFile(void);  // through NtCreateFile9
@@ -335,6 +338,10 @@ static void Physical(void) {
   u32 low = MmAllocatePhysicalMemoryEx(0, 0x10000, kPageReadWrite | kMemLargePages, 0x100000, 0x1FFFFF, 0x10000);
   CHECK(low && MmGetPhysicalAddress(low) >= 0x100000 && MmGetPhysicalAddress(low) + 0x10000 <= 0x200000);
   MmFreePhysicalMemory(0, low);
+  // Whole pages of the view are committed.
+  u32 part = MmAllocatePhysicalMemoryEx(0, 0x1000, kPageReadWrite | kMemLargePages, 0, 0, 0x10000), info[7];
+  CHECK(part && NtQueryVirtualMemory(part + 0x8000, info, 0) == 0 && info[4] == kMemCommit);
+  MmFreePhysicalMemory(0, part);
   MmFreePhysicalMemory(0, small);
   MmFreePhysicalMemory(0, large);
   MmFreePhysicalMemory(0, huge);
@@ -429,6 +436,10 @@ static void Threads(void) {
   shared.tls_index = KeTlsAlloc();
   CHECK(shared.tls_index != 0xFFFFFFFF);
   CHECK(KeTlsSetValue(shared.tls_index, 0x1111) && KeTlsGetValue(shared.tls_index) == 0x1111);
+  // A slot freed and handed out again reads 0.
+  u32 slot = KeTlsAlloc();
+  CHECK(KeTlsSetValue(slot, 5) && KeTlsFree(slot) && KeTlsAlloc() == slot && KeTlsGetValue(slot) == 0);
+  KeTlsFree(slot);
 
   // A worker created suspended, started, waiting on an event.
   shared.event[0] = 1 << 24;  // KeInitializeEvent: a synchronization event, not signalled
@@ -576,6 +587,10 @@ static void Objects(void) {
   CHECK(lock == (u32)pcr() && irql == 0);
   KfReleaseSpinLock(&lock, irql);
   CHECK(lock == 0);
+  // A release frees the lock whoever holds it.
+  lock = 0x1234;
+  KfReleaseSpinLock(&lock, irql);
+  CHECK(lock == 0);
   // An interlocked list: pop and flush.
   u32 nodes[3] = {(u32)(uintptr_t)&nodes[1], (u32)(uintptr_t)&nodes[2], 0};
   u32 head[2] = {(u32)(uintptr_t)&nodes[0], 3 << 16};
@@ -683,6 +698,12 @@ static void Files(void) {
   CHECK(OpenPath(&h, "d:\\data.bin", kGenericWrite, kOpen, kSync, io) == kStatusAccessDenied);
   CHECK(OpenPath(&h, "game:\\missing.bin", kGenericRead, kOpen, kSync, io) == kStatusObjectNameNotFound);
   CHECK(OpenPath(&h, "game:\\nodir\\x.bin", kGenericRead, kOpen, kSync, io) == kStatusObjectPathNotFound);
+  // A backslash after a name names a directory: a file's is invalid, a
+  // directory's opens (and is a directory to a file open).
+  CHECK(OpenPath(&h, "game:\\data.bin\\", kGenericRead, kOpen, kSync, io) == 0xC0000033);
+  CHECK(OpenPath(&h, "game:\\Sub\\", kGenericRead, kOpen, kSync | kNonDirectoryFile, io) == 0xC00000BA);
+  CHECK(OpenPath(&d, "game:\\Sub\\", kGenericRead, kOpen, kSync | kDirectoryFile, io) == 0);
+  NtClose(d);
   // A directory's entries, through a mask, one per query.
   u32 entry[32];
   struct Ansi mask;
@@ -711,6 +732,13 @@ static void Files(void) {
   v = 4;
   CHECK(NtSetInformationFile(h, io, &v, 8, 20) == 0);
   CHECK(NtFlushBuffersFile(h, io) == 0);
+  // A directory with entries is not deleted; a file to create with a
+  // backslash after its name is invalid.
+  u32 probe = 0;
+  uint8_t remove_dir = 1;
+  CHECK(OpenPath(&probe, "hdd:\\dir", kGenericRead, kOpen, kSync | kDirectoryFile | 0x1000, io) == 0xC0000101);
+  CHECK(NtSetInformationFile(d, io, &remove_dir, 1, 13) == 0xC0000101);
+  CHECK(OpenPath(&probe, "hdd:\\dir\\new\\", kGenericWrite, kCreate, kSync | kNonDirectoryFile, io) == 0xC0000033);
   // XAPI's root: the DOS devices directory (ObDosDevices, -3), as xam's
   // GetFileAttributesExA passes it.
   CHECK(QueryFullIn(0xFFFFFFFD, "D:\\data.bin", info) == 0 && info[5] == 32);
@@ -943,6 +971,41 @@ static void Gpu(void) {
   CHECK(query[8] == 0 && query[12] == 0 && query[15] == 0);
 }
 
+// A thread that waits on an event and counts itself through.
+static volatile u32 pulsed;
+static u32 PulseWaiter(void* arg) {
+  NtWaitForSingleObjectEx((u32)(uintptr_t)arg, 1, 0, 0);
+  __sync_fetch_and_add(&pulsed, 1);
+  return 0;
+}
+
+// PulseEvent lets the threads waiting through, all of them for a
+// notification event, one for a synchronization event, and leaves the
+// event unsignalled.
+static void Pulses(void) {
+  int64_t fifty_ms = -500000, zero = 0;
+  for (u32 type = 0; type < 2; type++) {
+    u32 e = 0, threads[2], id, previous = 9;
+    pulsed = 0;
+    CHECK(NtCreateEvent(&e, 0, type, 0) == 0);
+    for (u32 k = 0; k < 2; k++)
+      CHECK(ExCreateThread(&threads[k], 0, &id, (void*)thread_startup, (void*)PulseWaiter, (void*)(uintptr_t)e, 0) == 0);
+    KeDelayExecutionThread(1, 0, &fifty_ms);
+    CHECK(NtPulseEvent(e, &previous) == 0 && previous == 0);
+    CHECK(WaitFor(&pulsed, type ? 1 : 2));
+    KeDelayExecutionThread(1, 0, &fifty_ms);
+    CHECK(pulsed == (type ? 1 : 2) && NtWaitForSingleObjectEx(e, 1, 0, &zero) == 0x102);
+    if (type) {
+      CHECK(NtSetEvent(e, 0) == 0 && WaitFor(&pulsed, 2));
+    }
+    for (u32 k = 0; k < 2; k++) {
+      NtWaitForSingleObjectEx(threads[k], 1, 0, 0);
+      NtClose(threads[k]);
+    }
+    NtClose(e);
+  }
+}
+
 // ---- strings, statuses, the FPU flag ------------------------------------------
 static void Conversions(void) {
   uint16_t wide[8];
@@ -974,6 +1037,13 @@ static void Conversions(void) {
   time = 6 * 864000000000ull;  // 1601-01-07, a Sunday
   RtlTimeToTimeFields(&time, f);
   CHECK(f[2] == 7 && f[7] == 0);
+  // And back, the weekday ignored; no such date is FALSE.
+  uint16_t fields[8] = {2006, 11, 7, 12, 34, 56, 789, 6};
+  CHECK(RtlTimeFieldsToTime(fields, &time) == 1 && time == 0x1c7026921f53c50ull);
+  fields[1] = 2, fields[2] = 29;
+  CHECK(RtlTimeFieldsToTime(fields, &time) == 0 && time == 0x1c7026921f53c50ull);
+  uint16_t first[8] = {1601, 1, 1, 0, 0, 0, 0, 0};
+  CHECK(RtlTimeFieldsToTime(first, &time) == 1 && time == 0);
   volatile uint8_t* fpu = (volatile uint8_t*)(uintptr_t)(*At((u32)pcr() + 0x100) + 0x71);
   KeEnableFpuExceptions(1);
   CHECK(*fpu == 1);
@@ -1193,6 +1263,12 @@ static void Xam(void) {
   CHECK(MmQueryStatistics(stats) == 0 && stats[1] == 0x20000 && stats[3] > 0 && stats[3] < 0x20000 && stats[5] > 0);
   stats[0] = 0x60;
   CHECK(MmQueryStatistics(stats) == 0xC0000023);
+  // Reserved virtual bytes are at most the title's total.
+  u32 vbase = 0, vsize = 0x30000000, none = 0;
+  CHECK(NtAllocateVirtualMemory(&vbase, &vsize, kMemReserve, kPageReadWrite, 0) == 0);
+  stats[0] = 0x68;
+  CHECK(MmQueryStatistics(stats) == 0 && stats[5] == stats[4]);
+  CHECK(NtFreeVirtualMemory(&vbase, &none, kMemRelease, 0) == 0);
   // The music player's playback controller, in-process and as a request.
   u32 controller = 9, locked = 9;
   u32 get[3] = {2, (u32)(uintptr_t)&controller, (u32)(uintptr_t)&locked};
@@ -1684,6 +1760,7 @@ int main(void) {
   Physical();
   Threads();
   Objects();
+  Pulses();
   Strings();
   Variables();
   Files();

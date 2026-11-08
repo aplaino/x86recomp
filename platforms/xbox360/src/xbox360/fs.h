@@ -42,6 +42,8 @@ struct Location {
   std::filesystem::path host;
   std::string guest;
   bool exists = false;
+  // The path ends in a backslash after a name: it names a directory.
+  bool trailing_backslash = false;
 };
 // kStatusSuccess, kStatusObjectPathNotFound (no device, or a directory on
 // the way is missing) or kStatusObjectNameInvalid.

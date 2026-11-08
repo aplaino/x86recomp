@@ -50,12 +50,15 @@ HLE(kKrnl, 25, ExTerminateThread) { ExitThread(Arg(c, 0)); }
 
 HLE(kKrnl, 102, KeGetCurrentProcessType) { return kTitleProcess; }
 
+// KeTlsAlloc: a free slot, zeroed in every thread, so that a slot freed
+// and allocated again reads 0 (NT's TlsAlloc; console check).
 HLE(kKrnl, 338, KeTlsAlloc) {
   std::lock_guard<std::mutex> g(g_tls);
   g_tls_used.resize(Process().tls_slots);
   for (uint32_t i = 0; i < g_tls_used.size(); i++)
     if (!g_tls_used[i]) {
       g_tls_used[i] = true;
+      ZeroTlsSlot(i);
       return i;
     }
   return 0xFFFFFFFF;

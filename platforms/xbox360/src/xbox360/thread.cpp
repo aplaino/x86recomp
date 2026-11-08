@@ -267,6 +267,10 @@ Thread* CurrentThread() { return t_current; }
 uint32_t KThread(const Thread* t) { return t ? t->kthread : 0; }
 uint32_t ThreadId(const Thread* t) { return t->id; }
 uint32_t TlsSlots(const Thread* t) { return t->tls + g_process.tls_data_size; }
+void ZeroTlsSlot(uint32_t slot) {
+  std::lock_guard<std::mutex> g(g_threads);
+  for (auto& [kthread, t] : g_by_kthread) Wr32(TlsSlots(t) + 4 * slot, 0);
+}
 void SetLastError(uint32_t error) { Wr32(t_current->kthread + kKtLastError, error); }
 uint32_t LastError() { return Rd32(t_current->kthread + kKtLastError); }
 

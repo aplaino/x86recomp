@@ -64,8 +64,9 @@ constexpr uint32_t kDispatcherHeaderSize = 0x10, kSemaphoreSize = 0x14, kMutantS
 void InitObject(uint32_t obj, ObjectType type, int32_t signal_state);
 // Changes an object's signal state and wakes its waiters, under the
 // dispatcher lock: SetSignal returns the previous state (KeSetEvent,
-// KeResetEvent), PulseEvent sets it, lets current waiters through and
-// clears it again.
+// KeResetEvent), PulseEvent lets the threads waiting on it through (all
+// of them, or the first for a synchronization event) and leaves it
+// unsignalled.
 int32_t SetSignal(uint32_t obj, int32_t state);
 int32_t PulseEvent(uint32_t obj);
 // KeReleaseSemaphore: false (and no change) if the count would exceed the
@@ -192,6 +193,8 @@ void SetLastError(uint32_t error);
 uint32_t LastError();
 // The guest address of a thread's dynamic TLS slots (KeTlsGetValue).
 uint32_t TlsSlots(const Thread* t);
+// Zeroes a dynamic TLS slot in every thread (KeTlsAlloc).
+void ZeroTlsSlot(uint32_t slot);
 // Its processor (KPCR and KTHREAD), 0-5.
 void SetProcessor(Thread* t, uint32_t cpu);
 // Suspend counts (KeSuspendThread, KeResumeThread): the previous count.

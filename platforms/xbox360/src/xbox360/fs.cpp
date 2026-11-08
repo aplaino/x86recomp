@@ -121,7 +121,7 @@ uint32_t Resolve(const std::string& path, Location& out) {
     if (c.find_first_of("/\0", 0, 2) != std::string::npos) return kStatusObjectNameInvalid;
     parts.push_back(c);
   }
-  out = {dev, dev->root, dev->name, true};
+  out = {dev, dev->root, dev->name, true, !parts.empty() && rest.ends_with('\\')};
   for (size_t k = 0; k < parts.size(); k++) {
     std::string found = FindEntry(out.host, parts[k]);
     bool last = k + 1 == parts.size();

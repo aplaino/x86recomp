@@ -7,9 +7,11 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 #include "ppc/fatal.h"
 #include "xbox360/hle.h"
@@ -38,6 +40,13 @@ struct ApcQueues {
   bool closed = false;
 };
 std::unordered_map<uint32_t, ApcQueues> g_apcs;
+
+// The threads waiting on each object, in the order they began, and the
+// pulses (PulseEvent) that let a waiter through, by thread and object:
+// a pulse leaves the event's state unsignalled. Under the dispatcher
+// lock.
+std::unordered_map<uint32_t, std::vector<uint32_t>> g_waiters;
+std::set<std::pair<uint32_t, uint32_t>> g_pulses;
 
 // Whether a wait of the current thread has an APC to run: a kernel one
 // outside a critical region, a user one in an alertable wait.
@@ -122,19 +131,19 @@ int32_t SetSignal(uint32_t obj, int32_t state) {
   return old;
 }
 
+// NT's: every thread waiting on a notification event goes through, the
+// first waiting on a synchronization event; the event is left unsignalled.
 int32_t PulseEvent(uint32_t obj) {
-  int32_t old;
-  {
-    std::lock_guard<std::mutex> g(g_dispatch);
-    old = State(obj);
-    SetState(obj, 1);
+  std::lock_guard<std::mutex> g(g_dispatch);
+  int32_t old = State(obj);
+  SetState(obj, 0);
+  if (auto it = g_waiters.find(obj); it != g_waiters.end()) {
+    for (uint32_t kthread : it->second) {
+      g_pulses.insert({kthread, obj});
+      if (Rd8(obj) == kSynchronizationEvent) break;
+    }
     g_wake.notify_all();
   }
-  // Waiters check again once the lock is free; give them the chance
-  // before the event is cleared.
-  std::this_thread::yield();
-  std::lock_guard<std::mutex> g(g_dispatch);
-  SetState(obj, 0);
   return old;
 }
 
@@ -169,21 +178,35 @@ uint32_t WaitObjects(const uint32_t* objs, uint32_t count, bool wait_all, Clock:
                      bool alertable) {
   uint32_t me = KThread(CurrentThread());
   std::unique_lock<std::mutex> l(g_dispatch);
+  for (uint32_t i = 0; i < count; i++) g_waiters[objs[i]].push_back(me);
+  // A pulse the check below does not take is gone, as on NT, where it
+  // satisfies a wait only when it happens.
+  auto ready = [&](uint32_t o) { return Signaled(o, me) || g_pulses.count({me, o}); };
+  auto done = [&](uint32_t status) {
+    for (uint32_t i = 0; i < count; i++) {
+      auto& w = g_waiters[objs[i]];
+      w.erase(std::find(w.begin(), w.end(), me));
+      if (w.empty()) g_waiters.erase(objs[i]);
+      g_pulses.erase({me, objs[i]});
+    }
+    return status;
+  };
   for (bool last = false;; last = Clock::now() >= deadline) {
     if (wait_all) {
       bool all = true;
-      for (uint32_t i = 0; i < count && all; i++) all = Signaled(objs[i], me);
+      for (uint32_t i = 0; i < count && all; i++) all = ready(objs[i]);
       if (all) {
         bool abandoned = false;
         for (uint32_t i = 0; i < count; i++) abandoned |= Acquire(objs[i], me);
-        return abandoned ? kStatusAbandoned : kStatusSuccess;
+        return done(abandoned ? kStatusAbandoned : kStatusSuccess);
       }
     } else {
       for (uint32_t i = 0; i < count; i++)
-        if (Signaled(objs[i], me)) return (Acquire(objs[i], me) ? kStatusAbandoned : 0) + i;
+        if (ready(objs[i])) return done((Acquire(objs[i], me) ? kStatusAbandoned : 0) + i);
     }
-    if (ApcDue(me, alertable)) return kApcDue;
-    if (last) return kStatusTimeout;
+    for (uint32_t i = 0; i < count; i++) g_pulses.erase({me, objs[i]});
+    if (ApcDue(me, alertable)) return done(kApcDue);
+    if (last) return done(kStatusTimeout);
     if (deadline == Clock::time_point::max()) g_wake.wait(l);
     else g_wake.wait_until(l, deadline);
   }

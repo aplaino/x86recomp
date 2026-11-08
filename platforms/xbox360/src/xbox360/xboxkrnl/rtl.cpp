@@ -179,6 +179,23 @@ HLE(kKrnl, 320, RtlTimeToTimeFields) {
   return 0;
 }
 
+// RtlTimeFieldsToTime(*fields, *time): RtlTimeToTimeFields's inverse,
+// the weekday ignored. FALSE, the time left alone, for fields that are no
+// date from 1601 on, as NT's. XAPI's local time calls it for the time
+// zone's daylight saving dates.
+HLE(kKrnl, 319, RtlTimeFieldsToTime) {
+  using namespace std::chrono;
+  uint32_t fields = Arg(c, 0);
+  uint16_t v[7];
+  for (uint32_t k = 0; k < 7; k++) v[k] = Rd16(fields + 2 * k);
+  year_month_day date{year{v[0]}, month{v[1]}, day{v[2]}};
+  if (v[0] < 1601 || !date.ok() || v[3] > 23 || v[4] > 59 || v[5] > 59 || v[6] > 999) return 0;
+  int64_t days = int64_t(sys_days{date}.time_since_epoch().count()) + 134774;
+  uint64_t ms = ((uint64_t(days) * 24 + v[3]) * 60 + v[4]) * 60000 + v[5] * 1000u + v[6];
+  Wr64(Arg(c, 1), ms * 10000);
+  return 1;
+}
+
 // RtlFreeAnsiString(string): its buffer, from the kernel pool.
 HLE(kKrnl, 295, RtlFreeAnsiString) {
   uint32_t s = Arg(c, 0);
