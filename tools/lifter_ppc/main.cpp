@@ -359,6 +359,25 @@ int main(int argc, char** argv) {
   char hash[32];
   std::snprintf(hash, sizeof hash, "0x%llXull",
                 static_cast<unsigned long long>(p.text_hash()));
+  // The frame descriptions (an array of none still needs an element).
+  std::string frames, saves;
+  uint32_t nframes = 0, nsaves = 0, unreadable = 0;
+  for (const lifter::ppc::Frame& f : p.Frames()) {
+    char b[128];
+    std::snprintf(b, sizeof b, "    {0x%08llXu, 0x%08llXu, %d, %d, %u, %u, %zu, %u},\n",
+                  static_cast<unsigned long long>(f.va), static_cast<unsigned long long>(f.end),
+                  f.sp, f.fp_offset, f.fp, f.unreadable ? 1u : 0u, f.saves.size(), nsaves);
+    frames += b;
+    for (const recomp::ppc::LiftedSave& v : f.saves) {
+      std::snprintf(b, sizeof b, "    {%u, %u, %d},\n", v.reg, v.size, v.where);
+      saves += b;
+    }
+    nframes++;
+    nsaves += uint32_t(f.saves.size());
+    unreadable += f.unreadable;
+  }
+  if (frames.empty()) frames = "    {},\n";
+  if (saves.empty()) saves = "    {},\n";
   bool ok = true;
   for (int k = 0; k < files; k++) {
     char name[32];
@@ -369,14 +388,17 @@ int main(int argc, char** argv) {
                                      entries + "};\nextern const uint32_t kLiftedFunctionCount = " +
                                      std::to_string(p.functions().size()) +
                                      ";\nextern const uint64_t kLiftedTextHash = " + hash +
-                                     ";\n\n}  // namespace recomp::ppc\n") &&
+                                     ";\n\nextern const LiftedFrame kLiftedFrames[] = {\n" + frames +
+                                     "};\nextern const uint32_t kLiftedFrameCount = " +
+                                     std::to_string(nframes) + ";\nextern const LiftedSave kLiftedSaves[] = {\n" +
+                                     saves + "};\n\n}  // namespace recomp::ppc\n") &&
        ok;
   if (!forms.empty()) ok = WriteForms(p, forms) && ok;
   for (const std::string& w : p.warnings())
     std::fprintf(stderr, "recomp_lift_ppc: warning: %s\n", w.c_str());
   std::printf(
       "recomp_lift_ppc: %zu functions (%zu import thunks), %zu instructions, %zu jump tables, "
-      "%zu undecoded\n",
-      p.functions().size(), imports, total, tables, invalid);
+      "%zu undecoded, %u frames (%u unreadable)\n",
+      p.functions().size(), imports, total, tables, invalid, nframes, unreadable);
   return ok ? 0 : 1;
 }

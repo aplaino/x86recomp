@@ -51,4 +51,22 @@ void Dispatch(Ctx& c, uint64_t target, uint64_t va) {
   fn(c);
 }
 
+// The continuation runs in the resumable function's catch handler, where
+// another throw would leave that function: a later one into the same frame
+// is caught here.
+void Resume(Ctx& c, GuestResume r, uint32_t lo, uint32_t hi) {
+  for (;;) {
+    try {
+      if (!LookupLifted(r.target))
+        Fatal(&c, "an unwind continues at %x in frame %x, which was not lifted as a resume target",
+              r.target, r.frame);
+      Dispatch(c, r.target, 0);
+      return;
+    } catch (const GuestResume& again) {
+      if (again.frame != r.frame || again.target < lo || again.target >= hi) throw;
+      r = again;
+    }
+  }
+}
+
 }  // namespace recomp::ppc

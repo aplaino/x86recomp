@@ -595,7 +595,16 @@ std::string EmitFunction(const Program& p, const Function& f) {
     if (!ppc::IsTerminator(i) && (next == f.insns.end() || next->first != i.va + 4))
       body += "  " + e.Branch(i.va, i.va + 4) + "\n";
   }
-  s += "void " + FunctionName(f.va) + "(Ctx& c) {\n" + e.Prologue() + body + "}\n\n";
+  if (f.resumable) {
+    // An unwind may continue in this activation (GuestResume): its frame
+    // is r1 on entry.
+    std::string lo = Hex(f.va), hi = Hex(f.end);
+    s += "void " + FunctionName(f.va) + "(Ctx& c) {\n  const uint32_t ef = uint32_t(c.r[1]);\n  try {\n" +
+         e.Prologue() + body + "  } catch (const GuestResume& g) {\n    if (g.frame != ef || g.target < " +
+         lo + " || g.target >= " + hi + ") throw;\n    Resume(c, g, " + lo + ", " + hi + ");\n  }\n}\n\n";
+  } else {
+    s += "void " + FunctionName(f.va) + "(Ctx& c) {\n" + e.Prologue() + body + "}\n\n";
+  }
   return Declarations(e.callees()) + s;
 }
 

@@ -308,6 +308,7 @@ Function Program::Build(uint64_t start, uint64_t end, std::set<uint64_t>& found)
   Function f;
   f.va = start;
   f.end = end;
+  f.resumable = img_.resumable.count(start) != 0;
   auto imp = img_.imports.find(start);
   if (imp != img_.imports.end()) {
     f.import = &imp->second;
@@ -359,16 +360,9 @@ Function Program::Build(uint64_t start, uint64_t end, std::set<uint64_t>& found)
   return f;
 }
 
-// Addresses the module holds as constants, words in its data and LIS /
-// ADDI (ORI) pairs in the code reached, that land in code past the last
-// instruction its function reaches (in the gap after its return): a
-// function called only through a pointer that has no .pdata entry, such as
-// a one-branch thunk between two functions' padding. A constant in a
-// function's reached code, or on padding (0) or an undecodable word, is
-// not one.
-std::set<uint64_t> Program::PointerStarts(const std::set<uint64_t>& starts) const {
+std::set<uint64_t> Program::Constants(bool data) const {
   std::set<uint64_t> consts;
-  for (uint64_t off = 0; off + 4 <= img_.bytes.size(); off += 4)
+  for (uint64_t off = 0; data && off + 4 <= img_.bytes.size(); off += 4)
     if (!InText(img_.base + off)) consts.insert(Word(img_.base + off));
   for (const auto& [va, f] : funcs_)
     for (const auto& [iva, i] : f.insns) {
@@ -377,8 +371,17 @@ std::set<uint64_t> Program::PointerStarts(const std::set<uint64_t>& starts) cons
           (i.op == Op::kOri && ConstOf(iva, f.va, i.rd, v)))
         consts.insert(uint32_t(i.op == Op::kAddi ? v + uint64_t(i.imm) : v | uint64_t(i.imm)));
     }
+  return consts;
+}
+
+// Constants (Constants) that land in code past the last instruction their
+// function reaches (in the gap after its return): a function called only
+// through a pointer that has no .pdata entry, such as a one-branch thunk
+// between two functions' padding. A constant in a function's reached code,
+// or on padding (0) or an undecodable word, is not one.
+std::set<uint64_t> Program::PointerStarts(const std::set<uint64_t>& starts) const {
   std::set<uint64_t> out;
-  for (uint64_t t : consts) {
+  for (uint64_t t : Constants(true)) {
     if (t % 4 || !InText(t) || starts.count(t) || !Word(t) ||
         ppc::Decode(t, Word(t), img_.cpu).op == Op::kInvalid)
       continue;
@@ -387,6 +390,31 @@ std::set<uint64_t> Program::PointerStarts(const std::set<uint64_t>& starts) cons
       const Function& f = std::prev(it)->second;
       if (t < f.end && f.insns.lower_bound(t) != f.insns.end()) continue;
     }
+    out.insert(t);
+  }
+  return out;
+}
+
+// Where an unwind may continue a resumable function: the addresses in it
+// the image names (Image::resume_targets) and the constants the code
+// builds (Constants) that land on an instruction it reaches, as the
+// continuation after a catch block, whose address the catch block's code
+// returns. Each becomes a start of its own (overlapping the function, whose
+// code is unchanged): the code a GuestResume runs.
+std::set<uint64_t> Program::ResumeStarts(const std::set<uint64_t>& starts) const {
+  std::set<uint64_t> cands = img_.resume_targets, out;
+  std::set<uint64_t> consts = Constants(false);
+  cands.insert(consts.begin(), consts.end());
+  for (uint64_t t : cands) {
+    if (t % 4 || starts.count(t)) continue;
+    auto r = img_.resumable.upper_bound(t);
+    if (r == img_.resumable.begin()) continue;
+    auto f = funcs_.find(*std::prev(r));
+    if (f == funcs_.end() || t <= f->second.va || t >= f->second.end) continue;
+    bool named = img_.resume_targets.count(t) != 0;
+    if (named ? !Word(t) || ppc::Decode(t, Word(t), img_.cpu).op == Op::kInvalid
+              : !f->second.insns.count(t))
+      continue;
     out.insert(t);
   }
   return out;
@@ -424,7 +452,8 @@ void Program::Discover() {
       grew = true;
     }
     if (!grew) {
-      std::set<uint64_t> more = PointerStarts(starts);
+      std::set<uint64_t> more = PointerStarts(starts), resume = ResumeStarts(starts);
+      more.insert(resume.begin(), resume.end());
       if (more.empty()) break;
       starts.insert(more.begin(), more.end());
     }

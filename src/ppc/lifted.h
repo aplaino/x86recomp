@@ -56,6 +56,44 @@ void RegisterLiftedFunctions(const LiftedFn* fns, uint32_t count, uint64_t text_
 // guest thread runs, as the table is not locked.
 void RegisterGuestFunctions(const LiftedFn* fns, uint32_t count);
 
+// What a function's prologue does, as the lifter read it (the image reader
+// gives the prologue's length), for walking the guest stack (ppc/unwind.h):
+// where it leaves the stack pointer and where the values the registers had
+// on entry are once it has run. Emitted into generated/table.cpp, in
+// address order, for the functions whose prologue the image describes.
+struct LiftedFrame {
+  uint32_t va, end;    // the function's range
+  int32_t sp;          // r1 after the prologue: r1 on entry + sp
+  int32_t fp_offset;   // fp != 0: GPR fp after the prologue = r1 on entry + fp_offset
+  uint8_t fp;
+  uint8_t unreadable;  // 1: the prologue does something the lifter does not follow
+  uint16_t saves;      // its saves, LiftedSave [first, first + saves)
+  uint32_t first;
+};
+// Register ids of LiftedSave.
+inline constexpr uint8_t kSaveGpr = 0, kSaveLr = 32, kSaveCr = 33, kSaveFpr = 64, kSaveVr = 128;
+// A register's value on entry: `size` bytes at r1 on entry + `where`, or
+// with size 0 in GPR `where` after the prologue.
+struct LiftedSave {
+  uint8_t reg, size;
+  int32_t where;
+};
+void RegisterLiftedFrames(const LiftedFrame* frames, uint32_t count, const LiftedSave* saves);
+
+// Thrown to continue at `target` in the activation of a lifted function
+// whose r1 on entry was `frame` (an exception's unwind ending in a frame
+// further up the stack), with the context already holding the registers
+// to continue with. Caught by that function if the lifter made it
+// resumable and `target` is in its range, which continues there with
+// Resume(); every other function lets it pass.
+struct GuestResume {
+  uint32_t target, frame;
+};
+// Runs the code at r.target (a function the lifter started there) and
+// again for each later GuestResume into the same frame and range
+// [lo, hi) while that code runs.
+void Resume(Ctx& c, GuestResume r, uint32_t lo, uint32_t hi);
+
 // Runtime services called from lifted code. `va` is always the guest
 // address of the instruction making the call, for diagnostics.
 void Dispatch(Ctx& c, uint64_t target, uint64_t va);  // BCCTR, BCLR to a non-return
