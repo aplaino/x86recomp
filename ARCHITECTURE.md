@@ -137,6 +137,19 @@ emit that function's body as `f_<VA>_lifted`; every call site and the
 dispatch table still reach `f_<VA>`, which the game project defines (in
 `recomp::gen`) and which may call the lifted body.
 
+### Shared native functions
+Code that many programs link statically (a compiler's runtime library
+above all) is replaced once, here, and bound to each program's copy:
+`native <va> <name>` in a manifest emits the lifted body as
+`f_<VA>_lifted` too, and `f_<VA>` (generated/natives.cpp) calls
+`recomp::native::<name>(Ctx&, GuestFn original)`, which may hand the
+call to the original. The functions are behaviour, not addresses: a
+library's own name and version say what they reimplement, and a program
+names its copies in its manifest. Each library comes with an oracle
+test that a game project runs against its own EXE, lifting the bound
+originals at build time; a binding without a check fails it. They are
+static libraries, linked into the program like its own replacements.
+
 ## Decisions
 
 ### Guest arena

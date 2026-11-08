@@ -160,6 +160,15 @@ bool Program::LoadManifest(const std::string& path, std::string* err) {
       entries.insert(va);
       replaced.insert(va);
       if (!name.empty()) names[va] = name;
+    } else if (kind == "native") {
+      if (name.empty()) {
+        *err = path + ":" + std::to_string(no) + ": native needs a function name";
+        return false;
+      }
+      entries.insert(va);
+      replaced.insert(va);
+      natives[va] = name;
+      names[va] = name;
     } else {
       *err = path + ":" + std::to_string(no) + ": unknown directive " + kind;
       return false;

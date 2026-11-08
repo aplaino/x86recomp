@@ -79,6 +79,9 @@ struct Program {
   std::set<uint64_t> replaced;                // manifest: the game project
                                               // defines f_X; the lifted body
                                               // is emitted as f_X_lifted
+  std::map<uint64_t, std::string> natives;    // manifest: replaced by a
+                                              // shared native function
+                                              // (recomp::native::<name>)
   std::set<uint64_t> resume_sites;            // manifest: calls/jmps that
                                               // abandon the stack (SEH,
                                               // longjmp)
