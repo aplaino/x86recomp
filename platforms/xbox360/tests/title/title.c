@@ -103,6 +103,7 @@ u32 seh_outer(u32 code);
 u32 own_frame(u32 code);
 u32 capture(void* context);
 u32 back_outer(void);
+u32 sj_caller(void);
 extern u32 seh_log[16];
 u32 XAudioRegisterRenderDriverClient(u32* registration, u32* driver);
 u32 XAudioUnregisterRenderDriverClient(u32 driver);
@@ -2139,6 +2140,9 @@ static void Exceptions(void) {
   for (int k = 0; k < 16; k++) seh_log[k] = 0;
   CHECK(back_outer() == 0x444);
   CHECK(seh_log[6] == 1);
+
+  // longjmp: a blr to a frame further up, through a frame in between.
+  CHECK(sj_caller() == 0x505);
 
   // The L2 window is guest memory.
   CHECK(KeLockL2(0, 0x7F100000, 0x20000, 1, 1) == 0);

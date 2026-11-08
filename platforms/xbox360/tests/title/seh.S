@@ -376,6 +376,83 @@ __xex_pdata_\name:
   blr
   .size back_handler, .-back_handler
 
+// sj_setjmp(buffer): saves r1, the return address, r30 and r31 in the
+// buffer and returns 0, as setjmp does.
+  .p2align 2
+  FUNC sj_setjmp
+  mflr 0
+  stw 0, 4(3)
+  std 1, 8(3)
+  std 31, 16(3)
+  std 30, 24(3)
+  li 3, 0
+  blr
+  .size sj_setjmp, .-sj_setjmp
+
+// sj_longjmp(buffer, value): back to where sj_setjmp returned, with r3 the
+// value: the registers from the buffer, then a blr to the saved return
+// address with r1 that frame's.
+  .p2align 2
+  FUNC sj_longjmp
+  ld 31, 16(3)
+  ld 30, 24(3)
+  lwz 5, 4(3)
+  mtlr 5
+  ld 1, 8(3)
+  mr 3, 4
+  blr
+  .size sj_longjmp, .-sj_longjmp
+
+// sj_caller(): sj_setjmp on a buffer in its frame; on its first return
+// changes r31 and calls sj_deep, which jumps back; the second return gives
+// 0x500 + the value (-1 if r31 is not back to the value it had at the
+// setjmp).
+  .p2align 2
+  PDATA sj_caller, 4
+  FUNC sj_caller
+  mflr 12
+  stw 12, -8(1)
+  std 31, -16(1)
+  stwu 1, -0x80(1)
+  lis 31, MARK_OWN
+  addi 3, 1, 0x50
+  bl sj_setjmp
+  cmpwi 3, 0
+  bne 1f
+  li 31, 0
+  addi 3, 1, 0x50
+  bl sj_deep
+  li 3, -2
+  b 2f
+1:
+  addi 3, 3, 0x500
+  lis 0, MARK_OWN
+  cmpw 31, 0
+  beq 2f
+  li 3, -1
+2:
+  addi 1, 1, 0x80
+  lwz 12, -8(1)
+  mtlr 12
+  ld 31, -16(1)
+  blr
+  .size sj_caller, .-sj_caller
+
+// sj_deep(buffer): a frame between the setjmp and the longjmp.
+  .p2align 2
+  PDATA sj_deep, 3
+  FUNC sj_deep
+  mflr 12
+  stw 12, -8(1)
+  stwu 1, -0x60(1)
+  li 4, 5
+  bl sj_longjmp
+  addi 1, 1, 0x60
+  lwz 12, -8(1)
+  mtlr 12
+  blr
+  .size sj_deep, .-sj_deep
+
   .data
   .p2align 2
 // count, then per scope: begin, end, filter (or __finally), __except.
