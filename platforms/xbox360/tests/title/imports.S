@@ -184,6 +184,35 @@ __xex_import_slot_\name:
   FUNCTION 781, XamVoiceHeadsetPresent, 1
   FUNCTION 782, XamVoiceSubmitPacket, 1
   FUNCTION 783, XamVoiceClose, 1
+  FUNCTION 2, NetDll_WSACleanup, 1
+  FUNCTION 3, NetDll_socket, 1
+  FUNCTION 4, NetDll_closesocket, 1
+  FUNCTION 6, NetDll_ioctlsocket, 1
+  FUNCTION 7, NetDll_setsockopt, 1
+  FUNCTION 8, NetDll_getsockopt, 1
+  FUNCTION 9, NetDll_getsockname, 1
+  FUNCTION 11, NetDll_bind, 1
+  FUNCTION 12, NetDll_connect, 1
+  FUNCTION 18, NetDll_recv, 1
+  FUNCTION 20, NetDll_recvfrom, 1
+  FUNCTION 22, NetDll_send, 1
+  FUNCTION 24, NetDll_sendto, 1
+  FUNCTION 26, NetDll_inet_addr, 1
+  FUNCTION 27, NetDll_WSAGetLastError, 1
+  FUNCTION 29, NetDll_WSACreateEvent, 1
+  FUNCTION 52, NetDll_XNetCleanup, 1
+  FUNCTION 53, NetDll_XNetRandom, 1
+  FUNCTION 54, NetDll_XNetCreateKey, 1
+  FUNCTION 55, NetDll_XNetRegisterKey, 1
+  FUNCTION 56, NetDll_XNetUnregisterKey, 1
+  FUNCTION 57, NetDll_XNetXnAddrToInAddr, 1
+  FUNCTION 67, NetDll_XNetDnsLookup, 1
+  FUNCTION 68, NetDll_XNetDnsRelease, 1
+  FUNCTION 69, NetDll_XNetQosListen, 1
+  FUNCTION 70, NetDll_XNetQosLookup, 1
+  FUNCTION 72, NetDll_XNetQosRelease, 1
+  FUNCTION 73, NetDll_XNetGetTitleXnAddr, 1
+  FUNCTION 74, NetDll_XNetGetDebugXnAddr, 1
   VARIABLE 27, ExThreadObjectType
   VARIABLE 173, KeTimeStampBundle
   VARIABLE 344, XboxKrnlVersion

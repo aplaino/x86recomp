@@ -84,16 +84,108 @@ only a console can settle.
   wrapper then reports open). Console check.
 
 ## Networking
-- There is no network interface: a console with no cable. NetDll_* take
-  the caller first, a title (1) or the system (2), and refuse others with
-  WSAEINVAL (xam's code). NetDll_WSAStartup fills WSADATA as xam does:
-  the version asked for, the highest 2.2, empty description and status,
-  no limits. NetDll_XNetStartup succeeds. Their Ex forms (WSAStartupEx,
-  XNetStartupEx, which titles call through XexGetProcedureAddress on newer
-  systems) take the title's version too, which xam hands on to its network
-  stack unchecked: the same here. NetDll_XNetGetEthernetLinkStatus
-  returns 0, no link (xam returns 0 whenever the NIC's link bit is clear,
-  and does not check the caller).
+xam has its own TCP/IP stack behind the NetDll_* exports (xam's code,
+decompiled; what is chosen says so). There is no network interface here:
+a console with no cable connected.
+- Startup: NetDll_* take the caller first, a title (1) or the system (2);
+  WSAStartup and XNetStartup refuse others with WSAEINVAL and count per
+  caller, as do their cleanups (WSANOTINITIALISED past zero; XNetCleanup
+  returns the error, WSACleanup sets it). A caller's sockets close when
+  its Winsock count ends; its keys and security associations go when
+  both end; the stack (DNS lookups and QoS included) with the last
+  caller. Winsock calls need WSAStartup (WSANOTINITIALISED). WSADATA: the
+  version asked for, the highest 2.2, empty description and status, no
+  limits. The Ex forms (WSAStartupEx, XNetStartupEx, which titles call
+  through XexGetProcedureAddress) take the title's version too, passed on
+  unchecked. A caller's settings come from its first startup's
+  XNetStartupParams (WSAStartup's: the defaults): a 13- or 0x4C-byte
+  structure, each byte clamped to xam's bounds, 0 the default. The
+  defaults: 8 datagram and 32 stream sockets, 16 KiB buffers, 8 keys, 32
+  security associations, QoS data 256 bytes, probes every 2 s with 3
+  retries, TTL 64, a 20 s TCP connect timeout, 60 s linger.
+- The console's address: NetDll_XNetGetEthernetLinkStatus returns 0, no
+  link (xam does not check the caller). XNetGetTitleXnAddr returns
+  XNET_GET_XNADDR_NONE (1) before startup; after, an XNADDR with no IP,
+  the console's Ethernet address (chosen: 00:22:48:00:00:01, a Microsoft
+  OUI; console check) and byte 0x20 1, and 0x8002 (Ethernet,
+  troubleshoot): the IP configuration's first tick, due at once, finds no
+  link and settles with no address. A stack started with cfgFlags 0x80
+  skips the configuration and stays pending (0). XNetGetDebugXnAddr is a
+  retail system's: XNET_GET_XNADDR_NONE, nothing written.
+- Sockets: socket takes AF_UNSPEC or AF_INET (else WSAEAFNOSUPPORT),
+  SOCK_STREAM or SOCK_DGRAM (WSAESOCKTNOSUPPORT), TCP, UDP or VDP (254)
+  matching the type (WSAEPROTONOSUPPORT), a missing type or protocol
+  taken from the other; past the caller's count WSAENOBUFS. A handle is
+  the caller in its top 4 bits, a sequence number (random start) and the
+  table's slot in the low 12; another is WSAENOTSOCK. bind takes the any
+  address only (WSAEADDRNOTAVAIL), once (WSAEINVAL); a port in use by a
+  socket of the kind is WSAEADDRINUSE unless SO_REUSEADDR and neither is
+  exclusive; datagram sockets cannot have 68, 1256 or 3074; port 0 takes
+  the next of 1025-1255. getsockname needs a bound socket. ioctlsocket:
+  FIONBIO, FIONREAD (the next datagram's size, 1 for an empty one), else
+  WSAENOPROTOOPT.
+- Options: SOL_SOCKET's SO_SNDBUF (1 B to 63 KiB) and SO_RCVBUF (to 255
+  KiB, 63 KiB without TCP window scaling), SO_SNDTIMEO, SO_RCVTIMEO,
+  SO_TYPE, SO_REUSEADDR and SO_EXCLUSIVEADDRUSE (setting either again is
+  WSAEINVAL), SO_BROADCAST (UDP), SO_LINGER and SO_DONTLINGER (TCP),
+  SO_ACCEPTCONN (TCP, never listening), 0x5801 (insecure: the title needs
+  privilege 6, WSAEACCES), 0x5802, 0x5803 (needs a Live logon:
+  WSAENETDOWN); IP_TTL (4 bytes, 1-255), 100 (the TOS's DSCP bits),
+  IP_ADD/DROP_MEMBERSHIP (UDP, 4 groups); TCP_NODELAY, 0x5803 and 0x5804
+  (0x58-0x5B4), 0x5805. Unknown options WSAENOPROTOOPT, unknown levels
+  WSAEINVAL; a value under 4 bytes is a byte. getsockopt clears the
+  value over *length first.
+- UDP: sendto refuses address 0, port 0 and 127.x other than 127.0.0.1
+  (WSAEADDRNOTAVAIL), multicast but on an insecure socket, broadcast
+  without SO_BROADCAST (WSAEACCES), a security association's address
+  (0.x.y.z) the caller holds none for (WSAEHOSTUNREACH), more than 0x8000
+  bytes (0x4F0 to an association; WSAEMSGSIZE), a VDP datagram under 2
+  bytes; it binds the socket first. Datagrams to 127.x go to the socket
+  bound to the port (from that port if it is connected), unless its
+  receive buffer is full (chosen: dropped, console check); all else is
+  lost, with the length returned. send needs a connected socket
+  (WSAENOTCONN). recv and recvfrom need a bound socket; with nothing
+  queued a non-blocking socket, or a second blocking receive, gets
+  WSAEWOULDBLOCK, a blocking one waits up to SO_RCVTIMEO (WSAETIMEDOUT);
+  closesocket ends the wait with WSAENOTSOCK. A datagram larger than the
+  buffer fills it and is lost: WSAEMSGSIZE. recvfrom writes a
+  sockaddr_in (family set before the wait).
+- TCP: no socket listens (titles cannot), so nothing connects: connect to
+  127.0.0.1 is refused at once (WSAECONNREFUSED); anywhere else no answer
+  comes and it times out after the connect timeout (WSAETIMEDOUT). A
+  non-blocking socket gets WSAEWOULDBLOCK, then WSAEALREADY while it
+  tries; afterwards it may connect again. Address 0, port 0, broadcast,
+  multicast and 127.x but 127.0.0.1 are WSAEADDRNOTAVAIL; send and recv
+  WSAENOTCONN.
+- inet_addr: parts decimal, octal (0...) or hex (0x...), spaces around
+  them allowed; fewer than 4 fill the last one's low bytes; INADDR_NONE
+  otherwise, 0 for "". WSAGetLastError is the thread's last error;
+  WSACreateEvent a manual-reset event (NtCreateEvent).
+- XNet keys: XNetCreateKey makes a random XNKID (system link, or
+  cross-platform with privilege 0xE) and key. XNetRegisterKey takes an
+  online key or the system link kind the privilege allows (WSAEINVAL),
+  once across callers (WSAEALREADY), up to the count (WSA_E_NO_MORE);
+  XNetUnregisterKey only the caller's own, with its associations and
+  QoS listener. XNetXnAddrToInAddr: no Ethernet address WSAEINVAL; this
+  console's 127.0.0.1; an online key needs Live (WSAEADDRNOTAVAIL);
+  otherwise a security association under a registered key, its address
+  0.x.y.z (a counter from a random start, then the slot), the same for
+  the same console and key. Nothing answers through one: datagrams are
+  lost, connections time out. XNetRandom gives random bytes.
+- DNS: XNetDnsLookup takes a host name (under 254 characters, labels up
+  to 63, none empty; WSAEFAULT) and an event (WSASYSCALLFAILURE for a
+  handle that is not one); with no DNS server it ends at once:
+  WSAHOST_NOT_FOUND, no addresses, the event set. XNetDnsRelease the
+  caller's own.
+- QoS: XNetQosListen answers probes under a registered key (enable,
+  disable, data up to the limit, bits per second, release).
+  XNetQosLookup's entries for this console complete at once, contacted
+  when it listens (its data, 100 Mbit/s each way, disabled flagged);
+  system link ones to a console like this one (XNADDR byte 0x20 1, or a
+  title's to 0) probe and fail after the probe timeout times the retries
+  + 1; online ones, security gateways and the rest need Live and fail at
+  once. A failed entry is only complete; the event is set as each ends.
+  XNetQosRelease the caller's own.
 - XNetLogonGetTitleID(service): the title Live's logon is for (for some
   services another title's); only a logon sets it, so 0 here (xam's
   code).

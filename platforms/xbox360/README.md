@@ -19,7 +19,7 @@ kernel's memory, thread, synchronisation, file, module, settings,
 display and audio driver, string and formatting exports, xam's (users
 with a local profile signed in, profile settings, notifications,
 content packages as host directories, the XGI and Live apps' messages
-offline) and its message dispatch, timers, controllers through SDL3's
+offline, its network stack with no cable) and its message dispatch, timers, controllers through SDL3's
 gamepads, with a GPU command processor that executes a title's ring
 buffer without drawing, audio output through SDL3 and XMA decoding,
 which a test title checks; the imports no title has called yet follow.

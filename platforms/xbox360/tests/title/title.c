@@ -170,6 +170,35 @@ u32 XamVoiceCreate(u32 slot, u32 packets, u32* voice);
 u32 XamVoiceHeadsetPresent(u32 voice);
 u32 XamVoiceSubmitPacket(u32 voice, u32 size, void* packet);
 u32 XamVoiceClose(u32 voice);
+u32 NetDll_WSACleanup(u32 caller);
+u32 NetDll_socket(u32 caller, u32 family, u32 type, u32 protocol);
+u32 NetDll_closesocket(u32 caller, u32 s);
+u32 NetDll_ioctlsocket(u32 caller, u32 s, u32 command, u32* arg);
+u32 NetDll_setsockopt(u32 caller, u32 s, u32 level, u32 option, const void* value, u32 length);
+u32 NetDll_getsockopt(u32 caller, u32 s, u32 level, u32 option, void* value, u32* length);
+u32 NetDll_getsockname(u32 caller, u32 s, void* name, u32* length);
+u32 NetDll_bind(u32 caller, u32 s, const void* name, u32 length);
+u32 NetDll_connect(u32 caller, u32 s, const void* name, u32 length);
+u32 NetDll_recv(u32 caller, u32 s, void* buffer, u32 length, u32 flags);
+u32 NetDll_recvfrom(u32 caller, u32 s, void* buffer, u32 length, u32 flags, void* from, u32* from_length);
+u32 NetDll_send(u32 caller, u32 s, const void* buffer, u32 length, u32 flags);
+u32 NetDll_sendto(u32 caller, u32 s, const void* buffer, u32 length, u32 flags, const void* to, u32 to_length);
+u32 NetDll_inet_addr(const char* text);
+u32 NetDll_WSAGetLastError(void);
+u32 NetDll_WSACreateEvent(void);
+u32 NetDll_XNetCleanup(u32 caller);
+u32 NetDll_XNetRandom(u32 caller, void* buffer, u32 length);
+u32 NetDll_XNetCreateKey(u32 caller, void* id, void* key);
+u32 NetDll_XNetRegisterKey(u32 caller, const void* id, const void* key);
+u32 NetDll_XNetUnregisterKey(u32 caller, const void* id);
+u32 NetDll_XNetXnAddrToInAddr(u32 caller, const void* xnaddr, const void* id, u32* ina);
+u32 NetDll_XNetDnsLookup(u32 caller, const char* name, u32 event, u32* xndns);
+u32 NetDll_XNetDnsRelease(u32 caller, u32 xndns);
+u32 NetDll_XNetQosListen(u32 caller, const void* id, const void* data, u32 size, u32 bits, u32 flags);
+u32 NetDll_XNetQosLookup(void);  // through NetDll_XNetQosLookup13
+u32 NetDll_XNetQosRelease(u32 caller, u32 xnqos);
+u32 NetDll_XNetGetTitleXnAddr(u32 caller, void* xnaddr);
+u32 NetDll_XNetGetDebugXnAddr(u32 caller, void* xnaddr);
 u32 XamShowDeviceSelectorUI(u32 user, u32 type, u32 flags, uint64_t bytes, u32* device, u32* overlapped);
 extern u32 __imp_NtClose, __imp_ExThreadObjectType, __imp_KeTimeStampBundle, __imp_XboxKrnlVersion,
     __imp_XexExecutableModuleHandle, __imp_ExLoadedCommandLine, __imp_VdGlobalDevice, __imp_VdGpuClockInMHz,
@@ -189,6 +218,8 @@ u32 XamShowMessageBoxUIEx9(u32 slot, const uint16_t* title, const uint16_t* text
                            u32 focus, u32 flags, u32* result, u32* overlapped);
 u32 XamContentCreateEx9(u32 user, const char* root, void* data, u32 flags, u32* disposition, u32* license,
                         u32 cache_size, uint64_t content_size, u32* overlapped);
+u32 NetDll_XNetQosLookup13(u32 caller, u32 cxna, u32* xnaddrs, u32* ids, u32* keys, u32 cina, u32* inas,
+                           u32* services, u32 probes, u32 bits, u32 flags, u32 event, u32* xnqos);
 u32 VdSwap10(volatile u32* words, u32* fetch, u32 writeback, void* system, u32 value, u32* front, u32* format,
              u32* color_space, u32* width, u32* height);
 void interrupt_entry(void);
@@ -1880,6 +1911,187 @@ static int PadChange(u32 h, uint16_t speed, int notified) {
 
 // Two pads (title_main.cpp): player 1's holds A, d-pad up, the guide
 // button and the left stick up; player 2's nothing.
+// ---- xam's network stack, with no cable --------------------------------------
+struct SockAddr {
+  uint16_t family, port;
+  u32 addr;
+  uint8_t zero[8];
+};
+static struct SockAddr Addr(u32 addr, uint16_t port) {
+  struct SockAddr a = {2, port, addr, {0}};
+  return a;
+}
+static u32 NetError(u32 result) { return result == 0xFFFFFFFF ? NetDll_WSAGetLastError() : 0; }
+
+static void Net(void) {
+  // inet_addr: decimal, octal and hex parts, short forms, failures.
+  CHECK(NetDll_inet_addr("1.2.3.4") == 0x01020304 && NetDll_inet_addr("0x7f.1") == 0x7F000001 &&
+        NetDll_inet_addr("010.0.0.1") == 0x08000001 && NetDll_inet_addr(" 10 ") == 10 && NetDll_inet_addr("") == 0);
+  CHECK(NetDll_inet_addr("1.2.3.4.5") == 0xFFFFFFFF && NetDll_inet_addr("1..2") == 0xFFFFFFFF &&
+        NetDll_inet_addr("0x") == 0xFFFFFFFF && NetDll_inet_addr("1.a") == 0xFFFFFFFF);
+  CHECK(NetError(NetDll_socket(2, 2, 2, 17)) == 10093 && NetError(NetDll_WSACleanup(3)) == 10093 &&
+        NetDll_XNetCleanup(3) == 10093);
+  CHECK(NetError(NetDll_socket(1, 3, 2, 17)) == 10047 && NetError(NetDll_socket(1, 2, 5, 0)) == 10044 &&
+        NetError(NetDll_socket(1, 2, 2, 6)) == 10043 && NetError(NetDll_socket(1, 2, 1, 17)) == 10043);
+
+  // UDP to this console's own sockets.
+  u32 a = NetDll_socket(1, 2, 2, 17), b = NetDll_socket(1, 0, 0, 17), v = NetDll_socket(1, 2, 0, 254);
+  CHECK(a >> 28 == 1 && b >> 28 == 1 && v >> 28 == 1 && a != b && (a & 0xFFF) == 0 && (b & 0xFFF) == 1);
+  struct SockAddr any = Addr(0, 5000), name;
+  u32 len = 0, n = 0, opt = 0;
+  CHECK(NetDll_bind(1, b, &any, 16) == 0 && NetError(NetDll_bind(1, b, &any, 16)) == 10022);
+  CHECK(NetDll_getsockname(1, b, &name, &len) == 0 && len == 16 && name.family == 2 && name.port == 5000);
+  CHECK(NetError(NetDll_getsockname(1, a, &name, &len)) == 10022);
+  struct SockAddr there = Addr(0x0A000001, 5000), reserved = Addr(0, 3074);
+  CHECK(NetError(NetDll_bind(1, a, &there, 16)) == 10049 && NetError(NetDll_bind(1, a, &reserved, 16)) == 10048 &&
+        NetError(NetDll_bind(1, a, &any, 16)) == 10048);
+  struct SockAddr loop = Addr(0x7F000001, 5000), none = Addr(0, 5000), other_loop = Addr(0x7F000002, 5000),
+                  bcast = Addr(0xFFFFFFFF, 5000), far = Addr(0x01020304, 80), sa = Addr(0x00010203, 80);
+  CHECK(NetDll_sendto(1, a, "hello", 5, 0, &loop, 16) == 5);
+  CHECK(NetDll_getsockname(1, a, &name, &len) == 0 && name.port == 1025);  // bound on the way
+  CHECK(NetDll_ioctlsocket(1, b, 0x4004667F, &n) == 0 && n == 5);
+  char buf[16] = {0};
+  struct SockAddr from;
+  len = 3;
+  CHECK(NetDll_recvfrom(1, b, buf, sizeof buf, 0, &from, &len) == 5 && Memeq(buf, "hello", 5) && len == 16 &&
+        from.family == 2 && from.port == 1025 && from.addr == 0x7F000001);
+  n = 1;
+  CHECK(NetDll_ioctlsocket(1, b, 0x8004667E, &n) == 0 && NetError(NetDll_recv(1, b, buf, 16, 0)) == 10035);
+  n = 0;
+  opt = 50;
+  CHECK(NetDll_ioctlsocket(1, b, 0x8004667E, &n) == 0 && NetDll_setsockopt(1, b, 0xFFFF, 0x1006, &opt, 4) == 0);
+  CHECK(NetError(NetDll_recv(1, b, buf, 16, 0)) == 10060);  // SO_RCVTIMEO
+  CHECK(NetDll_sendto(1, a, "world", 5, 0, &loop, 16) == 5 && NetError(NetDll_recv(1, b, buf, 2, 0)) == 10040 &&
+        buf[0] == 'w' && buf[1] == 'o' && buf[2] == 'l');  // cut short and gone
+  CHECK(NetError(NetDll_sendto(1, a, "x", 1, 0, &none, 16)) == 10049 &&
+        NetError(NetDll_sendto(1, a, "x", 1, 0, &other_loop, 16)) == 10049 &&
+        NetError(NetDll_sendto(1, a, "x", 1, 0, &bcast, 16)) == 10013 &&
+        NetError(NetDll_sendto(1, a, "x", 1, 0, &sa, 16)) == 10065 &&
+        NetDll_sendto(1, a, "x", 1, 0, &far, 16) == 1);  // lost: no link
+  opt = 1;
+  CHECK(NetDll_setsockopt(1, a, 0xFFFF, 0x20, &opt, 4) == 0 && NetDll_sendto(1, a, "x", 1, 0, &bcast, 16) == 1);
+  CHECK(NetError(NetDll_send(1, a, "x", 1, 0)) == 10057 && NetDll_connect(1, a, &loop, 16) == 0 &&
+        NetDll_send(1, a, "abc", 3, 0) == 3 && NetDll_recv(1, b, buf, 16, 0) == 3);
+  CHECK(NetError(NetDll_sendto(1, v, "x", 1, 0, &loop, 16)) == 10040 && NetDll_sendto(1, v, "\0\1x", 3, 0, &loop, 16) == 3);
+  u32 big = 0;
+  CHECK(XamAlloc(0, 0x8001, &big) == 0 &&
+        NetError(NetDll_sendto(1, a, (void*)(uintptr_t)big, 0x8001, 0, &far, 16)) == 10040);
+  XamFree(big);
+  // Options: their values, xam's limits and refusals.
+  len = 4;
+  CHECK(NetDll_getsockopt(1, a, 0xFFFF, 0x1008, &opt, &len) == 0 && opt == 2 && len == 4);
+  CHECK(NetDll_getsockopt(1, a, 0xFFFF, 0x1002, &opt, &len) == 0 && opt == 0x4000);
+  CHECK(NetDll_getsockopt(1, a, 0, 7, &opt, &len) == 0 && opt == 64);
+  uint8_t byte = 0xAA;
+  len = 1;
+  CHECK(NetDll_getsockopt(1, a, 0, 7, &byte, &len) == 0 && byte == 64 && len == 1);
+  len = 4;
+  CHECK(NetError(NetDll_getsockopt(1, a, 6, 1, &opt, &len)) == 10042 &&
+        NetError(NetDll_getsockopt(1, a, 99, 1, &opt, &len)) == 10022);
+  opt = 1 << 20;
+  CHECK(NetDll_setsockopt(1, a, 0xFFFF, 0x1001, &opt, 4) == 0 && NetDll_setsockopt(1, a, 0xFFFF, 0x1002, &opt, 4) == 0);
+  CHECK(NetDll_getsockopt(1, a, 0xFFFF, 0x1001, &opt, &len) == 0 && opt == 0xFC00 &&
+        NetDll_getsockopt(1, a, 0xFFFF, 0x1002, &opt, &len) == 0 && opt == 0xFC00);
+  opt = 1;
+  CHECK(NetDll_setsockopt(1, a, 0xFFFF, 4, &opt, 4) == 0 && NetError(NetDll_setsockopt(1, a, 0xFFFF, 4, &opt, 4)) == 10022);
+  CHECK(NetError(NetDll_setsockopt(1, a, 0xFFFF, 0x5801, &opt, 4)) == 10013 &&  // no privilege
+        NetError(NetDll_setsockopt(1, a, 0xFFFF, 0x5803, &opt, 4)) == 10050);  // no Live
+  opt = 0;
+  CHECK(NetError(NetDll_setsockopt(1, a, 0, 7, &opt, 4)) == 10022 && NetError(NetDll_setsockopt(1, v, 0xFFFF, 0x20, &opt, 4)) == 10042);
+  u32 group = 0xE0000001;
+  CHECK(NetDll_setsockopt(1, a, 0, 5, &group, 8) == 0 && NetError(NetDll_setsockopt(1, a, 0, 5, &group, 8)) == 10022 &&
+        NetDll_setsockopt(1, a, 0, 6, &group, 8) == 0 && NetError(NetDll_setsockopt(1, a, 0, 6, &group, 8)) == 10022);
+  CHECK(NetError(NetDll_ioctlsocket(1, a, 0x1234, &n)) == 10042);
+
+  // TCP: refused by this console, otherwise no answer.
+  u32 t = NetDll_socket(1, 2, 1, 0);
+  uint16_t linger[2];
+  len = 4;
+  CHECK(NetDll_getsockopt(1, t, 0xFFFF, 0x80, linger, &len) == 0 && linger[0] == 0 && linger[1] == 60);
+  CHECK(NetDll_getsockopt(1, t, 0xFFFF, ~0x80u, &opt, &len) == 0 && opt == 1 &&
+        NetDll_getsockopt(1, t, 6, 0x5803, &opt, &len) == 0 && opt == 0x200);
+  CHECK(NetError(NetDll_connect(1, t, &none, 16)) == 10049 && NetError(NetDll_connect(1, t, &loop, 16)) == 10061);
+  CHECK(NetError(NetDll_recv(1, t, buf, 16, 0)) == 10057 && NetError(NetDll_send(1, t, "x", 1, 0)) == 10057);
+  n = 1;
+  CHECK(NetDll_ioctlsocket(1, t, 0x8004667E, &n) == 0 && NetError(NetDll_connect(1, t, &far, 16)) == 10035 &&
+        NetError(NetDll_connect(1, t, &far, 16)) == 10037);
+  CHECK(NetDll_closesocket(1, t) == 0 && NetError(NetDll_closesocket(1, t)) == 10038 &&
+        NetError(NetDll_closesocket(1, 0x10000FFF)) == 10038);
+
+  // The system's stack with its own settings: one datagram socket, a
+  // 1 s connect timeout, 1 s QoS probes with 1 retry.
+  uint8_t params[0x4C] = {0x4C};
+  params[2] = 1;
+  params[9] = 1;
+  params[10] = 1;
+  params[0x45] = 1;
+  uint16_t wsa[0xC8];
+  CHECK(NetDll_XNetStartup(2, params) == 0 && NetDll_WSAStartup(2, 0x0202, wsa) == 0);
+  u32 d = NetDll_socket(2, 2, 2, 17), s2 = NetDll_socket(2, 2, 1, 6);
+  CHECK(d >> 28 == 2 && NetError(NetDll_socket(2, 2, 2, 17)) == 10055);
+  CHECK(NetError(NetDll_connect(2, s2, &far, 16)) == 10060);  // after 1 s
+  CHECK(NetError(NetDll_closesocket(1, d)) == 10038);
+
+  // XNet: this console's address, keys, security associations.
+  uint8_t own[0x24], peer[0x24] = {0}, id[8], key[16];
+  CHECK(NetDll_XNetGetTitleXnAddr(1, own) == 0x8002 && own[10] == 0x00 && own[11] == 0x22 && own[12] == 0x48 &&
+        own[0x20] == 1 && *(u32*)own == 0);
+  CHECK(NetDll_XNetGetDebugXnAddr(1, peer) == 1 && NetDll_XNetRandom(1, buf, 16) == 0);
+  CHECK(NetDll_XNetCreateKey(1, id, key) == 0 && (id[0] & 0xF0) == 0);
+  CHECK(NetDll_XNetRegisterKey(1, id, key) == 0 && NetDll_XNetRegisterKey(1, id, key) == 10037);
+  u32 ina = 1, ina2 = 0;
+  CHECK(NetDll_XNetXnAddrToInAddr(1, own, id, &ina) == 0 && ina == 0x7F000001);
+  CHECK(NetDll_XNetXnAddrToInAddr(1, peer, id, &ina) == 10022 && ina == 0);  // no Ethernet address
+  for (int k = 0; k < 6; k++) peer[10 + k] = (uint8_t)(k + 1);
+  CHECK(NetDll_XNetXnAddrToInAddr(1, peer, id, &ina) == 0 && ina && ina >> 24 == 0 &&
+        NetDll_XNetXnAddrToInAddr(1, peer, id, &ina2) == 0 && ina2 == ina);
+  sa.addr = ina;
+  CHECK(NetDll_sendto(1, a, "x", 1, 0, &sa, 16) == 1);  // through the association, lost
+  uint8_t other[8] = {0x80, 1, 2, 3, 4, 5, 6, 7}, unknown[8] = {0, 9, 9, 9, 9, 9, 9, 9};
+  CHECK(NetDll_XNetXnAddrToInAddr(1, peer, unknown, &ina) == 10022);
+  *(u32*)(peer + 4) = 0x0A000001;
+  CHECK(NetDll_XNetXnAddrToInAddr(1, peer, other, &ina) == 10049);  // online: needs Live
+
+  // QoS: this console answers at once, another console's probes run out.
+  CHECK(NetDll_XNetQosListen(1, id, "data", 4, 0, 5) == 0 && NetDll_XNetQosListen(1, unknown, 0, 0, 0, 1) == 10022);
+  peer[0x20] = 1;  // a console like this one: probed
+  u32 event = NetDll_WSACreateEvent(), xnqos = 0;
+  u32 xnaddrs[2] = {(u32)(uintptr_t)own, (u32)(uintptr_t)peer}, ids[2] = {(u32)(uintptr_t)id, (u32)(uintptr_t)id},
+      keys[2] = {(u32)(uintptr_t)key, (u32)(uintptr_t)key};
+  CHECK(event && NetDll_XNetQosLookup13(2, 2, xnaddrs, ids, keys, 0, 0, 0, 0, 0, 0, event, &xnqos) == 0 && xnqos);
+  CHECK(*At(xnqos) == 2 && *At(xnqos + 4) == 1 && *(uint8_t*)(uintptr_t)(xnqos + 8) == 0xB &&
+        *(uint16_t*)(uintptr_t)(xnqos + 8 + 6) == 4 && Memeq((void*)(uintptr_t)*At(xnqos + 8 + 8), "data", 4) &&
+        *At(xnqos + 8 + 0x10) == 100000000);
+  int64_t ten_ms = -100000, wait = -15000000;
+  KeDelayExecutionThread(1, 0, &wait);
+  CHECK(*At(xnqos + 4) == 1);  // probes for 2 s
+  for (int k = 0; k < 200 && *At(xnqos + 4); k++) KeDelayExecutionThread(1, 0, &ten_ms);
+  CHECK(*At(xnqos + 4) == 0);
+  CHECK(*(uint8_t*)(uintptr_t)(xnqos + 8 + 0x18) == 1);  // complete, never contacted
+  CHECK(NetDll_XNetQosRelease(1, xnqos) == 10022 && NetDll_XNetQosRelease(2, xnqos) == 0);
+
+  // DNS: no server.
+  u32 xndns = 0, dns_event = NetDll_WSACreateEvent();
+  int64_t zero = 0;
+  CHECK(NetDll_XNetDnsLookup(1, "", 0, &xndns) == 10014 && NetDll_XNetDnsLookup(1, ".a", 0, &xndns) == 10014);
+  CHECK(NtWaitForSingleObjectEx(dns_event, 1, 0, &zero) == kStatusTimeout);
+  CHECK(NetDll_XNetDnsLookup(1, "host.example", dns_event, &xndns) == 0 && *At(xndns) == 11001 &&
+        *At(xndns + 4) == 0 && NtWaitForSingleObjectEx(dns_event, 1, 0, &zero) == 0);
+  CHECK(NetDll_XNetDnsRelease(2, xndns) == 10022 && NetDll_XNetDnsRelease(1, xndns) == 0);
+
+  CHECK(NetDll_XNetUnregisterKey(2, id) == 10022 && NetDll_XNetUnregisterKey(1, id) == 0 &&
+        NetDll_XNetUnregisterKey(1, id) == 10022);
+  // Cleanup: the system's sockets go with its Winsock, the stack with the
+  // last caller.
+  CHECK(NetDll_WSACleanup(2) == 0 && NetError(NetDll_closesocket(2, d)) == 10093);
+  CHECK(NetDll_WSAStartup(2, 0x0202, wsa) == 0 && NetError(NetDll_closesocket(2, d)) == 10038 &&
+        NetDll_WSACleanup(2) == 0 && NetDll_XNetCleanup(2) == 0 && NetDll_XNetCleanup(2) == 10093);
+  CHECK(NetDll_WSACleanup(1) == 0 && NetDll_WSACleanup(1) == 0 && NetDll_XNetCleanup(1) == 0 &&
+        NetDll_XNetGetTitleXnAddr(1, own) == 0x8002 && NetDll_XNetCleanup(1) == 0);
+  CHECK(NetDll_XNetGetTitleXnAddr(1, own) == 1 && NetDll_XNetRandom(1, buf, 4) == 10093);
+  CHECK(NtClose(event) == 0 && NtClose(dns_event) == 0);
+}
+
 static void Controllers(void) {
   uint8_t caps[0x14];
   memset(caps, 0xAA, sizeof caps);
@@ -1927,6 +2139,7 @@ static void Controllers(void) {
 int main(void) {
   Modules();
   Xam();
+  Net();
   Controllers();
   Users();
   Content();

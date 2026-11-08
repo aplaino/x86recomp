@@ -166,3 +166,26 @@ pcr:
   .endm
 
   XENON10 VdSwap10, VdSwap
+
+// The same with thirteen: the ninth to thirteenth to r1 + 0x50 to 0x70.
+  .macro XENON13 name, target
+  .globl \name
+  .type \name, @function
+\name:
+  mflr 0
+  std 0, 16(1)
+  stdu 1, -160(1)
+  .irp k, 0, 1, 2, 3, 4
+  ld 11, 160 + 96 + 8 * \k(1)
+  std 11, 0x50 + 8 * \k(1)
+  .endr
+  bl \target
+  nop
+  addi 1, 1, 160
+  ld 0, 16(1)
+  mtlr 0
+  blr
+  .size \name, .-\name
+  .endm
+
+  XENON13 NetDll_XNetQosLookup13, NetDll_XNetQosLookup
