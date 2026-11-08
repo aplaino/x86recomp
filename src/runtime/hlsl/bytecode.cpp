@@ -111,7 +111,7 @@ class Translator {
     out_->minor = minor_;
     Decode();
     Declare();
-    if (!pixel_) out_->position_matrix = PositionMatrix();
+    if (!pixel_) out_->position_matrix = PositionMatrix(&out_->position_note);
     Emit();
   }
 
@@ -213,17 +213,25 @@ class Translator {
 
   // What a temporary's z and w hold: the sum over `rows` of a scalar times
   // c[k].z (lane z) and c[k].w (lane w), the same scalar in both, plus
-  // c[trans].zw once (-1: none). `known` false: anything else.
+  // c[trans].zw once (-1: none). `known` false: anything else, `why` says
+  // what (Program::position_note).
   struct ZwSum {
     bool known = false;
     std::set<uint32_t> rows;
     int trans = -1;
+    const char* why = "";
   };
+  static ZwSum Unknown(const char* why) {
+    ZwSum r;
+    r.why = why;
+    return r;
+  }
 
-  // The b of Program::position_matrix, or -1. Followed through mov, mul,
-  // mad and add in straight-line code; a write in an if block may or may
-  // not happen (unknown after it); loops and calls are not followed.
-  int PositionMatrix() const {
+  // The b of Program::position_matrix, or -1 and why not. Followed
+  // through mov, mul, mad and add in straight-line code; a write in an if
+  // block may or may not happen (unknown after it); loops and calls are
+  // not followed.
+  int PositionMatrix(std::string* why) const {
     std::map<uint32_t, ZwSum> temps;
     ZwSum pos;
     int writes = 0, depth = 0;
@@ -238,24 +246,34 @@ class Translator {
     auto scalar = [](const Param& p) { return ((p.swz >> 4) & 3) == ((p.swz >> 6) & 3) && p.mod <= 1; };
     // A register the application sets (a def in the shader overrides it).
     auto app = [&](const Param& p) { return p.type == CONST && !p.rel && !defs_.count(p.num); };
+    // Why a row or a translation read as `p` is none.
+    auto bad = [&](const Param& p) -> const char* {
+      if (p.rel) return "a register read through a0 or aL";
+      if (p.mod > 1) return "a source modifier other than negation";
+      if (!zw(p)) return "z and w not read from .z and .w";
+      if (p.type == CONST && defs_.count(p.num)) return "a constant the shader defines";
+      return nullptr;
+    };
     // A source added as it is: the translation only unnegated.
     auto term = [&](const Param& p) -> ZwSum {
-      if (p.rel || p.mod > 1 || !zw(p)) return {};
+      if (const char* w = bad(p)) return Unknown(w);
       if (app(p)) {
+        if (p.mod) return Unknown("the translation negated");
         ZwSum r;
-        r.known = p.mod == 0;
+        r.known = true;
         r.trans = int(p.num);
         return r;
       }
       auto it = p.type == TEMP ? temps.find(p.num) : temps.end();
-      if (it == temps.end() || (p.mod && it->second.trans >= 0)) return {};
+      if (it == temps.end()) return Unknown("a term not made from the float registers (an input, a temporary set otherwise)");
+      if (p.mod && it->second.trans >= 0) return Unknown("the translation negated");
       return it->second;
     };
     // A scalar times a row, or times a sum without the translation.
     auto prod = [&](const Param& a, const Param& b) -> ZwSum {
       for (int k = 0; k < 2; k++) {
         const Param& f = k ? a : b;
-        if (!scalar(k ? b : a) || f.rel || f.mod > 1 || !zw(f)) continue;
+        if (!scalar(k ? b : a) || bad(f)) continue;
         if (app(f)) {
           ZwSum r;
           r.known = true;
@@ -265,10 +283,12 @@ class Translator {
         auto it = f.type == TEMP ? temps.find(f.num) : temps.end();
         if (it != temps.end() && it->second.known && it->second.trans < 0) return it->second;
       }
-      return {};
+      return Unknown("a product that is not a scalar times a row");
     };
     auto sum = [](ZwSum a, const ZwSum& b) -> ZwSum {
-      if (!a.known || !b.known || (a.trans >= 0 && b.trans >= 0)) return {};
+      if (!a.known) return a;
+      if (!b.known) return b;
+      if (a.trans >= 0 && b.trans >= 0) return Unknown("the translation added twice");
       a.rows.insert(b.rows.begin(), b.rows.end());
       if (b.trans >= 0) a.trans = b.trans;
       return a;
@@ -283,31 +303,53 @@ class Translator {
         continue;
       }
       if (in.op == RET && depth == 0) break;  // the end of main (subroutines follow)
-      if (in.op == CALL || in.op == CALLNZ || in.op == LOOP_ || in.op == REP || in.op == BREAK ||
-          in.op == BREAKC || in.op == BREAKP || in.op == LABEL_)
+      if (in.op == CALL || in.op == CALLNZ || in.op == LABEL_) {
+        *why = "a subroutine (not followed)";
         return -1;
+      }
+      if (in.op == LOOP_ || in.op == REP || in.op == BREAK || in.op == BREAKC || in.op == BREAKP) {
+        *why = "a loop (not followed)";
+        return -1;
+      }
       if (!in.has_dst || in.op == DCL || in.op == DEF || in.op == DEFI || in.op == DEFB) continue;
       ZwSum v;
-      if (depth == 0 && !in.predicated && !(in.dst.mod & 1) && in.dst.shift == 0) {
-        const std::vector<Param>& a = in.src;
-        if (in.op == MOV && a.size() == 1) v = term(a[0]);
-        else if (in.op == ADD && a.size() == 2) v = sum(term(a[0]), term(a[1]));
-        else if (in.op == MUL && a.size() == 2) v = prod(a[0], a[1]);
-        else if (in.op == MAD && a.size() == 3) v = sum(prod(a[0], a[1]), term(a[2]));
-      }
+      const std::vector<Param>& a = in.src;
+      if (depth > 0) v = Unknown("written in an if block");
+      else if (in.predicated) v = Unknown("a predicated write");
+      else if ((in.dst.mod & 1) || in.dst.shift != 0) v = Unknown("a saturated or shifted write");
+      else if (in.op == MOV && a.size() == 1) v = term(a[0]);
+      else if (in.op == ADD && a.size() == 2) v = sum(term(a[0]), term(a[1]));
+      else if (in.op == MUL && a.size() == 2) v = prod(a[0], a[1]);
+      else if (in.op == MAD && a.size() == 3) v = sum(prod(a[0], a[1]), term(a[2]));
+      else v = Unknown("an instruction other than mov, add, mul and mad (dp4, m4x4: a column-major matrix)");
       const uint32_t m = in.dst.mask & 0xC;
       if (!m) continue;
+      if (m != 0xC) v = Unknown("z and w written apart");
       if (is_pos(in.dst)) {
         writes++;
-        pos = m == 0xC ? v : ZwSum{};
+        pos = v;
       } else if (in.dst.type == TEMP) {
-        temps[in.dst.num] = m == 0xC ? v : ZwSum{};
+        temps[in.dst.num] = v;
       }
     }
-    if (writes != 1 || !pos.known || pos.trans < 3) return -1;
+    if (writes != 1) {
+      *why = writes ? "z and w written more than once" : "z and w not written";
+      return -1;
+    }
+    if (!pos.known) {
+      *why = pos.why;
+      return -1;
+    }
+    if (pos.trans < 3) {
+      *why = "no translation added";
+      return -1;
+    }
     const uint32_t b = uint32_t(pos.trans) - 3;
     for (uint32_t r : pos.rows)
-      if (r < b || r > b + 2) return -1;
+      if (r < b || r > b + 2) {
+        *why = "a row c" + std::to_string(r) + " not with the translation c" + std::to_string(pos.trans);
+        return -1;
+      }
     return int(b);
   }
 
@@ -330,8 +372,12 @@ class Translator {
       auto note = [&](const Param& p, bool write) {
         if (p.type == TEMP) temps_ = std::max(temps_, p.num + 1);
         if (p.type == CONST || p.type == CONST2 || p.type == CONST3 || p.type == CONST4) {
-          if (p.rel) rel_const_ = true;
-          else if (!defs_.count(ConstIndex(p))) max_c_ = std::max(max_c_, ConstIndex(p) + 1);
+          if (p.rel) {
+            rel_const_ = true;
+          } else if (!defs_.count(ConstIndex(p))) {
+            max_c_ = std::max(max_c_, ConstIndex(p) + 1);
+            if (!write && ConstIndex(p) < 256) out_->float_reads.set(ConstIndex(p));
+          }
         }
         if (p.type == CONSTINT || p.type == CONSTBOOL) uses_int_ = true;
         if (write && !pixel_ && (p.type == RASTOUT || p.type == ATTROUT || p.type == TEXCRDOUT))

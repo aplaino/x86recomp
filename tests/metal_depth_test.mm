@@ -7,7 +7,8 @@
 // qualify, and two layers 3 mm apart 30 m away, in world coordinates
 // kilometres from the origin, must keep their order, store what D3D9
 // would (reversed), clipped at the same near and far, and read back as
-// D3D9 stores them.
+// D3D9 stores them. Depth bias by D3D9's amount wherever the stored value
+// is; border colours and vertex texture reads of reversed depth textures.
 //
 //   metal_depth_test        (skipped, exit 77, without a Metal device)
 
@@ -33,8 +34,13 @@ using Tokens = std::vector<uint32_t>;
 
 // ---- hand-assembled shaders (as tests/hlsl_bytecode_test.cpp)
 
-enum Reg : uint32_t { R = 0, V = 1, C = 2, O = 6, OC = 8, ODEPTH = 9, S = 10 };
-enum Op : uint32_t { MOV = 1, ADD = 2, MUL = 5, MAD = 4, TEX = 66 };
+enum Reg : uint32_t {
+  R = 0, V = 1, C = 2, A = 3, O = 6, I = 7, OC = 8, ODEPTH = 9, S = 10, B = 14, AL = 15, LBL = 18, P = 19,
+};
+enum Op : uint32_t {
+  MOV = 1, ADD = 2, MAD = 4, MUL = 5, CALL = 25, LOOP = 27, RET = 28, ENDLOOP = 29, LABEL = 30, IF = 40,
+  ENDIF = 43, MOVA = 46, DEFI = 48, TEX = 66, DEF = 81, SETP = 94, TEXLDL = 95,
+};
 
 uint32_t TypeBits(uint32_t type) { return ((type & 7) << 28) | ((type & 0x18) << 8); }
 uint32_t Dst(uint32_t type, uint32_t n, uint32_t mask = 0xF) {
@@ -47,8 +53,8 @@ uint32_t Src(uint32_t type, uint32_t n, uint32_t swz = 0xE4) {
 struct Asm {
   Tokens t;
   explicit Asm(bool pixel) { t.push_back((pixel ? 0xFFFF0000u : 0xFFFE0000u) | 3u << 8); }
-  void I(uint32_t op, std::initializer_list<uint32_t> params) {
-    t.push_back(op | uint32_t(params.size()) << 24);
+  void I(uint32_t op, std::initializer_list<uint32_t> params, uint32_t ctl = 0, uint32_t flags = 0) {
+    t.push_back(op | ctl << 16 | uint32_t(params.size()) << 24 | flags);
     t.insert(t.end(), params);
   }
   void Dcl(uint32_t usage, uint32_t index, uint32_t dst) { I(31, {0x80000000u | usage | index << 16, dst}); }
@@ -81,30 +87,89 @@ Tokens ConstPs(bool depth) {
 
 // vs_3_0 as the HLSL compiler makes mul(float4(pos, 1), M) with M in
 // c8-c11 (rows): r0 = y c9 + x c8 + z c10, then + c11. `variant`: 0 that;
-// 1 z pushed towards the camera (z - c12.x, GTA IV's emissive signs); 2
-// z = w (the sky: the translation's .xyww); 3 the matrix's rows in
-// c8-c10 but the translation from c12.
+// 1 z pushed towards the camera (z - c12.x, as emissive signs drawn over
+// a wall are); 2 z = w (a sky: the translation's .xyww); 3 the matrix's
+// rows in c8-c10 but the translation from c12; 4 the position's write
+// predicated; 5 a row added in an if block; 6 a loop; 7 a subroutine; 8
+// c11 defined in the shader; 9 the translation read as c[a0.x + 11]; 10
+// the translation carried negated (r1 = c11, the position r0 - r1); 11
+// the position's x, y, w and its z written apart (the same values); 12 a
+// row negated (z and w alike: still the matrix).
 Tokens WvpVs(int variant = 0) {
   constexpr uint32_t kX = 0x00, kY = 0x55, kZ = 0xAA, kW = 0xFF;
+  constexpr uint32_t kNeg = 1u << 24;
   Asm a(false);
+  if (variant == 8) a.I(DEF, {Dst(C, 11), 0, 0, 0x3F800000u, 0x3F800000u});
+  if (variant == 6) a.I(DEFI, {Dst(I, 0), 2, 0, 1, 0});
   a.Dcl(0, 0, Dst(V, 0));
   a.Dcl(0, 0, Dst(O, 0));
   a.I(MUL, {Dst(R, 0), Src(V, 0, kY), Src(C, 9)});
   a.I(MAD, {Dst(R, 0), Src(V, 0, kX), Src(C, 8), Src(R, 0)});
-  a.I(MAD, {Dst(R, 0), Src(V, 0, kZ), Src(C, 10), Src(R, 0)});
+  if (variant == 5) a.I(IF, {Src(B, 0)});
+  a.I(MAD, {Dst(R, 0), Src(V, 0, kZ), Src(C, 10) | (variant == 12 ? kNeg : 0), Src(R, 0)});
+  if (variant == 5) a.I(ENDIF, {});
+  if (variant == 6) {
+    a.I(LOOP, {Src(AL, 0), Src(I, 0)});
+    a.I(ADD, {Dst(R, 1), Src(R, 1), Src(C, 12)});
+    a.I(ENDLOOP, {});
+  }
+  if (variant == 7) a.I(CALL, {Src(LBL, 0)});
   if (variant == 1) {
     a.I(ADD, {Dst(R, 0), Src(R, 0), Src(C, 11)});
     a.I(MOV, {Dst(O, 0, 0xB), Src(R, 0)});
-    a.I(ADD, {Dst(O, 0, 0x4), Src(R, 0, kZ), Src(C, 12, kX) | 1u << 24});
+    a.I(ADD, {Dst(O, 0, 0x4), Src(R, 0, kZ), Src(C, 12, kX) | kNeg});
   } else if (variant == 2) {
     a.I(MAD, {Dst(O, 0), Src(V, 0, kW), Src(C, 11, 0xF4), Src(R, 0)});  // c11.xyww
+  } else if (variant == 4) {
+    a.I(SETP, {Dst(P, 0, 1), Src(V, 0, kX), Src(C, 12, kX)}, 1);  // p0.x = v0.x > c12.x
+    a.I(ADD, {Dst(O, 0), Src(P, 0, kX), Src(R, 0), Src(C, 11)}, 0, 0x10000000u);
+  } else if (variant == 9) {
+    a.I(MOVA, {Dst(A, 0, 1), Src(C, 12, kX)});
+    // c[a0.x + 11]: the relative address token follows (vs_3_0).
+    a.I(ADD, {Dst(O, 0), Src(R, 0), Src(C, 11) | 0x2000u, 0x80000000u | TypeBits(A)});
+  } else if (variant == 10) {
+    a.I(MOV, {Dst(R, 1), Src(C, 11)});
+    a.I(ADD, {Dst(O, 0), Src(R, 0), Src(R, 1) | kNeg});
+  } else if (variant == 11) {
+    a.I(ADD, {Dst(R, 0), Src(R, 0), Src(C, 11)});
+    a.I(MOV, {Dst(O, 0, 0xB), Src(R, 0)});
+    a.I(MOV, {Dst(O, 0, 0x4), Src(R, 0)});
   } else {
     a.I(ADD, {Dst(O, 0), Src(R, 0), Src(C, variant == 3 ? 12 : 11)});
+  }
+  if (variant == 7) {
+    a.I(RET, {});
+    a.I(LABEL, {Src(LBL, 0)});
+    a.I(MOV, {Dst(R, 1), Src(C, 12)});
+    a.I(RET, {});
   }
   return a.End();
 }
 
-// vs_3_0: a full-target pass with c0 (x, y scaled and offset), as GTA IV's
+// vs_3_0: POSITION passed through, TEXCOORD0 what s0 reads at TEXCOORD0
+// (texldl: its w, 0, the level).
+Tokens VertexSampleVs() {
+  Asm a(false);
+  a.Dcl(0, 0, Dst(V, 0));
+  a.Dcl(5, 0, Dst(V, 1));
+  a.Dcl(0, 0, Dst(O, 0));
+  a.Dcl(5, 0, Dst(O, 1));
+  a.DclSampler(2, 0);
+  a.I(TEXLDL, {Dst(R, 0), Src(V, 1), Src(S, 0)});
+  a.I(MOV, {Dst(O, 0), Src(V, 0)});
+  a.I(MOV, {Dst(O, 1), Src(R, 0)});
+  return a.End();
+}
+
+// ps_3_0: TEXCOORD0 as the colour.
+Tokens VaryingPs() {
+  Asm a(true);
+  a.Dcl(5, 0, Dst(V, 0));
+  a.I(MOV, {Dst(OC, 0), Src(V, 0)});
+  return a.End();
+}
+
+// vs_3_0: a full-target pass with c0 (x, y scaled and offset), as games'
 // blits.
 Tokens BlitVs() {
   Asm a(false);
@@ -222,13 +287,25 @@ struct Gpu {
     float c[2][4];  // pixel shader constants c0, c1
     bool reversed;  // as the device draws reversed: mode 1 (w - z), or 2 with `k`
     float min_z = 0, max_z = 1;
-    float bias = 0, slope = 0;  // Metal's
+    float bias = 0, slope = 0;  // D3D9's DEPTHBIAS, SLOPESCALEDEPTHBIAS
     uint32_t depth_samplers = 0;
     int mode = -1;               // r_position's mode, -1: from `reversed`
     float k[2] = {};             // depth from w's k0, k1
     std::vector<float> vc;       // vertex shader constants c0.. (4 floats each)
     id<MTLTexture> tex = nil;  // s0
+    int border = -1;           // s0 clamped to this MTLSamplerBorderColor (-1: the default sampler)
+    id<MTLTexture> vtex = nil;  // vertex s0
+    uint32_t vertex_depth_samplers = 0;
   };
+
+  id<MTLSamplerState> SamplerFor(int border) {
+    MTLSamplerDescriptor* sd = [MTLSamplerDescriptor new];
+    if (border >= 0) {
+      sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToBorderColor;
+      sd.borderColor = MTLSamplerBorderColor(border);
+    }
+    return [dev newSamplerStateWithDescriptor:sd];
+  }
 
   void Encode(id<MTLRenderCommandEncoder> e, const Draw& d) {
     VsState vst{};
@@ -239,8 +316,12 @@ struct Gpu {
       vst.in[i][2] = 3;  // FLOAT4
     }
     vst.clip_mask[1] = d.mode >= 0 ? d.mode : d.reversed ? 1 : 0;
+    vst.clip_mask[2] = int32_t(d.vertex_depth_samplers);
     vst.depth[0] = d.k[0];
     vst.depth[1] = d.k[1];
+    // metal_device.mm's: float depth, 2^23 per unit of depth range.
+    const gfx::DepthBias db = gfx::DepthBiasOf(d.bias, d.slope, d.reversed, d.min_z, d.max_z, 8388608.0f);
+    vst.depth[2] = db.clip;
     PsState pst{};
     pst.alpha[0] = 8;  // ALWAYS
     pst.alpha[2] = int32_t(d.depth_samplers);
@@ -260,7 +341,7 @@ struct Gpu {
       vp.zfar = r.max_z;
     }
     [e setViewport:vp];
-    [e setDepthBias:d.reversed ? -d.bias : d.bias slopeScale:d.reversed ? -d.slope : d.slope clamp:0];
+    [e setDepthBias:db.constant slopeScale:db.slope clamp:0];
     [e setVertexBytes:&vst length:sizeof vst atIndex:2];
     if (!d.vc.empty()) [e setVertexBytes:d.vc.data() length:d.vc.size() * sizeof(float) atIndex:0];
     [e setVertexBytes:vb.data() length:vb.size() * sizeof(Vertex) atIndex:3];
@@ -268,7 +349,11 @@ struct Gpu {
     [e setFragmentBytes:&pst length:sizeof pst atIndex:2];
     if (d.tex) {
       [e setFragmentTexture:d.tex atIndex:0];
-      [e setFragmentSamplerState:[dev newSamplerStateWithDescriptor:[MTLSamplerDescriptor new]] atIndex:0];
+      [e setFragmentSamplerState:SamplerFor(d.border) atIndex:0];
+    }
+    if (d.vtex) {
+      [e setVertexTexture:d.vtex atIndex:0];
+      [e setVertexSamplerState:SamplerFor(-1) atIndex:0];
     }
     [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:NSUInteger(d.verts.size())];
   }
@@ -432,7 +517,7 @@ int CompareChecks(Fixture& f) {
         Gpu::Draw a{pipe, g.DepthState(MTLCompareFunctionAlways, true), Cover(za, one), {{1, 0, 0, 1}, {}}, rev != 0};
         const uint32_t fn = rev ? gfx::MirrorDepthCompare(func) : func;
         Gpu::Draw b{pipe, g.DepthState(CompareOp(fn), false), Cover(zb, one), {{0, 1, 0, 1}, {}}, rev != 0};
-        b.bias = pr.bias * 8388608.0f;  // metal_device.mm's scale for float depth
+        b.bias = pr.bias;
         std::vector<float> rgba;
         g.Run(f.color, f.depth, rev ? 0.0 : 1.0, {a, b}, &rgba, nullptr);
         got[rev] = rgba[(kSize / 2 * kSize + kSize / 2) * 4 + 1];
@@ -509,18 +594,153 @@ int SampleChecks(Fixture& f) {
   return failures;
 }
 
+// DEPTHBIAS on a reversed buffer (DepthBiasOf): the stored value moves by
+// D3D9's amount (less the bias: it moves the other way) wherever it is,
+// near 0 (far from the camera, where the rasterizer's constant bias is
+// thousands of times smaller) as near 0.5, with z (w - z) and from w, over
+// a perspective triangle (w 1 to 4), and in a viewport narrower than 0..1.
+int BiasChecks(Fixture& f) {
+  Gpu& g = f.g;
+  id<MTLRenderPipelineState> pipe = g.Pipeline(f.vs, f.ps, MTLPixelFormatRGBA32Float, MTLPixelFormatDepth32Float);
+  if (!pipe) return 1;
+  const struct {
+    const char* name;
+    int mode;            // r_position's: 1 w - z (z / w the D3D9 depth `z`), 2 from w
+    float z, k0;         // mode 2: k0 / w stored (k1 0): 0.001 to 0.004
+    float min_z, max_z;  // the viewport's
+  } cases[] = {
+      {"z, stored 0.002", 1, 0.998f, 0, 0, 1},
+      {"z, stored 0.5", 1, 0.5f, 0, 0, 1},
+      {"from w, stored 0.001-0.004", 2, 0, 0.004f, 0, 1},
+      {"z, viewport 0.25..0.75, stored 0.5", 1, 0.5f, 0, 0.25f, 0.75f},
+  };
+  const float w[3] = {1.0f, 2.0f, 4.0f};
+  int failures = 0;
+  double worst = 0;
+  for (const auto& c : cases)
+    for (float bias : {1e-5f, -1e-5f, 2e-4f, -2e-4f}) {
+      const float z[3] = {c.z, c.z, c.z};
+      Gpu::Draw d{pipe, g.DepthState(MTLCompareFunctionAlways, true), Cover(z, w), {{1, 0, 0, 1}, {}}, true,
+                  c.min_z, c.max_z};
+      if (c.mode == 2) {
+        d.mode = 2;
+        d.k[0] = c.k0;
+      }
+      std::vector<float> z0, z1;
+      g.Run(f.color, f.depth, 0.0, {d}, nullptr, &z0);
+      d.bias = bias;
+      g.Run(f.color, f.depth, 0.0, {d}, nullptr, &z1);
+      // Within a percent of the bias, and the stored values' rounding.
+      const double tol = 0.01 * std::fabs(bias) + 1.2e-7;
+      int bad = 0;
+      for (int i = 0; i < kSize * kSize; i++) {
+        const double moved = double(z1[i]) - double(z0[i]);
+        worst = std::fmax(worst, std::fabs(moved + bias) / std::fabs(bias));
+        if (std::fabs(moved + bias) > tol && bad++ < 2)
+          std::printf("FAIL bias %g, %s: pixel %d stored %.9g, biased %.9g (moved %.4g, want %.4g)\n", bias, c.name,
+                      i, z0[i], z1[i], moved, -bias);
+      }
+      failures += bad;
+    }
+  std::printf("%s depth bias, reversed (D3D9's amount at 0.002 and 0.5: off by %.2g of it at most)\n",
+              failures ? "FAIL" : "ok", worst);
+  return failures;
+}
+
+// A reversed depth texture's border colour (ReversedDepthBorder): read
+// through R_DEPTH_TEX, what D3D9's border colour reads (depth in r, g, b):
+// 0 for black, 1 for white.
+int BorderChecks(Fixture& f) {
+  Gpu& g = f.g;
+  id<MTLRenderPipelineState> read = g.Pipeline(f.vs, f.ps_sample, MTLPixelFormatRGBA32Float, MTLPixelFormatInvalid);
+  if (!read) return 1;
+  const float one[3] = {1, 1, 1};
+  // Read outside the texture everywhere.
+  std::vector<Vertex> outside = Cover(one, one);
+  for (Vertex& v : outside) v.uv[0] = v.uv[1] = 1.5f;
+  int failures = 0;
+  for (int rev = 0; rev < 2; rev++) {
+    id<MTLTexture> depth = g.Texture(MTLPixelFormatDepth32Float);
+    g.Run(f.color, depth, 0.3, {}, nullptr, nullptr);  // the texture's content, not read
+    for (uint8_t border : {uint8_t(0), uint8_t(1), uint8_t(2)}) {
+      Gpu::Draw r{read, g.DepthState(MTLCompareFunctionAlways, false), outside, {}, false};
+      r.tex = depth;
+      r.depth_samplers = rev ? 1 : 0;
+      r.border = rev ? gfx::ReversedDepthBorder(border) : border;
+      std::vector<float> rgba;
+      g.Run(f.color, nil, 0, {r}, &rgba, nullptr);
+      const float want = border == 2 ? 1.0f : 0.0f;
+      const float* px = &rgba[(kSize / 2 * kSize + kSize / 2) * 4];
+      if (px[0] != want || px[1] != want || px[2] != want) {
+        std::printf("FAIL border %u%s: read %g %g %g %g, want %g\n", border, rev ? " reversed" : "", px[0], px[1],
+                    px[2], px[3], want);
+        failures++;
+      }
+    }
+  }
+  std::printf("%s depth texture border colour\n", failures ? "FAIL" : "ok");
+  return failures;
+}
+
+// A depth texture read by a vertex shader (texldl, R_DEPTH_TEX with the
+// vertex state's mask): the depth D3D9 stores, drawn either way.
+int VertexSampleChecks(Fixture& f) {
+  Gpu& g = f.g;
+  id<MTLFunction> vs = g.Compile(VertexSampleVs()), ps = g.Compile(VaryingPs());
+  if (!vs || !ps) return 1;
+  id<MTLRenderPipelineState> draw = g.Pipeline(f.vs, f.ps, MTLPixelFormatRGBA32Float, MTLPixelFormatDepth32Float);
+  id<MTLRenderPipelineState> read = g.Pipeline(vs, ps, MTLPixelFormatRGBA32Float, MTLPixelFormatInvalid);
+  if (!draw || !read) return 1;
+  const float z[3] = {0.3f, 0.3f, 0.3f}, one[3] = {1, 1, 1};
+  int failures = 0;
+  for (int rev = 0; rev < 2; rev++) {
+    id<MTLTexture> depth = g.Texture(MTLPixelFormatDepth32Float);
+    Gpu::Draw d{draw, g.DepthState(MTLCompareFunctionAlways, true), Cover(z, one), {{1, 0, 0, 1}, {}}, rev != 0};
+    g.Run(f.color, depth, rev ? 0.0 : 1.0, {d}, nullptr, nullptr);
+    Gpu::Draw r{read, g.DepthState(MTLCompareFunctionAlways, false), Cover(one, one), {}, false};
+    r.vtex = depth;
+    r.vertex_depth_samplers = rev ? 1 : 0;
+    std::vector<float> rgba;
+    g.Run(f.color, nil, 0, {r}, &rgba, nullptr);
+    const float* px = &rgba[(kSize / 2 * kSize + kSize / 2) * 4];
+    for (int k = 0; k < 3; k++)
+      if (std::fabs(px[k] - 0.3f) > 1e-6f) {
+        std::printf("FAIL vertex texture read%s: %g %g %g, want 0.3\n", rev ? " reversed" : "", px[0], px[1], px[2]);
+        failures++;
+        break;
+      }
+  }
+  std::printf("%s depth texture read by a vertex shader\n", failures ? "FAIL" : "ok");
+  return failures;
+}
+
 // ---- depth from w
 
-// hlsl::Program::position_matrix of the vertex shaders above.
+// hlsl::Program::position_matrix of the vertex shaders above, and for
+// those that do not qualify, position_note (what it says, in part).
 int AnalysisChecks() {
   int failures = 0;
   const struct {
     const char* name;
     Tokens t;
     int want;
+    const char* note;
   } cases[] = {
-      {"c8-c11", WvpVs(0), 8},     {"z pushed", WvpVs(1), -1}, {"z = w", WvpVs(2), -1},
-      {"other translation", WvpVs(3), -1}, {"blit", BlitVs(), -1}, {"pass-through", PassVs(), -1},
+      {"c8-c11", WvpVs(0), 8, ""},
+      {"z pushed", WvpVs(1), -1, "more than once"},
+      {"z = w", WvpVs(2), -1, "product"},
+      {"other translation", WvpVs(3), -1, "not with the translation c12"},
+      {"predicated", WvpVs(4), -1, "predicated"},
+      {"a row in an if block", WvpVs(5), -1, "if block"},
+      {"a loop", WvpVs(6), -1, "loop"},
+      {"a subroutine", WvpVs(7), -1, "subroutine"},
+      {"c11 defined", WvpVs(8), -1, "defines"},
+      {"relative translation", WvpVs(9), -1, "a0"},
+      {"translation carried negated", WvpVs(10), -1, "negated"},
+      {"xyw and z written apart", WvpVs(11), -1, "more than once"},
+      {"a row negated", WvpVs(12), 8, ""},
+      {"blit", BlitVs(), -1, ""},
+      {"pass-through", PassVs(), -1, ""},
   };
   for (const auto& c : cases) {
     hlsl::Program p;
@@ -529,7 +749,24 @@ int AnalysisChecks() {
       std::printf("FAIL translate %s: %s\n", c.name, err.c_str());
       failures++;
     } else if (p.position_matrix != c.want) {
-      std::printf("FAIL position matrix of %s: %d, want %d\n", c.name, p.position_matrix, c.want);
+      std::printf("FAIL position matrix of %s: %d, want %d (%s)\n", c.name, p.position_matrix, c.want,
+                  p.position_note.c_str());
+      failures++;
+    } else if ((c.want < 0) == p.position_note.empty() || p.position_note.find(c.note) == std::string::npos) {
+      std::printf("FAIL position note of %s: \"%s\", want one with \"%s\"\n", c.name, p.position_note.c_str(),
+                  c.note);
+      failures++;
+    }
+  }
+  // The registers read, for the device's note of shaders that read the
+  // matrix but do not qualify.
+  {
+    hlsl::Program p;
+    std::string err;
+    const Tokens t = WvpVs(8);
+    if (!hlsl::TranslateBytecode(t.data(), t.size(), &p, &err) || !p.float_reads.test(8) || !p.float_reads.test(10) ||
+        p.float_reads.test(11) || p.float_reads.test(12)) {
+      std::printf("FAIL float registers read: c8-c10 (c11 defined)\n");
       failures++;
     }
   }
@@ -606,12 +843,70 @@ int ProjectionChecks() {
   check(w.Use(noisy, &exact) && w.n == double(kNear) && w.a == exact.a, "the game's own planes, if they agree");
   w.fresh = true;
   check(w.Use(near2, &exact) && w.n == near2.n, "else the matrix's");
+  w.fresh = true;
+  check(!w.Use(p, nullptr, false) && w.fresh, "a draw without depth test or write: not from w, nothing set");
+  check(w.Use(near2) && w.n == near2.n && !w.fresh, "the next one with depth sets it");
+
+  // The far plane, relative to the near one (a - 1): with n / f 1 / 50
+  // (a - 1 0.02), 0.1% further is another projection, 0.001% the same.
+  {
+    gfx::WDepth wide;
+    gfx::WProjection base = gfx::PerspectiveOfPlanes(1, 50), off = gfx::PerspectiveOfPlanes(1, 50.05),
+                     close = gfx::PerspectiveOfPlanes(1, 50.0005);
+    base.a_tol = off.a_tol = close.a_tol = 1e-6 * base.a;  // as PerspectiveOf's
+    base.tol = off.tol = close.tol = 1e-3;
+    check(wide.Use(base) && !wide.Use(off), "a far plane 0.1% further (n / f 1 / 50): another projection");
+    check(wide.Use(close), "0.001% further: the same");
+  }
+
+  // Objects' matrices, rotated and kilometres from the origin, under a
+  // turned and tilted camera: their a and n within PerspectiveOf's
+  // rounding (a_tol, tol) of the planes', so the same projection.
+  {
+    auto rot = [](int axis, float t) {  // about z (0) or x (1)
+      const float c = std::cos(t), s = std::sin(t);
+      return axis == 0 ? M4{{{c, s, 0, 0}, {-s, c, 0, 0}, {0, 0, 1, 0}, {0, 0, 0, 1}}}
+                       : M4{{{1, 0, 0, 0}, {0, c, s, 0}, {0, -s, c, 0}, {0, 0, 0, 1}}};
+    };
+    const float a = kFar / (kFar - kNear);
+    const M4 axes_proj = Mul(M4{{{1, 0, 0, 0}, {0, 0, 1, 0}, {0, 1, 0, 0}, {0, 0, 0, 1}}},
+                             M4{{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, a, 1}, {0, 0, -kNear * a, 0}}});
+    uint32_t seed = 12345;
+    auto rnd = [&]() {  // 0..1
+      seed = seed * 1664525u + 1013904223u;
+      return float(seed >> 8) / float(1u << 24);
+    };
+    double worst_a = 0, worst_n = 0;
+    int bad = 0;
+    for (int i = 0; i < 500; i++) {
+      const float cxr = (rnd() - 0.5f) * 5000, cyr = (rnd() - 0.5f) * 5000, czr = rnd() * 200;
+      const M4 cam = Mul(Mul(Translate(-cxr, -cyr, -czr), rot(0, rnd() * 6.2832f)), rot(1, (rnd() - 0.5f) * 1.2f));
+      const M4 world = Mul(rot(0, rnd() * 6.2832f), Translate(cxr + (rnd() - 0.5f) * 200, cyr + (rnd() - 0.5f) * 200,
+                                                            czr + (rnd() - 0.5f) * 20));
+      gfx::WProjection q2;
+      if (!Perspective(Mul(world, Mul(cam, axes_proj)), &q2)) {
+        bad++;
+        continue;
+      }
+      worst_a = std::fmax(worst_a, std::fabs(q2.a - exact.a) / q2.a_tol);
+      worst_n = std::fmax(worst_n, std::fabs(q2.n - exact.n) / q2.tol);
+      if (!gfx::WDepth::Same(exact, q2)) bad++;
+    }
+    if (bad) {
+      std::printf("FAIL projection: %d of 500 rotated objects' matrices not the planes' (a off by %.2g of its "
+                  "tolerance, n by %.2g)\n",
+                  bad, worst_a, worst_n);
+      failures++;
+    } else {
+      std::printf("   rotated objects: a off by %.2g of its tolerance at most, n by %.2g\n", worst_a, worst_n);
+    }
+  }
   std::printf("%s projection (orthographic, oblique; one per content)\n", failures ? "FAIL" : "ok");
   return failures;
 }
 
 // The camera of the layers below: 2.5 km from the origin (the far side of
-// GTA IV's map).
+// a city-sized map).
 constexpr double kCx = -1817.63, kCy = 2471.53, kCz = 136.81;
 
 // A layer at y = kCy + dist across the whole view, its vertices less
@@ -635,7 +930,7 @@ std::vector<float> WvpConsts(const M4& m) {
 }
 
 // Two layers 3 mm apart, 30 m from the camera, in world coordinates 2.5
-// km from the origin (the far side of GTA IV's map), each with its own
+// km from the origin (the far side of a city-sized map), each with its own
 // matrix (one with its world translation, one with world-space vertices);
 // then layers past the far plane and before the near one. Drawn
 // reversed, z from the matrix and from w. (From z, this GPU's rounding
@@ -788,6 +1083,9 @@ int main() {
     failures += SampleChecks(f);
     failures += CompareChecks(f);
     failures += DepthOutChecks(f);
+    failures += BiasChecks(f);
+    failures += BorderChecks(f);
+    failures += VertexSampleChecks(f);
     failures += FromWChecks(g, f.color, f.depth);
     failures += FromWSampleChecks(f);
     return failures ? 1 : 0;

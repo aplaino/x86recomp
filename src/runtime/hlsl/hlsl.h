@@ -40,6 +40,7 @@
 // and varyings at fixed locations per semantic (VaryingLocation), so any
 // vertex shader pairs with any pixel shader without linking.
 
+#include <bitset>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -119,8 +120,12 @@ struct Program {
   // alike: z = sum of s_k c[b + k].z and w = the same sum of the .w, for
   // the same scalars s_k (s_3 = 1), nothing else added to either. A
   // backend may then compute the depth from w alone (gfx/reversed_z.h).
-  // -1: not known to be so.
+  // -1: not known to be so, and position_note says why.
   int position_matrix = -1;
+  std::string position_note;
+  // Bytecode: the float registers c0-c255 read by number (not through a0
+  // or aL, not ones the shader defines).
+  std::bitset<256> float_reads;
 };
 
 // D3DXSHADER flags that change the translation.

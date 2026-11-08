@@ -752,16 +752,17 @@ class MetalDevice final : public Device {
     const double busy = double(enc_busy_ns_.exchange(0));
     const uint64_t pipes = pipe_compiles_.exchange(0), pipe_ns = pipe_ns_.exchange(0),
                    pipe_max = pipe_max_ns_.exchange(0), prebuilt = pipe_prebuilt_.exchange(0);
-    char b[704];
+    char b[768];
     std::snprintf(b, sizeof b,
-                  "per frame %.0f draws (%.0f of them depth from w; %.2f ms recording them, %.2f us each), "
+                  "per frame %.0f draws (%.0f of them depth from w, %.0f not for another projection; %.2f ms "
+                  "recording them, %.2f us each), "
                   "%.0f recorded ops, "
                   "%.1f render passes, %.1f uploads ahead + %.1f in order (%.2f MB, %.2f MB in "
                   "order); encoder busy %.0f%% (%.2f ms a frame); in %.0f frames: %llu textures + "
                   "%llu depth buffers created, %llu arena buffers (%.0f MB) + %llu made ahead, %llu shaders (%.1f ms, "
                   "%llu MSL compiles), %llu pipelines compiled while drawing (%.1f ms, max %.1f), "
                   "%llu built ahead used",
-                  double(c.draws) / f, double(c.w_draws) / f, double(c.draw_ns) / f / 1e6,
+                  double(c.draws) / f, double(c.w_draws) / f, double(c.w_other) / f, double(c.draw_ns) / f / 1e6,
                   c.draws ? double(c.draw_ns) / double(c.draws) / 1e3 : 0.0, double(c.ops) / f,
                   double(c.passes) / f, double(c.uploads_ahead) / f, double(c.uploads_in_order) / f,
                   double(c.upload_bytes) / f / 1048576.0, double(c.in_order_bytes) / f / 1048576.0,
@@ -1311,6 +1312,8 @@ class MetalDevice final : public Device {
       sh.inputs = prog.inputs.size();
       sh.float_regs = prog.float_regs;
       sh.position_matrix = prog.position_matrix;
+      sh.position_note = prog.position_note;
+      sh.float_reads = prog.float_reads;
       sh.sampler_type.fill(hlsl::ParamType::Void);
       for (const hlsl::Sampler& smp : prog.samplers) {
         if (smp.reg >= 16) FatalF("gfx: shader sampler register %u", smp.reg);
@@ -1503,6 +1506,7 @@ class MetalDevice final : public Device {
     DepthKey dk{};
     dk.func = dk.sfunc = dk.bfunc = uint8_t(MTLCompareFunctionAlways);
     float bias = 0, slope = 0;
+    clip_bias_ = 0;
     if (pass_.depth) {
       dk.test = rs_[7] ? 1 : 0;
       dk.write = (rs_[7] && rs_[14]) ? 1 : 0;
@@ -1521,10 +1525,16 @@ class MetalDevice final : public Device {
         dk.read = uint8_t(rs_[58]);
         dk.wmask = uint8_t(rs_[59]);
       }
-      bias = (AsFloat(rs_[195]) - float(rs_[47]) * (1.0f / 65535.0f)) * pass_.bias_scale;
-      slope = AsFloat(rs_[175]);
-      if (pass_.reversed) bias = -bias, slope = -slope;  // nearer is larger
+      // DEPTHBIAS (less the legacy ZBIAS) and SLOPESCALEDEPTHBIAS; on a
+      // reversed buffer the constant part from the vertex shader
+      // (reversed_z.h).
+      const DepthBias db = DepthBiasOf(AsFloat(rs_[195]) - float(rs_[47]) * (1.0f / 65535.0f), AsFloat(rs_[175]),
+                                       pass_.reversed, viewport_.min_z, viewport_.max_z, pass_.bias_scale);
+      bias = db.constant;
+      slope = db.slope;
+      clip_bias_ = db.clip;
     }
+    depth_used_ = dk.test || dk.write;
     BindDepth(dk);
 
     // Rasterizer: D3D culls by screen winding, CW (2) or CCW (3); front
@@ -1605,7 +1615,7 @@ class MetalDevice final : public Device {
       st.in[i][2] = int32_t(in.type);
     }
     PixelState(st.pixel);
-    ClipState(st, d, vs.position_matrix);
+    ClipState(st, d, vs);
     VertexBuffer(3, vb.buf, 0);
 
     ShaderResources(d, vs, ps, st);
@@ -1639,6 +1649,8 @@ class MetalDevice final : public Device {
   }
 
  private:
+  struct Shader;  // (below)
+
   // ---- the scene at an internal resolution, upscaled (RECOMP_UPSCALER)
 
   enum class Upscaler { Off, Bilinear, MetalFX, MetalFXSpatial, Taa, Smaa };
@@ -1708,13 +1720,22 @@ class MetalDevice final : public Device {
   }
 
   // The vertex state's user clip planes (D3D9 with shaders: clip space),
-  // and how depth is made (r_position): reversed, and from w where the
-  // draw qualifies (reversed_z.h).
-  void ClipState(VsState& st, const ShaderDraw& d, int position_matrix) {
+  // how depth is made (r_position): reversed, its bias, and from w where
+  // the draw qualifies (reversed_z.h); and the vertex samplers that read a
+  // reversed depth texture (R_DEPTH_TEX).
+  void ClipState(VsState& st, const ShaderDraw& d, const Shader& vs) {
     st.clip_mask[0] = int32_t(rs_[152] & 0x3F);
     if (st.clip_mask[0]) std::memcpy(st.clip, clip_planes_, sizeof st.clip);
+    for (uint32_t r = 0; r < vs.samplers && r < 4; r++)
+      if (const Tex* t = FindTex(d.textures[16 + r]); t && t->depth && ReversedDepth(t->tex.pixelFormat))
+        st.clip_mask[2] |= int32_t(1u << r);
     st.clip_mask[1] = pass_.reversed ? 1 : 0;
-    if (!pass_.reversed || wvp_reg_ < 0 || position_matrix != wvp_reg_ || !d.vs_float) return;
+    st.depth[2] = clip_bias_;
+    if (!pass_.reversed || wvp_reg_ < 0 || !d.vs_float) return;
+    if (vs.position_matrix != wvp_reg_) {
+      NoteNotFromW(vs);
+      return;
+    }
     WProjection p;
     if (!PerspectiveOf(d.vs_float + wvp_reg_, &p)) return;
     auto dit = depths_.find(pass_.depth_id);
@@ -1723,10 +1744,14 @@ class MetalDevice final : public Device {
     // The first after a clear: the game's planes, where it knows them.
     WProjection exact;
     float n, f;
-    const bool planes = wd.fresh && depth_planes_ && depth_planes_(&n, &f) && n > 0 && f > n;
+    const bool fresh = wd.fresh && depth_used_;
+    const bool planes = fresh && depth_planes_ && depth_planes_(&n, &f) && n > 0 && f > n;
     if (planes) exact = PerspectiveOfPlanes(n, f);
-    const bool fresh = wd.fresh;
-    if (!wd.Use(p, planes ? &exact : nullptr)) return;
+    if (!wd.Use(p, planes ? &exact : nullptr, depth_used_)) {
+      // Tests or writes depth, with another projection than the content's.
+      if (perf_ && depth_used_) pc_.w_other++;
+      return;
+    }
     // The first few contents' projections, for the log.
     if (fresh && w_logged_ < 4) {
       w_logged_++;
@@ -1737,6 +1762,26 @@ class MetalDevice final : public Device {
     st.depth[0] = wd.K0();
     st.depth[1] = wd.K1();
     if (perf_) pc_.w_draws++;
+  }
+
+  // A vertex shader drawn into a reversed buffer, testing or writing
+  // depth, that reads the world-view-projection's registers but does not
+  // qualify for depth from w: once per shader, why (the first 256).
+  void NoteNotFromW(const Shader& vs) {
+    if (!depth_used_ || !vs.hash || w_noted_.size() > 256) return;
+    bool reads = false;
+    for (int k = 0; k < 4; k++) reads = reads || vs.float_reads.test(size_t(wvp_reg_ + k));
+    if (!reads || !w_noted_.insert(vs.hash).second) return;
+    if (w_noted_.size() > 256) {
+      std::fprintf(stderr, "gfx: depth from w: more vertex shaders kept w - z, not logged\n");
+      return;
+    }
+    char other[64] = "";
+    if (vs.position_matrix >= 0)
+      std::snprintf(other, sizeof other, "its position is from c%d-c%d", vs.position_matrix, vs.position_matrix + 3);
+    std::fprintf(stderr, "gfx: depth from w: vertex shader %016llx reads c%d-c%d, keeps w - z: %s\n",
+                 (unsigned long long)vs.hash, wvp_reg_, wvp_reg_ + 3,
+                 *other ? other : vs.position_note.empty() ? "(no analysis)" : vs.position_note.c_str());
   }
 
   // The camera (world to clip space, D3D's row vectors) from a scene
@@ -2482,7 +2527,9 @@ void main() {
     uint32_t samplers = 0;  // highest register used + 1
     ShaderId without_depth = 0;  // (PixelShaderWithoutDepth)
     uint32_t float_regs = 0;
-    int position_matrix = -1;  // hlsl::Program's
+    int position_matrix = -1;  // hlsl::Program's, vertex shaders
+    std::string position_note;
+    std::bitset<256> float_reads;
     uint64_t hash = 0;  // of its translation: the same from run to run (0: the device's own)
     uint32_t varyings = 0;  // locations written (vertex) or read (pixel): hlsl::VaryingMask
     // Pixel shaders: the translation, and its variants for vertex shaders
@@ -2618,7 +2665,7 @@ void main() {
       st.in[i][2] = int32_t(in.type);
     }
     PixelState(st.pixel);
-    ClipState(st, d, vs.position_matrix);
+    ClipState(st, d, vs);
     VertexBuffer(3, shared_buf_, 0);
     ShaderResources(d, vs, ps, st);
 
@@ -2743,10 +2790,12 @@ void main() {
                            : want == hlsl::ParamType::Sampler3D ? dummy_3d_
                                                                 : dummy_2d_;
       Tex* t = FindTex(d.textures[r]);
+      bool reversed = false;  // a reversed depth texture: its border colour mirrored
       if (t && t->cube == (want == hlsl::ParamType::SamplerCube) &&
           want != hlsl::ParamType::Sampler3D) {
         tex = t->tex;
         t->used = serial_;
+        reversed = t->depth && ReversedDepth(tex.pixelFormat);
       }
       // The sampler made from the row last time, while the row's change
       // counter has not moved.
@@ -2755,15 +2804,19 @@ void main() {
       SlotSampler& cached = slot_sampler_[r];
       if (!version || cached.version != version || cached.row != row)
         cached = {row, version, Sampler(D3D9Sampler(row))};
-      if (pass_.scaled && Attached(tex)) {
+      const bool nearest = pass_.scaled && Attached(tex);
+      if (nearest || reversed) {
+        SamplerKey k = D3D9Sampler(row);
         // A target the pass draws to, read at the pixel being drawn (the
         // game's lighting reads its accumulation and depth so): at the
         // internal resolution the game's coordinates fall off the texel
         // centres, and linear filtering then reads the neighbours, which
         // across a GPU tile's edge another tile may be writing (NaN rows
         // and columns on a 32-pixel grid). Nearest, as at full size.
-        SamplerKey k = D3D9Sampler(row);
-        k.min = k.mag = uint8_t(MTLSamplerMinMagFilterNearest);
+        if (nearest) k.min = k.mag = uint8_t(MTLSamplerMinMagFilterNearest);
+        // Read as 1 - rgb (R_DEPTH_TEX): the border's black and white
+        // swapped, so it reads as D3D9's.
+        if (reversed) k.border = ReversedDepthBorder(k.border);
         TextureAndSampler(vertex, reg, tex, Sampler(k));
         continue;
       }
@@ -4168,6 +4221,11 @@ void main() {
   int wvp_reg_ = -1;  // SetDepthFromW's; -1 also with depth from w off
   DepthPlanes depth_planes_ = nullptr;
   int w_logged_ = 0;
+  std::unordered_set<uint64_t> w_noted_;  // NoteNotFromW's shaders
+  // The draw being recorded: a reversed buffer's depth bias for
+  // r_position (DepthBiasOf's clip), and whether it tests or writes depth.
+  float clip_bias_ = 0;
+  bool depth_used_ = false;
   // RECOMP_GPU_PASSES: a timestamp buffer per frame in flight (one more
   // than the slots), the passes it timed, and the totals by pass number.
   struct PassTimes {
@@ -4394,6 +4452,7 @@ void main() {
   struct PerfCounts {
     uint64_t frames = 0, draws = 0, draw_ns = 0, ops = 0, passes = 0;
     uint64_t w_draws = 0;  // with depth from w
+    uint64_t w_other = 0;  // that would be, but have another projection than the buffer content's
     uint64_t uploads_ahead = 0, uploads_in_order = 0, upload_bytes = 0, in_order_bytes = 0;
     // Arena buffers: made while drawing, and taken ready (made ahead).
     uint64_t textures = 0, depths = 0, arena_buffers = 0, arena_bytes = 0, arena_ahead = 0;
