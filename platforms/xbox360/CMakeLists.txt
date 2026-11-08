@@ -67,7 +67,9 @@ add_library(recomp_xbox360_xam SHARED
   src/xbox360/xam/net.cpp
   src/xbox360/xam/notify.cpp
   src/xbox360/xam/profile.cpp
+  src/xbox360/xam/ui.cpp
   src/xbox360/xam/user.cpp
+  src/xbox360/xam/voice.cpp
   src/xbox360/xam/xgi.cpp
   src/xbox360/xam/xlivebase.cpp
   src/xbox360/xam/xmp.cpp)

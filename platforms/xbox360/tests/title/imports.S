@@ -172,6 +172,18 @@ __xex_import_slot_\name:
   FUNCTION 531, XamUserAreUsersFriends, 1
   FUNCTION 752, XamWriteGamerTile, 1
   FUNCTION 759, XamUserCreateStatsEnumerator, 1
+  FUNCTION 703, XamShowFriendsUI, 1
+  FUNCTION 710, XamShowPlayerReviewUI, 1
+  FUNCTION 709, XamShowAchievementsUI, 1
+  FUNCTION 725, XamShowGamerCardUIForXUID, 1
+  FUNCTION 711, XamShowMarketplaceUI, 1
+  FUNCTION 705, XamShowKeyboardUI, 1
+  FUNCTION 732, XamShowMessageBoxUIEx, 1
+  FUNCTION 729, XamShowDirtyDiscErrorUI, 1
+  FUNCTION 780, XamVoiceCreate, 1
+  FUNCTION 781, XamVoiceHeadsetPresent, 1
+  FUNCTION 782, XamVoiceSubmitPacket, 1
+  FUNCTION 783, XamVoiceClose, 1
   VARIABLE 27, ExThreadObjectType
   VARIABLE 173, KeTimeStampBundle
   VARIABLE 344, XboxKrnlVersion

@@ -306,6 +306,56 @@ field of xam's XGI object (+0xDC) and fail with 0x8056F002 while it is
   title's resources (failing for one the title lacks) and shows an award
   notification; neither here (console check).
 
+## The system UI
+- xam loads its UI app (ERROR_ACCESS_DENIED when another UI holds it)
+  and sends it (0xFE) a message per UI; one that fails unloads the app
+  and returns ERROR_OUTOFMEMORY or ERROR_FUNCTION_FAILED. There is no UI
+  here: one that shows closes at once, raising XN_SYS_UI 1 and 0
+  (chosen, as for the sign-in UI).
+- The Live UIs (XamShowFriendsUI, MessagesUI, PlayersUI, GameInviteUI,
+  FriendRequestUI, PlayerReviewUI, others' gamer cards: messages
+  0x21002, 0x21009) show nothing for a user (with 0xFF: any user) not
+  signed in to Live and return ERROR_ACCESS_DENIED; PlayerReviewUI first
+  refuses a slot past 3 but 0xFD (ERROR_INVALID_PARAMETER). xam's code.
+- XamShowAchievementsUI and the user's own gamer card
+  (XamShowGamerCardUIForXUID with XUID 0 or one of the user's; another
+  online XUID is a Live UI, any other XUID ERROR_INVALID_PARAMETER) send
+  0x21008 in process and return 0. XamShowMarketplaceUI(slot, type,
+  offer, categories) refuses a slot past 3 or a type past 0x18
+  (ERROR_INVALID_PARAMETER) and a slot without a profile (its XUIDs'
+  error, ERROR_NO_SUCH_USER), then sends 0x2100A. xam's code.
+- XamShowKeyboardUI(slot, flags, default text, title, description,
+  buffer, characters, overlapped) sends 0x21005 {slot, characters, flags,
+  default, title, description, buffer, overlapped} as a request and
+  returns ERROR_IO_PENDING, with or without an XOVERLAPPED (xam's code).
+  The keyboard here returns the default text, truncated with its
+  terminator, as Xenia's headless keyboard does (chosen; console check).
+- XamShowMessageBoxUI(Ex)(slot, title, text, button count, buttons,
+  focus, flags, *result, overlapped) refuses a slot past 3 but 0xFF,
+  flags in 0xFFC00EF8, anything but 1-3 buttons with the focus on one
+  (none only with a passcode mode, 0x370000), 0x100000 with 0x200000,
+  0x100000 with more than one button or the focus off the first,
+  0x200000 with more than two or the focus past the second, a result
+  without an XOVERLAPPED and none with one (ERROR_INVALID_PARAMETER, the
+  XOVERLAPPED's extended error too). It clears the result unless a
+  passcode mode and sends 0x2100D (0x47C bytes: the slot, the strings,
+  the buttons, focus, flags, result, overlapped): ERROR_IO_PENDING with
+  an XOVERLAPPED, 0 without. xam's code. The box here presses the
+  focused button, as Xenia's headless one does (chosen; console check).
+- XamShowDirtyDiscErrorUI shows xam's message box with its own strings
+  and waits for it, returning its result: 0 here.
+
+## Voice
+- XamVoiceCreate(slot, packets, *voice) resets the user's entry in xam's
+  table (0x38 bytes): the packet count, the packets (0x10 bytes each,
+  each naming the voice, linked first to last), an empty list, the time
+  it was made; E_OUTOFMEMORY and no voice when the packets cannot be
+  allocated. XamVoiceClose frees the packets and returns TRUE. xam's
+  code. The headset itself is the kernel's (XVoiced*, not in the system
+  update): no headset here, XamVoiceHeadsetPresent returns 0 and
+  XamVoiceSubmitPacket drops the packet and returns 0 (chosen; console
+  check).
+
 ## Notifications
 - An id is an area (bits 25-30), a version (16-24) and a number.
   XamNotifyCreateListener(areas, highest version) makes a listener for

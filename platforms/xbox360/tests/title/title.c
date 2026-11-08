@@ -157,6 +157,19 @@ u32 XamUserAreUsersFriends(u32 slot, uint64_t* xuids, u32 count, u32* result, u3
 u32 XamWriteGamerTile(u32 slot, u32 title, u32 large, u32 small, u32 award, u32* overlapped);
 u32 XamUserCreateStatsEnumerator(u32 title, u32 kind, uint64_t pivot, u32 rows, u32 count, void* views, u32* size,
                                  u32* handle);
+u32 XamShowFriendsUI(u32 slot);
+u32 XamShowPlayerReviewUI(u32 slot, uint64_t xuid);
+u32 XamShowAchievementsUI(u32 slot, u32 title);
+u32 XamShowGamerCardUIForXUID(u32 slot, uint64_t xuid, u32 flags);
+u32 XamShowMarketplaceUI(u32 slot, u32 type, uint64_t offer, u32 categories);
+u32 XamShowKeyboardUI(u32 slot, u32 flags, const uint16_t* text, const uint16_t* title, const uint16_t* description,
+                      uint16_t* buffer, u32 chars, u32* overlapped);
+u32 XamShowMessageBoxUIEx(void);  // through XamShowMessageBoxUIEx9
+u32 XamShowDirtyDiscErrorUI(void);
+u32 XamVoiceCreate(u32 slot, u32 packets, u32* voice);
+u32 XamVoiceHeadsetPresent(u32 voice);
+u32 XamVoiceSubmitPacket(u32 voice, u32 size, void* packet);
+u32 XamVoiceClose(u32 voice);
 u32 XamShowDeviceSelectorUI(u32 user, u32 type, u32 flags, uint64_t bytes, u32* device, u32* overlapped);
 extern u32 __imp_NtClose, __imp_ExThreadObjectType, __imp_KeTimeStampBundle, __imp_XboxKrnlVersion,
     __imp_XexExecutableModuleHandle, __imp_ExLoadedCommandLine, __imp_VdGlobalDevice, __imp_VdGpuClockInMHz,
@@ -172,6 +185,8 @@ u32 NtQueryDirectoryFile9(u32 handle, u32 event, void* apc, void* context, u32* 
                           void* mask, u32 restart);
 u32 XamUserReadProfileSettings9(u32 title, u32 slot, u32 xuid_count, void* xuids, u32 count, u32* ids, u32* size,
                                 void* results, u32* overlapped);
+u32 XamShowMessageBoxUIEx9(u32 slot, const uint16_t* title, const uint16_t* text, u32 count, const uint16_t** buttons,
+                           u32 focus, u32 flags, u32* result, u32* overlapped);
 u32 XamContentCreateEx9(u32 user, const char* root, void* data, u32 flags, u32* disposition, u32* license,
                         u32 cache_size, uint64_t content_size, u32* overlapped);
 u32 VdSwap10(volatile u32* words, u32* fetch, u32 writeback, void* system, u32 value, u32* front, u32* format,
@@ -1456,6 +1471,46 @@ static void Users(void) {
   CHECK(XNotifyGetNext(h, 0, &id, &value) == 1 && id == 0x02000001 && value == 0x001510F1);
   NtClose(h);
   CHECK(XNotifyPositionUI(1) == 0);
+
+  // The system UI: the Live ones are refused, the others show and close
+  // (XN_SYS_UI 1, then 0: a listener holds 0).
+  CHECK(XamShowFriendsUI(0) == 5 && XamShowPlayerReviewUI(0, 0x0009000000000001ull) == 5 &&
+        XamShowPlayerReviewUI(4, 0) == 87);
+  CHECK(XamShowGamerCardUIForXUID(0, 0x0009000000000001ull, 0) == 5 &&
+        XamShowGamerCardUIForXUID(0, 0xE000000000000002ull, 0) == 87);
+  CHECK(XamShowMarketplaceUI(1, 0, 0, 0) == 1317 && XamShowMarketplaceUI(0, 0x19, 0, 0) == 87);
+  h = XamNotifyCreateListener(1, 1);
+  while (XNotifyGetNext(h, 0, &id, &value)) {
+  }
+  CHECK(XamShowAchievementsUI(0, 0) == 0 && XamShowGamerCardUIForXUID(0, 0xE000000000000001ull, 0) == 0 &&
+        XamShowMarketplaceUI(0, 0, 0, 0) == 0 && XamShowDirtyDiscErrorUI() == 0);
+  CHECK(XNotifyGetNext(h, 9, &id, &value) == 1 && value == 0 && XNotifyGetNext(h, 0, &id, &value) == 0);
+  // The keyboard gives its default text back, truncated; the message box
+  // its focused button.
+  static const uint16_t text[] = {'a', 'b', 'c', 'd', 0}, ok[] = {'O', 'K', 0}, no[] = {'N', 'o', 0};
+  uint16_t typed[8] = {9, 9, 9, 9, 9, 9, 9, 9};
+  u32 kov[7] = {0, 0, 0, 0, 0, 0, 0};
+  CHECK(XamShowKeyboardUI(0, 0, text, 0, 0, typed, 3, kov) == 997 && kov[0] == 0 && typed[0] == 'a' &&
+        typed[1] == 'b' && typed[2] == 0 && typed[3] == 9);
+  const uint16_t* buttons[2] = {ok, no};
+  u32 pressed[2] = {9, 9};
+  CHECK(XamShowMessageBoxUIEx9(0, text, text, 2, buttons, 1, 0, pressed, kov) == 997 && kov[0] == 0 &&
+        pressed[0] == 1);
+  CHECK(XamShowMessageBoxUIEx9(0, text, text, 2, buttons, 1, 0, 0, 0) == 0);
+  CHECK(XamShowMessageBoxUIEx9(0, text, text, 2, buttons, 2, 0, pressed, kov) == 87 && kov[6] == 87);
+  CHECK(XamShowMessageBoxUIEx9(0, text, text, 2, buttons, 1, 0, pressed, 0) == 87 &&
+        XamShowMessageBoxUIEx9(0, text, text, 2, buttons, 1, 0x100000, pressed, kov) == 87);
+  NtClose(h);
+
+  // Voice: no headset.
+  u32 voice = 0;
+  CHECK(XamVoiceCreate(0, 3, &voice) == 0 && voice && *At(voice + 4) == 3 && *At(voice + 8) != 0);
+  u32 packet = *At(voice + 0xC), packets = 0;
+  for (; packet; packet = *At(packet + 0xC)) packets += *At(packet + 8) == voice;
+  CHECK(packets == 3 && *At(*At(voice + 0x10) + 0xC) == 0);
+  uint8_t talk[16] = {0};
+  CHECK(XamVoiceHeadsetPresent(voice) == 0 && XamVoiceSubmitPacket(voice, sizeof talk, talk) == 0);
+  CHECK(XamVoiceClose(voice) == 1 && *At(voice + 4) == 0 && *At(voice + 8) == 0);
 }
 
 // ---- content ------------------------------------------------------------------
