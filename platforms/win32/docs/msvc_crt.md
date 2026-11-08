@@ -1,0 +1,102 @@
+# The statically linked MSVC CRT
+
+32-bit Windows programs of the VC6 to VC8 era link Microsoft's C runtime
+into the EXE (and into each DLL of their own). recomp_msvc_crt
+(src/win32/msvc_crt*.cpp) has native versions of its functions, which a
+program binds to its copies in its manifest (ARCHITECTURE.md, "Shared
+native functions"):
+
+    native 0040CC70 msvc_crt::strlen
+
+Finding the copies: identify the CRT in the program's EXE by signature
+and give each function's address. A program may hold several copies
+of one function (two names whose code is one, e.g. memcpy and memmove
+from one source); bind each. The game project's CMakeLists.txt adds the
+oracle:
+
+    recomp_add_msvc_crt_oracle(EXE <exe> SYMBOLS <dir> MANIFEST <manifest>
+      STUBS <manifest> SOURCES <stubs.cpp>)
+
+It lifts the bound originals with `--only` and runs each against its
+native version on random arguments from the same memory and registers
+(platforms/win32/tests/msvc_crt_oracle.cpp has what it compares and how
+it draws the arguments). What the originals call outside the CRT (the
+program's allocator, the CRT's _lock) is stubbed: STUBS replaces those
+functions, SOURCES defines them and `Setup()`.
+
+## Versions
+Checked against: VC6 (Visual C++ 6.0's static CRT, LIBC/LIBCMT). A
+program with another version runs the oracle against its own copies; a
+function whose behaviour differs gets a variant under the version's
+namespace, as the locale functions, floor and ceil have
+(`msvc_crt::vc6::`).
+
+## Strings, memory, integers (msvc_crt::)
+memset, memcpy, memmove, memchr, strlen, strcpy, strcat, strncpy,
+strncat, strcmp, strncmp, strchr, strrchr, strstr, strcspn, strpbrk,
+wcslen, wcscpy, wcsncpy, wcschr, wcsrchr, wcscspn, and the compiler's
+helpers _allmul, _aulldiv, _aullrem, _allshl, _alloca_probe and _ftol.
+- strcmp and strncmp return -1, 0 or 1 (the asm versions), comparing
+  unsigned bytes.
+- memcpy is memmove's code: overlapping copies are as memmove's. strcpy
+  and strcat between overlapping strings are undefined in C; the
+  originals copy forwards a dword at a time, the natives as memmove.
+- Byte and unit arguments (memset's, strchr's, wcschr's) are the low
+  byte or unit of their int.
+- _aulldiv/_aullrem with a zero divisor: the original runs, to raise the
+  divide error from its div.
+- _alloca_probe (_chkstk): touches each page from the top down, returns
+  with ESP lowered by EAX, ECX kept and the return address in EAX, and
+  its own pushes left in memory (ECX at the old ESP-4, the return
+  address just below the new ESP).
+- _ftol: fistp under RC=chop with the control word put back, on the x87
+  model: out-of-range values, NaNs and exception flags as the hardware.
+
+## Locale (msvc_crt::vc6::)
+tolower, toupper, _strcmpi, _strnicmp, _memicmp, _strlwr, _strupr,
+isalpha, isdigit, isspace, isalnum, iscntrl, _isctype, atoi, atol and
+strtol, on VC6's locale globals: the program gives their addresses with
+`msvc_crt::vc6::SetLocale` (win32/msvc_crt.h) before it runs.
+- After setlocale(LC_CTYPE, ".<code page>") every one of them takes the
+  CRT's locale path: classes from the ctype table setlocale built
+  (GetStringTypeA), case from LCMapString. The natives read the table
+  where the originals do; 'A'-'Z' and 'a'-'z' map to each other (as
+  LCMapString does in every code page). The original runs, from the
+  start, for another character the table marks for mapping, a string
+  with a byte over 0x7F in _strlwr/_strupr (LCMapString maps the whole
+  string; Windows-1252 has letters at 0x8A-0x9F too), a multibyte code
+  page (__mb_cur_max > 1), and values from 256 up.
+- Kept from the originals: tolower/toupper also leave their result in
+  the argument's stack slot in the locale path; at a NUL, _strnicmp
+  compares the bytes themselves; _strcmpi and _memicmp compare lowered
+  bytes, _strnicmp lowered ints; _isctype reads the table for -1..255 in
+  any code page.
+- Not kept: the locale lock (programs bound to these call setlocale
+  once, before other threads start), and _strlwr/_strupr's buffer from
+  the program's allocator (the original maps into it and copies back).
+- atol and atoi (atoi calls atol): spaces and digits as the table
+  classes them (a byte the code page marks as a digit counts, its value
+  its byte minus '0'), a sign, no overflow check (the value wraps).
+- strtol (through strtoxl): spaces, a sign, a 0x/0X prefix in base 16,
+  base 0 as 16 after 0x, 8 after another 0 and 10 otherwise; an invalid
+  base or no digits return 0 with the end pointer at the string's start.
+  The original runs for a value that does not fit (errno ERANGE, in the
+  thread's data) and for a byte over 0x7F the table marks as a letter
+  (it passes the signed char to toupper).
+- Not native yet: _wcsicmp/_wcsnicmp. Their towlower returns 16 bits in
+  AX over whatever EAX held, and they store whole registers into their
+  argument slots.
+
+## floor and ceil (msvc_crt::vc6::)
+Their double result in ST0. VC6's code sets its own control word with
+_ctrlfp (0x173F for floor, 0x1B3F for ceil: all exceptions masked, 64-bit
+precision, RC down or up), rounds with frndint, compares the result with
+the argument, puts the caller's control word back with _ctrlfp and loads
+the result; EAX is left as _ctrlfp's return, the replaced control word
+as fnstcw reads it (reserved bit 6 set: 0x177F, 0x1B7F), sign-extended.
+The natives take the same steps on the x87 model, so the status word is
+the same: PE for a fraction, DE for a denormal argument, the compare's
+condition codes. The original runs for a NaN or an infinity (_except1,
+_handle_qnan1), when the caller has an exception unmasked (an inexact
+result with the precision exception unmasked is raised through
+_except1), and when the stack has no free register.

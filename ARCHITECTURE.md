@@ -149,6 +149,8 @@ names its copies in its manifest. Each library comes with an oracle
 test that a game project runs against its own EXE, lifting the bound
 originals at build time; a binding without a check fails it. They are
 static libraries, linked into the program like its own replacements.
+- The MSVC CRT (32-bit, statically linked): recomp_msvc_crt,
+  platforms/win32/docs/msvc_crt.md; `recomp_add_msvc_crt_oracle`.
 
 ## Decisions
 
