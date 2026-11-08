@@ -78,10 +78,13 @@ here; on the console a KPCR belongs to a hardware thread.
   alignment and the bounds apply to the physical address.
 - NtAllocateVirtualMemory and NtFreeVirtualMemory follow NT: base and
   size in and out, MEM_RESERVE / MEM_COMMIT, MEM_DECOMMIT / MEM_RELEASE
-  (size 0 releases the whole reservation), in whole pages of the region's
-  own size: 64 KiB in the large-page heap from 0x40000000, for commits
-  and decommits too (a title's heap grows by the size a commit returns,
-  and decommits 64 KiB at a time). MEM_COMMIT with no base
+  (size 0 releases the whole reservation; a size releases that range of
+  one reservation, and what follows it becomes a reservation of its own:
+  titles' heaps give back the tail of a block they shrink in place this
+  way), in whole pages of the region's own size: 64 KiB in the
+  large-page heap from 0x40000000, for commits and decommits too (a
+  title's heap grows by the size a commit returns, and decommits 64 KiB
+  at a time). MEM_COMMIT with no base
   reserves the region as well (titles' heaps commit that way, with
   MEM_TOP_DOWN); a commit outside a reservation fails. The first 64 KiB
   are never mapped (a null pointer faults), and no call commits, protects
@@ -100,6 +103,15 @@ here; on the console a KPCR belongs to a hardware thread.
 - SLIST_HEADER: the first entry (be32), depth (be16), sequence (be16).
 - Handles: multiples of 4 from 0xF8000004; -2 the current thread, -1 the
   current process.
+- Named events, mutants and timers: XAPI's CreateEvent, CreateMutex and
+  CreateWaitableTimer pass a name with RootDirectory -4
+  (\BaseNamedObjects) and OBJ_OPENIF (0x80), and turn
+  STATUS_OBJECT_NAME_EXISTS (0x40000000) into ERROR_ALREADY_EXISTS. An
+  existing name opens that object (with OBJ_OPENIF; otherwise
+  STATUS_OBJECT_NAME_COLLISION), or fails with
+  STATUS_OBJECT_TYPE_MISMATCH if it is another type. Names compare
+  exactly unless OBJ_CASE_INSENSITIVE (0x40) is set, as on NT, and go
+  with the object's last reference. Other roots are fatal.
 
 ## Modules
 - XexExecutableModuleHandle holds the address of the title's loader entry
@@ -216,9 +228,11 @@ here; on the console a KPCR belongs to a hardware thread.
   same conversion, into a kernel pool buffer (allocate) or the string's
   own, truncated with STATUS_BUFFER_OVERFLOW (NT's behaviour). Whether
   the console's ANSI code page is Latin-1 or 1252 is a console check.
-- RtlNtStatusToDosError maps the statuses this kernel returns as Windows
-  NT does (Xenia's table is NT's, not copied here); a customer status
-  (bit 29) stays itself, 0x8007xxxx gives xxxx, any other is fatal.
+- RtlNtStatusToDosError maps the statuses this kernel returns, and those
+  titles' own code passes (STATUS_REQUEST_ABORTED from a cancelled file
+  copy), as Windows NT does (Xenia's table is NT's, not copied here); a
+  customer status (bit 29) stays itself, 0x8007xxxx gives xxxx, any other
+  is fatal.
 - MmQueryStatistics fills MM_STATISTICS (0x68 bytes, its size first, else
   STATUS_BUFFER_TOO_SMALL): 0x20000 physical pages, the kernel's 0x100
   (Xenia's), the title's available pages (what no committed page or
@@ -242,8 +256,8 @@ here; on the console a KPCR belongs to a hardware thread.
 
 ## Timers
 - NtCreateTimer(*handle, attributes, type): a KTIMER (0x28 bytes), a
-  notification (0) or synchronization (1) timer, not set; named timers
-  are not supported yet.
+  notification (0) or synchronization (1) timer, not set; a name as for
+  the other objects (Objects).
 - NtSetTimerEx(handle, *due, APC routine, APC mode, APC context, resume,
   period, *previous): clears the timer and signals it at the due time (a
   wait's timeout: negative relative, otherwise absolute), then every
@@ -274,9 +288,10 @@ here; on the console a KPCR belongs to a hardware thread.
   call (Xenia, ReXGlue). A mask that matches nothing on the first query is
   STATUS_NO_SUCH_FILE, the end STATUS_NO_MORE_FILES.
 - FILE_NETWORK_OPEN_INFORMATION, FILE_STANDARD_INFORMATION,
-  FILE_RENAME_INFORMATION (replace, root directory, an ANSI_STRING) and
-  the volume information are NT's layouts in big-endian, as ReXGlue has
-  them. FILE_BASIC_INFORMATION's attributes are NT's 32-bit field at
+  FILE_RENAME_INFORMATION (replace, a BOOLEAN whose padding XAPI's
+  MoveFile leaves unset; root directory; an ANSI_STRING) and the volume
+  information are NT's layouts in big-endian, as ReXGlue has them. A
+  rename to another device fails with STATUS_NOT_SAME_DEVICE, as on NT. FILE_BASIC_INFORMATION's attributes are NT's 32-bit field at
   0x20; ReXGlue has a 64-bit one there. Console check.
 - File systems: GDFX on the disc, FATX on the hard disk (names of at most
   42 characters), 512-byte sectors (Xenia notes code that needs that).

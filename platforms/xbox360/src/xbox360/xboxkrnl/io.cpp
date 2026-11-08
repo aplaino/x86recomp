@@ -346,13 +346,14 @@ HLE(kKrnl, 247, NtSetInformationFile) {
       break;
     }
     case kFileRename: {
-      // FILE_RENAME_INFORMATION: replace if it exists, a root directory, the
-      // new name (ANSI_STRING).
+      // FILE_RENAME_INFORMATION: replace if it exists (a BOOLEAN; callers
+      // leave the padding after it unset), a root directory, the new name
+      // (ANSI_STRING).
       Location to;
       uint32_t s = ResolveIn(Rd32(info + 4), ReadAnsiString(info + 8), to);
       if (s != kStatusSuccess) return done(s, 0);
-      if (to.device != f->loc.device) return done(kStatusAccessDenied, 0);
-      if (to.exists && !Rd32(info)) return done(kStatusObjectNameCollision, 0);
+      if (to.device != f->loc.device) return done(kStatusNotSameDevice, 0);
+      if (to.exists && !Rd8(info)) return done(kStatusObjectNameCollision, 0);
       std::error_code ec;
       std::filesystem::rename(f->loc.host, to.host, ec);
       if (ec) return done(StatusFromErrno(ec.value()), 0);

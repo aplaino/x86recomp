@@ -22,17 +22,47 @@ const int64_t* Timeout(uint32_t ptr, int64_t& storage) {
 
 uint32_t Pcr(const ppc::Ctx& c) { return uint32_t(c.r[13]); }
 
-// Objects of named handles are not supported yet: the attributes' name.
-void RefuseNamed(ppc::Ctx& c, uint32_t attributes, const char* what) {
-  if (attributes && Rd32(attributes + 4))
-    ppc::Fatal(&c, "%s with a name: named objects are not supported yet", what);
-}
-
 uint32_t NewObject(uint32_t size, ObjectType type, int32_t state, void (*destroy)(uint32_t) = SystemFree) {
   uint32_t obj = SystemAlloc(size);
   InitObject(obj, type, state);
   Own(obj, destroy);
   return obj;
+}
+
+// Events and timers of either kind are one object type each.
+uint8_t TypeOf(uint32_t obj) {
+  uint8_t t = Rd8(obj);
+  return t == kSynchronizationEvent ? kNotificationEvent : t == kSynchronizationTimer ? kNotificationTimer : t;
+}
+
+// Gives a new object (from NewObject) a handle in *handle, under the name
+// in OBJECT_ATTRIBUTES (root directory, *ANSI_STRING name, attributes) if
+// there is one. Named objects live in \BaseNamedObjects, the root XAPI
+// passes as -4. An existing name with OBJ_OPENIF opens that object
+// (STATUS_OBJECT_NAME_EXISTS, the new one is dropped), without it is a
+// collision; an object of another type is a mismatch.
+uint32_t Publish(ppc::Ctx& c, uint32_t handle, uint32_t attributes, uint32_t obj) {
+  constexpr uint32_t kBaseNamedObjects = 0xFFFFFFFC, kObjCaseInsensitive = 0x40, kObjOpenIf = 0x80;
+  uint32_t name = attributes ? Rd32(attributes + 4) : 0;
+  uint32_t existing = obj, flags = 0;
+  if (name) {
+    if (Rd32(attributes) != kBaseNamedObjects)
+      ppc::Fatal(&c, "named object under root %x: only \\BaseNamedObjects is supported", Rd32(attributes));
+    flags = Rd32(attributes + 8);
+    existing = NameObject(obj, ReadAnsiString(name), flags & kObjCaseInsensitive);
+  }
+  if (existing == obj) {
+    Wr32(handle, NewHandle(obj));
+    return kStatusSuccess;
+  }
+  uint32_t status = !(flags & kObjOpenIf)              ? kStatusObjectNameCollision
+                    : TypeOf(existing) != TypeOf(obj) ? kStatusObjectTypeMismatch
+                                                      : kStatusObjectNameExists;
+  Reference(obj);  // drops the new object
+  Dereference(obj);
+  if (status == kStatusObjectNameExists) Wr32(handle, NewHandle(existing));
+  Dereference(existing);
+  return status;
 }
 
 // A timer goes with its last reference, stopped first.
@@ -70,20 +100,16 @@ HLE(kKrnl, 143, KeResetEvent) { return uint32_t(SetSignal(Arg(c, 0), 0)); }
 // NtCreateEvent(*handle, attributes, type, initial state): type 0
 // notification, 1 synchronization.
 HLE(kKrnl, 209, NtCreateEvent) {
-  RefuseNamed(c, Arg(c, 1), "NtCreateEvent");
   uint32_t obj = NewObject(kDispatcherHeaderSize, Arg(c, 2) ? kSynchronizationEvent : kNotificationEvent,
                            Arg(c, 3) ? 1 : 0);
-  Wr32(Arg(c, 0), NewHandle(obj));
-  return kStatusSuccess;
+  return Publish(c, Arg(c, 0), Arg(c, 1), obj);
 }
 
 // NtCreateTimer(*handle, attributes, type): type 0 notification, 1
 // synchronization, not set.
 HLE(kKrnl, 215, NtCreateTimer) {
-  RefuseNamed(c, Arg(c, 1), "NtCreateTimer");
   uint32_t obj = NewObject(kTimerSize, Arg(c, 2) ? kSynchronizationTimer : kNotificationTimer, 0, DestroyTimer);
-  Wr32(Arg(c, 0), NewHandle(obj));
-  return kStatusSuccess;
+  return Publish(c, Arg(c, 0), Arg(c, 1), obj);
 }
 
 // NtSetTimerEx(handle, *due, APC routine, APC mode, APC context, resume,
@@ -152,11 +178,9 @@ HLE(kKrnl, 136, KeReleaseSemaphore) {
 
 // NtCreateMutant(*handle, attributes, initial owner).
 HLE(kKrnl, 212, NtCreateMutant) {
-  RefuseNamed(c, Arg(c, 1), "NtCreateMutant");
   uint32_t obj = NewObject(kMutantSize, kMutantObject, Arg(c, 2) ? 0 : 1);
   if (Arg(c, 2)) Wr32(obj + 0x18, KThread(CurrentThread()));
-  Wr32(Arg(c, 0), NewHandle(obj));
-  return kStatusSuccess;
+  return Publish(c, Arg(c, 0), Arg(c, 1), obj);
 }
 
 // NtReleaseMutant(handle, *previous count).

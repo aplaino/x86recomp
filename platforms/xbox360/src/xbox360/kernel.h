@@ -15,7 +15,7 @@ struct XexModule;
 
 // NTSTATUS values.
 constexpr uint32_t kStatusSuccess = 0, kStatusAbandoned = 0x80, kStatusAlerted = 0x101,
-                   kStatusTimeout = 0x102, kStatusPending = 0x103,
+                   kStatusTimeout = 0x102, kStatusPending = 0x103, kStatusObjectNameExists = 0x40000000,
                    kStatusUnsuccessful = 0xC0000001, kStatusNotImplemented = 0xC0000002,
                    kStatusInvalidHandle = 0xC0000008, kStatusInvalidParameter = 0xC000000D,
                    kStatusBufferTooSmall = 0xC0000023, kStatusInvalidParameter2 = 0xC00000F0,
@@ -34,7 +34,8 @@ constexpr uint32_t kStatusBufferOverflow = 0x80000005, kStatusNoMoreFiles = 0x80
                    kStatusAccessDenied = 0xC0000022, kStatusObjectNameInvalid = 0xC0000033,
                    kStatusObjectNameNotFound = 0xC0000034, kStatusObjectNameCollision = 0xC0000035,
                    kStatusObjectPathNotFound = 0xC000003A, kStatusDiskFull = 0xC000007F,
-                   kStatusFileIsADirectory = 0xC00000BA, kStatusDirectoryNotEmpty = 0xC0000101,
+                   kStatusFileIsADirectory = 0xC00000BA, kStatusNotSameDevice = 0xC00000D4,
+                   kStatusDirectoryNotEmpty = 0xC0000101,
                    kStatusNotADirectory = 0xC0000103;
 
 // ---- dispatcher objects -----------------------------------------------
@@ -110,6 +111,10 @@ bool CloseHandle(uint32_t handle);
 // An object registered with Own() is freed when its references drop to
 // zero.
 void Own(uint32_t obj, void (*destroy)(uint32_t obj));
+// Names obj, registered with Own(), unless an object of that name exists:
+// that one is returned instead, with a reference taken for the caller, and
+// obj stays unnamed. A name goes with its object's last reference.
+uint32_t NameObject(uint32_t obj, const std::string& name, bool case_insensitive);
 void Reference(uint32_t obj);
 void Dereference(uint32_t obj);
 

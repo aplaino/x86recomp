@@ -1,9 +1,11 @@
 // Dispatcher objects, waits, handles and time (kernel.h).
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <unordered_map>
 
@@ -50,10 +52,16 @@ bool Acquire(uint32_t o, uint32_t kthread) {
 }
 
 // The steady clock's time for an NT timeout.
+// A wait longer than the host clock can count (XAPI's INFINITE sleep passes
+// a relative 0x8000000000000000) waits forever.
 Clock::time_point Deadline(int64_t timeout) {
+  if (timeout == INT64_MIN) return Clock::time_point::max();
   int64_t ticks = timeout < 0 ? -timeout : timeout - int64_t(SystemTime());
   if (ticks < 0) ticks = 0;
-  return Clock::now() + std::chrono::nanoseconds(ticks) * 100;
+  Clock::time_point now = Clock::now();
+  if (uint64_t(ticks) > uint64_t((Clock::time_point::max() - now).count()) / 100)
+    return Clock::time_point::max();
+  return now + std::chrono::nanoseconds(ticks) * 100;
 }
 
 const Clock::time_point g_start = Clock::now();
@@ -165,8 +173,10 @@ uint32_t Wait(const uint32_t* objs, uint32_t count, bool wait_all, const int64_t
 
 uint32_t Delay(int64_t timeout, bool /*alertable*/) {
   HoldIfSuspended();
+  Clock::time_point deadline = Deadline(timeout);
   if (timeout == 0) std::this_thread::yield();
-  else std::this_thread::sleep_until(Deadline(timeout));
+  else if (deadline == Clock::time_point::max()) for (;;) std::this_thread::sleep_for(std::chrono::hours(24));
+  else std::this_thread::sleep_until(deadline);
   HoldIfSuspended();
   return kStatusSuccess;
 }
@@ -230,10 +240,18 @@ namespace {
 struct Owned {
   uint32_t refs;
   void (*destroy)(uint32_t);
+  std::string name;  // empty: none
 };
 std::mutex g_handles;
-std::unordered_map<uint32_t, uint32_t> g_table;  // handle -> object
-std::unordered_map<uint32_t, Owned> g_owned;     // object -> references
+std::unordered_map<uint32_t, uint32_t> g_table;     // handle -> object
+std::unordered_map<uint32_t, Owned> g_owned;        // object -> references
+std::unordered_map<std::string, uint32_t> g_names;  // name -> object
+
+bool SameName(const std::string& a, const std::string& b, bool case_insensitive) {
+  if (!case_insensitive) return a == b;
+  return std::equal(a.begin(), a.end(), b.begin(), b.end(),
+                    [](char x, char y) { return std::tolower(uint8_t(x)) == std::tolower(uint8_t(y)); });
+}
 // As the kernel's: multiples of 4, never 0 or a pseudo handle.
 uint32_t g_next_handle = 0xF8000000;
 }  // namespace
@@ -271,6 +289,18 @@ void Own(uint32_t obj, void (*destroy)(uint32_t obj)) {
   g_owned[obj] = {0, destroy};
 }
 
+uint32_t NameObject(uint32_t obj, const std::string& name, bool case_insensitive) {
+  std::lock_guard<std::mutex> g(g_handles);
+  for (const auto& [n, existing] : g_names)
+    if (SameName(n, name, case_insensitive)) {
+      g_owned.at(existing).refs++;
+      return existing;
+    }
+  g_owned.at(obj).name = name;
+  g_names[name] = obj;
+  return obj;
+}
+
 void Reference(uint32_t obj) {
   std::lock_guard<std::mutex> g(g_handles);
   auto it = g_owned.find(obj);
@@ -286,6 +316,7 @@ void Dereference(uint32_t obj) {
     if (!it->second.refs) ppc::Fatal(nullptr, "object %x dereferenced more often than referenced", obj);
     if (--it->second.refs) return;
     destroy = it->second.destroy;
+    if (!it->second.name.empty()) g_names.erase(it->second.name);
     g_owned.erase(it);
   }
   if (destroy) destroy(obj);

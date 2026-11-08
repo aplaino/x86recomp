@@ -246,6 +246,30 @@ uint32_t Release(uint32_t va) {
   return n * kPage;
 }
 
+bool ReleaseRange(uint32_t va, uint32_t size) {
+  std::lock_guard<std::mutex> g(g_lock);
+  if (!InOneReservation(va, size)) return false;
+  uint32_t base = g_pages[va / kPage].base, first = va / kPage, n = size / kPage;
+  uint32_t total = g_pages[base / kPage].pages, alloc_protect = g_pages[base / kPage].alloc_protect;
+  uint32_t end = first + n, last = base / kPage + total;  // page numbers
+  Heap h;
+  bool physical = HeapOf(va, h) && IsPhysical(h);
+  for (uint32_t p = first; p < end; p++) {
+    if (g_pages[p].state == kCommitted) std::memset(g_mem + uint64_t(p) * kPage, 0, kPage);
+    g_pages[p] = {};
+  }
+  if (physical) std::memset(&g_frames[(va - ViewOffset(h)) / kPage], 0, n);
+  // What is left before the range keeps the reservation; what is left
+  // after it becomes one of its own, with the same allocation protection.
+  if (first > base / kPage) g_pages[base / kPage].pages = first - base / kPage;
+  if (end < last) {
+    for (uint32_t p = end; p < last; p++) g_pages[p].base = end * kPage;
+    g_pages[end].pages = last - end;
+    g_pages[end].alloc_protect = uint16_t(alloc_protect);
+  }
+  return true;
+}
+
 bool Protect(uint32_t va, uint32_t size, uint32_t protect, uint32_t* old) {
   std::lock_guard<std::mutex> g(g_lock);
   if (!InOneReservation(va, size)) return false;

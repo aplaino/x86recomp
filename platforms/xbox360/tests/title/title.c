@@ -167,6 +167,8 @@ enum {
   kStatusTimeout = 0x102, kStatusConflictingAddresses = 0xC0000018, kStatusInvalidHandle = 0xC0000008,
   kStatusMutantNotOwned = 0xC0000046, kStatusEndOfFile = 0xC0000011, kStatusAccessDenied = 0xC0000022,
   kStatusObjectNameNotFound = 0xC0000034, kStatusObjectNameCollision = 0xC0000035,
+  kStatusObjectNameExists = 0x40000000, kStatusObjectTypeMismatch = 0xC0000024, kStatusNotSameDevice = 0xC00000D4,
+  kStatusMemoryNotAllocated = 0xC00000A0, kMemFree = 0x10000,
   kStatusObjectPathNotFound = 0xC000003A, kStatusNoMoreFiles = 0x80000006,
   kGenericRead = 0x80000000, kGenericWrite = 0x40000000,
   kOpen = 1, kCreate = 2, kOpenIf = 3, kSync = 0x20, kDirectoryFile = 0x1, kNonDirectoryFile = 0x40,
@@ -181,6 +183,12 @@ void* memcpy(void* d, const void* s, unsigned long n) {
   for (unsigned long k = 0; k < n; k++) ((volatile unsigned char*)d)[k] = ((const unsigned char*)s)[k];
   return d;
 }
+
+// ANSI_STRING.
+struct Ansi {
+  uint16_t length, maximum;
+  u32 buffer;
+};
 
 static int failures;
 #define CHECK(cond)                                                          \
@@ -261,6 +269,30 @@ static void Memory(void) {
   CHECK(NtQueryVirtualMemory(base + 0x10000, info, 0) == 0 && info[4] == kMemReserve && info[3] == 0x10000);
   rel = 0;
   CHECK(NtFreeVirtualMemory(&base, &rel, kMemRelease, 0) == 0 && rel == 0x100000);
+  // A release with a size frees that range of one reservation: a tail (as
+  // a heap shrinking a block in place gives back), then a middle, whose
+  // remainder becomes a reservation of its own.
+  base = 0;
+  size = 0x6000;
+  CHECK(NtAllocateVirtualMemory(&base, &size, kMemReserve | kMemCommit, kPageReadWrite, 0) == 0);
+  *At(base + 0x5000) = 1;
+  b2 = base + 0x4100;
+  s2 = 0x1F00;
+  CHECK(NtFreeVirtualMemory(&b2, &s2, kMemRelease, 0) == 0 && b2 == base + 0x4000 && s2 == 0x2000);
+  CHECK(NtQueryVirtualMemory(base + 0x4000, info, 0) == 0 && info[4] == kMemFree);
+  b2 = base + 0x1000;
+  s2 = 0x1000;
+  CHECK(NtFreeVirtualMemory(&b2, &s2, kMemRelease, 0) == 0);
+  CHECK(NtQueryVirtualMemory(base + 0x2000, info, 0) == 0 && info[1] == base + 0x2000 && info[3] == 0x2000 &&
+        info[4] == kMemCommit && info[2] == kPageReadWrite);
+  rel = 0;
+  CHECK(NtFreeVirtualMemory(&base, &rel, kMemRelease, 0) == 0 && rel == 0x1000);
+  b2 = base + 0x2000;
+  rel = 0;
+  CHECK(NtFreeVirtualMemory(&b2, &rel, kMemRelease, 0) == 0 && rel == 0x2000);
+  b2 = base + 0x5000;
+  s2 = 0x1000;
+  CHECK(NtFreeVirtualMemory(&b2, &s2, kMemRelease, 0) == kStatusMemoryNotAllocated);
   // The kernel pool.
   u32 p = ExAllocatePool(100);
   CHECK(p != 0 && (p & 15) == 0);
@@ -368,6 +400,13 @@ static u32 Ticker(void* arg) {
   return 0;
 }
 
+static u32 Setter(void* arg) {
+  int64_t ms = -200000;
+  KeDelayExecutionThread(1, 0, &ms);
+  KeSetEvent(arg, 1, 0);
+  return 0;
+}
+
 static void Threads(void) {
   CHECK(KeGetCurrentProcessType() == 1);
   // r13: the KPCR, whose current thread is this thread's KTHREAD, a
@@ -445,6 +484,15 @@ static void Threads(void) {
   CHECK(NtWaitForSingleObjectEx(h, 1, 0, 0) == 0);
   NtClose(h);
 
+  // A relative timeout of 0x8000000000000000 (XAPI's INFINITE) waits
+  // until the object is signalled.
+  u32 ev[4] = {0, 0, (u32)(uintptr_t)&ev[2], (u32)(uintptr_t)&ev[2]};  // a notification event
+  int64_t forever = (int64_t)0x8000000000000000ull;
+  CHECK(ExCreateThread(&h, 0, 0, (void*)thread_startup, (void*)Setter, ev, 0) == 0);
+  CHECK(KeWaitForSingleObject(ev, 3, 1, 0, &forever) == 0 && ev[1] == 1);
+  NtWaitForSingleObjectEx(h, 1, 0, 0);
+  NtClose(h);
+
   // Four threads contending for a critical section.
   RtlInitializeCriticalSection(shared.cs);
   u32 hs[4];
@@ -486,6 +534,30 @@ static void Objects(void) {
   CHECK(NtWaitForSingleObjectEx(m, 1, 0, &zero) == 0);
   CHECK(NtReleaseMutant(m, &previous) == 0 && NtReleaseMutant(m, &previous) == 0 && previous == 0);
   CHECK(NtReleaseMutant(m, &previous) == kStatusMutantNotOwned);
+  NtClose(m);
+  // Named objects, as XAPI's CreateEvent and CreateMutex ask for them:
+  // under \BaseNamedObjects (-4) with OBJ_OPENIF.
+  struct Ansi name;
+  RtlInitAnsiString(&name, "Shared");
+  u32 attributes[3] = {0xFFFFFFFC, (u32)(uintptr_t)&name, 0x80};
+  u32 n1 = 0, n2 = 0;
+  CHECK(NtCreateEvent(&n1, attributes, 0, 0) == 0);
+  CHECK(NtCreateEvent(&n2, attributes, 1, 1) == kStatusObjectNameExists && n2 && n2 != n1);
+  CHECK(NtWaitForSingleObjectEx(n1, 1, 0, &zero) == kStatusTimeout);  // the first one's state
+  CHECK(NtSetEvent(n2, &previous) == 0 && NtWaitForSingleObjectEx(n1, 1, 0, &zero) == 0);
+  CHECK(NtCreateMutant(&m, attributes, 0) == kStatusObjectTypeMismatch);
+  attributes[2] = 0;
+  CHECK(NtCreateEvent(&s, attributes, 0, 0) == kStatusObjectNameCollision);
+  RtlInitAnsiString(&name, "SHARED");
+  CHECK(NtCreateEvent(&s, attributes, 0, 0) == 0);  // names compare exactly
+  NtClose(s);
+  attributes[2] = 0xC0;  // ... unless case-insensitive
+  CHECK(NtCreateEvent(&s, attributes, 0, 0) == kStatusObjectNameExists);
+  NtClose(s);
+  NtClose(n1);
+  NtClose(n2);
+  attributes[2] = 0x80;  // the name went with its last handle
+  CHECK(NtCreateMutant(&m, attributes, 0) == 0);
   NtClose(m);
   // A spin lock holds the owner's KPCR.
   u32 lock = 0;
@@ -556,10 +628,6 @@ static void Variables(void) {
 // ---- files ------------------------------------------------------------------
 // The title's disc (tests/CMakeLists.txt writes it): data.bin (the 32 bytes
 // 0-9A-V), Sub/Name.TXT ("hello"), Sub/other.dat.
-struct Ansi {
-  uint16_t length, maximum;
-  u32 buffer;
-};
 struct Attributes {
   u32 root, name, attributes;
 };
@@ -645,15 +713,28 @@ static void Files(void) {
   CHECK(NtWaitForSingleObjectEx(e, 1, 0, &zero) == 0);
   NtClose(e);
   // Renamed, then deleted when its handle closes.
+  uint8_t remove_now = 1;
   struct {
     u32 replace, root;
     struct Ansi name;
   } rename = {0, 0, {0, 0, 0}};
   RtlInitAnsiString(&rename.name, "hdd:\\dir\\g.bin");
   CHECK(NtSetInformationFile(h, io, &rename, sizeof rename, 10) == 0);
+  // Replace-if-exists is a BOOLEAN: XAPI's MoveFile leaves the padding
+  // after it unset.
+  u32 other = 0;
+  CHECK(OpenPath(&other, "hdd:\\dir\\o.bin", kGenericRead | kGenericWrite, kCreate, kSync | kNonDirectoryFile, io) == 0);
+  RtlInitAnsiString(&rename.name, "hdd:\\dir\\g.bin");
+  rename.replace = 0x00FFFFFF;
+  CHECK(NtSetInformationFile(other, io, &rename, sizeof rename, 10) == kStatusObjectNameCollision);
+  RtlInitAnsiString(&rename.name, "game:\\o.bin");
+  CHECK(NtSetInformationFile(other, io, &rename, sizeof rename, 10) == kStatusNotSameDevice);
+  CHECK(NtSetInformationFile(other, io, &remove_now, 1, 13) == 0);
+  NtClose(other);
+  rename.replace = 0;
+  RtlInitAnsiString(&rename.name, "hdd:\\dir\\g.bin");
   CHECK(QueryFull("hdd:\\dir\\f.bin", info) == kStatusObjectNameNotFound && QueryFull("hdd:\\dir\\g.bin", info) == 0);
-  uint8_t remove = 1;
-  CHECK(NtSetInformationFile(h, io, &remove, 1, 13) == 0);
+  CHECK(NtSetInformationFile(h, io, &remove_now, 1, 13) == 0);
   NtClose(h);
   CHECK(QueryFull("hdd:\\dir\\g.bin", info) == kStatusObjectNameNotFound);
   CHECK(NtQueryVolumeInformationFile(d, io, volume, sizeof volume, 5) == 0 && Memeq(&volume[3], "FATX", 4));
@@ -869,7 +950,8 @@ static void Conversions(void) {
   struct Ansi s = {0, 2, (u32)(uintptr_t)small};
   CHECK(RtlUnicodeStringToAnsiString(&s, &u, 0) == 0x80000005 && s.length == 1 && Memeq(small, "h", 2));
   CHECK(RtlNtStatusToDosError(0) == 0 && RtlNtStatusToDosError(0xC0000034) == 2 &&
-        RtlNtStatusToDosError(0x80070005) == 5 && RtlNtStatusToDosError(0xC0000135) == 126);
+        RtlNtStatusToDosError(0x80070005) == 5 && RtlNtStatusToDosError(0xC0000135) == 126 &&
+        RtlNtStatusToDosError(0xC0000240) == 1235 && RtlNtStatusToDosError(0xC00000F0) == 87);
   uint64_t time = 0;
   uint16_t f[8];
   RtlTimeToTimeFields(&time, f);

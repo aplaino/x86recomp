@@ -59,28 +59,32 @@ HLE(kKrnl, 204, NtAllocateVirtualMemory) {
 }
 
 // NtFreeVirtualMemory(*base, *size, type, debug): MEM_RELEASE frees the
-// reservation at *base (size 0), MEM_DECOMMIT [*base, *base + *size), or to
-// the reservation's end for size 0.
+// reservation at *base for size 0, else [*base, *base + *size) of one
+// reservation (titles' heaps give back the tail of a block they shrink
+// in place); MEM_DECOMMIT [*base, *base + *size), or to the
+// reservation's end for size 0. Both take whole pages of the region's size.
 HLE(kKrnl, 220, NtFreeVirtualMemory) {
   uint32_t base_ptr = Arg(c, 0), size_ptr = Arg(c, 1), type = Arg(c, 2);
   uint32_t base = Rd32(base_ptr), size = Rd32(size_ptr);
-  if (type & kMemRelease) {
-    if (size) return kStatusInvalidParameter;
+  if (type & kMemRelease && !size) {
     uint32_t released = Release(base);
     if (!released) return kStatusFreeVmNotAtBase;
     Wr32(size_ptr, released);
     return kStatusSuccess;
   }
-  if (!(type & kMemDecommit)) return kStatusInvalidParameter;
+  if (!(type & (kMemRelease | kMemDecommit))) return kStatusInvalidParameter;
   RegionInfo r;
   Heap h;
   if (!Query(base, r) || r.state == kMemFree || !HeapOf(base, h)) return kStatusMemoryNotAllocated;
   if (!size) size = r.alloc_base + ReservationSize(r.alloc_base) - base;
-  // Whole pages of the region's size, as a commit takes them.
   uint32_t page = HeapPageSize(h), end = (base + size + page - 1) & ~(page - 1);
   base &= ~(page - 1);
   size = end - base;
-  if (!Decommit(base, size)) return kStatusMemoryNotAllocated;
+  if (type & kMemRelease) {
+    if (!ReleaseRange(base, size)) return kStatusMemoryNotAllocated;
+  } else if (!Decommit(base, size)) {
+    return kStatusMemoryNotAllocated;
+  }
   Wr32(base_ptr, base);
   Wr32(size_ptr, size);
   return kStatusSuccess;

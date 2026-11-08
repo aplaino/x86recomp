@@ -68,6 +68,10 @@ bool Decommit(uint32_t va, uint32_t size);
 // Releases the reservation based at va. Returns its size, 0 if va is not
 // the base of one.
 uint32_t Release(uint32_t va);
+// Releases [va, va + size) of one reservation (whole pages); the pages left
+// after it become a reservation of their own. False if the range leaves the
+// reservation.
+bool ReleaseRange(uint32_t va, uint32_t size);
 // Sets the protection of committed pages; `old` gets the first page's.
 bool Protect(uint32_t va, uint32_t size, uint32_t protect, uint32_t* old);
 

@@ -66,11 +66,14 @@ constexpr DosError kDosErrors[] = {
     {0xC000009F, 487},  // free VM not at base: ERROR_INVALID_ADDRESS
     {0xC00000A0, 487},  // memory not allocated: ERROR_INVALID_ADDRESS
     {0xC00000BA, 5},    // file is a directory: ERROR_ACCESS_DENIED
+    {0xC00000D4, 17},   // not same device: ERROR_NOT_SAME_DEVICE
+    {0xC00000F0, 87},   // invalid parameter 2: ERROR_INVALID_PARAMETER
     {0xC00000F1, 87},   // invalid parameter 3: ERROR_INVALID_PARAMETER
     {0xC0000101, 145},  // directory not empty: ERROR_DIR_NOT_EMPTY
     {0xC0000103, 267},  // not a directory: ERROR_DIRECTORY
     {0xC0000135, 126},  // DLL not found: ERROR_MOD_NOT_FOUND
     {0xC0000225, 1168}, // not found: ERROR_NOT_FOUND
+    {0xC0000240, 1235}, // request aborted: ERROR_REQUEST_ABORTED
     {0xC0000263, 127},  // driver entry point not found: ERROR_PROC_NOT_FOUND
 };
 
