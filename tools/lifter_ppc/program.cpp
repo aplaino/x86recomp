@@ -357,7 +357,59 @@ Function Program::Build(uint64_t start, uint64_t end, std::set<uint64_t>& found)
     }
     work.push_back(va + 4);
   }
+  // Jumps: a BCLR whose straight-line code above it (back to a label) last
+  // set r1 with a load from memory other than the stack, where a return
+  // has r1 from the stack (lwz r1, 0(r1)) or arithmetic on a frame pointer.
+  for (const auto& [va, i] : f.insns) {
+    if (i.op != Op::kBclr || i.lk) continue;
+    for (uint64_t p = va; p > start && va - p < 64 * 4;) {
+      if (f.labels.count(p)) break;
+      p -= 4;
+      auto it = f.insns.find(p);
+      if (it == f.insns.end()) break;
+      const Insn& w = it->second;
+      if ((w.op == Op::kB || w.op == Op::kBc || w.op == Op::kBclr || w.op == Op::kBcctr) && !w.lk)
+        break;
+      if (!WritesReg(w, 1) || (w.op == Op::kB && w.lk)) continue;
+      if (w.op == Op::kLoad && w.rd == 1 && w.ra != 1 && !w.update) f.jumps.insert(va);
+      break;
+    }
+  }
   return f;
+}
+
+bool Program::SavesContext(const Function& f) const {
+  // In address order from the start, before anything writes r3: a store of
+  // r1 and one of the register MFLR copied LR to, both based on r3.
+  int lr_reg = -1;
+  bool sp = false, ret = false;
+  for (const auto& [va, i] : f.insns) {
+    if (i.op == Op::kMfspr && i.spr == kLr) lr_reg = i.rd;
+    if (i.op == Op::kStore && i.ra == 3 && !i.indexed && !i.update && (i.size == 4 || i.size == 8)) {
+      if (i.rd == 1) sp = true;
+      if (int(i.rd) == lr_reg) ret = true;
+    }
+    if (sp && ret) return true;
+    if (WritesReg(i, 3) && !(i.op == Op::kB && i.lk)) return false;
+    if (i.op == Op::kB && i.lk) return false;
+  }
+  return false;
+}
+
+bool Program::SetjmpReturns() {
+  std::set<uint64_t> savers;
+  for (const auto& [va, f] : funcs_)
+    if (!f.import && SavesContext(f)) savers.insert(va);
+  bool added = false;
+  // The functions the image describes a frame for: the activations a jump
+  // finds (not the starts overlapping them).
+  for (const auto& [va, f] : funcs_)
+    for (const auto& [iva, i] : f.insns)
+      if (i.op == Op::kB && i.lk && savers.count(uint64_t(i.imm)) && img_.prologues.count(va)) {
+        added |= img_.resumable.insert(va).second;
+        added |= img_.resume_targets.insert(iva + 4).second;
+      }
+  return added;
 }
 
 std::set<uint64_t> Program::Constants(bool data) const {
@@ -454,7 +506,8 @@ void Program::Discover() {
     if (!grew) {
       std::set<uint64_t> more = PointerStarts(starts), resume = ResumeStarts(starts);
       more.insert(resume.begin(), resume.end());
-      if (more.empty()) break;
+      bool setjmp = SetjmpReturns();
+      if (more.empty() && !setjmp) break;
       starts.insert(more.begin(), more.end());
     }
   }

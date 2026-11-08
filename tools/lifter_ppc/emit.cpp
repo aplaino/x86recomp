@@ -371,6 +371,8 @@ std::string Emitter::Body(const Insn& i) {
     }
     case Op::kBclr: {
       std::string dec, cond = BranchCondition(i, dec);
+      if (!i.lk && f_ && f_->jumps.count(i.va))
+        return dec + "if (" + cond + ") { " + Spill() + "Jump(c, lr, " + Hex(i.va) + "); }";
       if (!i.lk) return dec + "if (" + cond + ") { " + Spill() + "return; }";
       return dec + "{ uint64_t t = uint32_t(lr) & ~3u; lr = " + Hex(i.va + 4) + "; if (" + cond + ") { " +
              Spill() + "Dispatch(c, t, " + Hex(i.va) + "); " + Reload() + "} }";

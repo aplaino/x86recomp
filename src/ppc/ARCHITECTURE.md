@@ -176,7 +176,10 @@ mask bit 4, an unused immediate).
   (dispatched).
 - Calls: `bl` and `bcl` call the target's function, `blr` returns,
   `bctrl` and `blrl` dispatch; registers are spilled to the context
-  around anything that can observe them.
+  around anything that can observe them. A `blr` whose straight-line code
+  above it last set r1 with a load from memory other than the stack
+  (longjmp, a saved context's restore) is a jump to another frame, not a
+  return (`Jump`; "Unwinding").
 - Import thunks (from a platform's image reader) become `Import(c, module,
   ordinal, va)`, defined by the platform. `sc` calls `Sc()`, traps that
   fire `Trap()`, `mftb` (and `mfspr` of TBL or TBU, its later spelling)
@@ -224,6 +227,14 @@ and handlers); the core gives them the frames and the continuation.
   function's own code is unchanged. A continuation in the frame that
   called into the platform, at that call's return address, is a plain
   return.
+- Jumps to another frame. A `blr` the lifter reads as a jump (above) calls
+  `Jump`, which finds the frame the registers now describe (r1 on entry of
+  the target's function, from its frame description) and throws a
+  GuestResume to it. A setjmp's return is such a target: functions that
+  store r1 and their return address into the buffer their first argument
+  points at (before anything writes r3) are read as setjmp, and each
+  function with a frame description that calls one becomes resumable,
+  with the call's return address a resume start.
 
 ## Lifted modules
 `recomp_add_lifted_ppc(<target> <dir> LINK <platform library>)` makes a
