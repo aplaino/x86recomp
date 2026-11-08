@@ -13,6 +13,7 @@
 #include "xbox360/config.h"
 #include "xbox360/hle.h"
 #include "xbox360/kernel.h"
+#include "xbox360/xam/notify.h"
 
 namespace recomp::xbox360 {
 namespace {
@@ -63,6 +64,11 @@ void DestroyListener(uint32_t obj) {
 
 }  // namespace
 
+void Broadcast(uint32_t id, uint32_t value) {
+  std::lock_guard<std::mutex> g(g_lock);
+  for (auto& [obj, l] : g_listeners) Post(obj, l, id, value);
+}
+
 // XamNotifyCreateListener(areas, highest version): a handle to a new
 // listener.
 HLE(kXam, 650, XamNotifyCreateListener) {
@@ -73,7 +79,7 @@ HLE(kXam, 650, XamNotifyCreateListener) {
   Own(obj, DestroyListener);
   std::lock_guard<std::mutex> g(g_lock);
   Listener& l = g_listeners[obj] = Listener{areas, version, {}};
-  const Pending system[] = {{0x00000009, 0}, {0x0000000A, SignedInMask()}, {0x02000001, 0x001510F1},
+  const Pending system[] = {{kXnSysUi, 0}, {kXnSysSigninChanged, SignedInMask()}, {0x02000001, 0x001510F1},
                             {0x02000003, 0}};
   for (const Pending& p : system) Post(obj, l, p.id, p.value);
   return NewHandle(obj);

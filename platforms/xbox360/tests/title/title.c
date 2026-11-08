@@ -126,6 +126,8 @@ u32 XamUserReadProfileSettings(void);  // through XamUserReadProfileSettings9
 u32 XamUserWriteProfileSettings(u32 title, u32 slot, u32 count, void* settings, u32* overlapped);
 u32 XamNotifyCreateListener(uint64_t areas, u32 version);
 u32 XNotifyGetNext(u32 listener, u32 match, u32* id, u32* value);
+u32 XamUserCheckPrivilege(u32 slot, u32 privilege, u32* result);
+u32 XamShowSigninUI(u32 panes, u32 flags);
 u32 XNotifyPositionUI(u32 position);
 u32 XMsgStartIORequest(u32 app, u32 message, u32* overlapped, void* buffer, u32 size);
 u32 XMsgStartIORequestEx(u32 app, u32 message, u32* overlapped, void* buffer, u32 size, void* xparams);
@@ -1110,6 +1112,11 @@ static void Users(void) {
   CHECK(XamUserGetName(0, name, sizeof name) == 0 && Memeq(name, "Player", 7));
   CHECK(XamUserGetName(0, name, 4) == 0 && Memeq(name, "Pla", 4));
   CHECK(XamUserGetName(1, name, sizeof name) == 0x525 && name[0] == 0);
+  // A profile signed in only locally holds no privilege.
+  u32 allowed = 9;
+  CHECK(XamUserCheckPrivilege(0, 254, &allowed) == 1245 && allowed == 0);
+  CHECK(XamUserCheckPrivilege(0xFF, 243, &allowed) == 1245 && allowed == 0);
+  CHECK(XamUserCheckPrivilege(1, 243, &allowed) == 1317 && XamUserCheckPrivilege(4, 243, &allowed) == 87);
 
   // Profile settings: the size first, then the settings.
   u32 ids[4] = {0x1004000C, 0x1004000D, 0x1004000E, 0x10040003}, size = 0;
@@ -1190,6 +1197,14 @@ static void Users(void) {
   CHECK(XNotifyGetNext(h, 0, &id, &value) == 0 && id == 0);
   int64_t zero = 0;
   CHECK(NtWaitForSingleObjectEx(h, 1, 0, &zero) == kStatusTimeout);
+  // The sign-in UI: none for online-enabled profiles only; otherwise it
+  // shows and closes with nothing changed, which the listener sees as
+  // XN_SYS_UI 0 (its latest value), no sign-in change.
+  CHECK(XamShowSigninUI(1, 0x400000) == 1627);
+  CHECK(NtWaitForSingleObjectEx(h, 1, 0, &zero) == kStatusTimeout);
+  CHECK(XamShowSigninUI(1, 0) == 0);
+  CHECK(XNotifyGetNext(h, 0, &id, &value) == 1 && id == 9 && value == 0);
+  CHECK(XNotifyGetNext(h, 0, &id, &value) == 0);
   NtClose(h);
   h = XamNotifyCreateListener(2, 1);
   CHECK(NtWaitForSingleObjectEx(h, 1, 0, &zero) == 0);

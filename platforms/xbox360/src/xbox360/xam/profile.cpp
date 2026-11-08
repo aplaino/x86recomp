@@ -29,7 +29,7 @@ namespace {
 
 constexpr const char* kXam = "xam.xex";
 constexpr uint32_t kErrorInvalidParameter = 0x57, kErrorInsufficientBuffer = 0x7A, kErrorIoPending = 0x3E5,
-                   kErrorFunctionFailed = 0x65B, kEInvalidArg = 0x80070057, kNotLoggedOn = 0x80070525;
+                   kErrorFunctionFailed = 0x65B, kEInvalidArg = 0x80070057, kNoSuchUser = 0x80070525;
 // The dashboard's title id: its settings are the profile's own.
 constexpr uint32_t kDashboard = 0xFFFE07D1;
 // XUSER_DATA types with data after the settings (a string, bytes).
@@ -136,7 +136,7 @@ XMSG(kXgiApp, 0xB000C, XgiReadProfileSettings) {
            ids = Rd32(p1 + 20), results = Rd32(p1 + 28);
   uint32_t users = xuids ? Rd32(p1 + 8) : 1;
   const Profile* profile = SignedInProfile(slot);
-  if (!profile) return kNotLoggedOn;
+  if (!profile) return kNoSuchUser;
   for (uint32_t u = 0; u < users && xuids; u++)
     if (Rd64(xuids + 8 * u) != profile->xuid) ppc::Fatal(&c, "profile settings of another user's XUID");
   std::lock_guard<std::mutex> g(g_lock);
@@ -184,7 +184,7 @@ XMSG(kXgiApp, 0xB000C, XgiReadProfileSettings) {
 XMSG(kXgiApp, 0xB000D, XgiWriteProfileSettings) {
   uint32_t title = Title(Rd32(p1 + 4)), slot = Rd32(p1 + 8), count = Rd32(p1 + 12), settings = Rd32(p1 + 16);
   const Profile* profile = SignedInProfile(slot);
-  if (!profile) return kNotLoggedOn;
+  if (!profile) return kNoSuchUser;
   std::lock_guard<std::mutex> g(g_lock);
   for (uint32_t k = 0; k < count; k++) {
     uint32_t s = settings + kSettingSize * k, id = Rd32(s + 0x10);

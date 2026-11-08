@@ -109,12 +109,26 @@ only a console can settle.
   top); none is signed in to Live.
 - XamUserGetSigninState(slot): 0, 1 (locally) or 2 (Live).
   XamUserGetXUID(slot, types, *xuid) returns an HRESULT: E_INVALIDARG for
-  a slot past 3, ERROR_NOT_LOGGED_ON (0x80070525) when the slot has no
+  a slot past 3, ERROR_NO_SUCH_USER (0x80070525) when the slot has no
   profile or no XUID of the types asked (1 offline, 2 and 4 online), and
   always writes the XUID (0 on failure). XamUserGetName(slot, buffer,
   size) converts the name (RtlUnicodeToMultiByteN) into size - 1 bytes
   and a NUL, returning a Win32 code. All from xam's code.
 
+- XamUserCheckPrivilege(slot or 0xFF, privilege, *result): privileges
+  come with Live (xam asks XLiveBase 0x58008 for a Live user's), so a
+  profile signed in locally holds none: ERROR_NOT_LOGGED_ON and FALSE;
+  ERROR_NO_SUCH_USER for a slot with no profile (0xFF: no profile at
+  all), ERROR_INVALID_PARAMETER past slot 3. xam's code. A title's XAPI
+  wrapper answers the same itself on systems before 0x20096B00.
+- XamShowSigninUI(panes, flags): with 0x400000 (online-enabled profiles
+  only) it fails with ERROR_FUNCTION_FAILED unless a signed-in user holds
+  Live's privilege 0xFE, so always here. Otherwise xam posts its UI app
+  (0xFE) message 0x21001 {0, 0xFF, panes, flags, 0} and returns 0; the
+  UI raises XN_SYS_UI 1, then 0 when it closes, and
+  XN_SYS_SIGNINCHANGED if the profiles changed (xam's code). With no UI
+  here it closes at once with nothing changed (chosen): listeners hold
+  XN_SYS_UI 0, which titles read as a cancelled sign-in.
 - XUserSetContextEx (XGI 0xB0006: user, XUID, context id, value)
   succeeds, as xam's does whether or not the user exists; xam keeps the
   value for presence and Live sessions, which nothing reads here.
@@ -239,7 +253,7 @@ only a console can settle.
   0xF0000 and 0x100000 up); others, and flag 0x40, open read-only and
   are ERROR_ACCESS_DENIED to create. The user's XUID owns the package (no
   user, 0, past slot 3) and is its creator; a slot with no profile is
-  ERROR_NOT_LOGGED_ON (xam's code). A root already in use is
+  ERROR_NO_SUCH_USER (xam's code). A root already in use is
   ERROR_DUP_NAME before the package is touched (chosen: xam finds it when
   it links the root, and then undoes what it made). A file name FATX
   refuses (`\/:*?"<>|`, "." and "..") is ERROR_INVALID_NAME (chosen).
@@ -256,7 +270,7 @@ only a console can settle.
   the user is none) (xam's code).
 - XamContentCreateEnumerator(user, device id (0 for any), content type,
   flags, items per call, *buffer size, *handle): an enumerator of xam's
-  app (0x20005), the buffer size items * 0x134; ERROR_NOT_LOGGED_ON for
+  app (0x20005), the buffer size items * 0x134; ERROR_NO_SUCH_USER for
   a slot with no profile. XamEnumerate returns up to the items per call,
   ERROR_NO_MORE_FILES when there are none left: the user's packages of
   the type, then, unless the enumerator's flags have any of 0x7FFFF000

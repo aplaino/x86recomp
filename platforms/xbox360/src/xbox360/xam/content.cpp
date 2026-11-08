@@ -41,7 +41,7 @@ constexpr uint32_t kErrorInvalidParameter = 0x57, kErrorInvalidName = 0x7B, kErr
 constexpr uint32_t kFileNotFound = 0x80070002, kPathNotFound = 0x80070003, kAccessDenied = 0x80070005,
                    kNoMoreFiles = 0x80070012, kSharingViolation = 0x80070020, kDupName = 0x80070034,
                    kBadName = 0x8007007B, kAlreadyExists = 0x800700B7, kDeviceNotConnected = 0x8007048F,
-                   kNotLoggedOn = 0x80070525;
+                   kNoSuchUser = 0x80070525;
 
 constexpr uint32_t kDataSize = 0x134, kDataDisplayName = 8, kDataFileName = 0x108, kFileNameSize = 42;
 constexpr uint8_t kNoUser = 0x80;
@@ -120,7 +120,7 @@ uint32_t UserXuid(uint32_t user, uint64_t& xuid) {
   xuid = 0;
   if (user >= kUserSlots) return 0;
   const Profile* p = SignedInProfile(user);
-  if (!p) return kNotLoggedOn;
+  if (!p) return kNoSuchUser;
   xuid = p->xuid;
   return 0;
 }
