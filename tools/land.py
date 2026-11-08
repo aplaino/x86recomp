@@ -152,7 +152,8 @@ def main():
 
     push = subprocess.run(["git", "push", "origin", "HEAD:main"])
     if push.returncode != 0:
-        sys.exit("land: push rejected (main moved?); rerun to rebase and retest")
+        sys.exit("land: push failed (main moved, or the remote could not be "
+                 "reached; see git's message); rerun to rebase and retest")
 
     checkout = main_checkout()
     if checkout:
