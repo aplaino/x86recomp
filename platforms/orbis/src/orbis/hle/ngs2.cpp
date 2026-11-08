@@ -1145,9 +1145,7 @@ void DecodeAtrac9(Voice& v, uint32_t want) {
         if (!v.a9) {
           v.a9 = recomp::orbis::AudioDecoder::Atrac9(v.a9_config);
           if (!v.a9)
-            recomp::FatalF("libSceNgs2: ATRAC9 config %08X is not implemented yet (ffmpeg "
-                           "refuses it)",
-                           v.a9_config);
+            recomp::FatalF("libSceNgs2: ATRAC9 config %08X does not decode", v.a9_config);
         }
         if (v.a9_restart || (v.pos == 0 && head.skip)) v.a9->Flush();
         v.a9_restart = false;

@@ -1,7 +1,9 @@
 // orbis_process_test's checks of libSceAjm's HLE (orbis/hle/ajm.cpp), from
 // lifted code: contexts, codecs and instances, batches built with the
 // library's job builders, their validation and error blocks, ATRAC9
-// decoding (a superframe made here: 4 frames of 64 bytes, mono, 48 kHz),
+// decoding (superframes made here: mono, 48 kHz, 4 frames of up to 64
+// bytes; also behind a RIFF header, as a stream that configures an
+// instance no initialisation job did),
 // and the library's ATRAC9 config and MP3 frame parsers. ajm_checks()
 // returns how many failed.
 
@@ -52,7 +54,7 @@ typedef struct {
   unsigned long ra;
 } BatchError;
 
-static unsigned char superframes[3 * 256];
+static unsigned char superframes[3 * 256], riff[100 + 3 * 256];
 static float pcm[4096];
 static short pcm16[4096], split[2048];
 static unsigned long batch[64];
@@ -72,11 +74,11 @@ static int run(unsigned ctx, unsigned id, unsigned long cflags, const void* sb_i
   return r ? r : sceAjmBatchWait(ctx, b, 0xFFFFFFFF, 0);
 }
 
-// Whether s holds the first n float samples of pcm as S16.
-static int same16(const short* s, int n) {
+// Whether s holds the n float samples at ref as S16.
+static int same16(const short* s, const float* ref, int n) {
   for (int i = 0; i < n; i++) {
     // Rounded to nearest; a tie may go either way here (to even there).
-    const float x = pcm[i] * 32768.0f, t = x - (long)x;
+    const float x = ref[i] * 32768.0f, t = x - (long)x;
     long v = (long)(x < 0 ? x - 0.5f : x + 0.5f);
     if (v > 32767) v = 32767;
     if (v < -32768) v = -32768;
@@ -152,11 +154,13 @@ int ajm_checks(void) {
   failed += test_check(357, id == 0x4001 && id16 == 0x4002 && sceAjmInstanceCodecType(id) == 1, 1);
 
   // The superframes: frame 0 starts a packet, the others continue it.
-  // The middle superframe's frames are another pattern.
+  // The middle superframe's frames are another pattern, 59 bytes long:
+  // each starts where the one before ended, the last one taking the
+  // superframe's rest.
   static const unsigned char kFrame[2][4] = {{0x3C, 0x83, 0x96, 0x1F}, {0x35, 0x20, 0xB4, 0x73}};
   for (int s = 0; s < 3; s++)
     for (int k = 0; k < 4; k++) {
-      unsigned char* fr = superframes + 256 * s + 64 * k;
+      unsigned char* fr = superframes + 256 * s + (s == 1 ? 59 : 64) * k;
       for (int i = 0; i < 4; i++) fr[i] = kFrame[s == 1][i];
       fr[0] |= k ? 0x80 : 0;
     }
@@ -182,10 +186,11 @@ int ajm_checks(void) {
   failed += test_check(369, sceAjmBatchStartBuffer(ctx, batch, end - (char*)batch, 50, 0, &b) * 10 +
                                 b,
                        0);
-  // 370-372: two superframes decoded at once: 512 bytes in, 2048 samples.
+  // 370-372: two superframes decoded at once: 512 bytes in, 2048 samples,
+  // the input used up.
   failed += test_check(370, sceAjmBatchWait(ctx, b, 0xFFFFFFFF, 0) + (int)sb[0], 0);
   const unsigned* s2 = (const unsigned*)sb2;
-  failed += test_check(371, s2[0] == 0 && s2[2] == 512 && s2[3] == 2048 * 4 && sb2[2] == 2048 &&
+  failed += test_check(371, s2[0] == 0x8 && s2[2] == 512 && s2[3] == 2048 * 4 && sb2[2] == 2048 &&
                                 s2[6] == 8,
                        1);
   int loud = 0, bounded = 1;
@@ -201,7 +206,7 @@ int ajm_checks(void) {
   run(ctx, id16, kRev | kInitialize | kReset, init, 8, 0, 0, 0, 0, 0);
   int r = run(ctx, id16, 0, 0, 0, kRev | kStream, superframes, 512, pcm16, sizeof pcm16);
   failed += test_check(374, r * 10 + (s2[2] == 64 && s2[3] == 512 && sb2[2] == 256), 1);
-  failed += test_check(375, same16(pcm16, 256), 1);
+  failed += test_check(375, same16(pcm16, pcm, 256), 1);
 
   // 376-377: gapless: skip 100 samples, then 1000 at most: the samples
   // of the first decode from the 100th on.
@@ -227,9 +232,47 @@ int ajm_checks(void) {
                                        sb2, 0x20, 0);
   sceAjmBatchStartBuffer(ctx, batch, end - (char*)batch, 50, 0, &b);
   r = sceAjmBatchWait(ctx, b, 0xFFFFFFFF, 0);
-  failed += test_check(390, r * 10 + (end - (char*)batch == 8 + 4 * 16 + 8 + 16 && same16(split, 2048) &&
+  failed += test_check(390, r * 10 + (end - (char*)batch == 8 + 4 * 16 + 8 + 16 && same16(split, pcm, 2048) &&
                                      s2[2] == 512 && s2[3] == 4096 && s2[6] == 8),
                        1);
+  failed += test_check(391, s2[0], 0x10);  // the output is full
+
+  // 392-396: an instance no initialisation job configured, given a RIFF
+  // header: fact's 1000 samples after a delay of 100.
+  unsigned id3 = 0;
+  sceAjmInstanceCreate(ctx, 1, 1, &id3);
+  static const unsigned char kGuid[16] = {0xD2, 0x42, 0xE1, 0x47, 0xBA, 0x36, 0x8D, 0x4D,
+                                          0x88, 0xFC, 0x61, 0x65, 0x4F, 0x8C, 0x83, 0x6C};
+  unsigned* h = (unsigned*)riff;
+  h[0] = 'R' | 'I' << 8 | 'F' << 16 | 'F' << 24, h[1] = sizeof riff - 8;
+  h[2] = 'W' | 'A' << 8 | 'V' << 16 | 'E' << 24;
+  h[3] = 'f' | 'm' << 8 | 't' << 16 | ' ' << 24, h[4] = 52;
+  h[5] = 0xFFFE | 1 << 16, h[6] = 48000, h[7] = 12000, h[8] = 256;  // block: the superframe
+  h[9] = 34 | 256 << 16, h[10] = 4;  // extension size, samples per block, speaker mask
+  for (int i = 0; i < 16; i++) riff[44 + i] = kGuid[i];
+  h[15] = 1, h[16] = 0xF00770FE, h[17] = 0;  // version, config
+  h[18] = 'f' | 'a' << 8 | 'c' << 16 | 't' << 24, h[19] = 12, h[20] = 1000, h[21] = h[22] = 100;
+  h[23] = 'd' | 'a' << 8 | 't' << 16 | 'a' << 24, h[24] = 3 * 256;
+  for (int i = 0; i < 3 * 256; i++) riff[100 + i] = superframes[i];
+  // Room for 500 samples: frame 0 gives 156 after the delay, frame 1 256,
+  // frame 2 does not fit; the header and two frames consumed.
+  r = run(ctx, id3, 0, 0, 0, kRev | kStream | kMultipleFrames, riff, sizeof riff, pcm16, 1000);
+  failed += test_check(392, r * 10 + (s2[0] == 0x10 && s2[2] == 100 + 128 && s2[3] == 412 * 2 &&
+                                      sb2[2] == 412 && s2[6] == 2),
+                       1);
+  failed += test_check(393, same16(pcm16, pcm + 100, 412), 1);
+  // The rest: output stops at the fact's samples, the input is used up.
+  r = run(ctx, id3, 0, 0, 0, kRev | kStream | kMultipleFrames, riff + 228, sizeof riff - 228,
+          pcm16, 4096);
+  failed += test_check(394, r * 10 + (s2[0] == 0x8 && s2[2] == sizeof riff - 228 &&
+                                      s2[3] == 588 * 2 && sb2[2] == 1000 && s2[6] == 10),
+                       1);
+  failed += test_check(395, same16(pcm16, pcm + 512, 588), 1);
+  // A new header starts the stream again.
+  r = run(ctx, id3, 0, 0, 0, kRev | kStream | kMultipleFrames, riff, sizeof riff, pcm16, 1000);
+  failed += test_check(396, r * 10 + (s2[2] == 228 && sb2[2] == 412 && same16(pcm16, pcm + 100, 412)),
+                       1);
+  sceAjmInstanceDestroy(ctx, id3);
 
   // 378-380: errors: the error block names the job, the command and the
   // job's return address.

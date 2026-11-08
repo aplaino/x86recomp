@@ -48,9 +48,27 @@ target_link_libraries(recomp_orbis_fiber PUBLIC recomp_orbis)
 # libSceAudioOut (and the audio libraries on it).
 add_library(recomp_orbis_audio SHARED src/orbis/hle/audioout.cpp)
 target_link_libraries(recomp_orbis_audio PUBLIC recomp_orbis recomp_audio)
-# libSceAjm: the audio coprocessor's codecs on ffmpeg.
+# LibAtrac9 (MIT, NOTICE): the ATRAC9 decoder. ffmpeg's rejects valid
+# superframes and decodes a superframe at a time, where the coprocessor
+# decodes a frame and consumes its own length.
+FetchContent_Declare(libatrac9
+  GIT_REPOSITORY https://github.com/Thealexbarney/LibAtrac9.git
+  GIT_TAG efca2e3af35562a09a9bb6deed90e45b4b824dc4)
+FetchContent_MakeAvailable(libatrac9)  # its CMakeLists is not used: fetch only
+file(GLOB LIBATRAC9_SOURCES CONFIGURE_DEPENDS "${libatrac9_SOURCE_DIR}/C/src/*.c")
+add_library(libatrac9 STATIC ${LIBATRAC9_SOURCES})
+set_target_properties(libatrac9 PROPERTIES POSITION_INDEPENDENT_CODE ON C_STANDARD 99)
+target_include_directories(libatrac9 PUBLIC "${libatrac9_SOURCE_DIR}/C/src")
+target_compile_options(libatrac9 PRIVATE -w)
+find_library(LIBM m)
+if(LIBM)
+  target_link_libraries(libatrac9 PRIVATE ${LIBM})
+endif()
+
+# libSceAjm: the audio coprocessor's codecs (ATRAC9 on LibAtrac9, MP3 on
+# ffmpeg).
 add_library(recomp_orbis_ajm SHARED src/orbis/hle/ajm.cpp src/orbis/hle/audio_decoder.cpp)
-target_link_libraries(recomp_orbis_ajm PUBLIC recomp_orbis PRIVATE PkgConfig::FFMPEG)
+target_link_libraries(recomp_orbis_ajm PUBLIC recomp_orbis PRIVATE PkgConfig::FFMPEG libatrac9)
 # libSceNgs2: renders into the game's buffers, which it gives libSceAudioOut;
 # ATRAC9 through the coprocessor's decoders (libSceAjm's).
 add_library(recomp_orbis_ngs2 SHARED src/orbis/hle/ngs2.cpp src/orbis/hle/ngs2_dsp.cpp)

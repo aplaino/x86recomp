@@ -256,16 +256,16 @@ library.
   mastering voice; buffers no voice wrote are zeroed). The sampler reads
   PCM in place from the game's memory through its block ring (repeats,
   exit loop, stream continuations, termination), and ATRAC9 through
-  ffmpeg's decoder as 11.00 walks it: units of a superframe plus the frame
+  the decoder as 11.00 walks it: units of a superframe plus the frame
   margin, the superframe at the frame offset, a block's skip dropped from
   its first frames, the decoder restarted at a block that skips (blocks
   without a skip play on gaplessly), the setup's checks (decoders of the
   kind flag 1 picks, the 0xFE config byte, its channel count). Ours: the
-  decoder is libSceAjm's (ffmpeg's, as below); it decodes a whole
+  decoder is libSceAjm's (LibAtrac9, as below); it decodes a whole
   superframe at once, where 11.00 decodes a frame at a time (the decoder
   state differs only when a block ends inside a superframe and the next
-  does not skip); a superframe ffmpeg cannot decode or a config it refuses
-  (an odd superframe index) is fatal. Both resample through a 4-tap
+  does not skip); a superframe that does not decode or a config LibAtrac9
+  refuses (an odd superframe index) is fatal. Both resample through a 4-tap
   Hann-windowed sinc resampler (512 phases, 3 samples of start-up
   history); envelopes, RBJ biquads, the compressor/limiter, distortion
   and peak meters follow 11.00's formulas; the mastering rack's matrix,
@@ -294,19 +294,35 @@ library.
   LAME's delay and padding, VBRI, the 0xB4 tag and its CRC). A batch's
   inputs are read at its start and its jobs run when it is waited for.
   The jobs run on the audio coprocessor in 11.00, whose firmware decides
-  what they do: that is ours, on ffmpeg's ATRAC9 and MP3 decoders.
-  Initialisation takes ATRAC9's 4 config bytes (MP3: no parameters); a
-  run decodes a frame, or with MULTIPLE_FRAMES as many as the input and
-  output hold, into the instance's format (flags bits 7-9: S16 rounded to
-  nearest, S32, float), the output buffers filled one after the other.
-  An ATRAC9 superframe decodes at its first frame, which needs all of it;
-  each frame consumes its share (the config's frame size). The sideband
-  records, in order: the result (0, 0), STREAM (bytes consumed, bytes
-  written, samples output since the stream's start), MULTIPLE_FRAMES
-  (frames), FORMAT (channels, WAVE speaker mask, rate, the instance's
-  format, bitrate), GAPLESS (samples to output, to skip, skipped). Gapless
-  decoding skips the first samples and stops output after the total
-  (frames are still consumed); RESET restarts the stream and the skip.
+  what they do. Measured on 11.00 (a console run's AJM log, ATRAC9 with
+  STREAM and MULTIPLE_FRAMES into S16): an ATRAC9 instance no
+  initialisation job configured takes its stream from a RIFF/WAVE header
+  at the start of a run's input (WAVE_FORMAT_EXTENSIBLE with ATRAC9's
+  subformat: the config from fmt, the samples and the delay from fact,
+  the header's bytes consumed up to the data chunk), skips the delay,
+  stops output at the samples, and takes a new header once the data is
+  used up; a frame consumes its own length (byte-aligned) and the last
+  frame of a superframe the superframe's rest; a run decodes as many
+  frames as the output holds and the input has; the result is 0x10 when
+  the output has no room for the next frame, else 0x8 when the input is
+  used up; a 24-byte sideband buffer gets the result and STREAM records
+  only, with no error. The decoder is LibAtrac9 (MIT, NOTICE), whose
+  frame lengths match 11.00's for every run measured; its S16 samples
+  match or differ by 1 (90.5% equal: the coprocessor computes with other
+  arithmetic). The rest is ours, MP3 on ffmpeg's decoder: initialisation
+  takes ATRAC9's 4 config bytes (MP3: no parameters); a run decodes a
+  frame, or with MULTIPLE_FRAMES as many as the input and output hold,
+  into the instance's format (flags bits 7-9: S16 rounded to nearest,
+  S32, float), the output buffers filled one after the other. The
+  sideband records, in order: the result (MP3 and a single frame: 0; the
+  internal result 0), STREAM (bytes consumed, bytes written, samples
+  output since the stream's start), MULTIPLE_FRAMES (frames, when the
+  buffer has room), FORMAT (channels, WAVE speaker mask, rate, the
+  instance's format, bitrate), GAPLESS (samples to output, to skip,
+  skipped). Gapless decoding skips the first samples and stops output
+  after the total (frames are still consumed; a RIFF stream's delay and
+  samples are its skip and total); RESET restarts the stream and the
+  skip.
   Contexts are small numbers of the HLE's own (11.00's are the
   descriptors of /dev/ajm); memory registration keeps 11.00's limits but
   takes any memory (11.00 wants direct memory); sceAjmStrError's texts
@@ -315,8 +331,12 @@ library.
   multi-codec instances (Extend, Switch), jobs on 0x80000, FLUSH and
   jobs with other than one CONTROL or RUN command, codec-specific
   sideband records, codec info, resampling, a run that decodes no frame,
-  a sideband buffer too small for its records, and anything the decoder
-  rejects (the coprocessor's error results are not measured).
+  a sideband buffer too small for its records, an ATRAC9 frame that does
+  not end in a run's input, a RIFF header that is not ATRAC9's, lacks
+  fmt, fact or data in the input, or whose fact delays differ, a RIFF
+  header inside a stream's data or on an initialised instance's stream,
+  input past a RIFF stream's data, and anything the decoder rejects (the
+  coprocessor's error results are not measured).
 - recomp_orbis_avplayer: libSceAvPlayer on ffmpeg, reading through the
   game's file callbacks on a guest service thread; video as NV12 in the
   game's texture memory (pitch: the width rounded up to 64), released
@@ -475,12 +495,13 @@ noted:
   dialog the game closes (user canceled, none), and whether the dialog
   libraries refuse each other while one is initialised
   (sceCommonDialogIsUsed: not modelled).
-- Everything libSceAjm's jobs do on the audio coprocessor: the sideband
-  records' values (the layouts follow the SDK's record sizes; field
-  meanings are the community's), how much input a frame consumes, the
-  speaker masks, gapless decoding's details, what MP3 initialisation
-  takes, and the coprocessor's error results. A console run of the same
-  batches would measure them.
+- What libSceAjm's jobs do on the audio coprocessor beyond the measured
+  ATRAC9 streams (recomp_orbis_ajm above): the sideband records' values
+  for other flags (the layouts follow the SDK's record sizes; field
+  meanings are the community's), the results of single-frame runs and
+  of MP3, the frame count's record, the speaker masks, gapless
+  decoding's details, what MP3 initialisation takes, and the
+  coprocessor's error results.
 - The Remote Play service's answer to sceRemoteplayInitialize (the HLE:
   success).
 - The add-on content service's answers (the SKU, the boot param's attr,

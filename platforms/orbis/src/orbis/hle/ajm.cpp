@@ -2,9 +2,10 @@
 // the audio coprocessor (ACP) that runs the codecs. The library's checks,
 // the batch words its job builders write, the driver's validation, ids,
 // pools and codes are 11.00's (library and kernel). What a job does and
-// the sideband records it writes are decided by the ACP's firmware, not
-// measured: those are this HLE's own, on its ffmpeg decoders
-// (audio_decoder.h); docs/hle.md lists them. A batch's inputs are read
+// the sideband records it writes are decided by the ACP's firmware:
+// ATRAC9 streams are measured (a RIFF header configuring an instance,
+// frame lengths, results), the rest is this HLE's own, on its decoders
+// (audio_decoder.h); docs/hle.md says which is which. A batch's inputs are read
 // when it starts and its jobs run when it is waited for, which is when
 // 11.00 copies outputs back to memory not registered with
 // sceAjmMemoryRegister.
@@ -80,11 +81,15 @@ struct Instance {
   int priority = 0;
   bool violation_allowed = false;
 
-  // The stream: the decoder and, for ATRAC9, its config and the frames of
-  // the superframe decoded last not output yet.
+  // The stream: the decoder and, for ATRAC9, its config, the next frame's
+  // index in its superframe and the bytes the superframe's frames before
+  // it consumed; for a stream a RIFF header configured, the data bytes
+  // left (the instance takes a new header when they are).
   std::unique_ptr<AudioDecoder> dec;
   uint32_t at9_config = 0;
-  uint32_t next_frame = 0, frames = 0;
+  uint32_t next_frame = 0, superframe_used = 0;
+  bool riff = false;
+  uint64_t riff_left = 0;
   uint64_t total_samples = 0;
   uint32_t mp3_rate = 0, mp3_bitrate = 0;  // the last MP3 frame's header
   // Gapless decoding: samples to output (0: all), to skip at the start,
@@ -300,7 +305,63 @@ bool ParseMp3Frame(const uint8_t* b, size_t size, bool parse_tag, Mp3Frame& f) {
   return true;
 }
 
-// ---- the ACP: running a job (this HLE's own; docs/hle.md)
+// ---- the ACP: running a job (this HLE's own where docs/hle.md says so)
+
+[[noreturn]] void NotMeasured(const char* what, uint32_t id) {
+  recomp::FatalF("libSceAjm: instance %X: %s is decided by the ACP's firmware, not measured; not "
+                 "implemented",
+                 id, what);
+}
+
+uint32_t Le32(const uint8_t* p) { return p[0] | p[1] << 8 | p[2] << 16 | uint32_t(p[3]) << 24; }
+
+// An ATRAC9 RIFF/WAVE header, which configures an ATRAC9 instance no
+// initialisation job did (11.00's coprocessor, measured): the config from
+// the fmt chunk, the samples and the delay from the fact chunk, where the
+// data chunk's bytes start and how many there are.
+struct Riff {
+  uint32_t config = 0, samples = 0, delay = 0, data = 0, data_size = 0;
+};
+
+bool IsRiff(const std::vector<uint8_t>& b) {
+  return b.size() >= 12 && !std::memcmp(b.data(), "RIFF", 4) && !std::memcmp(b.data() + 8, "WAVE", 4);
+}
+
+Riff ParseRiff(const Instance& in, const std::vector<uint8_t>& b) {
+  // WAVE_FORMAT_EXTENSIBLE's subformat for ATRAC9.
+  static const uint8_t kAt9Guid[16] = {0xD2, 0x42, 0xE1, 0x47, 0xBA, 0x36, 0x8D, 0x4D,
+                                       0x88, 0xFC, 0x61, 0x65, 0x4F, 0x8C, 0x83, 0x6C};
+  Riff r;
+  bool fmt = false, fact = false;
+  for (size_t at = 12; at + 8 <= b.size();) {
+    const uint8_t* ck = b.data() + at;
+    const uint32_t len = Le32(ck + 4);
+    if (!std::memcmp(ck, "data", 4)) {
+      r.data = uint32_t(at + 8), r.data_size = len;
+      break;
+    }
+    if (at + 8 + len > b.size()) break;
+    if (!std::memcmp(ck, "fmt ", 4)) {
+      const uint8_t* f = ck + 8;
+      At9Config c;
+      if (len < 52 || (f[0] | f[1] << 8) != 0xFFFE || std::memcmp(f + 24, kAt9Guid, 16) ||
+          !ParseAt9(f + 44, c) || (f[2] | f[3] << 8) != c.channels ||
+          (f[12] | f[13] << 8) != c.frame_bytes * c.frames)
+        NotMeasured("a RIFF header that is not ATRAC9's (or disagrees with its config)", in.id);
+      r.config = Be32(f + 44), fmt = true;
+    } else if (!std::memcmp(ck, "fact", 4)) {
+      // The samples, then two delays; the measured streams have them
+      // equal and skip one of them.
+      if (len < 12 || Le32(ck + 12) != Le32(ck + 16))
+        NotMeasured("a RIFF fact chunk without two equal delays", in.id);
+      r.samples = Le32(ck + 8), r.delay = Le32(ck + 12), fact = true;
+    }
+    at += 8 + len + (len & 1);
+  }
+  if (!fmt || !fact || !r.data) NotMeasured("a RIFF header without fmt, fact and data in the input", in.id);
+  if (r.delay > 0xFFFF) NotMeasured("a RIFF delay of more than 65535 samples", in.id);
+  return r;
+}
 
 // Writes the decoded samples to a job's output buffers, one after the
 // other, in the instance's format (flags bits 7-9: S16, S32, float).
@@ -357,43 +418,56 @@ void Emit(Instance& in, Output& out, uint32_t first, uint32_t n) {
     for (uint32_t c = 0; c < channels; c++) out.Sample(in.dec->channel(c)[i]);
 }
 
-[[noreturn]] void NotMeasured(const char* what, uint32_t id) {
-  recomp::FatalF("libSceAjm: instance %X: %s is decided by the ACP's firmware, not measured; not "
-                 "implemented",
-                 id, what);
-}
+// RUN results (the sideband's first word), as 11.00's coprocessor gives
+// them for ATRAC9 streams: the output has no room for the next frame;
+// the input is used up.
+constexpr uint32_t kResultOutputFull = 0x10, kResultInputUsed = 0x8;
 
 // Decodes frames from `in` into `out` (one, or as many as fit with
-// MULTIPLE_FRAMES); returns the frames, sets the input bytes consumed.
-uint32_t Decode(Instance& in, const Job& job, Output& out, uint32_t& consumed) {
-  consumed = 0;
+// MULTIPLE_FRAMES) from job.in's byte `consumed` on; returns the frames,
+// advances consumed and sets the result.
+uint32_t Decode(Instance& in, const Job& job, Output& out, uint32_t& consumed, uint32_t& result) {
   uint32_t frames = 0;
+  result = 0;
   const bool many = job.flags & kMultipleFrames;
   const uint8_t* src = job.in.data();
   const size_t size = job.in.size();
   while (frames == 0 || many) {
-    uint32_t skip = 0, n = 0, unit = 0, first = 0;
+    uint32_t skip = 0, n = 0, unit = 0;
     if (in.codec == kCodecAt9) {
-      if (!in.dec) NotMeasured("running ATRAC9 before its initialisation", in.id);
       At9Config c;
       const uint8_t b[4] = {uint8_t(in.at9_config >> 24), uint8_t(in.at9_config >> 16),
                             uint8_t(in.at9_config >> 8), uint8_t(in.at9_config)};
       ParseAt9(b, c);
-      // A frame consumes its share of the superframe; the superframe
-      // decodes at its first frame, which needs all of it.
-      unit = c.frame_bytes;
-      const bool start = in.next_frame == in.frames;
-      if (size - consumed < (start ? unit * c.frames : unit)) break;
       n = GaplessCut(in, c.frame_samples, skip);
-      if (out.Room() < uint64_t(n) * c.channels * out.SampleBytes()) break;
-      if (start) {
-        if (!in.dec->Decode(src + consumed, unit * c.frames) || in.dec->channels() != c.channels)
-          recomp::FatalF("libSceAjm: instance %X: an ATRAC9 superframe did not decode (the "
-                         "ACP's result is not measured)",
-                         in.id);
-        in.next_frame = 0, in.frames = c.frames;
+      if (out.Room() < uint64_t(n) * c.channels * out.SampleBytes()) {
+        result = kResultOutputFull;
+        break;
       }
-      first = in.next_frame++ * c.frame_samples;
+      if (size == consumed || (in.riff && in.riff_left == 0)) {
+        if (in.riff && in.riff_left == 0 && size != consumed)
+          NotMeasured("input past the end of a RIFF stream's data", in.id);
+        result = kResultInputUsed;
+        break;
+      }
+      // A frame consumes its own length (byte-aligned); the last frame of
+      // a superframe consumes the superframe's rest.
+      const size_t avail = size - consumed;
+      const size_t used = in.dec->DecodeFrame(src + consumed, avail);
+      if (used == 0 || in.dec->channels() != c.channels)
+        recomp::FatalF("libSceAjm: instance %X: an ATRAC9 frame did not decode (the ACP's "
+                       "result is not measured)",
+                       in.id);
+      const uint32_t superframe = c.frame_bytes * c.frames;
+      unit = ++in.next_frame == c.frames ? superframe - in.superframe_used : uint32_t(used);
+      if (used > avail || unit > avail || unit < used)
+        NotMeasured("an ATRAC9 frame that does not end in the job's input", in.id);
+      if (in.next_frame == c.frames) in.next_frame = 0, in.superframe_used = 0;
+      else in.superframe_used += unit;
+      if (in.riff) {
+        if (unit > in.riff_left) NotMeasured("a frame past the end of a RIFF stream's data", in.id);
+        in.riff_left -= unit;
+      }
     } else {
       Mp3Header h;
       if (size - consumed < 4) break;
@@ -410,7 +484,7 @@ uint32_t Decode(Instance& in, const Job& job, Output& out, uint32_t& consumed) {
                        in.id);
       in.mp3_rate = h.rate, in.mp3_bitrate = h.bitrate;
     }
-    Emit(in, out, first + skip, n);
+    Emit(in, out, skip, n);
     in.gapless_skipped = uint16_t(in.gapless_skipped + skip);
     in.total_samples += n;
     consumed += unit;
@@ -418,12 +492,14 @@ uint32_t Decode(Instance& in, const Job& job, Output& out, uint32_t& consumed) {
   }
   if (frames == 0 && (size || out.Room()))
     NotMeasured("a run that decodes no frame (input or output too short)", in.id);
+  // A single frame's result is not measured: ours is 0.
+  if (!many) result = 0;
   return frames;
 }
 
 void Reset(Instance& in) {
   if (in.dec) in.dec->Flush();
-  in.next_frame = in.frames = 0;
+  in.next_frame = in.superframe_used = 0;
   in.total_samples = 0;
   in.gapless_skipped = 0;
 }
@@ -463,9 +539,8 @@ void RunControl(Instance& in, const Job& job, Sideband& sb) {
         NotMeasured("an ATRAC9 initialisation without a valid config", in.id);
       in.at9_config = Be32(job.sb_in.data());
       in.dec = AudioDecoder::Atrac9(in.at9_config);
-      if (!in.dec)
-        recomp::FatalF("libSceAjm: ATRAC9 config %08X is not implemented yet (ffmpeg refuses it)",
-                       in.at9_config);
+      if (!in.dec) recomp::FatalF("libSceAjm: ATRAC9 config %08X does not decode", in.at9_config);
+      in.riff = false;
     } else {
       if (!job.sb_in.empty()) NotMeasured("MP3 initialisation parameters", in.id);
       if (!in.dec) in.dec = AudioDecoder::Mp3();
@@ -489,18 +564,36 @@ void RunRun(Instance& in, const Job& job, Sideband& sb) {
   if (f & kGetCodecInfo) NotMeasured("the codec info record", in.id);
   if (f & kMultipleFrames && !(f & kStream)) NotMeasured("MULTIPLE_FRAMES without STREAM", in.id);
   Output out{job.out, uint32_t(in.flags >> 7 & 7)};
-  uint32_t frames = 0, consumed = 0;
+  uint32_t frames = 0, consumed = 0, result = 0;
+  // An ATRAC9 instance no initialisation job configured takes its stream
+  // from a RIFF header, and the next one when that stream's data is used
+  // up: the config, the delay skipped and output stopped at the samples
+  // (as gapless decoding does).
+  if (in.codec == kCodecAt9 && IsRiff(job.in) && (!in.dec || in.riff)) {
+    if (in.riff && in.riff_left) NotMeasured("a RIFF header inside a RIFF stream's data", in.id);
+    const Riff r = ParseRiff(in, job.in);
+    in.at9_config = r.config;
+    in.dec = AudioDecoder::Atrac9(r.config);
+    if (!in.dec) recomp::FatalF("libSceAjm: ATRAC9 config %08X does not decode", r.config);
+    Reset(in);
+    in.riff = true, in.riff_left = r.data_size;
+    in.gapless_total = r.samples, in.gapless_skip = uint16_t(r.delay);
+    consumed = r.data;
+  }
   if (!job.in.empty() || out.Room()) {
     if (!in.dec) NotMeasured("running before the codec's initialisation", in.id);
-    frames = Decode(in, job, out, consumed);
+    frames = Decode(in, job, out, consumed, result);
   }
-  sb.U64(0);  // the result
+  sb.U32(result);
+  sb.U32(0);  // the internal result
   if (f & kStream) {
     sb.U32(consumed);
     sb.U32(uint32_t(out.written));
     sb.U64(in.total_samples);
   }
-  if (f & kMultipleFrames) sb.U64(frames);
+  // With STREAM in a 24-byte sideband buffer, 11.00 writes no frame count
+  // and reports no error (measured); in a larger one it is ours.
+  if (f & kMultipleFrames && job.sb_out.size >= sb.bytes.size() + 8) sb.U64(frames);
   if (f & kFormat) {
     uint32_t channels, rate, bitrate;
     if (in.codec == kCodecAt9) {
