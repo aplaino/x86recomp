@@ -499,7 +499,12 @@ void HandleSdlEvent(const SDL_Event& e) {
       WindowOrigin(h, &ox, &oy);
       const ClientMap cm = MapToClient(h);
       int mw, mh;
-      if (!Background() || e.motion.which == kTestPointer) {
+      if (e.motion.which == kTestPointer) {
+        // Already client pixels, whatever size the host window has.
+        g_real_x = int(e.motion.x);
+        g_real_y = int(e.motion.y);
+        g_pointer_inside = true;
+      } else if (!Background()) {
         g_real_x = int((e.motion.x - cm.x0) * cm.kx);
         g_real_y = int((e.motion.y - cm.y0) * cm.ky);
         g_pointer_inside = true;
@@ -850,8 +855,9 @@ void InjectTestFocus() {
 //                         driven by relative motion, so this homes it to
 //                         the top-left corner first, over a few frames
 //   <t> move <dx> <dy>    relative motion
-//   <t> pointer <x> <y>   the host pointer is at client (x, y) (the
-//                         game's cursor should follow it exactly)
+//   <t> pointer <x> <y>   the host pointer is at client pixel (x, y)
+//                         (the game's cursor should follow it exactly),
+//                         independent of how the frame is shown
 //   <t> click [left|right]
 //   <t> key <SDL scancode name> [seconds]   e.g. Escape, Return, Space, A;
 //                         held for that long (default 0.08)
