@@ -786,6 +786,16 @@ void EnsureSdlVideo() {
     g_display_h = g_desktop_h = int(std::lround(float(m->h) * d));
     if (m->refresh_rate > 0) g_desktop_hz = int(std::lround(m->refresh_rate));
   }
+  // Test hook: <ID>_DESKTOP=WxH (pixels) is the desktop the game sees, so
+  // automated runs of games that size their window to the desktop stay
+  // in a window smaller than the host's.
+  if (const char* e = Env("DESKTOP"); e && *e) {
+    int w, h;
+    if (std::sscanf(e, "%dx%d", &w, &h) != 2 || w <= 0 || h <= 0)
+      FatalF("DESKTOP=%s: expected WxH", e);
+    g_display_w = g_desktop_w = w;
+    g_display_h = g_desktop_h = h;
+  }
 }
 
 void DesktopSize(int* w, int* h) {
