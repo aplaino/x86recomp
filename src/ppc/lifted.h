@@ -89,6 +89,12 @@ void RegisterLiftedFrames(const LiftedFrame* frames, uint32_t count, const Lifte
 struct GuestResume {
   uint32_t target, frame;
 };
+// A `blr` after the stack pointer was loaded from memory (longjmp, the C
+// runtime continuing after a catch block from a saved context): a jump to
+// `target` in the frame the registers now describe, not a return. Throws a
+// GuestResume to that frame's activation (its r1 on entry from the
+// target's frame description, ppc/unwind.h); fatal without one.
+[[noreturn]] void Jump(Ctx& c, uint64_t target, uint64_t va);
 // Runs the code at r.target (a function the lifter started there) and
 // again for each later GuestResume into the same frame and range
 // [lo, hi) while that code runs.

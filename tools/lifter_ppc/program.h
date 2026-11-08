@@ -71,6 +71,9 @@ struct Function {
   std::map<uint64_t, std::vector<uint64_t>> tables;
   // An unwind may continue in it (Image::resumable): GuestResume.
   bool resumable = false;
+  // BCLR instructions after the stack pointer was loaded from memory:
+  // jumps to another frame (ppc::Jump), not returns.
+  std::set<uint64_t> jumps;
 };
 
 // A prologue as the lifter read it (recomp::ppc::LiftedFrame).
@@ -116,6 +119,12 @@ class Program {
   // Starts where an unwind may continue a resumable function: see Discover.
   std::set<uint64_t> ResumeStarts(const std::set<uint64_t>& starts) const;
   Frame ReadPrologue(uint64_t va, uint64_t len) const;
+  // A function that saves r1 and its return address into the buffer its
+  // first argument points at (setjmp): a jump may come back to its return.
+  bool SavesContext(const Function& f) const;
+  // Calls to such functions: their callers become resumable and their
+  // return addresses resume targets. True if that added any.
+  bool SetjmpReturns();
   // The end of the code range holding `va`.
   uint64_t CodeEnd(uint64_t va) const;
   void Warn(const std::string& w);

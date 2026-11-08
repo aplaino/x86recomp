@@ -76,4 +76,16 @@ uint32_t VirtualUnwind(const LiftedFrame& f, Ctx& s) {
   return entry;
 }
 
+void Jump(Ctx& c, uint64_t target, uint64_t va) {
+  uint32_t t = uint32_t(target) & ~3u;
+  const LiftedFrame* f = LookupFrame(t);
+  if (!f)
+    Fatal(&c, "jump at %llx to %x: its function has no frame description",
+          static_cast<unsigned long long>(va), t);
+  Ctx probe = c;
+  uint32_t frame = VirtualUnwind(*f, probe);
+  c.resv_valid = false;
+  throw GuestResume{t, frame};
+}
+
 }  // namespace recomp::ppc
