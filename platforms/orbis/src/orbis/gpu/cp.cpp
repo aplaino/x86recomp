@@ -95,6 +95,18 @@ struct Engines {
   uint32_t pipe_stat_control = 0;
 };
 
+// The global data share: on-chip memory every engine (and, through DS
+// instructions with GDS set, every shader) shares; GCN's 64 KiB. Never
+// destroyed: the GPU threads use it until exit.
+struct GdsMemory {
+  std::mutex mu;
+  uint8_t bytes[64 * 1024] = {};
+};
+GdsMemory& Gds() {
+  static GdsMemory* g = new GdsMemory;
+  return *g;
+}
+
 uint64_t Ns() {
   return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                       std::chrono::steady_clock::now().time_since_epoch())
@@ -364,16 +376,33 @@ bool Step(Engines& e, Stream& s, bool ce) {
         // the cache sees the data.
         break;
       }
-      if (dst_sel != 0 || dst_reg || dst_fixed || src_reg || (src_mem && src_fixed))
+      if (dst_sel > 1 || dst_reg || dst_fixed || src_reg || (src_sel != 2 && src_fixed) ||
+          (dst_sel == 1 && src_sel == 1))
         FatalF("GPU: DMA_DATA %08X %08X not implemented yet", d[0], d[5]);
+      const gaddr src = d[1] | uint64_t(d[2]) << 32;
+      if (dst_sel == 1) {
+        // Into GDS: the destination is a byte offset in it.
+        if (dst + bytes > sizeof Gds().bytes) FatalF("GPU: DMA_DATA past the GDS");
+        if (src_mem) BeforeRead(src, bytes);
+        std::lock_guard<std::mutex> l(Gds().mu);
+        if (src_mem) {
+          std::memcpy(Gds().bytes + dst, GPtr(src), bytes);
+        } else {
+          for (uint32_t i = 0; i + 4 <= bytes; i += 4) std::memcpy(Gds().bytes + dst + i, &d[1], 4);
+        }
+        break;
+      }
       BeforeRead(dst, bytes);
       if (src_sel == 2) {
         for (uint32_t i = 0; i + 4 <= bytes; i += 4) Wr32(dst + i, d[1]);
       } else if (src_mem) {
-        BeforeRead(d[1] | uint64_t(d[2]) << 32, bytes);
-        std::memmove(GPtr(dst), GPtr(d[1] | uint64_t(d[2]) << 32), bytes);
+        BeforeRead(src, bytes);
+        std::memmove(GPtr(dst), GPtr(src), bytes);
       } else {
-        FatalF("GPU: DMA_DATA from GDS not implemented yet");
+        // From GDS: the source is a byte offset in it.
+        if (src + bytes > sizeof Gds().bytes) FatalF("GPU: DMA_DATA past the GDS");
+        std::lock_guard<std::mutex> l(Gds().mu);
+        std::memcpy(GPtr(dst), Gds().bytes + src, bytes);
       }
       MemoryWritten(dst, bytes);
       break;

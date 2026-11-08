@@ -592,6 +592,57 @@ int main() {
     Check(ok, "s_not_b64 inverts both halves and sets SCC from both");
   }
 
+  // s_nand, s_nor, s_xnor in 32 and 64 bits on s[4:5] = {0x0F0F00FF, -1}
+  // and s[6:7] = {0x00FF00FF, -1}, then SCC after a 64-bit result of zero
+  // (s17) and one zero only in its low half (s22). Stores s8 to s22 and
+  // s22 again at kOut + 0x5200.
+  static const uint32_t kNand[] = {
+      0xBE8403FF, 0x0F0F00FF,  // s_mov_b32 s4, 0x0f0f00ff
+      0xBE8503C1,              // s_mov_b32 s5, -1
+      0xBE8603FF, 0x00FF00FF,  // s_mov_b32 s6, 0x00ff00ff
+      0xBE8703C1,              // s_mov_b32 s7, -1
+      0x8C880604,              // s_nand_b64 s[8:9], s[4:5], s[6:7]
+      0x8D8A0604,              // s_nor_b64 s[10:11], s[4:5], s[6:7]
+      0x8E8C0604,              // s_xnor_b64 s[12:13], s[4:5], s[6:7]
+      0x8C0E0604,              // s_nand_b32 s14, s4, s6
+      0x8D0F0604,              // s_nor_b32 s15, s4, s6
+      0x8E100604,              // s_xnor_b32 s16, s4, s6
+      0x8D92C104,              // s_nor_b64 s[18:19], s[4:5], -1
+      0x85118281,              // s_cselect_b32 s17, 1, 2
+      0xBE9803C1,              // s_mov_b32 s24, -1
+      0xBE990380,              // s_mov_b32 s25, 0
+      0x8C941818,              // s_nand_b64 s[20:21], s[24:25], s[24:25]
+      0x85168281,              // s_cselect_b32 s22, 1, 2
+      0x7E020208, 0x7E040209, 0x7E06020A, 0x7E08020B,  // v_mov_b32 v1-v4, s8-s11
+      0xE0781000, 0x80000100,                          // buffer_store_dwordx4 v[1:4], v0, s[0:3], 0 offen
+      0xBF8C0000,                                      // s_waitcnt 0
+      0x7E02020C, 0x7E04020D, 0x7E06020E, 0x7E08020F,  // v_mov_b32 v1-v4, s12-s15
+      0xE0781010, 0x80000100,                          // ... offset:16
+      0xBF8C0000,                                      // s_waitcnt 0
+      0x7E020210, 0x7E040211, 0x7E060212, 0x7E080213,  // v_mov_b32 v1-v4, s16-s19
+      0xE0781020, 0x80000100,                          // ... offset:32
+      0xBF8C0000,                                      // s_waitcnt 0
+      0x7E020214, 0x7E040215, 0x7E060216, 0x7E080216,  // v_mov_b32 v1-v4, s20-s22, s22
+      0xE0781030, 0x80000100,                          // ... offset:48
+      0xBF810000,                                      // s_endpgm
+  };
+  constexpr gaddr kNandAt = kCode + 0x1600;
+  std::memcpy(GPtr(kNandAt), kNand, sizeof kNand);
+  {
+    uint32_t user[16] = {};
+    VSharp(user, kOut + 0x5200, 64);
+    std::memset(GPtr(kOut + 0x5200), 0xEE, 64);
+    Run(kNandAt, user, 4, 1, 1);
+    const uint32_t want[16] = {0xFFF0FF00u, 0, 0xF000FF00u, 0, 0xF00FFFFFu, 0xFFFFFFFFu, 0xFFF0FF00u, 0xF000FF00u,
+                               0xF00FFFFFu, 2, 0, 0, 0, 0xFFFFFFFFu, 1, 1};
+    bool ok = true;
+    for (uint32_t k = 0; k < 16; k++) {
+      if (Rd32(kOut + 0x5200 + 4 * k) != want[k]) std::printf("  word %u: %08X\n", k, Rd32(kOut + 0x5200 + 4 * k));
+      ok &= Rd32(kOut + 0x5200 + 4 * k) == want[k];
+    }
+    Check(ok, "s_nand, s_nor and s_xnor invert their op in 32 and 64 bits and set SCC from both halves");
+  }
+
   // A stage in waves: readlane, readfirstlane under a partial EXEC,
   // writelane, comparisons and carries as ballots, a branch on the wave's
   // VCC, v_movrels (past the VGPRs too), ds_or_b32 and ds_read2_b64. Lane i stores 20 words at
@@ -996,6 +1047,31 @@ int main() {
     }
     if (!ok || sum != 64) std::printf("  dumped sum %llu\n", (unsigned long long)sum);
     Check(ok && sum == 64, "an occlusion query's dumps hold the pixels drawn between them");
+  }
+  // DMA_DATA into and out of GDS: a value written twice (8 bytes) at GDS
+  // offset 0x10, a dword from memory at 0x18, then 16 bytes from 0x10
+  // back into memory (0x1C still holds GDS's zero).
+  {
+    constexpr gaddr kFrom = kOut + 0x5000, kTo = kOut + 0x5100;
+    Wr32(kFrom, 0xCAFEF00D);
+    std::memset(GPtr(kTo), 0xEE, 32);
+    const uint32_t dcb[] = {
+        0xC0055000, 0x40100000, 0x12345678, 0, 0x10, 0, 8,                      // data -> GDS
+        0xC0055000, 0x00100000, uint32_t(kFrom), uint32_t(kFrom >> 32), 0x18, 0, 4,  // memory -> GDS
+        0xC0055000, 0x20000000, 0x10, 0, uint32_t(kTo), uint32_t(kTo >> 32), 16,     // GDS -> memory
+    };
+    std::memcpy(GPtr(kDcb), dcb, sizeof dcb);
+    std::atomic<bool> done{false};
+    SubmitGraphics({{kDcb, uint32_t(sizeof dcb / 4)}}, {{0, 0}}, [&] { done = true; });
+    for (int i = 0; i < 5000 && !done; i++) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    Settle(true);
+    const uint32_t want[] = {0x12345678, 0x12345678, 0xCAFEF00D, 0, 0xEEEEEEEE};
+    bool ok = done;
+    for (int i = 0; i < 5; i++) ok &= Rd32(kTo + 4 * i) == want[i];
+    if (!ok)
+      std::printf("  GDS copy: %08X %08X %08X %08X %08X\n", Rd32(kTo), Rd32(kTo + 4), Rd32(kTo + 8),
+                  Rd32(kTo + 12), Rd32(kTo + 16));
+    Check(ok, "DMA_DATA writes GDS from data and memory and copies it back");
   }
   // An indirect draw through the command processor: its first vertex (3)
   // goes to the vertex shader's user SGPR 4, which it adds to the vertex

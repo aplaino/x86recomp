@@ -1864,9 +1864,10 @@ struct Translator {
           Line("r_t = " + e + ";");
           Line(Dst(d) + " = r_t; scc = r_t != 0u ? 1u : 0u;");
         };
-        auto wide = [&](const char* op) {
-          Line("r_t = " + pair(w & 0xFF, 0) + " " + op + " " + pair((w >> 8) & 0xFF, 0) + ";");
-          Line("r_t2 = " + pair(w & 0xFF, 1) + " " + op + " " + pair((w >> 8) & 0xFF, 1) + ";");
+        // A 64-bit op on both halves, inverted after for s_nand, s_nor, s_xnor.
+        auto wide = [&](const char* op, const char* inv = "") {
+          Line("r_t = " + std::string(inv) + "(" + pair(w & 0xFF, 0) + " " + op + " " + pair((w >> 8) & 0xFF, 0) + ");");
+          Line("r_t2 = " + std::string(inv) + "(" + pair(w & 0xFF, 1) + " " + op + " " + pair((w >> 8) & 0xFF, 1) + ");");
           Line(Dst(d) + " = r_t; " + Dst(d + 1) + " = r_t2; scc = (r_t | r_t2) != 0u ? 1u : 0u;");
         };
         switch (in.op) {
@@ -1895,6 +1896,12 @@ struct Translator {
           case 21: wide("& ~"); return;
           case 22: set(a + " | ~" + b); return;
           case 23: wide("| ~"); return;
+          case 24: set("~(" + a + " & " + b + ")"); return;
+          case 25: wide("&", "~"); return;
+          case 26: set("~(" + a + " | " + b + ")"); return;
+          case 27: wide("|", "~"); return;
+          case 28: set("~(" + a + " ^ " + b + ")"); return;
+          case 29: wide("^", "~"); return;
           case 30: set(a + " << (" + b + " & 31u)"); return;
           case 32: set(a + " >> (" + b + " & 31u)"); return;
           case 34: set("uint(int(" + a + ") >> (" + b + " & 31u))"); return;
@@ -2228,6 +2235,7 @@ struct Translator {
           Line("}");
           break;
         case Fmt::Ds:
+          if (in.w0 & 0x20000) return Fail(pc, "a DS instruction on GDS not translated yet");
           if (in.op == 53) {
             Swizzle(pc, in);
             break;

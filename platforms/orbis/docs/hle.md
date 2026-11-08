@@ -97,7 +97,9 @@ library.
   filled size (USE_OPAQUE) are fatal. End-of-pipe interrupts raise the
   graphics event 0x40, or on a compute ring event 0 to 6 by its pipe;
   their data is the id (a timestamp of 0). Other ids are fatal. Mip statistics are accepted and
-  never written.
+  never written. GDS (64 KiB, shared by every ring) is host memory that
+  DMA_DATA writes and reads; shaders' GDS instructions are not
+  translated yet (fatal), so nothing else sees it.
 - recomp_orbis_gpu draws on gfx::Device (orbis/gpu/renderer.h): its
   shaders translated to GLSL (orbis/gpu/shader.h), colour and depth
   targets as device images found by their guest address (never written
