@@ -62,6 +62,11 @@ option(RECOMP_PPC "PowerPC core: lifter and CPU model (a PowerPC platform turns 
 
 # Consoles with an AArch64 CPU.
 option(RECOMP_A64 "AArch64 core: lifter and CPU model (an AArch64 platform turns it on)" OFF)
+# The Nintendo Switch, on the AArch64 core.
+option(RECOMP_PLATFORM_HORIZON "Nintendo Switch (Horizon OS) platform module" OFF)
+if(RECOMP_PLATFORM_HORIZON)
+  set(RECOMP_A64 ON)
+endif()
 
 # The host layer (cmake/host.cmake): what a native program needs on its
 # host, whatever its guest CPU. SDL3 (windows, input, audio output),
@@ -139,7 +144,7 @@ endif()
 
 # --- AArch64 core ----------------------------------------------------------
 # The AArch64 lifter and CPU model, for the platforms with an AArch64 CPU
-# (RECOMP_A64, which they turn on), and its tests.
+# (RECOMP_A64, which they turn on), its tests, then those platforms.
 if(RECOMP_A64)
   add_library(recomp_a64 SHARED src/a64/dispatch.cpp src/a64/fatal.cpp src/a64/platform.cpp)
   target_include_directories(recomp_a64 PUBLIC src)
@@ -168,6 +173,10 @@ if(RECOMP_A64)
   endfunction()
 
   add_subdirectory(tests/a64)
+
+  if(RECOMP_PLATFORM_HORIZON)
+    add_subdirectory(platforms/horizon)
+  endif()
 endif()
 
 if(NOT RECOMP_X86)

@@ -27,6 +27,10 @@ OS or middleware API goes here, even when a game is where it came up.
 - The x86 core without Win32: `cmake --preset x86 && cmake --build --preset x86 && ctest --test-dir out/build/x86`.
   Changes to the base or src/x86 must keep it building: it shows that
   the core does not depend on a platform.
+- Platform modules (platforms/<name>) are built only with their
+  RECOMP_PLATFORM_<NAME> option; their own rules are in
+  platforms/<name>/CLAUDE.md. The Switch and its AArch64 core alone:
+  `cmake --preset horizon && cmake --build --preset horizon && ctest --test-dir out/build/horizon`.
 - Real validation happens in the game projects: after a change here,
   rebuild each one listed under Layout, re-lift if the lifter changed, and
   run its ctest (with <ID>_GAME_EXE set, the EXE-derived oracle tests run
