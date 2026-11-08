@@ -13,8 +13,10 @@ library.
   - Memory: flexible memory and anonymous mmap from the guest allocator;
     direct memory as offsets into a pool, each mapped to fresh guest
     memory (one range mapped twice at once, aliasing, is fatal; a range
-    unmapped and mapped again keeps its contents). File-backed mmap is
-    fatal. The mappings these make are recorded for
+    unmapped and mapped again keeps its contents). munmap frees every
+    mapping in its range as FreeBSD's does, parts of mappings included,
+    so a fixed mapping (16 KiB pages, without overwriting too) fits
+    there afterwards. File-backed mmap is fatal. The mappings these make are recorded for
     sceKernelVirtualQuery (an mprotect or a range name splits a record,
     as FreeBSD's map entries split); not measured on hardware: whether
     the kernel merges neighbouring entries, the memory type of flexible

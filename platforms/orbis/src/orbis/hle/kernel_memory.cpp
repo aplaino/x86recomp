@@ -134,16 +134,29 @@ void Reprotect(gaddr start, uint64_t len, int prot) {
   for (auto it = VmaRange(start, end); it != g_vma.end() && it->first < end; ++it) it->second.prot = prot;
 }
 
+// Unmaps everything in [addr, addr + len), across as many mappings
+// (reservations) as it covers, as FreeBSD's munmap does: the range is free
+// for other mappings afterwards (a fixed one without overwriting included).
 bool Unmap(gaddr addr, uint64_t len) {
   GuestAllocator& vm = g_proc->vm;
   GuestAllocator::Region r;
   if (addr & (kPage - 1) || !vm.Find(addr, &r)) return false;
-  if (addr == r.base && RoundUp(len) >= r.size) {
-    Forget(r.base, r.size);
-    return vm.Release(r.base);
+  const gaddr end = addr + RoundUp(len);
+  for (gaddr at = addr; at < end;) {
+    if (!vm.Find(at, &r)) {
+      uint64_t base = 0, size = 0;
+      vm.FreeGap(at, &base, &size);
+      if (!size) break;
+      at = base + size;
+      continue;
+    }
+    const gaddr to = std::min<gaddr>(end, r.base + r.size);
+    Forget(at, to - at);
+    if (at == r.base && to == r.base + r.size ? !vm.Release(r.base) : !vm.ReleaseRange(at, to - at))
+      return false;
+    at = to;
   }
-  Forget(addr, RoundUp(len));
-  return vm.Decommit(addr, RoundUp(len));
+  return true;
 }
 
 // The mappings of direct memory in [start, end): (address, length).
@@ -192,8 +205,8 @@ gaddr Map(gaddr addr, uint64_t len, int prot, bool fixed, bool no_overwrite) {
       vm.Decommit(addr, len);  // its pages read as zero again
       at = addr;
     } else {
-      at = vm.Reserve(addr, len);
-      if (at != addr) return 0;
+      if (!vm.ReserveAt(addr, len)) return 0;
+      at = addr;
     }
   } else {
     if (addr) at = vm.Reserve(addr, len);

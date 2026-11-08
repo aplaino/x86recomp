@@ -311,6 +311,18 @@ int kernel_checks(void) {
                                mw[0x1000 + 5] == 0x5678 && mw[0x1000] == 0 && mw[1] == 0, 1);
   r = sceKernelVirtualQuery(m, 0, &vq, sizeof vq);
   failed += test_check(34, r == 0 && vq.offset == (unsigned long)off + 0x4000 && ((int*)d)[0] == 7, 1);
+  // 35-37: the unmapped pages are free: the offset maps back there, fixed
+  // without overwriting (as munmap frees them on FreeBSD); one munmap
+  // then takes the three mappings in the old range, and a fixed mapping
+  // without overwriting fits there whole.
+  failed += test_check(35, sceKernelMunmap(m, 0x8000), 0);
+  void* back = (char*)d + 0x4000;
+  r = sceKernelMapDirectMemory(&back, 0x8000, 0x33, 0x90, off + 0x4000, 0x4000);
+  failed += test_check(36, r == 0 && back == (char*)d + 0x4000 && ((int*)back)[0] == 0x1234, 1);
+  void* whole = d;
+  r = sceKernelMunmap(d, 0x20000) * 10 +
+      sceKernelMapDirectMemory(&whole, 0x20000, 0x33, 0x90, off, 0x10000);
+  failed += test_check(37, r == 0 && whole == d && ((int*)d)[0] == 7, 1);
   sceKernelReleaseDirectMemory(off, 0x20000);
   void* f = 0;
   sceKernelMapNamedFlexibleMemory(&f, 0x8000, 3, 0, "flex");

@@ -28,6 +28,9 @@ class GuestAllocator {
   // at the lowest (or highest with top_down) free address. Returns the base
   // or 0.
   uint64_t Reserve(uint64_t va, uint64_t size, bool top_down = false);
+  // Reserves `size` bytes at exactly `va` (page-aligned, as a POSIX fixed
+  // mapping wants it, no 64 KiB rounding); false if any of it is taken.
+  bool ReserveAt(uint64_t va, uint64_t size);
   // Commits pages inside a reservation. Returns false if any part of the
   // range is not reserved.
   bool Commit(uint64_t va, uint64_t size, Prot prot);
@@ -35,6 +38,10 @@ class GuestAllocator {
   // Releases a whole reservation given its base. zero=false: see
   // GuestMemory::Decommit.
   bool Release(uint64_t base, bool zero = true);
+  // Releases [va, va + size) of the reservation holding it (POSIX
+  // munmap): what is left of it either side stays reserved, as separate
+  // reservations. False if the range is not inside one reservation.
+  bool ReleaseRange(uint64_t va, uint64_t size, bool zero = true);
 
   struct Region {
     uint64_t base = 0, size = 0;  // reservation containing the address

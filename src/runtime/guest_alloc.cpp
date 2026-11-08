@@ -95,6 +95,17 @@ uint64_t GuestAllocator::Reserve(uint64_t va, uint64_t size, bool top_down) {
   return cand;
 }
 
+bool GuestAllocator::ReserveAt(uint64_t va, uint64_t size) {
+  std::lock_guard<std::recursive_mutex> l(mu_);
+  size = RoundUp(size, kPage);
+  if (!size || va & (kPage - 1) || va < lo_ || va + size > hi_) return false;
+  auto it = regions_.lower_bound(va);
+  if (it != regions_.end() && it->first < va + size) return false;
+  if (it != regions_.begin() && std::prev(it)->first + std::prev(it)->second > va) return false;
+  regions_[va] = size;
+  return true;
+}
+
 bool GuestAllocator::Commit(uint64_t va, uint64_t size, Prot prot) {
   std::lock_guard<std::recursive_mutex> l(mu_);
   Region r;
@@ -126,6 +137,17 @@ bool GuestAllocator::Release(uint64_t base, bool zero) {
   if (it == regions_.end()) return false;
   mem_->Decommit(base, it->second, zero);
   regions_.erase(it);
+  return true;
+}
+
+bool GuestAllocator::ReleaseRange(uint64_t va, uint64_t size, bool zero) {
+  std::lock_guard<std::recursive_mutex> l(mu_);
+  Region r;
+  if (!size || !FindLocked(va, &r) || va + size > r.base + r.size) return false;
+  mem_->Decommit(va, size, zero);
+  regions_.erase(r.base);
+  if (va > r.base) regions_[r.base] = va - r.base;
+  if (va + size < r.base + r.size) regions_[va + size] = r.base + r.size - (va + size);
   return true;
 }
 
