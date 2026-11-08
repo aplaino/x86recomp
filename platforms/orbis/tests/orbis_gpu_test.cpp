@@ -556,6 +556,42 @@ int main() {
     Check(ok, "ds_swizzle_b32's bit-mask mode reads the lane across quads");
   }
 
+  // s_not_b64 on a pair whose result is zero only in its low half and on
+  // all ones; SCC picks 1 or 2 after each. Stores s[6:7], s8, s9 and s[12:13] at kOut + 0x300.
+  static const uint32_t kNot[] = {
+      0xBE8403C1,              // s_mov_b32 s4, -1
+      0xBE8503FF, 0x0F0F00FF,  // s_mov_b32 s5, 0x0f0f00ff
+      0xBE860804,              // s_not_b64 s[6:7], s[4:5]
+      0x85088281,              // s_cselect_b32 s8, 1, 2
+      0xBE8A04C1,              // s_mov_b64 s[10:11], -1
+      0xBE8C080A,              // s_not_b64 s[12:13], s[10:11]
+      0x85098281,              // s_cselect_b32 s9, 1, 2
+      0x7E020206,              // v_mov_b32 v1, s6
+      0x7E040207,              // v_mov_b32 v2, s7
+      0x7E060208,              // v_mov_b32 v3, s8
+      0x7E080209,              // v_mov_b32 v4, s9
+      0x7E0A020C,              // v_mov_b32 v5, s12
+      0x7E0C020D,              // v_mov_b32 v6, s13
+      0xE0781000, 0x80000100,  // buffer_store_dwordx4 v[1:4], v0, s[0:3], 0 offen
+      0xE0741010, 0x80000500,  // buffer_store_dwordx2 v[5:6], v0, s[0:3], 0 offen offset:16
+      0xBF810000,              // s_endpgm
+  };
+  constexpr gaddr kNotAt = kCode + 0x1400;
+  std::memcpy(GPtr(kNotAt), kNot, sizeof kNot);
+  {
+    uint32_t user[16] = {};
+    VSharp(user, kOut + 0x300, 24);
+    std::memset(GPtr(kOut + 0x300), 0xEE, 24);
+    Run(kNotAt, user, 4, 1, 1);  // 8 VGPRs
+    const uint32_t want[6] = {0, 0xF0F0FF00u, 1, 2, 0, 0};
+    bool ok = true;
+    for (uint32_t k = 0; k < 6; k++) {
+      if (Rd32(kOut + 0x300 + 4 * k) != want[k]) std::printf("  word %u: %08X\n", k, Rd32(kOut + 0x300 + 4 * k));
+      ok &= Rd32(kOut + 0x300 + 4 * k) == want[k];
+    }
+    Check(ok, "s_not_b64 inverts both halves and sets SCC from both");
+  }
+
   // A stage in waves: readlane, readfirstlane under a partial EXEC,
   // writelane, comparisons and carries as ballots, a branch on the wave's
   // VCC, v_movrels (past the VGPRs too), ds_or_b32 and ds_read2_b64. Lane i stores 20 words at
@@ -799,6 +835,44 @@ int main() {
   Check(DrawCovers(5, 6, 0x1B1000, dev.get()), "a triangle fan covers its triangles");
   verts({{-1, -1}, {1, -1}, {1, 1}, {-1, 1}});
   Check(DrawCovers(0x13, 4, 0x1B2000, dev.get()), "a quad list covers its quads");
+  // s_wqm_b64 exec, exec in a pixel shader after v_cmpx turns off column
+  // 0 (clip x -0.875): its quads' column 1 turns it back on, and each
+  // invocation's EXEC is its own lane, so 1 (lo) and 0 (hi) everywhere,
+  // written as red and green.
+  {
+    static const uint32_t kWqmPs[] = {
+        0xC8080000,              // v_interp_p1_f32 v2, v0, attr0.x
+        0xC8090001,              // v_interp_p2_f32 v2, v1, attr0.x
+        0x7C2204FF, 0xBF400000,  // v_cmpx_lt_f32 vcc, -0.75, v2
+        0xBEFE0A7E,              // s_wqm_b64 exec, exec
+        0x7E04027E,              // v_mov_b32 v2, exec_lo
+        0x7E040D02,              // v_cvt_f32_u32 v2, v2
+        0x7E06027F,              // v_mov_b32 v3, exec_hi
+        0x7E060D03,              // v_cvt_f32_u32 v3, v3
+        0x7E080280,              // v_mov_b32 v4, 0
+        0x7E0A02F2,              // v_mov_b32 v5, 1.0
+        0xF800180F, 0x05040302,  // exp mrt0 v2, v3, v4, v5 done vm
+        0xBF810000,              // s_endpgm
+    };
+    constexpr gaddr kWqmPsAt = kCode + 0x1500, kWqmTarget = 0x1BE000;
+    std::memcpy(GPtr(kWqmPsAt), kWqmPs, sizeof kWqmPs);
+    verts({{-1, -1}, {1, -1}, {-1, 1}});
+    Regs r;
+    DrawRegs(r, 0x11, kWqmTarget, kVsAt);
+    r.sh[0x08] = uint32_t(kWqmPsAt >> 8);
+    Draw(r, {3, 1, 0, 2});
+    Settle(true);
+    float px[8 * 8 * 4] = {};
+    const gfx::TextureId tex = TargetAt(kWqmTarget, 8, 8);
+    if (tex) dev->ReadImage(tex, 0, 0, {0, 0, 8, 8}, px, 8 * 16);
+    bool ok = tex;
+    for (int i = 0; i < 64 && ok; i++)
+      if (px[4 * i] != 1.0f || px[4 * i + 1] != 0.0f) {
+        std::printf("  pixel %d: EXEC %g %g\n", i, px[4 * i], px[4 * i + 1]);
+        ok = false;
+      }
+    Check(ok, "s_wqm_b64 in a pixel shader sets a lane of a quad with any lane set, and only it");
+  }
   // Levels 0 and 1 of an 8x8 texture of four floats (1D thin, 16 bytes an
   // element: level 1 at 1024) drawn as targets, level 1 with w = 2 (its
   // red twice the clip-space x); a load of level 1 through the T# reads

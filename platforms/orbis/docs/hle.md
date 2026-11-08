@@ -135,7 +135,10 @@ library.
   lane EXEC holds, lane 0 when it is empty); a host whose subgroups are
   not those invocations in order is fatal once the dispatch has run (the
   fault word below). Other stages run one lane per invocation, where
-  v_readfirstlane reads the invocation's own lane. v_movrels and
+  v_readfirstlane reads the invocation's own lane and a lane mask is
+  that lane (bit 0): s_wqm_b64 in a pixel stage sets it when any lane of
+  the invocation's quad has it (in another such stage it is fatal), so
+  loops that clear a mask a lane at a time end. v_movrels and
   v_movreld index VGPRs by M0; past the stage's VGPRs a source reads
   VGPR0 and a destination is not written (Sea Islands ISA, "Out-of-Range
   GPRs"). A compute stage can load scalars and descriptors at a run-time

@@ -442,7 +442,7 @@ struct Resolver {
           case 32: return true;  // s_setpc_b64 (the fetch shader's return)
           default:
             s.Forget(d);
-            if (in.op == 4 || (in.op >= 36 && in.op <= 43)) s.Forget(d + 1);
+            if (in.op == 4 || in.op == 8 || in.op == 10 || (in.op >= 36 && in.op <= 43)) s.Forget(d + 1);
             return true;
         }
       }
@@ -1797,7 +1797,17 @@ struct Translator {
             return;
           case 10: {  // s_wqm_b64: every lane of a quad with any lane set
             Line("r_t = " + pair(s0, 0) + "; r_t2 = " + pair(s0, 1) + ";");
-            Line("r_t = r_wqm(r_t); r_t2 = r_wqm(r_t2);");
+            if (wave) {
+              Line("r_t = r_wqm(r_t); r_t2 = r_wqm(r_t2);");
+            } else if (st.stage == Stage::Pixel) {
+              // An invocation's mask is its own lane (bit 0): set if any
+              // lane of its quad has it.
+              uses_quad = true;
+              Line("r_t &= 1u; r_t = subgroupQuadBroadcast(r_t, 0u) | subgroupQuadBroadcast(r_t, 1u) | "
+                   "subgroupQuadBroadcast(r_t, 2u) | subgroupQuadBroadcast(r_t, 3u); r_t2 = 0u;");
+            } else {
+              return Fail(pc, "s_wqm_b64 outside a pixel stage or waves not translated yet");
+            }
             Line(Dst(d) + " = r_t; " + Dst(d + 1) + " = r_t2; scc = (r_t | r_t2) != 0u ? 1u : 0u;");
             return;
           }
@@ -1815,6 +1825,10 @@ struct Translator {
             return;
           }
           case 7: Line(Dst(d) + " = ~" + src(s0) + "; scc = " + Dst(d) + " != 0u ? 1u : 0u;"); return;
+          case 8:  // s_not_b64
+            Line("r_t = ~" + pair(s0, 0) + "; r_t2 = ~" + pair(s0, 1) + ";");
+            Line(Dst(d) + " = r_t; " + Dst(d + 1) + " = r_t2; scc = (r_t | r_t2) != 0u ? 1u : 0u;");
+            return;
           case 31: {  // s_getpc_b64: the code base from the uniforms
             const int region = res.code().fetch.count(pc) ? 1 : 0;
             const gaddr rel = next - res.code().base[region];
