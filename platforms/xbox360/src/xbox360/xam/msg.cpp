@@ -96,6 +96,12 @@ uint32_t ProcessXMsgRequest(ppc::Ctx& c, uint32_t app, uint32_t message, uint32_
   return int32_t(hr) > 0 ? (hr & 0xFFFF) | 0x80070000 : hr;
 }
 
+// XMsgCancelIORequest(*overlapped, wait): xam cancels the task behind the
+// request and, when asked to, waits until the XOVERLAPPED no longer
+// reports ERROR_IO_PENDING; always S_OK. Every request here has completed
+// when it was started, so there is nothing to cancel.
+HLE(kXam, 504, XMsgCancelIORequest) { return 0; }
+
 HLE(kXam, 508, XMsgStartIORequestEx) {
   return StartXMsgRequest(c, Arg(c, 0), Arg(c, 1), Arg(c, 2), Arg(c, 3), Arg(c, 4));
 }

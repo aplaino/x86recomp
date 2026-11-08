@@ -149,6 +149,14 @@ u32 XamContentCreateEnumerator(u32 user, u32 device, u32 type, u32 flags, u32 it
 u32 XamContentGetDeviceData(u32 device, void* data);
 u32 XamContentGetCreator(u32 user, void* data, u32* is_creator, uint64_t* creator, u32* overlapped);
 u32 XamContentGetDeviceState(u32 device, u32* overlapped);
+u32 XGetLanguage(void);
+u32 XamGetExecutionId(u32* info);
+u32 XNetLogonGetTitleID(u32 service);
+u32 XMsgCancelIORequest(u32* overlapped, u32 wait);
+u32 XamUserAreUsersFriends(u32 slot, uint64_t* xuids, u32 count, u32* result, u32* overlapped);
+u32 XamWriteGamerTile(u32 slot, u32 title, u32 large, u32 small, u32 award, u32* overlapped);
+u32 XamUserCreateStatsEnumerator(u32 title, u32 kind, uint64_t pivot, u32 rows, u32 count, void* views, u32* size,
+                                 u32* handle);
 u32 XamShowDeviceSelectorUI(u32 user, u32 type, u32 flags, uint64_t bytes, u32* device, u32* overlapped);
 extern u32 __imp_NtClose, __imp_ExThreadObjectType, __imp_KeTimeStampBundle, __imp_XboxKrnlVersion,
     __imp_XexExecutableModuleHandle, __imp_ExLoadedCommandLine, __imp_VdGlobalDevice, __imp_VdGpuClockInMHz,
@@ -180,7 +188,7 @@ enum {
   kMemLargePages = 0x20000000, kMem16MbPages = 0x80000000, kPageReadWrite = 0x04,
   kStatusTimeout = 0x102, kStatusConflictingAddresses = 0xC0000018, kStatusInvalidHandle = 0xC0000008,
   kStatusMutantNotOwned = 0xC0000046, kStatusEndOfFile = 0xC0000011, kStatusAccessDenied = 0xC0000022,
-  kStatusObjectNameNotFound = 0xC0000034, kStatusObjectNameCollision = 0xC0000035,
+  kStatusObjectNameNotFound = 0xC0000034, kStatusObjectNameCollision = 0xC0000035, kStatusNotFound = 0xC0000225,
   kStatusObjectNameExists = 0x40000000, kStatusObjectTypeMismatch = 0xC0000024, kStatusNotSameDevice = 0xC00000D4,
   kStatusMemoryNotAllocated = 0xC00000A0, kMemFree = 0x10000,
   kStatusObjectPathNotFound = 0xC000003A, kStatusNoMoreFiles = 0x80000006,
@@ -1229,6 +1237,9 @@ static void XmaDecode(void) {
 // ---- xam ----------------------------------------------------------------------
 static void Xam(void) {
   CHECK(XGetGameRegion() == 0x00FF && XamGetSystemVersion() == 0x20449700);
+  CHECK(XGetLanguage() == 1 && XNetLogonGetTitleID(7) == 0);
+  u32 info = 9;  // the title has no execution info
+  CHECK(XamGetExecutionId(&info) == kStatusNotFound && info == 0);
   u32 size = 1;
   char buf[16];
   CHECK(XamLoaderGetLaunchDataSize(&size) == 0x490 && size == 0 && XamLoaderGetLaunchData(buf, 16) == 0x490);
@@ -1293,6 +1304,8 @@ static void Xam(void) {
   CHECK(XMsgStartIORequest(0xFA, 0x7001A, ov, set, sizeof set) == 0 && ov[0] == 87 && ov[6] == 0x80070057);
   CHECK(XMsgStartIORequest(0xFA, 0x7001A, 0, set, sizeof set) == 0 &&
         *At(*At((u32)pcr() + 0x100) + 0x160) == 0x80070057);
+  // Requests complete when started: nothing to cancel or wait for.
+  CHECK(XMsgCancelIORequest(ov, 1) == 0 && ov[0] == 87);
   NtClose(e);
 }
 
@@ -1314,6 +1327,12 @@ static void Users(void) {
   CHECK(XamUserCheckPrivilege(0, 254, &allowed) == 1245 && allowed == 0);
   CHECK(XamUserCheckPrivilege(0xFF, 243, &allowed) == 1245 && allowed == 0);
   CHECK(XamUserCheckPrivilege(1, 243, &allowed) == 1317 && XamUserCheckPrivilege(4, 243, &allowed) == 87);
+  // Friends are Live's.
+  uint64_t friend_xuid = 0x0009000000000001ull;
+  u32 is_friend = 9;
+  CHECK(XamUserAreUsersFriends(0, &friend_xuid, 1, &is_friend, 0) == 1245 && is_friend == 0);
+  CHECK(XamUserAreUsersFriends(1, &friend_xuid, 1, &is_friend, 0) == 1317 &&
+        XamUserAreUsersFriends(4, &friend_xuid, 1, &is_friend, 0) == 87);
 
   // Profile settings: the size first, then the settings.
   u32 ids[4] = {0x1004000C, 0x1004000D, 0x1004000E, 0x10040003}, size = 0;
@@ -1385,6 +1404,34 @@ static void Users(void) {
         *At(ts + 0x20) == 1);
   w[0].id = 0x10040100;
   CHECK(XamUserWriteProfileSettings(0x54540001, 0, 1, w, 0) == 0x57);
+  // An awarded gamer picture becomes the picture key; none for a slot
+  // without a profile.
+  CHECK(XamWriteGamerTile(0, 0x54540001, 0x10002, 0x20002, 1, 0) == 0);
+  CHECK(XamWriteGamerTile(1, 0x54540001, 0x10002, 0x20002, 1, 0) == 1627);
+  u32 key = 0x4064000F;
+  trsize = sizeof tr;
+  CHECK(XamUserReadProfileSettings9(0xFFFE07D1, 0, 0, 0, 1, &key, &trsize, tr, 0) == 0 && *At(ts) == 2 &&
+        *At(ts + 0x20) == 50);
+  const uint16_t* picture = (const uint16_t*)(uintptr_t)*At(ts + 0x24);
+  const char* expected = "545400010001000200020002";
+  int same = 1;
+  for (int k = 0; k < 25; k++) same &= picture[k] == (uint16_t)expected[k];
+  CHECK(same);
+  // Statistics are Live's: an enumerator sized for its rows and columns,
+  // whose calls fail.
+  struct {
+    u32 view, columns;
+    uint16_t ids[64];
+  } view = {1, 2, {1, 2}};
+  u32 stats_size = 0, stats = 0, rows = 9;
+  CHECK(XamUserCreateStatsEnumerator(0x54540001, 0, 1, 10, 1, &view, &stats_size, &stats) == 0 &&
+        stats_size == (10 * 0x30 + 0x10) + 8 + 2 * 10 * 0x1C);
+  static uint8_t stats_buf[0x428];
+  memset(stats_buf, 0xAA, sizeof stats_buf);
+  CHECK(XamEnumerate(stats, 0, stats_buf, stats_size, &rows, 0) == 1627 && stats_buf[0] == 0 &&
+        stats_buf[stats_size - 1] == 0);
+  NtClose(stats);
+  CHECK(XamUserCreateStatsEnumerator(0x54540001, 0, 1, 101, 1, &view, &stats_size, &stats) == 87);
 
   // A new listener holds what the system has pending: the UI is not
   // showing, player 1 signed in; a Live listener: disconnected, no link.

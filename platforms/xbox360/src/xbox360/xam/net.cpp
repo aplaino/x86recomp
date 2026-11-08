@@ -45,4 +45,9 @@ HLE(kXam, 80, NetDll_XNetStartupEx) { return Caller(Arg(c, 0)) ? 0 : kWsaEinval;
 // the caller here.
 HLE(kXam, 75, NetDll_XNetGetEthernetLinkStatus) { return 0; }
 
+// XNetLogonGetTitleID(service): the title Live's logon is for, or for a
+// service a different title's when the logon names one. Only signing in to
+// Live (or the system updater's logon) sets it; without, xam returns 0.
+HLE(kXam, 310, XNetLogonGetTitleID) { return 0; }
+
 }  // namespace recomp::xbox360

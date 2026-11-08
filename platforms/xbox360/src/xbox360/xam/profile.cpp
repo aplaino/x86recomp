@@ -37,6 +37,8 @@ constexpr uint32_t kTypeUnicode = 4, kTypeBinary = 6;
 // XUSER_PROFILE_SOURCE.
 constexpr uint32_t kSourceNoValue = 0, kSourceDefault = 1, kSourceTitle = 2;
 constexpr uint32_t kSettingSize = 0x28;
+// The gamercard's picture key setting.
+constexpr uint32_t kPictureKey = 0x4064000F;
 
 struct Known {
   uint32_t id, source, value;
@@ -199,6 +201,53 @@ XMSG(kXgiApp, 0xB000D, XgiWriteProfileSettings) {
     Store(c, *profile, Owner(title, id), id, std::move(bytes));
   }
   return 0;
+}
+
+// The XGI app's gamer picture write (0xB0033 {award, slot, title, large
+// picture, small picture, flags}): the user's picture becomes the title's
+// pictures, or with all three 0 the default; xam keeps it as the picture
+// key setting, "%08x%08x%08x" of the title and the two ids (the default's
+// fffe07d1, 0x20000, 0x10000) in UTF-16 with its terminator.
+// HRESULT_FROM_WIN32(ERROR_NOT_FOUND) for a slot with no profile (xam's
+// code). xam also copies the images from the title's resources (failing
+// for ones the title does not have) and shows a notification for an award;
+// neither here (console check).
+XMSG(kXgiApp, 0xB0033, XgiWriteGamerTile) {
+  constexpr uint32_t kNotFound = 0x80070490;
+  uint32_t slot = Rd32(p1 + 4), title = Rd32(p1 + 8), large = Rd32(p1 + 12), small = Rd32(p1 + 16);
+  const Profile* profile = SignedInProfile(slot);
+  if (!profile) return kNotFound;
+  if (!title && !large && !small) {
+    title = kDashboard;
+    large = 0x20000;
+    small = 0x10000;
+  }
+  char key[25];
+  std::snprintf(key, sizeof key, "%08x%08x%08x", title, large, small);
+  std::vector<uint8_t> bytes;
+  for (const char* k = key;; k++) {
+    bytes.push_back(0);
+    bytes.push_back(uint8_t(*k));
+    if (!*k) break;
+  }
+  std::lock_guard<std::mutex> g(g_lock);
+  Store(c, *profile, kDashboard, kPictureKey, std::move(bytes));
+  return 0;
+}
+
+// XamWriteGamerTile(slot, title, large picture, small picture, award,
+// *overlapped): the XGI app's write, flags 1 (0x11 when not an award).
+// ERROR_FUNCTION_FAILED for a failure, ERROR_IO_PENDING with an
+// XOVERLAPPED (xam's code).
+HLE(kXam, 752, XamWriteGamerTile) {
+  uint32_t award = Arg(c, 4), overlapped = Arg(c, 5);
+  uint32_t request = SystemAlloc(0x18);
+  const uint32_t fields[6] = {award, Arg(c, 0), Arg(c, 1), Arg(c, 2), Arg(c, 3), award ? 1u : 0x11u};
+  for (uint32_t k = 0; k < 6; k++) Wr32(request + 4 * k, fields[k]);
+  uint32_t hr = ProcessXMsgRequest(c, kXgiApp, 0xB0033, overlapped, request, 0x18);
+  SystemFree(request);
+  if (overlapped) return kErrorIoPending;
+  return int32_t(hr) < 0 ? kErrorFunctionFailed : 0;
 }
 
 // XamUserReadProfileSettings(title, slot, XUID count, *XUIDs, count, *ids,

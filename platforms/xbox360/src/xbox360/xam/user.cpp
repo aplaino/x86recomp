@@ -87,4 +87,17 @@ HLE(kXam, 700, XamShowSigninUI) {
   return 0;
 }
 
+// XamUserAreUsersFriends(slot, *XUIDs, count, *result, *overlapped):
+// whether the XUIDs are the user's friends, which Live answers (XLiveBase
+// 0x5800B). ERROR_INVALID_PARAMETER for a slot past 3, ERROR_NO_SUCH_USER
+// with no profile, ERROR_NOT_LOGGED_ON for a profile not on Live, as every
+// one is here; without an XOVERLAPPED the result is FALSE whatever the
+// code (xam's code).
+HLE(kXam, 531, XamUserAreUsersFriends) {
+  uint32_t slot = Arg(c, 0), result = Arg(c, 3), overlapped = Arg(c, 4);
+  if (!overlapped && result) Wr32(result, 0);
+  if (slot >= kUserSlots) return kErrorInvalidParameter;
+  return SignedInProfile(slot) ? kErrorNotLoggedOn : kErrorNoSuchUser;
+}
+
 }  // namespace recomp::xbox360

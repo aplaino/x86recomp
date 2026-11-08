@@ -18,13 +18,14 @@
 #include "xbox360/config.h"
 #include "xbox360/hle.h"
 #include "xbox360/kernel.h"
+#include "xbox360/xam/enumerate.h"
 #include "xbox360/xam/msg.h"
 
 namespace recomp::xbox360 {
 namespace {
 
 constexpr const char* kXam = "xam.xex";
-constexpr uint32_t kEInvalidArg = 0x80070057;
+constexpr uint32_t kEInvalidArg = 0x80070057, kErrorInvalidParameter = 87;
 // HRESULT_FROM_WIN32(ERROR_NOT_FOUND): a user index with no profile.
 constexpr uint32_t kNoUser = 0x80070490;
 // xam's session errors (facility 0x15): a privilege it lacks, no slot
@@ -340,6 +341,57 @@ XMSG(kXgiApp, 0xB001B, XSessionSearchByID) { return kLiveNotLoggedOn; }
 // clears the results and asks Live.
 XMSG(kXgiApp, 0xB0021, XUserReadStats) {
   std::memset(Mem() + Rd32(p1 + 0x18), 0, Rd32(p1 + 0x14));
+  return kLiveNotLoggedOn;
+}
+
+// ---- statistics enumerators ---------------------------------------------
+// XamUserCreateStatsEnumerator(title, kind, pivot, rows, view count, *views,
+// *size, *handle): an enumerator of the XGI app's 0xB0023 returning `rows`
+// rows a call (1 to 100), with the views (XUSER_STATS_SPEC: view id,
+// column count, column ids; 0x88 bytes each) and the size a call's results
+// need: the XUSER_STATS_READ_RESULTS (8 bytes), per view 0x10 and 0x30 a
+// row, per column 0x1C a row. ERROR_INVALID_PARAMETER for no views, no
+// size or handle, or rows out of range (xam's code). Its state as xam lays
+// it out: the title (the in-process message 0xB0022 fills it in), the kind
+// (0 by rank, 1 around a XUID, 3 by rating; xam makes 0 and 3 kind 2, from
+// the ranks reached, after the first call), the pivot, *ranks (one per
+// view), the view count, *views, then the ranks and the views.
+HLE(kXam, 759, XamUserCreateStatsEnumerator) {
+  uint32_t title = Arg(c, 0), kind = Arg(c, 1), rows = Arg(c, 3), count = Arg(c, 4), views = Arg(c, 5),
+           size = Arg(c, 6), handle = Arg(c, 7);
+  if (!count || !rows || rows > 100 || !size || !handle) return kErrorInvalidParameter;
+  uint32_t state;
+  Wr32(handle, CreateEnumerator(kXgiApp, 0xB0023, rows, count * 0x8C + 0x20, [](uint32_t) {}, state));
+  uint32_t request = SystemAlloc(8);
+  Wr32(request, title);
+  Wr32(request + 4, state);
+  CallXMsg(c, kXgiApp, 0xB0022, request, 0);
+  SystemFree(request);
+  uint32_t ranks = state + 0x20, copy = ranks + 4 * count;
+  Wr32(state + 4, kind);
+  Wr64(state + 8, Arg64(c, 2));
+  Wr32(state + 0x10, ranks);
+  Wr32(state + 0x14, count);
+  Wr32(state + 0x18, copy);
+  std::memcpy(Mem() + copy, Mem() + views, count * 0x88);
+  uint32_t needed = (rows * 0x30 + 0x10) * count + 8;
+  for (uint32_t v = 0; v < count; v++) needed += Rd32(views + 0x88 * v + 4) * rows * 0x1C;
+  Wr32(size, needed);
+  return 0;
+}
+
+// The enumerator's title {title, *state's title}: the title asked for, or
+// for 0 the one Live's logon is for (XNetLogonGetTitleID), 0 here.
+XMSG(kXgiApp, 0xB0022, XUserStatsEnumeratorTitle) {
+  Wr32(Rd32(p1 + 4), Rd32(p1));
+  return 0;
+}
+
+// A statistics enumerator's call (XamEnumerate's request): E_INVALIDARG for
+// flag 1, otherwise the buffer is cleared and the rows read from Live.
+XMSG(kXgiApp, 0xB0023, XUserEnumerateStats) {
+  if (Rd32(p1 + 4) & 1) return kEInvalidArg;
+  std::memset(Mem() + Rd32(p1 + 0xC), 0, Rd32(p1 + 0x10));
   return kLiveNotLoggedOn;
 }
 

@@ -14,6 +14,13 @@ only a console can settle.
   0x8E038602): here 0x00FF, North America, with the NTSC-M AV region
   (chosen). XamGetSystemVersion packs XboxKrnlVersion: major and minor in
   4 bits each, the build, the QFE's low byte (xam's code).
+- XGetLanguage: the user's language setting (XConfig 3/9) when it is 1-9;
+  otherwise by region: Japanese (2) in Japan, Korean (7) in the rest of
+  Asia but China when the one-byte setting 3/0xE is 0x38, English (1)
+  elsewhere (xam's code).
+- XamGetExecutionId(*info): the address of the title's execution info
+  (XEX header 0x40006), found through XexExecutableModuleHandle;
+  STATUS_NOT_FOUND and 0 without one (xam's code).
 
 ## The loader
 - XamLoaderGetLaunchDataSize writes the size of the launch data (what a
@@ -21,6 +28,12 @@ only a console can settle.
   when there is none; XamLoaderGetLaunchData returns ERROR_NOT_FOUND
   then too (ERROR_BUFFER_OVERFLOW for a short buffer). A title the system
   starts from its disc has none (xam's code).
+- XamLoaderLaunchTitle(name, flags) is XamLoaderLaunchTitleEx with flag
+  4: no name, an empty one, flag 2, or a device path (\\...) start the
+  dashboard; XamLoaderTerminateTitle unloads the title and starts the
+  dashboard (xam's code). Starting the dashboard ends the process here,
+  as HalReturnToFirmware does. Another executable is fatal and named:
+  the program is the one title it was lifted from.
 
 ## Input
 - Each user (0-3) has device contexts by type, bound by xam to the
@@ -81,6 +94,9 @@ only a console can settle.
   stack unchecked: the same here. NetDll_XNetGetEthernetLinkStatus
   returns 0, no link (xam returns 0 whenever the NIC's link bit is clear,
   and does not check the caller).
+- XNetLogonGetTitleID(service): the title Live's logon is for (for some
+  services another title's); only a logon sets it, so 0 here (xam's
+  code).
 
 ## Memory
 - XamAlloc(attributes, size, *address) returns an HRESULT (E_INVALIDARG
@@ -114,6 +130,10 @@ only a console can settle.
   HRESULT_FROM_WIN32) and HRESULT_FROM_WIN32(ERROR_IO_PENDING) with one,
   and return its Win32 code: 0, a FACILITY_WIN32 HRESULT's code, or
   ERROR_FUNCTION_FAILED (xam's code).
+- XMsgCancelIORequest(overlapped, wait) cancels the task behind a request
+  and with `wait` waits until the XOVERLAPPED is no longer
+  ERROR_IO_PENDING; it returns S_OK (xam's code). Requests here have
+  completed when they were started: nothing to cancel.
 - Apps titles call: 0xFA (the music player, XMP), 0xFB and 0xFC (Xenia's
   XGI and XLiveBase); xam's own exports call 0xFE, xam's own app.
 
@@ -163,6 +183,11 @@ only a console can settle.
   XN_SYS_SIGNINCHANGED if the profiles changed (xam's code). With no UI
   here it closes at once with nothing changed (chosen): listeners hold
   XN_SYS_UI 0, which titles read as a cancelled sign-in.
+- XamUserAreUsersFriends(slot, XUIDs, count, *result, overlapped) asks
+  Live (XLiveBase 0x5800B): ERROR_INVALID_PARAMETER past slot 3,
+  ERROR_NO_SUCH_USER with no profile, ERROR_NOT_LOGGED_ON for a profile
+  not on Live, as all are here; without an XOVERLAPPED *result is FALSE
+  whatever the code (xam's code).
 
 ## XGI (app 0xFB)
 xam's own handlers, for the messages titles send (their XDK wrappers
@@ -210,6 +235,18 @@ field of xam's XGI object (+0xDC) and fail with 0x8056F002 while it is
 - Live's queries (XSessionSearch 0xB0016, XSessionSearchByID 0xB001B,
   XUserReadStats 0xB0021, which first clears its results) fail with
   0x80151802, as the XLiveBase messages do.
+- XamUserCreateStatsEnumerator(title, kind, pivot, rows, view count,
+  views, *size, *handle): ERROR_INVALID_PARAMETER for no views, rows not
+  1-100, no size or handle pointer; otherwise an enumerator of message
+  0xB0023 (closed with 0xB0024, which the XGI app has no case for:
+  success) returning `rows` rows a call, whose state xam fills (the
+  title through the in-process 0xB0022: the title asked for, else
+  XNetLogonGetTitleID's; the kind, 0 by rank, 1 around a XUID, 3 by
+  rating; the pivot; a rank per view; a copy of the views, 0x88 bytes
+  each), and *size = 8 + per view 0x10 + 0x30 a row + 0x1C a row per
+  column. Each call fails with E_INVALIDARG for flag 1, else clears the
+  buffer and asks Live: 0x80151802 here, ERROR_FUNCTION_FAILED from
+  XamEnumerate. xam's code.
 
 ## Profile settings
 - XamUserReadProfileSettings(title, slot, XUID count, XUIDs, count, ids,
@@ -256,6 +293,18 @@ field of xam's XGI object (+0xDC) and fail with 0x8056F002 while it is
   auto centre, movement control, racing transmission, camera, brake and
   accelerator. Titles map their own option ids onto all of them and read
   the ones their own settings do not hold. An id not listed is fatal. Title 0 is the running title (chosen). Console check.
+
+- XamWriteGamerTile(slot, title, large picture, small picture, award,
+  overlapped) sends the XGI app 0xB0033 {award, slot, title, large,
+  small, flags 1, or 0x11 when not an award} with XMsgProcessRequest,
+  returning ERROR_FUNCTION_FAILED for a failure, ERROR_IO_PENDING with
+  an XOVERLAPPED. The XGI app needs a profile in the slot
+  (HRESULT_FROM_WIN32(ERROR_NOT_FOUND)) and makes the picture key
+  setting "%08x%08x%08x" of the title and ids (all three 0: the default,
+  fffe07d1, 0x20000, 0x10000), UTF-16 with its terminator, kept here as
+  the profile's setting 0x4064000F. xam also copies the images from the
+  title's resources (failing for one the title lacks) and shows an award
+  notification; neither here (console check).
 
 ## Notifications
 - An id is an area (bits 25-30), a version (16-24) and a number.

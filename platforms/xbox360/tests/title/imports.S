@@ -165,6 +165,13 @@ __xex_import_slot_\name:
   FUNCTION 715, XamShowDeviceSelectorUI, 1
   FUNCTION 790, XamSessionCreateHandle, 1
   FUNCTION 791, XamSessionRefObjByHandle, 1
+  FUNCTION 973, XGetLanguage, 1
+  FUNCTION 640, XamGetExecutionId, 1
+  FUNCTION 310, XNetLogonGetTitleID, 1
+  FUNCTION 504, XMsgCancelIORequest, 1
+  FUNCTION 531, XamUserAreUsersFriends, 1
+  FUNCTION 752, XamWriteGamerTile, 1
+  FUNCTION 759, XamUserCreateStatsEnumerator, 1
   VARIABLE 27, ExThreadObjectType
   VARIABLE 173, KeTimeStampBundle
   VARIABLE 344, XboxKrnlVersion
