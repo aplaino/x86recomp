@@ -444,7 +444,14 @@ library.
   exist, in the game's order, each with its icon, title, subtitle, time
   (the newest file's, also given as the param's mtime) and size, and the
   focused one's details; up and down move, cross picks, circle backs
-  out. The progress message shows the first listed directory that
+  out. The list for saving shows the game's new item (its title and PNG
+  icon) first, then the listed directories that exist; picking the new
+  item answers OK with no directory name (games name the new directory
+  themselves); the focus positions of save data fall on the new item
+  when there is none. The library's check of the new item is 11.00's
+  (title: under 128 bytes, no line break, UTF-8 as its own decoder reads
+  it; an icon of 1 to 0x1C800 bytes, or none and size 0; 32 zero bytes),
+  for the save type only. The progress message shows the first listed directory that
   exists and the work going on until the game closes it. Setting the
   progress bar before Initialize answers not initialized, as 11.00 does.
   Other modes (the progress bar among them), messages and list types are

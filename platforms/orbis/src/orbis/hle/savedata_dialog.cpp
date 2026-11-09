@@ -7,8 +7,8 @@
 // result's layout. The system's side, the dialog the player sees and
 // answers, is this runtime's own design: the console's look and wording
 // are not copied. docs/hle.md has what is not measured. Implemented: the
-// list for loading and the progress message; the other lists, messages
-// and modes are fatal.
+// list for loading, the list for saving with a new item and the progress
+// message; the other lists, messages and modes are fatal.
 
 #include <SDL3/SDL.h>
 
@@ -66,6 +66,8 @@ enum : uint32_t { kStyleDateSizeSubtitle, kStyleSubtitleDateSize, kStyleDateSize
 constexpr int32_t kResultOk = 0, kResultCanceled = 1;
 
 struct Item {
+  bool is_new = false;  // a save list's new item: title and icon from the game
+  std::string title;
   std::string dir;
   savedata::Entry e;
   std::vector<uint32_t> icon;  // A8R8G8B8; empty: none
@@ -114,22 +116,53 @@ bool ValidBase(gaddr p) {
 // The items (SceSaveDataDialogItems): {user, title id*, directory names*
 // (32 bytes each), their number (to 1024), new item*, focus position, its
 // directory name*, item style, 36 zero bytes}. The user is signed in and
-// registered; save data of other titles and new items are not
-// implemented yet.
+// registered; save data of other titles is not implemented yet.
 uint32_t CheckItemsCommon(gaddr it, uint32_t type) {
   if (Rd32(it) != kUser) return kErrParam;
   if (const gaddr title = Rd64(it + 8); title && !savedata::OwnTitle(title))
     recomp::FatalF("sceSaveDataDialogOpen: save data of title %s not implemented yet",
                    recomp::GStr(title).c_str());
   if (Rd32(it + 24) > 1024) return kErrParam;
-  if (type == kTypeSave && Rd64(it + 32))
-    recomp::FatalF("sceSaveDataDialogOpen: a new item not implemented yet");
   return 0;
 }
 
+// Text the library accepts: UTF-8 as its decoder reads it (forms of one to
+// six bytes, no overlong form, no surrogate in three bytes) up to the NUL.
+bool ValidUtf8(const uint8_t* s) {
+  while (*s) {
+    const uint8_t b = *s;
+    int n = b < 0x80 ? 1 : b < 0xC0 ? 0 : b < 0xE0 ? 2 : b < 0xF0 ? 3 : b < 0xF8 ? 4 : b < 0xFC ? 5 : b < 0xFE ? 6 : 0;
+    if (!n) return false;
+    uint32_t v = n == 1 ? b : b & (0x7F >> n);
+    for (int i = 1; i < n; i++) {
+      if ((s[i] & 0xC0) != 0x80) return false;
+      v = v << 6 | (s[i] & 0x3F);
+    }
+    static const uint32_t kMin[7] = {0, 0, 0x80, 0x800, 0x10000, 0x200000, 0x4000000};
+    if (v < kMin[n] || (n == 3 && v >> 11 == 0x1B)) return false;
+    s += n;
+  }
+  return true;
+}
+
+// A save list's new item (SceSaveDataDialogNewItem): {title* (optional:
+// shorter than 128 bytes, one line, UTF-8), icon*, its size (1 to 0x1C800
+// with an icon, else 0), 32 zero bytes}.
+uint32_t CheckNewItem(gaddr ni) {
+  if (const gaddr title = Rd64(ni)) {
+    const uint8_t* t = recomp::GPtr(title);
+    const size_t n = strnlen(reinterpret_cast<const char*>(t), 0x80);
+    if (n >= 0x80 || std::memchr(t, '\n', n) || std::memchr(t, '\r', n) || !ValidUtf8(t))
+      return kErrParam;
+  }
+  const uint64_t size = Rd64(ni + 16);
+  if (Rd64(ni + 8) ? !size || size > 0x1C800 : size != 0) return kErrParam;
+  return Zero(ni + 24, 32) ? 0 : kErrParam;
+}
+
 // A list's items: loading and deleting list at least one directory, all
-// valid and different; a focus position (0-6), its directory only with
-// position 6; a style (0-2).
+// valid and different; a save list's new item (CheckNewItem); a focus
+// position (0-6), its directory only with position 6; a style (0-2).
 uint32_t CheckListItems(gaddr it, uint32_t type) {
   if (uint32_t e = CheckItemsCommon(it, type)) return e;
   const gaddr names = Rd64(it + 16);
@@ -143,6 +176,8 @@ uint32_t CheckListItems(gaddr it, uint32_t type) {
         if (i != j && recomp::GStr(names + 32 * uint64_t(i)) == recomp::GStr(names + 32 * uint64_t(j)))
           return kErrParam;
   }
+  if (const gaddr ni = Rd64(it + 32); ni && type == kTypeSave)
+    if (uint32_t e = CheckNewItem(ni)) return e;
   const uint32_t focus = Rd32(it + 40);
   if (focus > kFocusDirName) return kErrParam;
   if (const gaddr fd = Rd64(it + 48))
@@ -151,12 +186,15 @@ uint32_t CheckListItems(gaddr it, uint32_t type) {
   return 0;
 }
 
-// A system message's items: the first directory (if named) valid, no
-// focus, a style (0-2, checked from SDK 6.00).
+// A system message's items: the first directory (if named) valid, a
+// save's new item (CheckNewItem), no focus, a style (0-2, checked from
+// SDK 6.00).
 uint32_t CheckMessageItems(gaddr it, uint32_t type) {
   if (uint32_t e = CheckItemsCommon(it, type)) return e;
   if (const gaddr names = Rd64(it + 16))
     if (recomp::GPtr(names)[0] && !ValidDirName(names)) return kErrParam;
+  if (const gaddr ni = Rd64(it + 32); ni && type == kTypeSave)
+    if (uint32_t e = CheckNewItem(ni)) return e;
   if (Rd32(it + 40) || Rd64(it + 48)) return kErrParam;
   if (SdkVersion() >= 0x6000000 && Rd32(it + 56) > kStyleDateSize) return kErrParam;
   return Zero(it + 60, 36) ? 0 : kErrParam;
@@ -228,9 +266,7 @@ constexpr int kRowH = 168, kListX = 120, kListY = 210, kListW = 1120, kRows = 4;
 constexpr int kIconW = 228, kIconH = 128;  // a save data icon's size
 constexpr uint32_t kText = 0xFFFFFFFF, kDim = 0xFFB0B8C8;
 
-void LoadIcon(Item& it) {
-  if (it.e.icon.empty()) return;
-  SDL_Surface* s = SDL_LoadPNG(it.e.icon.c_str());
+void LoadIcon(Item& it, SDL_Surface* s) {
   if (!s) return;
   if (SDL_Surface* a = SDL_ConvertSurface(s, SDL_PIXELFORMAT_ARGB8888)) {
     it.icon_w = a->w;
@@ -242,6 +278,21 @@ void LoadIcon(Item& it) {
     SDL_DestroySurface(a);
   }
   SDL_DestroySurface(s);
+}
+
+void LoadIcon(Item& it) {
+  if (!it.e.icon.empty()) LoadIcon(it, SDL_LoadPNG(it.e.icon.c_str()));
+}
+
+// A save list's new item: its title ("New Saved Data" without one) and
+// its PNG icon (none if it does not decode).
+Item NewItem(gaddr ni) {
+  Item item;
+  item.is_new = true;
+  item.title = Rd64(ni) ? recomp::GStr(Rd64(ni)) : "New Saved Data";
+  if (const gaddr icon = Rd64(ni + 8))
+    LoadIcon(item, SDL_LoadPNG_IO(SDL_IOFromConstMem(recomp::GPtr(icon), size_t(Rd64(ni + 16))), true));
+  return item;
 }
 
 // The listed directories that exist, in the game's order.
@@ -281,6 +332,10 @@ void DrawItem(recomp::ui::Canvas& c, const Item& it, uint32_t style, int x, int 
   else
     c.Fill(x, y, kIconW, kIconH, 0x30FFFFFF);
   const int tx = x + kIconW + 28, tw = right - tx;
+  if (it.is_new) {
+    c.Text(tx, y + 40 + 44, 36, it.title, kText, tw);
+    return;
+  }
   const std::string date = When(it.e.mtime) + "    " + Size(it.e.blocks);
   const std::string sub = Field(it.e.param + 0x80, 0x80);
   std::vector<std::pair<std::string, uint32_t>> lines = {{Field(it.e.param, 0x80), kText}};
@@ -297,7 +352,7 @@ void DrawItem(recomp::ui::Canvas& c, const Item& it, uint32_t style, int x, int 
 std::shared_ptr<recomp::ui::Canvas> DrawList(const Dialog& d) {
   auto c = std::make_shared<recomp::ui::Canvas>(kW, kH);
   c->Fill(0, 0, kW, kH, 0xD0101418);
-  c->Text(kListX, 140, 52, "Load", kText);
+  c->Text(kListX, 140, 52, d.type == kTypeSave ? "Save" : "Load", kText);
   c->Fill(kListX, 162, kW - 2 * kListX, 2, 0x60FFFFFF);
   for (size_t i = d.top; i < d.items.size() && i < d.top + kRows; i++) {
     const int y = kListY + int(i - d.top) * kRowH;
@@ -311,14 +366,15 @@ std::shared_ptr<recomp::ui::Canvas> DrawList(const Dialog& d) {
   const Item& f = d.items[d.focus];
   const int dx = kListX + kListW + 60, dw = kW - kListX - dx;
   int y = kListY + 40;
-  for (const std::string& l : recomp::orbis::dialog::Wrap(Field(f.e.param + 0x100, 0x400), 30, dw)) {
+  for (const std::string& l :
+       recomp::orbis::dialog::Wrap(f.is_new ? "" : Field(f.e.param + 0x100, 0x400), 30, dw)) {
     c->Text(dx, y, 30, l, kDim, dw);
     y += 42;
   }
   char n[32];
   std::snprintf(n, sizeof n, "%zu / %zu", d.focus + 1, d.items.size());
   c->Text(kListX, kH - 80, 30, n, kDim);
-  const std::string hint = "✕ Load      ○ Back";
+  const std::string hint = d.type == kTypeSave ? "✕ Save      ○ Back" : "✕ Load      ○ Back";
   c->Text(kW - kListX - recomp::ui::TextWidth(32, hint), kH - 80, 32, hint, kText);
   return c;
 }
@@ -341,7 +397,8 @@ std::shared_ptr<recomp::ui::Canvas> DrawMessage(const Dialog& d, const std::stri
 }
 
 // Ends the dialog with the answer (`picked`: the player chose the focused
-// item), unless it has ended already. Under g_mu.
+// item; the new item answers no directory, the game names it), unless it
+// has ended already. Under g_mu.
 void Finish(Dialog* d, int32_t result, bool picked = false) {
   if (g_status != kRunning || g_dialog.get() != d) return;
   recomp::orbis::videoout::SetOverlay(nullptr);
@@ -349,7 +406,7 @@ void Finish(Dialog* d, int32_t result, bool picked = false) {
   g_result = result;
   std::memset(g_chosen_param, 0, sizeof g_chosen_param);
   g_chosen.clear();
-  if (picked) {
+  if (picked && !d->items[d->focus].is_new) {
     const Item& it = d->items[d->focus];
     g_chosen = it.dir;
     std::memcpy(g_chosen_param, it.e.param, sizeof g_chosen_param);
@@ -476,15 +533,25 @@ ORBIS_HLE("libSceSaveDataDialog", sceSaveDataDialogOpen, 1) {
   std::function<void()> run;  // started once the dialog is open
   if (d->mode == kModeList) {
     if (uint32_t e = CheckListItems(items, d->type)) return e;
-    if (d->type != kTypeLoad)
-      recomp::FatalF("sceSaveDataDialogOpen: list type %u not implemented yet", d->type);
-    d->items = FindItems(items);
+    const gaddr ni = Rd64(items + 32);
+    if (d->type == kTypeSave ? !ni : d->type != kTypeLoad)
+      recomp::FatalF("sceSaveDataDialogOpen: list type %u%s not implemented yet", d->type,
+                     d->type == kTypeSave ? " without a new item" : "");
+    if (d->type == kTypeLoad && ni)
+      recomp::FatalF("sceSaveDataDialogOpen: a load list's new item not implemented yet");
+    // A save list: the new item first, then the save data. The focus
+    // positions of save data fall on the new item when there is none.
+    if (ni) d->items.push_back(NewItem(ni));
+    const size_t data = d->items.size();
+    for (Item& it : FindItems(items)) d->items.push_back(std::move(it));
     if (d->items.empty())
       recomp::FatalF("sceSaveDataDialogOpen: a list with no save data not implemented yet");
     const size_t last = d->items.size() - 1;
     const uint32_t focus = Rd32(items + 40);
-    if (focus == kFocusListTail || focus == kFocusDataTail) d->focus = last;
-    for (size_t i = 0; i <= last; i++) {
+    if (focus == kFocusListTail || (focus == kFocusDataTail && data <= last)) d->focus = last;
+    if (focus != kFocusListHead && focus != kFocusListTail && focus != kFocusDataTail && data <= last)
+      d->focus = data;
+    for (size_t i = data; i <= last; i++) {
       const int64_t t = d->items[i].e.mtime, best = d->items[d->focus].e.mtime;
       if ((focus == kFocusLatest && t > best) || (focus == kFocusOldest && t < best) ||
           (focus == kFocusDirName && d->items[i].dir == recomp::GStr(Rd64(items + 48))))
@@ -498,6 +565,8 @@ ORBIS_HLE("libSceSaveDataDialog", sceSaveDataDialogOpen, 1) {
     if (uint32_t e = CheckMessageItems(items, d->type)) return e;
     if (uint32_t e = CheckSystemMessage(m, d->type, items)) return e;
     d->msg = Rd32(m);
+    if (Rd64(items + 32))
+      recomp::FatalF("sceSaveDataDialogOpen: a system message's new item not implemented yet");
     if (d->msg != kMsgProgress)
       recomp::FatalF("sceSaveDataDialogOpen: system message %u not implemented yet", d->msg);
     d->items = FindItems(items);
