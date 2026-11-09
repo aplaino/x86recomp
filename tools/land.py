@@ -7,7 +7,9 @@ Run from the topic's worktree: tools/land.py [--dry-run]
 1. Refuses a dirty worktree.
 2. Fetches and rebases the topic onto origin/main.
 3. Picks the presets the changed paths call for, builds each in
-   out/land/<preset> and runs its ctest (niced, memory-capped).
+   out/land/<preset> and runs its ctest (niced, memory-capped). Docs
+   (.md) and C/C++ files whose change is only to comments and whitespace
+   build nothing.
 4. Pushes the topic to origin/main, a fast-forward only. If main moved in
    the meantime the push is rejected: rerun.
 5. Fast-forwards the checkout that has main, when it is clean.
@@ -19,6 +21,7 @@ environment.
 """
 import argparse
 import os
+import re
 import subprocess
 import sys
 
@@ -27,6 +30,7 @@ import sys
 EVERY = ["debug", "x86", "ppc", "a64", "a64-aarch64-qemu", "orbis",
          "xbox360", "horizon"]
 RULES = [
+    ("tools/land.py", []),
     ("src/runtime/", EVERY),
     ("cmake/", EVERY),
     ("CMakeLists.txt", EVERY),
@@ -79,12 +83,38 @@ def match(path, rules):
     return None
 
 
+C_FAMILY = (".c", ".cc", ".cpp", ".h", ".hpp", ".inl")
+# A string or character literal (raw strings included), a comment, or a
+# run of anything else; comments are dropped, literals kept whole.
+TOKEN = re.compile(r"""R"([^(\s]*)\(.*?\)\1"|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'"""
+                   r"""|(//[^\n]*|/\*.*?\*/)|[^\s"'/]+|/""", re.S)
+
+
+def code_tokens(text):
+    return [m.group(0) for m in TOKEN.finditer(text) if not m.group(2)]
+
+
+def comment_only(path):
+    """A C/C++ file whose change since origin/main is only to comments
+    and whitespace (the code tokens are the same)."""
+    if not path.endswith(C_FAMILY):
+        return False
+    old = subprocess.run(["git", "show", f"origin/main:{path}"], text=True,
+                         capture_output=True)
+    new = subprocess.run(["git", "show", f"HEAD:{path}"], text=True,
+                         capture_output=True)
+    if old.returncode != 0 or new.returncode != 0:
+        return False
+    return code_tokens(old.stdout) == code_tokens(new.stdout)
+
+
 def presets_for(paths):
     picked = set()
     for path in paths:
         if path.endswith(".md"):
             continue
-        picked.update(match(path, RULES) or ["debug"])
+        rule = match(path, RULES)
+        picked.update(["debug"] if rule is None else rule)
     return [p for p in EVERY if p in picked]
 
 
@@ -138,11 +168,15 @@ def main():
     paths = git("diff", "--name-only", "origin/main...HEAD").splitlines()
     if not paths:
         sys.exit("land: nothing to land")
+    comments = [p for p in paths if comment_only(p)]
+    if comments:
+        print("land: comments only, nothing to build:", ", ".join(comments))
+    paths = [p for p in paths if p not in comments]
     commits = git("log", "--oneline", "origin/main..HEAD")
     print(f"land: {topic}, onto origin/main:\n{commits}\n")
 
     presets = presets_for(paths)
-    print("land: presets:", ", ".join(presets) or "none (docs only)")
+    print("land: presets:", ", ".join(presets) or "none (docs and comments only)")
     if args.dry_run:
         return
     for preset in presets:
