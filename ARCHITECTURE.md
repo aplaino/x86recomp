@@ -88,7 +88,8 @@ place where the two worlds meet:
 ## Game projects
 A game project adds this repository with `add_subdirectory()`, links
 `recomp_runtime` plus the optional HLE modules its EXE imports
-(`recomp_mss32`, `recomp_bink`, `recomp_d3d7`, `recomp_dbghelp`), adds
+(`recomp_mss32`, `recomp_bink`, `recomp_d3d7`, `recomp_dbghelp`,
+`recomp_wmvcore`), adds
 its lifted code with `recomp_add_lifted()`, and fills a
 `recomp::GameConfig` in its `main()`:
 - `id`: per-user data directory ($XDG_DATA_HOME/<id>) and the prefix of
@@ -953,6 +954,16 @@ late-frame rule; on an idle host wake-ups land 15-30 us (Linux) or
   Bink 1.8's: sound tracks by ID (BINKSNDTRACK, the track list in the
   BINK struct), per-track volume, BinkCopyToBufferRect, BinkGoto,
   BinkGetRealtime.
+- wmvcore: the Windows Media Format SDK's synchronous reader
+  (WMCreateSyncReader) on ffmpeg, for games that play the player's own
+  music files: one audio stream decoded to 16-bit stereo PCM at the
+  file's rate (mono duplicated to both channels), the profile, the
+  output's media type, the "Duration" attribute (from the container, or
+  the packets' durations summed when ffmpeg would estimate it from the
+  bitrate), samples with 100 ns times, SetRange as a seek. A demuxer
+  and decoder per reader. Reads what the linked ffmpeg reads (MP3 in
+  the minimal Apple builds); the callback reader (WMCreateReader) is not
+  implemented.
 - dbghelp: UnDecorateSymbolName (LLVM's Microsoft demangler, normalised
   to MSVC's output); the rest stubbed.
 - shfolder, wsock32 (host-name queries), imm32, version: small shims.
