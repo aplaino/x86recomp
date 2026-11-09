@@ -14,8 +14,7 @@ namespace recomp::xbox360 {
 constexpr uint32_t kEdramTiles = 2048, kEdramTileWords = 80 * 16,
                    kEdramBytes = kEdramTiles * kEdramTileWords * 4;
 
-// At power-on, on the process's main thread: the host GPU device and the
-// EDRAM on it.
+// At power-on, after StartDisplay: the EDRAM on the display's device.
 void StartEdram();
 
 // A draw packet with RB_MODECONTROL in copy mode: the resolve the copy

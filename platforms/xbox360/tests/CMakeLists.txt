@@ -42,12 +42,21 @@ set(_title_data "${CMAKE_CURRENT_BINARY_DIR}/title_data")
 file(WRITE "${_title_game}/data.bin" "0123456789ABCDEFGHIJKLMNOPQRSTUV")
 file(WRITE "${_title_game}/Sub/Name.TXT" "hello")
 file(WRITE "${_title_game}/Sub/other.dat" "x")
-add_test(NAME xbox360_runtime_data COMMAND "${CMAKE_COMMAND}" -E rm -rf "${_title_data}")
-set_tests_properties(xbox360_runtime_data PROPERTIES FIXTURES_SETUP xbox360_runtime_data)
+# Its frames' screenshots go to title_shots, made empty before each run.
+set(_title_shots "${CMAKE_CURRENT_BINARY_DIR}/title_shots")
+add_test(NAME xbox360_runtime_data COMMAND "${CMAKE_COMMAND}" -E rm -rf "${_title_data}" "${_title_shots}")
+add_test(NAME xbox360_runtime_shots COMMAND "${CMAKE_COMMAND}" -E make_directory "${_title_shots}")
+set_tests_properties(xbox360_runtime_data xbox360_runtime_shots PROPERTIES FIXTURES_SETUP xbox360_runtime_data)
+set_tests_properties(xbox360_runtime_shots PROPERTIES DEPENDS xbox360_runtime_data)
 add_test(NAME xbox360_runtime COMMAND xbox360_title "${_bin}/title.xex" "${_title_game}" "${_title_data}")
-# Its resolves run on a GPU device (lavapipe will do), without a window.
+# Its window and GPU device (lavapipe will do) on SDL's offscreen video
+# driver.
 set_tests_properties(xbox360_runtime PROPERTIES FAIL_REGULAR_EXPRESSION "FAIL|fatal" TIMEOUT 120
-                     ENVIRONMENT "SDL_AUDIO_DRIVER=dummy;SDL_ASSERT=abort;SDL_VIDEO_DRIVER=offscreen"
+                     ENVIRONMENT "SDL_AUDIO_DRIVER=dummy;SDL_ASSERT=abort;SDL_VIDEO_DRIVER=offscreen;XBOX360_TITLE_SHOT_EVERY=1;XBOX360_TITLE_SHOT_DIR=${_title_shots}"
+                     FIXTURES_REQUIRED xbox360_runtime_data)
+add_test(NAME xbox360_runtime_frame COMMAND "${CMAKE_COMMAND}" -D "DIR=${_title_shots}"
+         -P "${_src}/check_frame.cmake")
+set_tests_properties(xbox360_runtime_frame PROPERTIES DEPENDS xbox360_runtime
                      FIXTURES_REQUIRED xbox360_runtime_data)
 # The title settings it wrote, saved in the profile's directory: the
 # 1000-byte one, the one written again (10 bytes), the empty one.

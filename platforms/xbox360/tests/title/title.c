@@ -1033,6 +1033,25 @@ static void Resolves(volatile u32* rb, u32 w, u32 data, u32 pdata) {
   for (u32 k = 0; k < 0x1000; k++) d += *At(mem + 0x8000 + 4 * k) == 0xABCDEF01;
   CHECK(d == 4096);
 
+  // The resolved texture as the front buffer, twice: tiled, a 64-texel
+  // pitch, 64x64, its words byte-swapped (endian 2) and the swizzle ZYXW,
+  // so A shows as red 44, green 33, blue 22 and B as 88 77 66. A swap
+  // waits until the one before it is shown, so after the fence the first
+  // of the two has been (xbox360_runtime_frame checks the screenshot).
+  u32 tex[6] = {1u << 31 | 2 << 22, (mem + 0x4000) | 2 << 6 | 6, 63 | 63 << 13, (2 | 1 << 3 | 0 << 6 | 3 << 9) << 1,
+                0, 0},
+      front = mem + 0x4000, format = 6, color_space = 0, width = 64, height = 64;
+  for (u32 n = 0; n < 2; n++) {
+    VdSwap10(&rb[w], tex, 0, 0, 0, &front, &format, &color_space, &width, &height);
+    w += 64;
+  }
+  rb[w++] = Type3(0x58, 3);
+  rb[w++] = 0;
+  rb[w++] = (pdata + 0x70) | 2;
+  rb[w++] = 7;
+  *Reg(0x1C5) = w;
+  CHECK(WaitFor(At(data + 0x70), 7));
+
   // A converting copy: a 2x MSAA 7e3 target (format 3, at tile 0x200)
   // cleared to red 16 (0x380), green 0.375 (0x0C0), blue 2^-9 (0x001, a
   // denormal: 1/128 of 2^-2), alpha 1 (3), its two samples averaged into
@@ -1124,12 +1143,14 @@ static void Gpu(void) {
   rb[w++] = Type3(0x5B, 1);
   rb[w++] = 0x15;
   // The swap: VdSwap fills 64 words.
-  u32 fb = ring + 0x2000, fetch[6] = {0, fb, 0, 0, 0, 0}, front = fb, format = 6, color_space = 0, width = 1280,
-      height = 720;
+  // Its front buffer: a linear 32x8 k_8_8_8_8 texture (format 6), the
+  // swizzle XYZW.
+  u32 fb = ring + 0x2000, fetch[6] = {1 << 22, fb | 6, 31 | 7 << 13, (0 | 1 << 3 | 2 << 6 | 3 << 9) << 1, 0, 0},
+      front = fb, format = 6, color_space = 0, width = 1280, height = 720;
   u32 swap = w;
   VdSwap10(&rb[w], fetch, 0, 0, 0, &front, &format, &color_space, &width, &height);
   w += 64;
-  CHECK(rb[swap] == 0x00054800 && rb[swap + 2] == pa + 0x2000 && rb[swap + 7] == 0xC0036400 &&
+  CHECK(rb[swap] == 0x00054800 && rb[swap + 2] == (pa + 0x2000 | 6) && rb[swap + 7] == 0xC0036400 &&
         rb[swap + 8] == 0x53574150 && rb[swap + 9] == pa + 0x2000 && rb[swap + 63] == 0x80000000);
   *Reg(0x1C5) = w;  // CP_RB_WPTR
 

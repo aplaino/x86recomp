@@ -114,6 +114,23 @@ none of it has been checked on a console yet.
 - The resolve runs as compute on the host GPU and its texels are in
   memory when the packet is done; the device exists from power-on.
 
+## Presentation
+- A swap packet shows its front buffer: the texture fetch constant the
+  words before it set (0x4800-0x4805), read as Xenia reads VdSwap's
+  (BSD-3): pitch (dword 0, bits 22-30, in 32 texels), tiled (bit 31),
+  format (dword 1, bits 0-5), endian (bits 6-7), address (bits 12-31),
+  width and height less one (dword 2, 13 bits each), the swizzle (dword
+  3, bits 1-12, 3 bits per destination: a source component 0-3, 4 zero,
+  5 one). The packet's width and height crop it.
+- k_8_8_8_8 only (component X in the low byte after the endian swap);
+  other formats and swizzle values 6 and 7 are fatal, not implemented
+  yet.
+- Texels are shown as stored: the display's gamma ramp is not applied
+  (Xenia applies the 256-entry ramp to 8_8_8_8). Console check.
+- A swap waits until the frame before it has been shown, so each is
+  shown once, in order (a choice, as a host swap chain holds the GPU
+  back).
+
 ## Interrupts and the vertical blank
 - VdSetGraphicsInterruptCallback(callback, argument): the callback runs as
   a DPC, callback(source, argument), source 0 for the vertical blank

@@ -237,8 +237,15 @@ and titles see of the Xenos, without drawing yet (docs/xenos.md):
 - The EDRAM is a buffer on the host GPU in the console's layout
   (`edram.{h,cpp}`); a draw in copy mode is a resolve, compute work that
   copies a target's rectangle to a tiled texture in memory (raw or
-  converted) and clears it. The device has no window
-  (gfx::CreateGpuDevice(nullptr)) and is made at power-on.
+  converted) and clears it.
+- The display (`display.{h,cpp}`) is the host window and the GPU device
+  on it, which the EDRAM shares, made at power-on on the main thread.
+  Each swap packet hands the front buffer to the main thread, which
+  shows it through the base's presentation (gfx/present.h, with its
+  screenshot and frame-rate dev aids) and services the window's events;
+  the next swap waits until it has. On SDL's offscreen video driver
+  (automated tests) the device has no window and frames reach only the
+  dev aids.
 Drawing (milestone 5) adds a renderer behind the same command processor,
 through gfx::Device: shaders translated to GLSL programs, drawing into
 host targets that load from and store to the EDRAM buffer.
@@ -357,5 +364,5 @@ builds and runs them too.
 5. Xenos: drawing, shaders and presentation through gfx::Device, behind
    the command processor (which runs the ring buffer already). In
    progress: the EDRAM and resolves (copies, conversions, sample
-   averages, clears) are done; presentation, shader translation and
-   draws are next.
+   averages, clears) and the front buffer's presentation (k_8_8_8_8) are
+   done; shader translation and draws are next.

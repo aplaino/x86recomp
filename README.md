@@ -81,7 +81,8 @@ core with it. The console modules are in progress and off by default:
   32-bit mode, exact floating point, VMX and the Xenon's VMX128, checked
   bit for bit against QEMU's PowerPC 970): XEX2 images with their own
   LZX decoder, the kernel's and xam's exports, the GPU's command
-  processor (not drawing yet), XAudio and XMA.
+  processor, resolves and the front buffer in a window (not drawing
+  yet), XAudio and XMA.
 - **Nintendo Switch** ([platforms/horizon](platforms/horizon),
   `RECOMP_PLATFORM_HORIZON`), on the AArch64 core (integer, flags and
   the exclusive monitor so far, checked against Unicorn and, on arm64

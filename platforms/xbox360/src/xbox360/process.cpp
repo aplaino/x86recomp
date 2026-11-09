@@ -1,7 +1,5 @@
 #include "xbox360/process.h"
 
-#include <unistd.h>
-
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -9,6 +7,7 @@
 #include "ppc/dispatch.h"
 #include "ppc/fatal.h"
 #include "xbox360/config.h"
+#include "xbox360/display.h"
 #include "xbox360/fs.h"
 #include "xbox360/gpu.h"
 #include "xbox360/hle.h"
@@ -99,9 +98,9 @@ void RunProcess(const GameConfig& cfg) {
   StartGpu();
   StartXma();
   CreateThread({0, 0, m.entry, 0, 0, true});
-  // The title runs on its own threads; this one waits for the end, which
-  // ExitProcess makes.
-  for (;;) pause();
+  // The title runs on its own threads; this one services the window and
+  // shows frames until the end, which ExitProcess makes.
+  RunDisplay();
 }
 
 }  // namespace recomp::xbox360

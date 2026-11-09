@@ -14,6 +14,7 @@
 
 #include "ppc/fatal.h"
 #include "xbox360/config.h"
+#include "xbox360/display.h"
 #include "xbox360/edram.h"
 #include "xbox360/hle.h"
 #include "xbox360/kernel.h"
@@ -173,7 +174,14 @@ void Type3(Reader& in, uint32_t packet) {
     }
     case kPm4Swap: {
       if (in.Next() != kSwapSignature) Fatal(nullptr, "GPU: a swap packet without its signature");
-      in.Skip(count - 1);
+      // The front buffer's fetch constant is in the registers the words
+      // before the packet set; then its address, width and height.
+      uint32_t fetch[6];
+      for (uint32_t k = 0; k < 6; k++) fetch[k] = GpuRegister(kRegShaderConstantFetch + k);
+      in.Next();
+      uint32_t width = in.Next(), height = in.Next();
+      in.Skip(count - 4);
+      QueueFrame(fetch, width, height);
       g_swaps++;
       g_counter++;
       return;
@@ -431,6 +439,7 @@ void StartGpu() {
   SetReg(kRegRbHsioAligner, 0x00BBBBBB);
   SetReg(kRegInterruptStatus, 1);
   SetReg(kRegD1ModeViewportSize, m.width << 16 | m.height);
+  StartDisplay();
   StartEdram();
   CreateSystemThread(CommandProcessor, nullptr);
   CreateSystemThread(VerticalBlank, nullptr);

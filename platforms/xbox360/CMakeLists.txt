@@ -27,6 +27,7 @@ add_library(recomp_xbox360 SHARED
   src/xbox360/audio.cpp
   src/xbox360/config.cpp
   src/xbox360/cpu.cpp
+  src/xbox360/display.cpp
   src/xbox360/format.cpp
   src/xbox360/fs.cpp
   src/xbox360/edram.cpp

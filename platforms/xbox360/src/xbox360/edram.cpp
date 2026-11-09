@@ -4,17 +4,17 @@
 
 #include "xbox360/edram.h"
 
-#include <SDL3/SDL.h>
-
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include "ppc/fatal.h"
 #include "runtime/gfx/device.h"
+#include "xbox360/display.h"
 #include "xbox360/gpu.h"
 #include "xbox360/hle.h"
 #include "xbox360/memory.h"
@@ -203,8 +203,9 @@ void main() {
 }
 )";
 
+// The EDRAM and the resolves' programs on the display's device
+// (HostDevice(), its lock held).
 struct State {
-  std::unique_ptr<gfx::Device> dev;
   gfx::BufferId edram = 0;
   gfx::ProgramId clear = 0, copy = 0;
 };
@@ -213,22 +214,20 @@ State* g_state;
 State& Device() {
   if (g_state) return *g_state;
   auto s = std::make_unique<State>();
-  s->dev = gfx::CreateGpuDevice(nullptr);
-  if (!s->dev) Fatal(nullptr, "GPU: no host GPU device for the EDRAM: %s", SDL_GetError());
-  s->dev->ResetSwapChain(8, 8, false);
-  s->edram = s->dev->CreateBuffer(kEdramBytes);
+  gfx::Device& dev = HostDevice();
+  s->edram = dev.CreateBuffer(kEdramBytes);
   std::vector<uint8_t> zero(kEdramBytes);
-  s->dev->UpdateBuffer(s->edram, 0, zero.data(), kEdramBytes);
+  dev.UpdateBuffer(s->edram, 0, zero.data(), kEdramBytes);
   gfx::ProgramDesc d;
   d.cs.glsl = std::string(kCommon) + kClear;
   d.cs.rw_buffers = 1;
   d.cs.uniform_bytes = 64;
   d.local_size[0] = d.local_size[1] = 8;
-  s->clear = s->dev->CreateProgram(d);
+  s->clear = dev.CreateProgram(d);
   d.cs.glsl = std::string(kCommon) + kCopy;
   d.cs.buffers = 1;
   d.cs.uniform_bytes = 80;
-  s->copy = s->dev->CreateProgram(d);
+  s->copy = dev.CreateProgram(d);
   g_state = s.release();
   return *g_state;
 }
@@ -341,13 +340,13 @@ void Dispatch(State& s, gfx::ProgramId prog, const Rect& r, const void* uniforms
   d.cs.uniforms = uniforms;
   d.cs.buffers = in;
   d.rw_buffers = out;
-  s.dev->DispatchProgram(d);
+  HostDevice().DispatchProgram(d);
 }
 
 }  // namespace
 
 void StartEdram() {
-  if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) Fatal(nullptr, "GPU: SDL video: %s", SDL_GetError());
+  std::lock_guard<std::mutex> l(HostDeviceLock());
   Device();
 }
 
@@ -369,6 +368,7 @@ void Resolve() {
   if (command > 1) Fatal(nullptr, "GPU: resolve copy command %u", command);
   Rect r = ResolveRect(surface & 0x3FFF);
   if (r.x1 <= r.x0 || r.y1 <= r.y0) return;
+  std::lock_guard<std::mutex> l(HostDeviceLock());
   State& s = Device();
   uint32_t shift_x = msaa == 2, shift_y = msaa >= 1, samples = 1u << msaa;
   // The pitch in 32bpp tiles: 80 samples each.

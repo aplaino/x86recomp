@@ -33,8 +33,9 @@ constexpr uint32_t kEdramModeCopy = 6;
 // name: none, bytes in halfwords, bytes in words, halfwords in words.
 uint32_t GpuSwap(uint32_t v, uint32_t endian);
 
-// The GPU at power-on: its registers, the vertical blank. Once, after the
-// process's TLS layout is known (it starts system threads).
+// The GPU at power-on: its registers, the display, the vertical blank.
+// On the main thread, once, after the process's TLS layout is known (it
+// starts system threads).
 void StartGpu();
 
 // VdInitializeRingBuffer: the primary ring buffer at physical address
