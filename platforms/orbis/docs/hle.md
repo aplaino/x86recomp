@@ -547,6 +547,11 @@ noted:
   two faces (the HLE: z, then y, then x, as AMD's instruction description
   reads), and how a cube's level is chosen near a face's edge (the
   host's).
+- A buffer format store of 16-bit floats (16_16, 16_16_16_16): the HLE
+  writes the components the instruction stores and leaves the format's
+  others as they are, and converts to nearest even (infinity past the
+  range, half denormals kept, NaNs quieted, their payload's top bits
+  kept).
 - PlayGo's chunk count (every id below 1000 is accepted; a package's
   count is in its playgo-chunk.dat, package entry 0x1001, which a copy of
   app0 does not hold), what an id past it returns, and the default

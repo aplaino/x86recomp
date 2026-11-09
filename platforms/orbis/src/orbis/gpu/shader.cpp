@@ -1422,7 +1422,19 @@ struct Translator {
       case 28: case 29: case 30: case 31: {  // buffer_store_dword(x2, x4, x3)
         if (rw_of[size_t(b)] < 0) return Fail(pc, "a store outside a compute stage not translated yet");
         const uint32_t n = in.op <= 7 ? in.op - 3 : in.op == 28 ? 1 : in.op == 29 ? 2 : in.op == 30 ? 4 : 3;
-        if (in.op == 4 && ((v[3] >> 15) & 0xF) != 4) return Fail(pc, "a format store not translated yet");
+        const uint32_t sdfmt = (v[3] >> 15) & 0xF, snfmt = (v[3] >> 12) & 7;
+        const uint32_t identity = (4u | 5u << 3 | 6u << 6 | 7u << 9) & ((1u << (3 * n)) - 1);
+        if (in.op <= 7 && (sdfmt == 5 || sdfmt == 12) && snfmt == 7 && n <= (sdfmt == 5 ? 2u : 4u) &&
+            (v[3] & 0xFFF & ((1u << (3 * n)) - 1)) == identity) {
+          // 16-bit floats (16_16, 16_16_16_16): each stored component
+          // converted (r_f2h) and written alone; the format's other
+          // components keep their memory (docs/hle.md).
+          Line("r_a = " + addr + ";");
+          for (uint32_t i = 0; i < n; i++)
+            Line("r_wh(" + std::to_string(rw_of[size_t(b)]) + ", r_a + " + U(2 * i) + ", r_f2h(" + V(vdata + i) + "));");
+          return;
+        }
+        if (in.op == 4 && sdfmt != 4) return Fail(pc, "a format store not translated yet");
         if (in.op >= 5 && in.op <= 7) {
           // Formats of 32-bit components (32_32, 32_32_32, 32_32_32_32) as
           // integers or floats: the registers' bits, one dword each, the
@@ -2406,7 +2418,20 @@ struct Translator {
       g += "uint r_rdw(int b, uint a) {\n  uint o = a - r_rwregion[b].x;\n"
            "  return o < r_rwregion[b].z ? r_rw[r_rwbuf[b].x + (o >> 2)] : 0u;\n}\n"
            "void r_wr(int b, uint a, uint v) {\n  uint o = a - r_rwregion[b].x;\n"
-           "  if (o < r_rwregion[b].z) r_rw[r_rwbuf[b].x + (o >> 2)] = v;\n}\n";
+           "  if (o < r_rwregion[b].z) r_rw[r_rwbuf[b].x + (o >> 2)] = v;\n}\n"
+           // One 16-bit half at a (2-aligned), its dword's other half kept.
+           "void r_wh(int b, uint a, uint h) {\n  uint o = a - r_rwregion[b].x;\n"
+           "  if (o >= r_rwregion[b].z) return;\n  uint i = r_rwbuf[b].x + (o >> 2), sh = (o & 2u) * 8u;\n"
+           "  atomicAnd(r_rw[i], ~(0xFFFFu << sh));\n  atomicOr(r_rw[i], (h & 0xFFFFu) << sh);\n}\n"
+           // A float's bits to a half's: to nearest even, infinity past
+           // the range, half denormals kept, NaNs quieted.
+           "uint r_f2h(uint f) {\n  uint sg = (f >> 16) & 0x8000u, e = (f >> 23) & 0xFFu, m = f & 0x7FFFFFu;\n"
+           "  if (e == 255u) return sg | 0x7C00u | (m != 0u ? 0x200u | (m >> 13) : 0u);\n"
+           "  int ex = int(e) - 112;\n  if (ex >= 31) return sg | 0x7C00u;\n"
+           "  uint h, rem, half_;\n  if (ex <= 0) {\n    if (ex < -10) return sg;\n"
+           "    m |= 0x800000u;\n    uint sh = uint(14 - ex);\n    h = m >> sh; rem = m & ((1u << sh) - 1u); half_ = 1u << (sh - 1u);\n"
+           "  } else {\n    h = uint(ex) << 10 | (m >> 13); rem = m & 0x1FFFu; half_ = 0x1000u;\n  }\n"
+           "  if (rem > half_ || (rem == half_ && (h & 1u) != 0u)) h++;\n  return sg | h;\n}\n";
     if (fault >= 0) {
       g += "void r_fault(uint at) { r_rw[r_rwbuf[" + std::to_string(fault) + "].x] = at; }\n";
       if (nro)
