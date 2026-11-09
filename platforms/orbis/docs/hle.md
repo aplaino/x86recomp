@@ -407,8 +407,12 @@ library.
   does with no input; the driver's first handle as measured (0x160500),
   a second open not modelled.
 - libSceNpTrophy (recomp_orbis_np): contexts and handles from 1,
-  unlocks kept below DataDir()/trophies; what needs the trophy pack
-  (outside the game's files) is not implemented.
+  unlocks kept below DataDir()/trophies; the unlock state's trophy count
+  from the pack's table of contents (app0's sce_sys/trophy/trophyNN.trp,
+  NN the label's entry in sce_sys/npbind.dat: its TROPnnn.PNG icons,
+  which matched a console's count for a 54-trophy pack); what needs the
+  pack's encrypted contents (names, grades, the platinum trophy) is not
+  implemented.
 - libSceCommonDialog (in recomp_orbis_system): initialisation.
 - recomp_orbis_system also: libSceRemoteplay's initialisation (11.00's
   checks; nobody streams from the console).
