@@ -605,13 +605,30 @@ HLE("msvcr90.dll", abs, kCdecl) {
   return uint32_t(int32_t(std::abs(int32_t(Arg(c, 0)))));
 }
 
-HLE("msvcr90.dll", _CIacos, kCdecl) { return RetX87(c, std::acos(DArg(c, 0))); }
-HLE("msvcr90.dll", _CIatan2, kCdecl) { return RetX87(c, std::atan2(DArg(c, 0), DArg(c, 1))); }
-HLE("msvcr90.dll", _CIexp, kCdecl) { return RetX87(c, std::exp(DArg(c, 0))); }
-HLE("msvcr90.dll", _CIlog, kCdecl) { return RetX87(c, std::log(DArg(c, 0))); }
-HLE("msvcr90.dll", _CIlog10, kCdecl) { return RetX87(c, std::log10(DArg(c, 0))); }
-HLE("msvcr90.dll", _CIpow, kCdecl) { return RetX87(c, std::pow(DArg(c, 0), DArg(c, 1))); }
-HLE("msvcr90.dll", _CIsqrt, kCdecl) { return RetX87(c, std::sqrt(DArg(c, 0))); }
+// The _CI helpers (what the compiler calls for intrinsic math) take their
+// operands on the x87 stack, not the C stack, pop them and push the result:
+// fld x; call _CIsqrt. Two operands as the source pushes them: pow(x, y) is
+// fld x; fld y (st0 = y, st1 = x); atan2(y, x) is fld y; fld x.
+double PopX87(Ctx& c) {
+  const uint64_t bits = x87::StoreF64(c.fpu);
+  x87::Pop(c.fpu);
+  double d;
+  std::memcpy(&d, &bits, 8);
+  return d;
+}
+HLE("msvcr90.dll", _CIacos, kCdecl) { return RetX87(c, std::acos(PopX87(c))); }
+HLE("msvcr90.dll", _CIexp, kCdecl) { return RetX87(c, std::exp(PopX87(c))); }
+HLE("msvcr90.dll", _CIlog, kCdecl) { return RetX87(c, std::log(PopX87(c))); }
+HLE("msvcr90.dll", _CIlog10, kCdecl) { return RetX87(c, std::log10(PopX87(c))); }
+HLE("msvcr90.dll", _CIsqrt, kCdecl) { return RetX87(c, std::sqrt(PopX87(c))); }
+HLE("msvcr90.dll", _CIpow, kCdecl) {
+  const double y = PopX87(c), x = PopX87(c);
+  return RetX87(c, std::pow(x, y));
+}
+HLE("msvcr90.dll", _CIatan2, kCdecl) {
+  const double x = PopX87(c), y = PopX87(c);
+  return RetX87(c, std::atan2(y, x));
+}
 
 // ---- stdio -----------------------------------------------------------------
 
