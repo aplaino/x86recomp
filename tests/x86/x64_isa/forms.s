@@ -766,3 +766,20 @@ vcvtps2pd ymm3, xmmword ptr [rsi]
 vcvtpd2ps xmm0, ymm1
 vcvtpd2ps xmm4, ymm4
 vcvtpd2ps xmm5, ymmword ptr [rsi]
+
+# F16C
+vcvtph2ps xmm1, xmm2
+vcvtph2ps xmm3, xmm3
+vcvtph2ps xmm9, qword ptr [rsi]
+vcvtph2ps ymm1, xmm2
+vcvtph2ps ymm4, xmm4
+vcvtph2ps ymm9, xmmword ptr [rsi]
+vcvtps2ph xmm1, xmm2, 0
+vcvtps2ph xmm1, xmm2, 1
+vcvtps2ph xmm1, xmm2, 2
+vcvtps2ph xmm1, xmm2, 3
+vcvtps2ph xmm5, xmm5, 4
+vcvtps2ph qword ptr [rsi], xmm9, 0
+vcvtps2ph xmm1, ymm2, 0
+vcvtps2ph xmm6, ymm6, 4
+vcvtps2ph xmmword ptr [rsi], ymm9, 3

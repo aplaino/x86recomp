@@ -1205,7 +1205,9 @@ lifted, not avoided:
   SSE4.1/4.2, POPCNT, LZCNT, CMPXCHG16B, AVX, F16C, BMI1, MOVBE, AES,
   PCLMUL; no AVX2 or FMA). Claimed now: all of those but AVX and F16C.
   AVX is claimed (OSXSAVE, XCR0 = 7
-  through XGETBV) once all its forms hold. Games read CPUID themselves
+  through XGETBV) once all its forms hold; F16C, lifted and tested
+  already (lift_isa64_sse, sse_ftz), with it, as software checks AVX
+  before using F16C. Games read CPUID themselves
   (MSVC's CRT fills __isa_available from it), so which paths they take
   follows from this table.
 - VEX forms of SSE instructions go through the legacy emitter: `v op

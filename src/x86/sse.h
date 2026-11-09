@@ -115,6 +115,12 @@ void CvtIntToF(Ctx& c, bool dbl, bool src64, uint64_t v, Xmm& d, uint64_t va);
 // int32, 0x80000000 for NaN and out of range (invalid).
 void CvtToDq(Ctx& c, bool dbl, bool truncate, Xmm& d, const Xmm& s, uint64_t va);
 
+// F16C: VCVTPH2PS, four half lanes of s from 16-bit lane `from` (0 or 4)
+// into d's four floats; VCVTPS2PH, s's four floats into d's 16-bit lanes
+// from `to`, the others kept, rounded by imm.
+void Cvtph2ps(Ctx& c, Xmm& d, const Xmm& s, int from, uint64_t va);
+void Cvtps2ph(Ctx& c, Xmm& d, int to, const Xmm& s, uint8_t imm, uint64_t va);
+
 // HADDPS/PD, HSUBPS/PD (SSE3): pairs of adjacent lanes of d, then of s,
 // added (subtracted: the higher lane from the lower). ADDSUBPS/PD: even
 // lanes d - s, odd ones d + s.

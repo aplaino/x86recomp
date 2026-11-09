@@ -740,3 +740,18 @@ c5 fc 5a 1e                                      # vcvtps2pd ymm3, xmmword ptr [
 c5 fd 5a c1                                      # vcvtpd2ps xmm0, ymm1
 c5 fd 5a e4                                      # vcvtpd2ps xmm4, ymm4
 c5 fd 5a 2e                                      # vcvtpd2ps xmm5, ymmword ptr [rsi]
+c4 e2 79 13 ca                                   # vcvtph2ps xmm1, xmm2
+c4 e2 79 13 db                                   # vcvtph2ps xmm3, xmm3
+c4 62 79 13 0e                                   # vcvtph2ps xmm9, qword ptr [rsi]
+c4 e2 7d 13 ca                                   # vcvtph2ps ymm1, xmm2
+c4 e2 7d 13 e4                                   # vcvtph2ps ymm4, xmm4
+c4 62 7d 13 0e                                   # vcvtph2ps ymm9, xmmword ptr [rsi]
+c4 e3 79 1d d1 00                                # vcvtps2ph xmm1, xmm2, 0
+c4 e3 79 1d d1 01                                # vcvtps2ph xmm1, xmm2, 1
+c4 e3 79 1d d1 02                                # vcvtps2ph xmm1, xmm2, 2
+c4 e3 79 1d d1 03                                # vcvtps2ph xmm1, xmm2, 3
+c4 e3 79 1d ed 04                                # vcvtps2ph xmm5, xmm5, 4
+c4 63 79 1d 0e 00                                # vcvtps2ph qword ptr [rsi], xmm9, 0
+c4 e3 7d 1d d1 00                                # vcvtps2ph xmm1, ymm2, 0
+c4 e3 7d 1d f6 04                                # vcvtps2ph xmm6, ymm6, 4
+c4 63 7d 1d 0e 03                                # vcvtps2ph xmmword ptr [rsi], ymm9, 3

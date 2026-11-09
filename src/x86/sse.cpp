@@ -611,6 +611,39 @@ void Cvtdq2ps(Ctx& c, Xmm& d, const Xmm& s, uint64_t va) {
   d = r;
 }
 
+// F16C. Half to single is exact: no rounding, DAZ and FTZ do not apply;
+// an SNaN is quieted (IE), NaNs keep their payload.
+void Cvtph2ps(Ctx& c, Xmm& d, const Xmm& s, int from, uint64_t va) {
+  Scope sc(c, va);
+  Xmm r;
+  for (int i = 0; i < 4; i++) {
+    sc.Begin();
+    SetLane<uint32_t>(r, i, f16_to_f32(float16_t{Lane<uint16_t>(s, from + i)}).v);
+    sc.End();
+  }
+  sc.Finish();
+  d = r;
+}
+
+// Single to half, rounded by imm bits 1:0 (bit 2: MXCSR's mode instead).
+// DAZ applies to the operands; the half results are not flushed (FTZ).
+void Cvtps2ph(Ctx& c, Xmm& d, int to, const Xmm& s, uint8_t imm, uint64_t va) {
+  Scope sc(c, va);
+  if (!(imm & 4)) softfloat_roundingMode = RoundingMode(uint32_t(imm & 3) << 13);
+  Xmm r = d;
+  for (int i = 0; i < 4; i++) {
+    uint32_t a = sc.Daz<false>(Lane<uint32_t>(s, i));
+    if (!IsNaN<false>(a)) sc.Operand<false>(a);
+    sc.Begin();
+    const uint16_t h = f32_to_f16(float32_t{a}).v;
+    sc.End();
+    if ((h & 0x7C00) == 0 && (h & 0x3FF) && !(c.mxcsr & kUE << 7)) sc.flags |= kUE;
+    SetLane<uint16_t>(r, to + i, h);
+  }
+  sc.Finish();
+  d = r;
+}
+
 void Ldmxcsr(Ctx& c, uint32_t v, uint64_t va) {
   if (v & 0xFFFF0000u)
     FatalF("sse: ldmxcsr %08X sets reserved bits at %08llX (#GP)", v,

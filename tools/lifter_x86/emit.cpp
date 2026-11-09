@@ -2468,6 +2468,34 @@ void InsnEmitter::EmitAvx() {
       ZeroUpper(0);
       return;
     }
+    // F16C: VEX.256 VCVTPH2PS widens a half of halves into both halves,
+    // VCVTPS2PH narrows both into one (8 or 16 bytes of halves in memory).
+    case ZYDIS_MNEMONIC_VCVTPH2PS: {
+      if (!IsVec(0)) return Unimpl();
+      const std::string src = HalfSrc(1, 0, 8 * halves);
+      L("{ const ::recomp::Xmm s = " + src + ";");
+      for (int h = 0; h < halves; h++)
+        L(Fmt("  ::recomp::sse::Cvtph2ps(c, %s, s, %d, %s);", Half(0, h).c_str(), 4 * h,
+              va.c_str()));
+      L("}");
+      if (halves == 1) ZeroUpper(0);
+      return;
+    }
+    case ZYDIS_MNEMONIC_VCVTPS2PH: {
+      if (!IsVec(1)) return Unimpl();
+      const unsigned imm = imm8(2);
+      L("{ ::recomp::Xmm r{};");
+      for (int h = 0; h < halves; h++)
+        L(Fmt("  ::recomp::sse::Cvtps2ph(c, r, %d, %s, %u, %s);", 4 * h, Half(1, h).c_str(), imm,
+              va.c_str()));
+      if (IsMem(0)) {
+        L(Fmt("  ::recomp::sse::St(B, m0, r, %d); }", 8 * halves));
+      } else {
+        L("  " + Half(0, 0) + " = r; }");
+        ZeroUpper(0);
+      }
+      return;
+    }
     case ZYDIS_MNEMONIC_VSQRTPS: case ZYDIS_MNEMONIC_VSQRTPD: {
       if (!IsVec(0)) return Unimpl();
       const bool dbl = m == ZYDIS_MNEMONIC_VSQRTPD;
