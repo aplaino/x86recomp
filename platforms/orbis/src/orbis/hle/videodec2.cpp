@@ -134,6 +134,7 @@ struct Sps {
   bool frame_mbs_only = false, crop = false;
   uint32_t crop_lrtb[4] = {};
   uint32_t units_in_tick = 0, time_scale = 0, max_dec_frame_buffering = 0;
+  bool operator==(const Sps&) const = default;  // not memcmp: the padding is not set
 };
 
 class Bits {
@@ -290,7 +291,7 @@ void ReadSps(Decoder& d, const uint8_t* p, size_t n) {
     while (end + 2 < n && !(p[end] == 0 && p[end + 1] == 0 && (p[end + 2] == 1 || p[end + 2] == 0))) end++;
     if (end + 2 >= n) end = n;
     const Sps s = ParseSps(p + i + 4, end - i - 4);
-    if (d.have_sps && std::memcmp(&s, &d.sps, sizeof s))
+    if (d.have_sps && s != d.sps)
       recomp::FatalF("libSceVideodec2: a second SPS not implemented yet");
     d.sps = s;
     d.have_sps = true;
