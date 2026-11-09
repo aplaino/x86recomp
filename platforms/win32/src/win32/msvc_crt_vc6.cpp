@@ -1,7 +1,7 @@
 // Functions of a VC6 CRT whose behaviour is that version's own, natively
 // (msvc_crt.cpp has those common to the versions; docs/msvc_crt.md):
-// the locale-dependent ones, on VC6's locale globals, and floor/ceil, with
-// the x87 state VC6's code leaves.
+// the locale-dependent ones, on VC6's locale globals, and floor/ceil and
+// the intrinsics _CIpow/_CIfmod, with the x87 state VC6's code leaves.
 //
 // The locale-dependent functions: after setlocale(LC_CTYPE, ".<code
 // page>") these take the CRT's locale path: the character classes come
@@ -29,6 +29,7 @@ using lift::Rd;
 using lift::Wr;
 
 Locale g_locale;
+Math g_math;
 
 uint32_t Arg(const Ctx& c, int n) { return Rd<uint32_t>(g_guest_base, c.esp + 4 + 4 * n); }
 uint8_t* P(uint32_t va) { return g_guest_base + va; }
@@ -102,6 +103,8 @@ void IsClass(Ctx& c, uint16_t mask, GuestFn original) {
 
 void SetLocale(const Locale& l) { g_locale = l; }
 const Locale& GetLocale() { return g_locale; }
+void SetMath(const Math& m) { g_math = m; }
+const Math& GetMath() { return g_math; }
 
 // tolower(ch) and toupper(ch).
 void tolower(Ctx& c, GuestFn original) { ToCase(c, false, original); }
@@ -275,5 +278,152 @@ void Round(Ctx& c, uint16_t cw, GuestFn original) {
 
 void floor(Ctx& c, GuestFn original) { Round(c, 0x173F, original); }
 void ceil(Ctx& c, GuestFn original) { Round(c, 0x1B3F, original); }
+
+// _CIpow and _CIfmod, the compiler's intrinsics for pow(x, y) and
+// fmod(x, y): x in ST1, y in ST0, both popped, the result pushed. The
+// natives take the originals' steps on the x87 model, so the registers,
+// the status word and EAX are what the originals leave (ECX and EDX are
+// not kept). The original runs, from the start, for whatever its error
+// and special-case paths handle, for a caller with an exception unmasked,
+// and when the stack lacks the registers the original pushes.
+namespace {
+
+const Math& M() {
+  if (!g_math.matherr_flag) FatalF("msvc_crt::vc6: an intrinsic ran before SetMath");
+  return g_math;
+}
+uint32_t Global(uint32_t va) { return Rd<uint32_t>(g_guest_base, va); }
+bool Empty(const x87::State& s, int i) { return s.empty >> ((s.top + i) & 7) & 1; }
+bool C3(const x87::State& s) { return s.sw & 0x4000; }
+
+// _twoToTOS: 2^ST0, as frndint, f2xm1 of the fraction and fscale.
+void TwoToTos(x87::State& s) {
+  x87::LoadSt(s, 0);
+  x87::RndInt(s);
+  x87::ArithStiSt0(s, x87::Op::SubR, 1);
+  x87::Xch(s, 1);
+  x87::Chs(s);
+  x87::F2xm1(s);
+  x87::LoadConst(s, x87::Const::One);
+  x87::ArithStiSt0(s, x87::Op::Add, 1);
+  x87::Pop(s);
+  x87::Scale(s);
+  x87::StoreSt(s, 1);
+  x87::Pop(s);
+}
+
+// Whether ST0 is an integer: a copy rounded with frndint, compared with
+// it and popped (`pops` 2: ST0 popped too, fcompp). The low half of EAX
+// takes the status word, as the original's fnstsw ax.
+bool IsInteger(x87::State& s, int pops, uint32_t& eax) {
+  x87::LoadSt(s, 0);
+  x87::RndInt(s);
+  x87::CompareSt(s, 1, false);
+  while (pops--) x87::Pop(s);
+  eax = (eax & 0xFFFF0000) | x87::StatusWord(s);
+  return C3(s);
+}
+
+}  // namespace
+
+// _CIpow stores x and y as doubles (under the caller's control word),
+// sets the caller's precision with round to nearest and all exceptions
+// masked (unless the control word is 0x27F already), loads x back and
+// takes y * log2(x) (fyl2x, on the register y, not its double) to the
+// power of two. A negative x needs an integer y (odd: the result
+// negated). Then, unless _fastflag is set, it stores the result as a
+// double and checks its exponent. EAX: the double result's exponent bits
+// with 0x27F (that control word) or 0x20 (another one) in the low half;
+// with _fastflag, x's exponent bits (x denormal: its significand bits
+// ORed) with, for a negative x, the status word from its last integer
+// check in the low half. The original runs for an infinite or NaN x or y
+// as doubles, a zero x, a negative x with a fractional y, and, without
+// _fastflag, a result that underflows or overflows as a double. It needs
+// two free registers.
+void _CIpow(Ctx& c, GuestFn original) {
+  x87::State& s = c.fpu;
+  const x87::State entry = s;
+  const uint16_t saved = x87::ControlWord(s);
+  if ((saved & 0x3F) != 0x3F || Empty(s, 0) || Empty(s, 1) || !Empty(s, 6) || !Empty(s, 7))
+    return original(c);
+  const bool fast = Global(M().fastflag);
+  auto bail = [&] {
+    s = entry;
+    original(c);
+  };
+  x87::Xch(s, 1);
+  const uint64_t x = x87::StoreF64(s);
+  x87::Pop(s);
+  const uint64_t y = x87::StoreF64(s);
+  if (saved != 0x27F) x87::SetControlWord(s, (saved & 0x300) | 0x7F);
+  const uint32_t xhi = uint32_t(x >> 32);
+  if ((y >> 52 & 0x7FF) == 0x7FF || (x >> 52 & 0x7FF) == 0x7FF || !(x << 1)) return bail();
+  x87::LoadF64(s, x);
+  uint32_t eax = xhi & 0x7FF00000 ? xhi & 0x7FF00000 : (xhi & 0xFFFFF) | uint32_t(x);
+  bool odd = false;
+  if (x >> 63) {
+    x87::LoadSt(s, 1);
+    if (!IsInteger(s, 1, eax)) return bail();
+    x87::ArithF64(s, x87::Op::Mul, 0x3FE0000000000000);  // 0.5
+    odd = !IsInteger(s, 2, eax);
+    x87::Chs(s);
+  }
+  x87::Yl2x(s);
+  TwoToTos(s);
+  if (odd) x87::Chs(s);
+  if (!fast) {
+    const uint32_t e = uint32_t(x87::StoreF64(s) >> 32) & 0x7FF00000;
+    if (e == 0 || e == 0x7FF00000) return bail();
+    eax = e | (saved == 0x27F ? 0x27F : 0x20);
+  }
+  if (saved != 0x27F) x87::SetControlWord(s, saved);
+  Ret(c, eax);
+}
+
+// _CIfmod (through _cintrindisp2 and _trandisp2) sets the control word
+// 0x133F (64-bit precision, round to nearest, all exceptions masked),
+// classifies y and x with fxam (both normal: the fmod core; the rest are
+// its table's special cases), then repeats fprem until it is complete.
+// Unless _fastflag is set it stores the result as a double (its flags
+// stay), and it puts the caller's control word back. Without _matherr_flag it first
+// stores x and y as doubles too. EAX: 0x20, or with _fastflag the status
+// word of the last fprem. The original runs for any other class of x or
+// y and with _adjust_fdiv set.
+void _CIfmod(Ctx& c, GuestFn original) {
+  x87::State& s = c.fpu;
+  const x87::State entry = s;
+  const uint16_t saved = x87::ControlWord(s);
+  if ((saved & 0x3F) != 0x3F || Empty(s, 0) || Empty(s, 1) || Global(M().adjust_fdiv) == 1)
+    return original(c);
+  if (!Global(M().matherr_flag)) {
+    x87::Xch(s, 1);
+    x87::StoreF64(s);
+    x87::Xch(s, 1);
+    x87::StoreF64(s);
+  }
+  x87::SetControlWord(s, 0x133F);
+  auto normal = [&] {
+    x87::Examine(s);
+    return (s.sw & 0x4500) == 0x0400;
+  };
+  const bool y_normal = normal();
+  x87::Xch(s, 1);
+  const bool x_normal = normal();
+  if (!y_normal || !x_normal) {
+    s = entry;
+    return original(c);
+  }
+  do x87::Prem(s);
+  while (s.sw & 0x0400);
+  uint32_t eax = x87::StatusWord(s);
+  x87::StoreSt(s, 1);
+  x87::Pop(s);
+  if (!Global(M().fastflag)) {
+    x87::StoreF64(s);
+    eax = 0x20;
+  }
+  x87::SetControlWord(s, saved);
+  Ret(c, eax);
+}
 
 }  // namespace recomp::native::msvc_crt::vc6

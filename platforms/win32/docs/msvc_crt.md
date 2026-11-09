@@ -28,8 +28,8 @@ functions, SOURCES defines them and `Setup()`.
 Checked against: VC6 (Visual C++ 6.0's static CRT, LIBC/LIBCMT). A
 program with another version runs the oracle against its own copies; a
 function whose behaviour differs gets a variant under the version's
-namespace, as the locale functions, floor and ceil have
-(`msvc_crt::vc6::`).
+namespace, as the locale functions, floor, ceil, _CIpow and _CIfmod
+have (`msvc_crt::vc6::`).
 
 ## Strings, memory, integers (msvc_crt::)
 memset, memcpy, memmove, memchr, strlen, strcpy, strcat, strncpy,
@@ -100,3 +100,34 @@ condition codes. The original runs for a NaN or an infinity (_except1,
 _handle_qnan1), when the caller has an exception unmasked (an inexact
 result with the precision exception unmasked is raised through
 _except1), and when the stack has no free register.
+
+## _CIpow and _CIfmod (msvc_crt::vc6::)
+The compiler's intrinsics for pow and fmod: x in ST1, y in ST0, both
+popped, the result pushed. VC6's code reads three switches, whose
+addresses the program gives with `msvc_crt::vc6::SetMath`
+(win32/msvc_crt.h): _fastflag (nonzero: no check of the result),
+_adjust_fdiv (1: fprem through _adj_fprem, for the Pentium FDIV bug)
+and _matherr_flag (0 when the program has its own _matherr). The
+natives take the originals' steps on the x87 model, so the registers,
+status word and EAX are the originals' (ECX and EDX are not kept).
+- _CIpow stores x and y as doubles under the caller's control word, sets
+  the caller's precision with round to nearest and exceptions masked
+  (unless the control word is 0x27F), and computes 2^(y * log2 x) with
+  fyl2x (on the register y, not its double), frndint, f2xm1 and fscale.
+  A negative x needs an integer y (odd: the result negated). Without
+  _fastflag it stores the result as a double and checks its exponent.
+  EAX: that exponent's bits with 0x27F or 0x20 in the low half; with
+  _fastflag, x's exponent bits (or, x denormal, its significand bits)
+  with the status word of the integer check in the low half for a
+  negative x.
+- _CIfmod sets 0x133F (64-bit precision, round to nearest, exceptions
+  masked), classifies both arguments with fxam, repeats fprem until it
+  completes and, without _fastflag, stores the result as a double.
+  Without _matherr_flag it stores x and y as doubles first. EAX: 0x20,
+  or with _fastflag the status word of the last fprem.
+- The original runs, from the start, for its error and special cases
+  (pow: an infinite or NaN x or y as doubles, a zero x, a negative x
+  with a fractional y, a double result that underflows or overflows;
+  fmod: an argument that is not normal), with _adjust_fdiv set, when the
+  caller has an exception unmasked, and when the stack lacks the
+  registers the original pushes (_CIpow: two).

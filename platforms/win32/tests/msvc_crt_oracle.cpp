@@ -10,14 +10,15 @@
 // and once natively. Compared: the result (EAX, and EDX where the function
 // returns 64 bits), ESP, EBX, ESI, EDI and EBP, ECX where the original
 // keeps it (_alloca_probe), every byte of the data area and of the stack
-// at and above the returning ESP, and for _ftol the whole x87 state. The
-// strings are short, drawn from a small alphabet (with bytes and units
-// over 0x7F) so that searches and compares hit, at every alignment. Not
-// compared: strcpy and strcat between overlapping strings (undefined in C;
-// the originals copy forwards a dword at a time, the native code as
-// memmove), and division by zero in _aulldiv/_aullrem, which the native
-// code hands to the original. Calls between the originals reach the
-// natives of what the manifest binds, as in the program.
+// at and above the returning ESP, and for _ftol and the x87 math the whole
+// x87 state. The strings are short, drawn from a small alphabet (with
+// bytes and units over 0x7F) so that searches and compares hit, at every
+// alignment. Not compared: strcpy and strcat between overlapping strings
+// (undefined in C; the originals copy forwards a dword at a time, the
+// native code as memmove), and division by zero in _aulldiv/_aullrem,
+// which the native code hands to the original. Calls between the
+// originals reach the natives of what the manifest binds, as in the
+// program.
 //
 // The VC6 locale functions run in the C locale and in a code page locale
 // as setlocale leaves it (__lc_handle[LC_CTYPE] set, _pctype pointing at a
@@ -191,6 +192,9 @@ void Dispatch(Ctx& c, uint32_t target, uint32_t va) {
         std::printf("unexpected call to %s!%s from %08X\n", i.dll.c_str(), i.name.c_str(), va);
         std::abort();
       }
+  // An indirect jump into lifted code (_CIfmod's dispatch table).
+  for (uint32_t i = 0; i < kLiftedFunctionCount; i++)
+    if (kLiftedFunctions[i].va == target) return kLiftedFunctions[i].fn(c);
   std::printf("unexpected call to %08X from %08X\n", target, va);
   std::abort();
 }
@@ -529,6 +533,62 @@ void FloorCeil() {
   }
 }
 
+// _CIpow/_CIfmod: x and y of every class, as doubles or as 80-bit values
+// (x87 code passes those), for pow mostly a positive x or an integer y,
+// and around the exponents where a double result overflows or
+// underflows. Every rounding and precision mode, 0x27F itself, 0 to 6
+// values already on the stack, and every setting of VC6's switches
+// (SetMath). Exceptions stay masked, as for floor/ceil.
+recomp::x87::F80 RandOperand(bool pow, bool is_y) {
+  const auto f64 = [](uint64_t v) {
+    recomp::x87::State t;
+    recomp::x87::Init(t);
+    recomp::x87::LoadF64(t, v);
+    return recomp::x87::StoreF80(t);
+  };
+  const auto value = [&](double d) {
+    uint64_t v;
+    std::memcpy(&v, &d, 8);
+    return f64(v);
+  };
+  switch (Rand(pow ? 6 : 3)) {
+    case 0: return RandF80();
+    case 1:
+    case 2: return f64(RandF64());
+    case 3:  // an integer, or half of one
+      return value((int(Rand(81)) - 40) / (is_y && Rand(4) ? 1.0 : 2.0));
+    case 4:  // around overflow and underflow
+      return is_y ? value((Rand(2) ? 1 : -1) * (900.0 + Rand(400000) / 100.0))
+                  : value((Rand(2) ? 1 : -1) * (1.0 + Rand(1000) / 100.0));
+    default: return value(Rand(2) ? 2.0 : 10.0);
+  }
+}
+
+void Intrinsics() {
+  const auto& m = recomp::native::msvc_crt::vc6::GetMath();
+  if (!m.matherr_flag) {
+    if (Bound("vc6::_CIpow") || Bound("vc6::_CIfmod"))
+      std::printf("_CIpow/_CIfmod are bound but Setup() gave no SetMath\n"), g_failures++;
+    return;
+  }
+  for (int i = 0; i < 300000; i++) {
+    for (const char* name : {"vc6::_CIpow", "vc6::_CIfmod"}) {
+      const bool pow = name[6] == 'p';
+      g_mem.write<uint32_t>(m.fastflag, Rand(4) ? 0 : 1);
+      g_mem.write<uint32_t>(m.adjust_fdiv, Rand(16) ? 0 : 1);
+      g_mem.write<uint32_t>(m.matherr_flag, Rand(4) ? 9876 : 0);
+      Ctx c = Frame({});
+      for (int k = Rand(4) ? Rand(3) : Rand(7); k > 0; k--) recomp::x87::LoadF80(c.fpu, RandF80());
+      recomp::x87::LoadF80(c.fpu, RandOperand(pow, false));
+      recomp::x87::LoadF80(c.fpu, RandOperand(pow, true));
+      recomp::x87::SetControlWord(
+          c.fpu, Rand(4) ? 0x27F : uint16_t(0x7F | Rand(4) << 8 | Rand(4) << 10 | Rand(2) << 12));
+      c.fpu.sw |= uint16_t(Rand(0x40) & 0x3D);
+      Check(name, c, kFpu, std::to_string(i));
+    }
+  }
+}
+
 // The VC6 locale: the C locale as the image starts, or a code page locale
 // as setlocale(LC_CTYPE, ".1252") leaves it, with or without a multibyte
 // __mb_cur_max.
@@ -687,6 +747,7 @@ int main(int argc, char** argv) {
   AllocaProbe();
   Ftol();
   FloorCeil();
+  Intrinsics();
   // Every bound function, prefixed as the manifest names it.
   for (uint32_t i = 0; i < kNativeCount; i++)
     if (!g_checked.count(kNatives[i].name)) {

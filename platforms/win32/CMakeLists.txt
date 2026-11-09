@@ -117,14 +117,17 @@ target_compile_options(recomp_msvc_crt PRIVATE -O2 -fno-strict-aliasing -fnon-ca
                        ${RECOMP_X87_FP_FLAGS} ${RECOMP_FAULT_FRAME_FLAGS})
 
 # recomp_add_msvc_crt_oracle(EXE <exe> SYMBOLS <dir> MANIFEST <file>
-#   [STUBS <manifest>] [SOURCES <file>...]): test msvc_crt_oracle, which
-# checks every function MANIFEST binds with `native <va> msvc_crt::<name>`
-# against the EXE's own copy (tests/msvc_crt_oracle.cpp), lifted at build
-# time with --only. STUBS adds manifest lines for the oracle's lift (what
-# the originals call outside the CRT, replaced by stubs); SOURCES define
-# those stubs and the oracle's Setup(). Nothing without the EXE.
+#   [STUBS <manifest>] [SOURCES <file>...] [ENTRIES <va>...]): test
+# msvc_crt_oracle, which checks every function MANIFEST binds with `native
+# <va> msvc_crt::<name>` against the EXE's own copy
+# (tests/msvc_crt_oracle.cpp), lifted at build time with --only. STUBS adds
+# manifest lines for the oracle's lift (what the originals call outside
+# the CRT, replaced by stubs); SOURCES define those stubs and the oracle's
+# Setup(). ENTRIES (hex) adds code the originals reach only through a
+# table (_CIfmod's dispatch), which --only does not find. Nothing without
+# the EXE.
 function(recomp_add_msvc_crt_oracle)
-  cmake_parse_arguments(A "" "EXE;SYMBOLS;MANIFEST;STUBS" "SOURCES" ${ARGN})
+  cmake_parse_arguments(A "" "EXE;SYMBOLS;MANIFEST;STUBS" "SOURCES;ENTRIES" ${ARGN})
   if(NOT EXISTS "${A_EXE}")
     return()
   endif()
@@ -168,6 +171,10 @@ extern const uint32_t kNativeCount = ${_count};
 }  // namespace recomp::native::msvc_crt::oracle
 ")
   list(JOIN _vas "," _only)
+  if(A_ENTRIES)
+    list(JOIN A_ENTRIES "," _entries)
+    string(APPEND _only ",${_entries}")
+  endif()
   set(_manifest "${_dir}/oracle.manifest")
   set(_gen "${_dir}/gen/gen_000.cpp" "${_dir}/gen/table.cpp" "${_dir}/gen/natives.cpp")
   add_custom_command(OUTPUT ${_gen}

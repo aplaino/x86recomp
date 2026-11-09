@@ -18,4 +18,16 @@ struct Locale {
 void SetLocale(const Locale& l);
 const Locale& GetLocale();
 
+// Where a VC6 CRT keeps its floating-point switches (guest addresses):
+// _fastflag (nonzero: the math intrinsics skip their checks of the
+// result), _adjust_fdiv (1 on a Pentium with the FDIV bug: fprem through
+// _adj_fprem) and _matherr_flag (0 when the program has its own
+// _matherr: the intrinsics keep their arguments for it). The natives of
+// _CIpow and _CIfmod read them; the program sets them before it runs any.
+struct Math {
+  uint32_t fastflag = 0, adjust_fdiv = 0, matherr_flag = 0;
+};
+void SetMath(const Math& m);
+const Math& GetMath();
+
 }  // namespace recomp::native::msvc_crt::vc6
