@@ -70,6 +70,10 @@ struct GameConfig {
   // pad connected later (over Bluetooth) still works. Games that switch
   // their button prompts to a gamepad's when one is listed turn this off.
   bool pad_slot_without_pad = true;
+  // Games that never confine the cursor (ClipCursor) but steer the camera
+  // with the mouse: while the window has focus, its client area is treated
+  // as clipped, so the pointer is grabbed and cannot leave it.
+  bool capture_cursor = false;
 
   // Post-process anti-aliasing (SMAA 1x) of the presented frame (SDL_GPU
   // backend); <ID>_AA=0|1 overrides.
