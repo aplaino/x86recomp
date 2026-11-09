@@ -63,7 +63,12 @@ void ShowHostWindow(SDL_Window* w) {
     const char* e = Env("HIDDEN");
     return e && *e && *e != '0';
   }();
-  if (!hidden) RunOnUiThread([&] { SDL_ShowWindow(w); });
+  // Raised too, to take keyboard focus (macOS grants it when the app may
+  // activate, as when launched through LaunchServices).
+  if (!hidden) RunOnUiThread([&] {
+    SDL_ShowWindow(w);
+    if (!Background()) SDL_RaiseWindow(w);
+  });
 }
 
 namespace {
@@ -151,6 +156,7 @@ struct Clip {
   bool on = false;
   int32_t l = 0, t = 0, r = 0, b = 0;  // screen coordinates
   uint32_t hwnd = 0;
+  bool captured = false;  // GameConfig::capture_cursor's, not the game's
 };
 Clip g_clip;
 uint32_t g_capture = 0;  // SetCapture
@@ -436,6 +442,30 @@ void AttachClip() {
   if (grab && !Background()) SetRelativeMouse(grab, true);
 }
 
+// GameConfig::capture_cursor: the focused window's client area as the clip
+// rectangle (unless the game has clipped the cursor itself), released when
+// the window loses focus.
+void CaptureCursor(uint32_t hwnd, bool on) {
+  SDL_Window* sdl = nullptr;
+  {
+    std::lock_guard<std::recursive_mutex> l(g_mu);
+    Window* w = Win(hwnd);
+    if (!w || !w->sdl) return;
+    if (on) {
+      if (g_clip.on) return;
+      int ox, oy, cw, ch;
+      WindowOrigin(hwnd, &ox, &oy);
+      ClientSize(*w, &cw, &ch);
+      g_clip = {true, ox, oy, ox + cw, oy + ch, 0, true};
+      return;  // AttachClip grabs
+    }
+    if (!g_clip.captured) return;
+    if (g_clip.hwnd) sdl = w->sdl;
+    g_clip = {};
+  }
+  if (sdl) SetRelativeMouse(sdl, false);
+}
+
 void ActivateApp(uint32_t hwnd, bool active) {
   {
     std::lock_guard<std::recursive_mutex> l(g_mu);
@@ -468,13 +498,24 @@ void HandleSdlEvent(const SDL_Event& e) {
       if (uint32_t h = HwndForSdl(e.window.windowID)) Post(h, WM_CLOSE, 0, 0);
       break;
     case SDL_EVENT_WINDOW_FOCUS_GAINED:
+      std::fprintf(stderr, "user32: host window %u focused\n", unsigned(e.window.windowID));
+      if (uint32_t h = HwndForSdl(e.window.windowID); h && Game().capture_cursor) CaptureCursor(h, true);
       AttachClip();
       if (uint32_t h = HwndForSdl(e.window.windowID)) ActivateApp(h, true);
       break;
     case SDL_EVENT_WINDOW_FOCUS_LOST:
+      std::fprintf(stderr, "user32: host window %u lost focus\n", unsigned(e.window.windowID));
       if (uint32_t h = HwndForSdl(e.window.windowID)) {
-        // Release keys so nothing stays stuck while we're away.
-        for (int vk = 0; vk < 256; vk++) g_key_down[vk] = 0;
+        // Release keys so nothing stays stuck while we're away, DirectInput's
+        // too (it reports changes, and would keep a held key down).
+        for (int vk = 0; vk < 256; vk++) {
+          if (!g_key_down[vk]) continue;
+          bool ext;
+          const uint8_t sc = ScanCodeForVk(uint8_t(vk), &ext);
+          if (sc) EmitRawInput(RawInput::Key, uint8_t(sc | (ext ? 0x80 : 0)), 0);
+          g_key_down[vk] = 0;
+        }
+        if (Game().capture_cursor) CaptureCursor(h, false);
         ActivateApp(h, false);
       }
       break;
