@@ -112,6 +112,15 @@ target_compile_features(lazy_mem_test PRIVATE cxx_std_20)
 target_link_libraries(lazy_mem_test PRIVATE Threads::Threads)
 add_test(NAME lazy_mem COMMAND lazy_mem_test)
 
+# wmvcore_test: the Windows Media synchronous reader (hle/wmvcore.cpp)
+# called through its import thunk and COM vtables in a guest arena, on MP3
+# files it writes; portable.
+if(TARGET recomp_wmvcore)
+  add_executable(wmvcore_test wmvcore_test.cpp)
+  target_link_libraries(wmvcore_test PRIVATE recomp_runtime recomp_wmvcore)
+  add_test(NAME wmvcore COMMAND wmvcore_test)
+endif()
+
 # lift_semantics_test checks the integer/flag helpers in lifted.h against
 # the host CPU the same way.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")

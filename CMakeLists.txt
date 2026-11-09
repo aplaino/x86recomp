@@ -190,6 +190,11 @@ if(FFMPEG_FOUND)
   # Bink video (binkw32) on ffmpeg; audio through the Miles mixer.
   add_library(recomp_bink SHARED src/runtime/hle/binkw32.cpp)
   target_link_libraries(recomp_bink PUBLIC recomp_mss32)
+
+  # The Windows Media Format SDK's synchronous reader (wmvcore) on ffmpeg:
+  # audio files decoded to PCM.
+  add_library(recomp_wmvcore SHARED src/runtime/hle/wmvcore.cpp)
+  target_link_libraries(recomp_wmvcore PUBLIC recomp_runtime PRIVATE PkgConfig::FFMPEG)
 endif()
 
 # HLSL (D3DX 9's dialect) to GLSL (runtime/hlsl/hlsl.h); no HLE in it,
