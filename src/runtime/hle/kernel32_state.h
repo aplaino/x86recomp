@@ -14,6 +14,8 @@
 namespace recomp {
 
 inline constexpr uint32_t kGuestPid = 0x1000;
+// The process that started the guest, as process snapshots report it.
+inline constexpr uint32_t kGuestParentPid = 0x0FFC;
 // Where the game believes it is installed (GameConfig::guest_dir) and the
 // full guest path of its EXE.
 const std::string& GuestGameDir();
@@ -79,10 +81,15 @@ GuestHeap* FindHeap(gaddr handle);
 
 // Kernel object handles. Values are small multiples of 4, as on Windows.
 struct KObject {
-  enum class Type { File, Event, Mutex, Semaphore, Thread, Mapping, Find, StdIo, Socket };
+  enum class Type { File, Event, Mutex, Semaphore, Thread, Mapping, Find, StdIo, Socket, Snapshot, Process };
   explicit KObject(Type t) : type(t) {}
   virtual ~KObject() = default;
   Type type;
+};
+
+struct ProcessObject : KObject {
+  explicit ProcessObject(uint32_t p) : KObject(Type::Process), pid(p) {}
+  uint32_t pid;
 };
 
 uint32_t NewHandle(std::shared_ptr<KObject> obj);
@@ -124,6 +131,10 @@ struct Thread;
 // SetEvent (or PulseEvent) on an event handle from host code (WinMM
 // timers). False if `h` is not an event.
 bool SignalEventHandle(uint32_t h, bool pulse);
+
+// Wakes the main thread if it is blocked in a wait, so that it pumps host
+// events (see RunOnUiThread).
+void WakeMainThreadWait();
 // A wait for any of several objects takes, among such events set at once,
 // the one set first (Windows: the lowest index). For DirectSound position
 // notifications.

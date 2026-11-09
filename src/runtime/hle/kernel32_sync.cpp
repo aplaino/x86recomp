@@ -27,6 +27,7 @@
 
 #include "runtime/hle/hle.h"
 #include "runtime/hle/kernel32_state.h"
+#include "runtime/hle/user32_window.h"
 #include "runtime/hle/win32.h"
 #include "runtime/perf.h"
 #include "runtime/platform.h"
@@ -45,6 +46,7 @@ struct Sleeper {
   std::condition_variable cv;
 };
 thread_local Sleeper t_sleeper;
+Sleeper* g_main_sleeper = nullptr;  // the main thread's, once it has waited
 
 struct Waitable : KObject {
   using KObject::KObject;
@@ -167,6 +169,7 @@ uint32_t WaitObjects(const std::vector<std::shared_ptr<Waitable>>& objs,
     o->Waiting(tid, true);
     o->sleepers.push_back(me);
   }
+  if (OnMainThread()) g_main_sleeper = me;
   for (;;) {
     if (wait_all) {
       bool all = true;
@@ -198,6 +201,19 @@ uint32_t WaitObjects(const std::vector<std::shared_ptr<Waitable>>& objs,
         }
     }
     if (timeout_ms == 0) return kWaitTimeout;
+    if (OnMainThread() && PumpInWaits()) {
+      // Another thread drives a window: run its window calls and post its
+      // events from here, in slices, until the wait is satisfied.
+      auto slice = std::chrono::steady_clock::now() + std::chrono::milliseconds(10);
+      if (timeout_ms != kInfinite && deadline < slice) slice = deadline;
+      me->cv.wait_until(l, slice);
+      l.unlock();
+      PumpHostEvents();
+      l.lock();
+      if (timeout_ms != kInfinite && std::chrono::steady_clock::now() >= deadline)
+        return kWaitTimeout;
+      continue;
+    }
     if (timeout_ms == kInfinite) {
       me->cv.wait(l);
     } else if (me->cv.wait_until(l, deadline) == std::cv_status::timeout) {
@@ -213,6 +229,11 @@ void SignalChanged(const Waitable& o) {
 }
 
 }  // namespace
+
+void WakeMainThreadWait() {
+  std::lock_guard<std::mutex> l(g_wait_mu);
+  if (g_main_sleeper) g_main_sleeper->cv.notify_one();
+}
 
 bool SignalEventHandle(uint32_t h, bool pulse) {
   auto e = std::dynamic_pointer_cast<EventObject>(GetHandle(h));
@@ -319,11 +340,11 @@ HLE64("kernel32.dll", ResetEvent, 1) {
 
 // ---- mutexes ----------------------------------------------------------------
 
-HLE("kernel32.dll", CreateMutexA, 3) {
+uint32_t CreateMutex(const Ctx& c, bool wide) {
   GuestSyncPoint sync;
   bool own = Arg(c, 1);
   uint32_t tid = CurrentThread()->tid;
-  uint32_t h = CreateNamed(NameOf(Arg(c, 2)), [] {
+  uint32_t h = CreateNamed(NameOf(Arg(c, 2), wide), [] {
     return std::make_shared<MutexObject>();
   });
   if (own) {
@@ -333,6 +354,9 @@ HLE("kernel32.dll", CreateMutexA, 3) {
   }
   return h;
 }
+
+HLE("kernel32.dll", CreateMutexA, 3) { return CreateMutex(c, false); }
+HLE("kernel32.dll", CreateMutexW, 3) { return CreateMutex(c, true); }
 
 // OpenMutexA/OpenFileMappingA(access, inherit, name): a new handle to an
 // existing named object of that type.
@@ -756,13 +780,22 @@ HLE("kernel32.dll", GetThreadContext, 2) {
 }
 
 HLE("kernel32.dll", OpenProcess, 3) {
-  SetLastError(kErrorAccessDenied);
-  return 0;
+  // Only the guest and its parent (the processes snapshots report) open.
+  uint32_t pid = uint32_t(Arg(c, 2));
+  if (pid != kGuestPid && pid != kGuestParentPid) {
+    SetLastError(kErrorAccessDenied);
+    return 0;
+  }
+  return NewHandle(std::make_shared<ProcessObject>(pid));
 }
 
+// Process snapshots list only the guest itself (see Process32FirstW).
 HLE("kernel32.dll", CreateToolhelp32Snapshot, 2) {
-  SetLastError(kErrorAccessDenied);
-  return 0xFFFFFFFF;
+  if (!(Arg(c, 0) & 2 /*TH32CS_SNAPPROCESS*/)) {
+    SetLastError(kErrorAccessDenied);
+    return 0xFFFFFFFF;
+  }
+  return NewHandle(std::make_shared<KObject>(KObject::Type::Snapshot));
 }
 HLE("kernel32.dll", Thread32First, 2) { return 0; }
 HLE("kernel32.dll", Thread32Next, 2) { return 0; }

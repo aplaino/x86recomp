@@ -22,6 +22,8 @@
 
 #include <SDL3/SDL.h>
 
+#include <type_traits>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -52,6 +54,17 @@
 namespace recomp::gfx {
 
 namespace {
+
+// Claiming a window makes its Metal view and layer, an AppKit call that
+// belongs on the main thread; a device made on another thread (a game that
+// renders from the thread that made its window) has it run there. The
+// runtime keeps the main thread pumping events while such a thread works.
+template <class F>
+void OnMainThread(F&& f) {
+  if (SDL_IsMainThread()) return f();
+  auto call = [](void* p) { (*static_cast<std::remove_reference_t<F>*>(p))(); };
+  if (!SDL_RunOnMainThread(call, &f, true)) WarnF("gfx: SDL_RunOnMainThread: %s\n", SDL_GetError());
+}
 
 // ---- uniform blocks (layouts mirror the shaders')
 
@@ -356,7 +369,9 @@ class GpuDevice final : public Device {
       WarnF("gfx: SDL_CreateGPUDevice: %s\n", SDL_GetError());
       return false;
     }
-    if (!SDL_ClaimWindowForGPUDevice(dev_, window_)) {
+    bool claimed = false;
+    OnMainThread([&] { claimed = SDL_ClaimWindowForGPUDevice(dev_, window_); });
+    if (!claimed) {
       WarnF("gfx: SDL_ClaimWindowForGPUDevice: %s\n", SDL_GetError());
       return false;
     }
@@ -450,7 +465,7 @@ class GpuDevice final : public Device {
       if (b) SDL_ReleaseGPUTransferBuffer(dev_, b);
     if (vs_) SDL_ReleaseGPUShader(dev_, vs_);
     if (fs_) SDL_ReleaseGPUShader(dev_, fs_);
-    SDL_ReleaseWindowFromGPUDevice(dev_, window_);
+    OnMainThread([&] { SDL_ReleaseWindowFromGPUDevice(dev_, window_); });
     SDL_DestroyGPUDevice(dev_);
   }
 
@@ -484,7 +499,9 @@ class GpuDevice final : public Device {
         next_show_ns_ = 0;
       }
     }
-    SDL_SetGPUSwapchainParameters(dev_, window_, SDL_GPU_SWAPCHAINCOMPOSITION_SDR, mode);
+    OnMainThread([&] {
+      SDL_SetGPUSwapchainParameters(dev_, window_, SDL_GPU_SWAPCHAINCOMPOSITION_SDR, mode);
+    });
     // Both start black, as a fresh D3D swap chain does.
     for (SDL_GPUTexture* t : {backbuffer_, front_}) {
       SetPass(t, nullptr);
@@ -1206,7 +1223,24 @@ void r_color0(inout vec4 c) {
       sh.samplers = std::max(sh.samplers, smp.reg + 1);
     }
     bool vertex = prog.stage == hlsl::Stage::Vertex;
-    std::string glsl = "#version 450\n" + Prelude(prog.stage, sh.samplers) + prog.glsl;
+    sh.sh = CompileShader(sh.stage, sh.samplers, "#version 450\n" + Prelude(prog.stage, sh.samplers) + prog.glsl);
+    // D3D9 drops a pixel shader's depth output when no depth buffer is
+    // bound; Metal refuses such a pipeline, so those get a variant whose
+    // depth write goes nowhere.
+    if (prog.writes_depth) {
+      std::string g = prog.glsl;
+      for (size_t at = 0; (at = g.find("gl_FragDepth =", at)) != std::string::npos;)
+        g.replace(at, 14, "r_dropped_depth =");
+      sh.no_depth = CompileShader(sh.stage, sh.samplers, "#version 450\n" + Prelude(prog.stage, sh.samplers) +
+                                          "float r_dropped_depth;\n" + g);
+    }
+    ShaderId id = next_id_++;
+    shaders_[id] = sh;
+    return id;
+  }
+
+  SDL_GPUShader* CompileShader(hlsl::Stage stage, uint32_t samplers, const std::string& glsl) {
+    bool vertex = stage == hlsl::Stage::Vertex;
     std::vector<uint32_t> spirv;
     std::string log;
     if (!GlslToSpirv(glsl, vertex ? ShaderStage::Vertex : ShaderStage::Fragment, &spirv, &log)) {
@@ -1228,14 +1262,12 @@ void r_color0(inout vec4 c) {
     si.format = SDL_GPU_SHADERFORMAT_SPIRV;
 #endif
     si.stage = vertex ? SDL_GPU_SHADERSTAGE_VERTEX : SDL_GPU_SHADERSTAGE_FRAGMENT;
-    si.num_samplers = sh.samplers;
+    si.num_samplers = samplers;
     si.num_storage_buffers = vertex ? 1 : 0;
     si.num_uniform_buffers = 3;
-    sh.sh = SDL_CreateGPUShader(dev_, &si);
-    if (!sh.sh) FatalF("gfx: SDL_CreateGPUShader (translated): %s", SDL_GetError());
-    ShaderId id = next_id_++;
-    shaders_[id] = sh;
-    return id;
+    SDL_GPUShader* out = SDL_CreateGPUShader(dev_, &si);
+    if (!out) FatalF("gfx: SDL_CreateGPUShader (translated): %s", SDL_GetError());
+    return out;
   }
 
   void DestroyShader(ShaderId id) override {
@@ -1253,6 +1285,7 @@ void r_color0(inout vec4 c) {
       }
     }
     SDL_ReleaseGPUShader(dev_, it->second.sh);
+    if (it->second.no_depth) SDL_ReleaseGPUShader(dev_, it->second.no_depth);
     shaders_.erase(it);
   }
 
@@ -1502,6 +1535,7 @@ void r_color0(inout vec4 c) {
   };
   struct Shader {
     SDL_GPUShader* sh = nullptr;
+    SDL_GPUShader* no_depth = nullptr;  // pixel shaders writing depth: without it
     hlsl::Stage stage = hlsl::Stage::Vertex;
     size_t inputs = 0;
     std::array<hlsl::ParamType, 16> sampler_type{};  // per register; Void if unused
@@ -2142,6 +2176,9 @@ void main() {
       if (after - now > refresh_ns_ / 4) next_show_ns_ = after + refresh_ns_;
       if (!ok || !sc) return;
     } else if (!SDL_WaitAndAcquireGPUSwapchainTexture(cmd, window_, &sc, &sw, &sh) || !sc) {
+      static bool warned = false;
+      if (!warned) WarnF("gfx: no swapchain texture: %s\n", SDL_GetError());
+      warned = true;
       return;
     }
     const Rect r = FitRect(bb_w_, bb_h_, int(sw), int(sh));
@@ -2788,8 +2825,10 @@ void main() {
     auto it = shader_pipelines_.find(k);
     if (it != shader_pipelines_.end()) return it->second;
     const uint8_t alpha[3] = {k.src_a, k.dst_a, k.op_a};
-    SDL_GPUGraphicsPipeline* p =
-        CreatePipeline(k.k, shaders_.at(k.vs).sh, shaders_.at(k.ps).sh, alpha);
+    const Shader& ps = shaders_.at(k.ps);
+    SDL_GPUShader* fs =
+        ps.no_depth && k.k.depth_format == SDL_GPU_TEXTUREFORMAT_INVALID ? ps.no_depth : ps.sh;
+    SDL_GPUGraphicsPipeline* p = CreatePipeline(k.k, shaders_.at(k.vs).sh, fs, alpha);
     shader_pipelines_[k] = p;
     return p;
   }

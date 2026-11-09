@@ -66,6 +66,10 @@ struct GameConfig {
   // window over the whole display, at once (a window just being shown or
   // resized can miss the animation and stay a window).
   bool mac_fullscreen_space = false;
+  // DirectInput lists a gamepad slot even with no pad connected, so that a
+  // pad connected later (over Bluetooth) still works. Games that switch
+  // their button prompts to a gamepad's when one is listed turn this off.
+  bool pad_slot_without_pad = true;
 
   // Post-process anti-aliasing (SMAA 1x) of the presented frame (SDL_GPU
   // backend); <ID>_AA=0|1 overrides.

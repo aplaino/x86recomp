@@ -93,7 +93,8 @@ vec4 r_depth_tex(int n, vec4 v) { return (r_clip_mask.z & (1 << n)) != 0 ? vec4(
 #define R_INT_BINDING set = 0, binding = 1
 #define R_SAMPLER_BINDING(n) set = 0, binding = n
 // r_alpha: x ALPHAFUNC, y ALPHAREF; z bit n: sampler n reads a reversed
-// depth texture; w 1 if the depth buffer is reversed (reversed_z.h).
+// depth texture, bit 16 + n: a depth-stencil format one (R_SHADOW); w 1 if
+// the depth buffer is reversed (reversed_z.h).
 layout(std140, set = 0, binding = 2) uniform r_ps_state { ivec4 r_alpha; vec4 r_bias[4]; vec4 r_vscale; };
 // The depth a shader writes, as a reversed depth buffer stores it.
 #define R_DEPTH_OUT(d) (r_alpha.w != 0 ? 1.0 - (d) : (d))
@@ -101,6 +102,12 @@ layout(std140, set = 0, binding = 2) uniform r_ps_state { ivec4 r_alpha; vec4 r_
 // texture (depth in r, g and b), 1 - the depth stored.
 vec4 r_depth_tex(int n, vec4 v) { return (r_alpha.z & (1 << n)) != 0 ? vec4(1.0 - v.rgb, v.a) : v; }
 #define R_DEPTH_TEX(n, v) r_depth_tex(n, v)
+// D3D9's read of a depth-stencil format texture (a hardware shadow map):
+// 1 where the coordinate's depth is at most the depth stored, else 0.
+vec4 r_shadow(int n, vec4 v, float ref) {
+  return (r_alpha.z & (1 << (16 + n))) != 0 ? vec4(ref <= v.r ? 1.0 : 0.0) : v;
+}
+#define R_SHADOW(n, v, ref) r_shadow(n, v, ref)
 // Metal samplers have no LOD bias: the shader adds it where the level is
 // implicit.
 #define R_BIAS(n) r_bias[(n) >> 2][(n) & 3]

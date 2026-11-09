@@ -109,5 +109,11 @@ HLE("winmm.dll", timeKillEvent, 1) {
   return TIMERR_NOERROR;
 }
 
+// No WinMM wave devices: audio goes through DirectSound or Miles (the
+// mixer), and middleware that probes WinMM as one output among several
+// sees none and uses another.
+HLE("winmm.dll", waveOutGetNumDevs, 0) { return 0; }
+HLE("winmm.dll", waveInGetNumDevs, 0) { return 0; }
+
 }  // namespace
 }  // namespace recomp::hle

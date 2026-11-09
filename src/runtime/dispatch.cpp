@@ -241,6 +241,14 @@ void FaultHandler(int sig, siginfo_t* si, void* uc) {
                       "FATAL: %s: host fault at %p (runtime bug)\n",
                       sig == SIGSEGV ? "SIGSEGV" : "SIGBUS", si->si_addr);
   (void)!write(2, buf, size_t(n));
+  // Why the guest did not get the fault, and where it was (the registers
+  // as last spilled to the context).
+  if (guest32 && CurrentThread()) {
+    n = std::snprintf(buf, sizeof buf, "  not raised in the guest: fault depth %d, HLE depth %d\n",
+                      t_fault_depth, hle::t_hle_depth);
+    (void)!write(2, buf, size_t(n));
+    DumpGuestState(CurrentThread()->ctx);
+  }
   char name[32] = "?";
   pthread_getname_np(pthread_self(), name, sizeof name);
   n = std::snprintf(buf, sizeof buf, "  thread '%s', pc %p, caller:\n", name,

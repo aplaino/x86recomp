@@ -594,3 +594,11 @@ HLE("user32.dll", wsprintfA, kCdecl) {
 }  // namespace
 }  // namespace hle
 }  // namespace recomp
+
+namespace recomp { namespace hle {
+
+// No message is ever reported pending here; a caller that polls this should
+// idle rather than spin.
+HLE("user32.dll", GetQueueStatus, 1) { return 0; }
+
+}} // compat

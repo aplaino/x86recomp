@@ -33,11 +33,12 @@ bool ParseSemantic(const std::string& s, Semantic* out) {
 int VaryingLocation(Semantic s) {
   // TEXCOORD0-15 0-15, COLOR0-1 16-17, FOG 18, NORMAL0-1 19-20, TANGENT0
   // 21, BINORMAL0 22, BLENDWEIGHT0 23, BLENDINDICES0 24, POSITION1-3
-  // 25-27, PSIZE as a varying 28, DEPTH 29: within the 32 locations that
+  // 25-27, PSIZE as a varying 28, DEPTH 29, COLOR2-3 30-31 (shader model 3
+  // allows colours past the two fixed-function ones): the 32 locations that
   // Vulkan and Metal implementations offer.
   switch (s.usage) {
     case kTexcoord: return s.index < 16 ? int(s.index) : -1;
-    case kColor: return s.index < 2 ? 16 + int(s.index) : -1;
+    case kColor: return s.index < 2 ? 16 + int(s.index) : s.index < 4 ? 28 + int(s.index) : -1;
     case kFog: return s.index == 0 ? 18 : -1;
     case kNormal: return s.index < 2 ? 19 + int(s.index) : -1;
     case kTangent: return s.index == 0 ? 21 : -1;

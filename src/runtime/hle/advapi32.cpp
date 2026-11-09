@@ -393,4 +393,27 @@ HLE("crypt32.dll", CryptUnprotectData, 7) {
 }
 
 }  // namespace
+// Name aliases for ordinals (some games import by name).
+HLE_NAMED("oleaut32.dll","SysAllocString", SysAllocStringName, 1) { return Arg(c, 0) ? com::AllocBstr(GWStr(Arg(c, 0))) : 0; }
+HLE_NAMED("oleaut32.dll","SysFreeString", SysFreeStringName, 1) { com::FreeBstr(Arg(c, 0)); return 0; }
+HLE("ole32.dll", CoFreeUnusedLibraries, 0) { return 0; }
+
 }  // namespace recomp::hle
+
+namespace recomp { namespace hle {
+
+HLE("advapi32.dll", GetUserNameW, 2) {
+  const char* n = "Player"; uint32_t cap = Arg(c,1)?Rd32(Arg(c,1)):0; gaddr buf=Arg(c,0);
+  if (buf && cap >= 7) { for(int i=0;i<7;i++) Wr16(buf+i*2,(unsigned char)(i<6?n[i]:0)); if(Arg(c,1)) Wr32(Arg(c,1),7); return 1; }
+  if (Arg(c,1)) Wr32(Arg(c,1),7); SetLastError(122); return 0;
+}
+HLE("advapi32.dll", CryptAcquireContextW, 5) { if(Arg(c,0)) Wr32(Arg(c,0),1); return 1; }
+HLE("advapi32.dll", CryptReleaseContext, 2) { return 1; }
+HLE("advapi32.dll", CryptGenRandom, 3) {
+  static std::random_device rd;
+  gaddr b = Arg(c, 2);
+  for (uint32_t i = 0, n = uint32_t(Arg(c, 1)); b && i < n; i++) Wr8(b + i, uint8_t(rd()));
+  return 1;
+}
+
+}} // compat

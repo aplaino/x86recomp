@@ -106,8 +106,8 @@ constexpr GUID kIID_IDirect3DVertexBuffer9 = {0xB64BB1B5, 0xFD70, 0x4DF6, {0xBF,
 constexpr GUID kIID_IDirect3DIndexBuffer9 = {0x7C9DD65E, 0xD3F7, 0x4529, {0xAC, 0xEE, 0x78, 0x58, 0x30, 0xAC, 0xDE, 0x35}};
 
 // D3DQUERYTYPE
-constexpr uint32_t D3DQUERYTYPE_EVENT = 8;
-constexpr uint32_t D3DISSUE_END = 0x1;
+constexpr uint32_t D3DQUERYTYPE_EVENT = 8, D3DQUERYTYPE_OCCLUSION = 9;
+constexpr uint32_t D3DISSUE_END = 0x1, D3DISSUE_BEGIN = 0x2;
 
 uint32_t SurfaceVtable() {
   return com::Vtable(
@@ -408,7 +408,9 @@ uint32_t NewTexture(Device& d, uint32_t device, bool cube, uint32_t w, uint32_t 
                     uint32_t* out) {
   *out = 0;
   gfx::Format f = FormatFromD3D(fmt);
-  const bool intz = fmt == D3DFMT_INTZ && (usage & D3DUSAGE_DEPTHSTENCIL) &&
+  // A depth texture: INTZ, or a depth-stencil format, which D3D9 reads by
+  // comparing (gfx::Device::SetDepthCompare).
+  const bool intz = (fmt == D3DFMT_INTZ || IsDepthFormat(f)) && (usage & D3DUSAGE_DEPTHSTENCIL) &&
                     pool == D3DPOOL_DEFAULT && !cube;
   if (intz) levels = 1;
   if (!w || !h || f == gfx::Format::Unknown || (IsDepthFormat(f) && !intz) ||
@@ -443,6 +445,7 @@ uint32_t NewTexture(Device& d, uint32_t device, bool cube, uint32_t w, uint32_t 
   if (intz) {
     t->tex = d.gfx->CreateDepthTexture(int(w), int(h), &t->depth);
     if (!t->tex) return 0x8876017C;  // D3DERR_OUTOFVIDEOMEMORY
+    if (fmt != D3DFMT_INTZ) d.gfx->SetDepthCompare(t->tex, true);
   } else if (pool != D3DPOOL_SYSTEMMEM && pool != D3DPOOL_SCRATCH) {
     t->tex = cube ? d.gfx->CreateCubeTexture(int(w), int(levels), f)
                   : d.gfx->CreateTexture(int(w), int(h), int(levels), f,
@@ -723,11 +726,53 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::CreatePixelShader", D3DDev9_CreatePixel
   return CreateShader(c, true);
 }
 
+// (pRenderTarget, pDestSurface): the target's pixels into a system-memory
+// surface of the same size and format (an offscreen plain surface or a
+// level of a SYSTEMMEM texture).
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetRenderTargetData", D3DDev9_GetRenderTargetData, 3) {
+  Device* d = Dev(c);
+  Surface* src = com::As<Surface>(Arg(c, 1));
+  Surface* dst = com::As<Surface>(Arg(c, 2));
+  if (!src || !dst || src->desc.Width != dst->desc.Width ||
+      src->desc.Height != dst->desc.Height || src->desc.Format != dst->desc.Format)
+    return D3DERR_INVALIDCALL;
+  gfx::ColorTarget from[4] = {};
+  switch (src->kind) {
+    case Surface::Kind::BackBuffer: break;
+    case Surface::Kind::RenderTarget: from[0].tex = src->tex; break;
+    case Surface::Kind::TextureLevel:
+      if (src->texture->cube || !src->texture->tex) return D3DERR_INVALIDCALL;
+      from[0] = {src->texture->tex, int(src->level)};
+      break;
+    default: return D3DERR_INVALIDCALL;
+  }
+  uint32_t mem, pitch;
+  if (dst->kind == Surface::Kind::Offscreen) {
+    mem = dst->mem;
+    pitch = dst->pitch;
+  } else if (dst->kind == Surface::Kind::TextureLevel && dst->texture->pool == D3DPOOL_SYSTEMMEM) {
+    Texture::Level& l = dst->texture->At(uint32_t(dst->face), uint32_t(dst->level));
+    LevelMem(*dst->texture, l);
+    mem = l.mem;
+    pitch = l.pitch;
+  } else {
+    return D3DERR_INVALIDCALL;
+  }
+  d->gfx->SetRenderTargets(from, 0);
+  d->gfx->ReadBack({0, 0, int32_t(src->desc.Width), int32_t(src->desc.Height)}, GPtr(mem), pitch,
+                   FormatFromD3D(src->desc.Format));
+  BindTargets(*d);
+  return D3D_OK;
+}
+
 // (Type, ppQuery): null ppQuery only asks whether the type is supported.
-// Only EVENT so far: it is signalled at once (draws are not tracked).
+// EVENT and OCCLUSION so far, answered at once (draws are not tracked): an
+// event is signalled, an occlusion query finds its draws fully visible.
+// Games take occlusion support for granted (every D3D9 GPU has it) and
+// keep the query without checking the result.
 HLE_NAMED("d3d9.dll", "IDirect3DDevice9::CreateQuery", D3DDev9_CreateQuery, 3) {
   uint32_t type = Arg(c, 1), out = Arg(c, 2);
-  if (type != D3DQUERYTYPE_EVENT) {
+  if (type != D3DQUERYTYPE_EVENT && type != D3DQUERYTYPE_OCCLUSION) {
     RECOMP_TRACE("  CreateQuery type %u: not available\n", type);
     if (out) Wr32(out, 0);
     return D3DERR_NOTAVAILABLE;
@@ -1237,14 +1282,21 @@ HLE_NAMED("d3d9.dll", "IDirect3DQuery9::GetType", D3DQuery9_GetType, 1) {
   return Obj<Query>(c, "IDirect3DQuery9")->type;
 }
 HLE_NAMED("d3d9.dll", "IDirect3DQuery9::GetDataSize", D3DQuery9_GetDataSize, 1) {
-  return sizeof(BOOL);  // EVENT
+  return 4;  // EVENT: BOOL; OCCLUSION: DWORD
 }
+// An occlusion query is bracketed by BEGIN and END; an event takes END only.
 HLE_NAMED("d3d9.dll", "IDirect3DQuery9::Issue", D3DQuery9_Issue, 2) {
-  return Arg(c, 1) == D3DISSUE_END ? D3D_OK : D3DERR_INVALIDCALL;
+  const uint32_t flags = Arg(c, 1);
+  if (flags == D3DISSUE_END) return D3D_OK;
+  if (flags == D3DISSUE_BEGIN && Obj<Query>(c, "IDirect3DQuery9")->type == D3DQUERYTYPE_OCCLUSION)
+    return D3D_OK;
+  return D3DERR_INVALIDCALL;
 }
-// (pData, dwSize, dwGetDataFlags): an EVENT is always signalled.
+// (pData, dwSize, dwGetDataFlags): an EVENT is always signalled; an
+// OCCLUSION query reports its draws visible (a count no draw reaches).
 HLE_NAMED("d3d9.dll", "IDirect3DQuery9::GetData", D3DQuery9_GetData, 4) {
-  if (Arg(c, 1) && Arg(c, 2) >= sizeof(BOOL)) Wr32(Arg(c, 1), 1);
+  const bool occlusion = Obj<Query>(c, "IDirect3DQuery9")->type == D3DQUERYTYPE_OCCLUSION;
+  if (Arg(c, 1) && Arg(c, 2) >= 4) Wr32(Arg(c, 1), occlusion ? 0x7FFFFFFF : 1);
   return D3D_OK;
 }
 
