@@ -109,7 +109,7 @@ target_link_libraries(recomp_ucrt PUBLIC recomp_win32 PRIVATE coremath)
 # msvc_crt::<name>` (src/win32/msvc_crt*.cpp, docs/msvc_crt.md). Static:
 # they replace lifted functions, and go into the program with them.
 add_library(recomp_msvc_crt STATIC src/win32/msvc_crt.cpp src/win32/msvc_crt_vc6.cpp
-            src/win32/msvc_crt_vc6_output.cpp)
+            src/win32/msvc_crt_vc6_ld12.cpp src/win32/msvc_crt_vc6_output.cpp)
 target_include_directories(recomp_msvc_crt PUBLIC src)
 target_link_libraries(recomp_msvc_crt PUBLIC recomp_x87)
 # They work on guest memory, whose faults reach the program's SEH as from
