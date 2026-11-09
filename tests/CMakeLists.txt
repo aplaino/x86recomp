@@ -113,12 +113,13 @@ target_link_libraries(lazy_mem_test PRIVATE Threads::Threads)
 add_test(NAME lazy_mem COMMAND lazy_mem_test)
 
 # wmvcore_test: the Windows Media synchronous reader (hle/wmvcore.cpp)
-# called through its import thunk and COM vtables in a guest arena, on MP3
-# files it writes; portable.
+# called through its import thunk and COM vtables in a guest arena, on the
+# MP3 files in wmvcore/ (decoded PCM against the signals they were encoded
+# from); portable.
 if(TARGET recomp_wmvcore)
   add_executable(wmvcore_test wmvcore_test.cpp)
-  target_link_libraries(wmvcore_test PRIVATE recomp_runtime recomp_wmvcore)
-  add_test(NAME wmvcore COMMAND wmvcore_test)
+  target_link_libraries(wmvcore_test PRIVATE recomp_runtime recomp_wmvcore Threads::Threads)
+  add_test(NAME wmvcore COMMAND wmvcore_test ${CMAKE_CURRENT_SOURCE_DIR}/wmvcore)
 endif()
 
 # lift_semantics_test checks the integer/flag helpers in lifted.h against
