@@ -13,9 +13,11 @@
 // for quads may include a trailing partial one. Vertices and index order may be laid out differently; the
 // expanded primitives may not differ.
 //
-// Also: every UNSIGNED_BYTE colour component comes back as the same byte,
-// and draws from the arrays as streams (Context::ArrayDraw) expand to the
-// same primitives where the context offers them.
+// Also: every UNSIGNED_BYTE colour component comes back as the same byte;
+// draws from the arrays as streams (Context::ArrayDraw) expand to the
+// same primitives where the context offers them; every state call that
+// changes what a draw does changes the state draws get (DrawState), and
+// glLockArraysEXT locks the vertex and normal streams as they were set.
 // Scenarios come from raw mt19937 output, which the standard fixes.
 
 #include <algorithm>
@@ -24,6 +26,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <random>
 #include <vector>
 
@@ -567,6 +570,120 @@ int main() {
     Check(sc, dev, before, mode, verts, seq, lighting, ntex);
     array_draws++;
   }
+  // Each state call changes the state draws get, after one taken before
+  // it (the context derives it again only when told it changed).
+  {
+    g::Context s(&dev, 640, 480);
+    uint32_t tex[2];
+    s.GenTextures(2, tex);
+    for (uint32_t t : tex) {
+      s.BindTexture(g::TEXTURE_2D, t);
+      s.TexImage2D(g::TEXTURE_2D, 0, g::RGBA, 1, 1, 0, g::RGBA, g::UNSIGNED_BYTE, &white);
+    }
+    const float one[4] = {0.5f, 0.25f, 1, 1};
+    const double plane[4] = {1, 2, 3, 4};
+    const float add = float(g::ADD), nearest = float(g::NEAREST), start = 5;
+    struct Call {
+      const char* what;
+      std::function<void()> f;
+    };
+    const Call calls[] = {
+        {"glEnable(GL_DEPTH_TEST)", [&] { s.SetEnabled(g::DEPTH_TEST, true); }},
+        {"glEnable(GL_BLEND)", [&] { s.SetEnabled(g::BLEND, true); }},
+        {"glBlendFunc", [&] { s.BlendFunc(g::SRC_ALPHA, g::ONE); }},
+        {"glAlphaFunc", [&] { s.AlphaFunc(g::GREATER, 0.5f); }},
+        {"glDepthFunc", [&] { s.DepthFunc(g::EQUAL); }},
+        {"glDepthMask", [&] { s.DepthMask(false); }},
+        {"glColorMask", [&] { s.ColorMask(true, false, true, true); }},
+        {"glEnable(GL_CULL_FACE)", [&] { s.SetEnabled(g::CULL_FACE, true); }},
+        {"glCullFace", [&] { s.CullFace(g::FRONT); }},
+        {"glFrontFace", [&] { s.FrontFace(g::CW); }},
+        {"glPolygonMode", [&] { s.PolygonMode(g::FRONT_AND_BACK, g::LINE); }},
+        {"glPolygonOffset", [&] {  // takes effect once enabled
+           s.PolygonOffset(1, 2);
+           s.SetEnabled(g::POLYGON_OFFSET_FILL, true);
+         }},
+        {"glPolygonOffset (enabled)", [&] { s.PolygonOffset(2, 3); }},
+        {"glShadeModel", [&] { s.ShadeModel(g::FLAT); }},
+        {"glEnable(GL_SCISSOR_TEST)", [&] { s.SetEnabled(g::SCISSOR_TEST, true); }},
+        {"glScissor", [&] { s.Scissor(1, 2, 30, 40); }},
+        {"glEnable(GL_STENCIL_TEST)", [&] { s.SetEnabled(g::STENCIL_TEST, true); }},
+        {"glStencilFunc", [&] { s.StencilFunc(g::EQUAL, 3, 0xF); }},
+        {"glStencilOp", [&] { s.StencilOp(g::KEEP, g::INCR, g::DECR); }},
+        {"glStencilMask", [&] { s.StencilMask(0x7); }},
+        {"glEnable(GL_FOG)", [&] { s.SetEnabled(g::FOG, true); }},
+        {"glFog", [&] { s.Fog(g::FOG_START, &start); }},
+        {"glEnable(GL_CLIP_PLANE0)", [&] { s.SetEnabled(g::CLIP_PLANE0, true); }},
+        {"glClipPlane", [&] { s.ClipPlane(g::CLIP_PLANE0, plane); }},
+        {"glEnable(GL_LIGHTING)", [&] { s.SetEnabled(g::LIGHTING, true); }},
+        {"glEnable(GL_LIGHT0)", [&] { s.SetEnabled(g::LIGHT0, true); }},
+        {"glLight", [&] { s.Light(g::LIGHT0, g::DIFFUSE, one); }},
+        {"glLightModel", [&] { s.LightModel(g::LIGHT_MODEL_AMBIENT, one); }},
+        {"glMaterial", [&] { s.Material(g::FRONT, g::DIFFUSE, one); }},
+        {"glEnable(GL_COLOR_MATERIAL)", [&] { s.SetEnabled(g::COLOR_MATERIAL, true); }},
+        {"glColorMaterial", [&] { s.ColorMaterial(g::FRONT, g::DIFFUSE); }},
+        {"glEnable(GL_TEXTURE_2D)", [&] { s.SetEnabled(g::TEXTURE_2D, true); }},
+        {"glBindTexture", [&] { s.BindTexture(g::TEXTURE_2D, tex[0]); }},
+        {"glTexParameter", [&] { s.TexParameter(g::TEXTURE_2D, g::TEXTURE_MAG_FILTER, &nearest); }},
+        {"glTexEnv", [&] { s.TexEnv(g::TEXTURE_ENV, g::TEXTURE_ENV_MODE, &add); }},
+        {"glTexImage2D", [&] {
+           s.TexImage2D(g::TEXTURE_2D, 0, g::RGB, 1, 1, 0, g::RGB, g::UNSIGNED_BYTE, &white);
+         }},
+        {"glDeleteTextures", [&] { s.DeleteTextures(1, &tex[0]); }},
+        {"Resize (the scissor's flip)", [&] { s.Resize(320, 240); }},
+    };
+    int sets;
+    for (const Call& c : calls) {
+      const gfx::FfState before = s.DrawState(&sets);
+      c.f();
+      if (std::memcmp(&before, &s.DrawState(&sets), sizeof before) == 0) {
+        std::printf("%s: the state draws get did not change\n", c.what);
+        g_failures++;
+      }
+    }
+  }
+
+  // glLockArraysEXT: the vertex and normal streams as set at the lock
+  // are locked, until either changes or the unlock; others never are.
+  {
+    std::vector<float> xyz(12, 0.0f), nrm(12, 0.0f);
+    std::vector<uint8_t> rgba(16, 0xFF);
+    gl.SetEnabled(g::LIGHTING, true);
+    gl.VertexPointer(3, g::FLOAT, 0, xyz.data());
+    gl.NormalPointer(g::FLOAT, 0, nrm.data());
+    gl.ColorPointer(4, g::UNSIGNED_BYTE, 0, rgba.data());
+    for (g::Enum a : {g::VERTEX_ARRAY, g::NORMAL_ARRAY, g::COLOR_ARRAY}) gl.SetClientState(a, true);
+    for (int u = 0; u < g::Context::kUnits; u++) {
+      gl.ActiveTexture(g::Enum(g::TEXTURE0 + u));
+      gl.SetEnabled(g::TEXTURE_2D, false);
+    }
+    gfx::FfDraw d;
+    const gfx::FfState* st;
+    auto locks = [&](uint32_t* pos, uint32_t* normal) {
+      d = {};
+      if (!gl.ArrayDraw(g::TRIANGLES, 0, 2, &d, &st)) return false;
+      *pos = d.position.lock;
+      *normal = d.normal.lock;
+      return d.diffuse.lock == 0;
+    };
+    uint32_t p0, n0, p1, n1;
+    bool ok = locks(&p0, &n0) && p0 == 0 && n0 == 0;
+    gl.LockArrays(0, 4);
+    ok = ok && locks(&p0, &n0) && p0 != 0 && n0 == p0 && locks(&p1, &n1) && p1 == p0 && n1 == n0;
+    gl.VertexPointer(3, g::FLOAT, 0, xyz.data() + 3);
+    ok = ok && locks(&p1, &n1) && p1 == 0 && n1 == n0;
+    gl.UnlockArrays();
+    ok = ok && locks(&p1, &n1) && p1 == 0 && n1 == 0;
+    gl.LockArrays(0, 4);
+    ok = ok && locks(&p1, &n1) && p1 != 0 && p1 != p0;
+    gl.UnlockArrays();
+    gl.SetEnabled(g::LIGHTING, false);
+    if (!ok) {
+      std::printf("glLockArraysEXT: the streams' locks are wrong\n");
+      g_failures++;
+    }
+  }
+
   std::printf("%d failures, %d array draws\n", g_failures, array_draws);
   if (array_draws < 500) return 1;
   return g_failures ? 1 : 0;

@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <numbers>
@@ -358,6 +359,7 @@ Context::~Context() {
 }
 
 void Context::Resize(int fb_w, int fb_h) {
+  Changed();
   if (fb_w == fb_w_ && fb_h == fb_h_) return;
   fb_w_ = fb_w;
   fb_h_ = fb_h;
@@ -460,6 +462,7 @@ bool Context::GetFloatv(Enum pname, float* out) {
 // ---- fixed-function state ---------------------------------------------------------
 
 void Context::SetEnabled(Enum cap, bool on) {
+  Changed();
   switch (cap) {
     case TEXTURE_2D: units_[active_unit_].tex2d = on; return;
     case CULL_FACE: case FOG: case DEPTH_TEST: case STENCIL_TEST: case ALPHA_TEST:
@@ -491,17 +494,19 @@ bool Context::IsEnabled(Enum cap) const {
 }
 
 void Context::BlendFunc(Enum s, Enum d) {
+  Changed();
   blend_src_ = s;
   blend_dst_ = d;
 }
 
 void Context::AlphaFunc(Enum f, float ref) {
+  Changed();
   alpha_func_ = f;
   alpha_ref_ = std::clamp(ref, 0.0f, 1.0f);
 }
 
-void Context::DepthFunc(Enum f) { depth_func_ = f; }
-void Context::DepthMask(bool on) { depth_mask_ = on; }
+void Context::DepthFunc(Enum f) { Changed(); depth_func_ = f; }
+void Context::DepthMask(bool on) { Changed(); depth_mask_ = on; }
 
 void Context::DepthRange(double n, double f) {
   depth_near_ = std::clamp(n, 0.0, 1.0);
@@ -510,23 +515,26 @@ void Context::DepthRange(double n, double f) {
 }
 
 void Context::ColorMask(bool r, bool g, bool b, bool a) {
+  Changed();
   color_mask_ = (r ? 1u : 0) | (g ? 2u : 0) | (b ? 4u : 0) | (a ? 8u : 0);
 }
 
-void Context::CullFace(Enum f) { cull_face_ = f; }
-void Context::FrontFace(Enum d) { front_face_ = d; }
+void Context::CullFace(Enum f) { Changed(); cull_face_ = f; }
+void Context::FrontFace(Enum d) { Changed(); front_face_ = d; }
 
 void Context::PolygonMode(Enum face, Enum mode) {
+  Changed();
   if (face != FRONT_AND_BACK) Unsupported("glPolygonMode face", face);
   polygon_mode_ = mode;
 }
 
 void Context::PolygonOffset(float factor, float units) {
+  Changed();
   offset_factor_ = factor;
   offset_units_ = units;
 }
 
-void Context::ShadeModel(Enum m) { shade_model_ = m; }
+void Context::ShadeModel(Enum m) { Changed(); shade_model_ = m; }
 
 void Context::Viewport(int x, int y, int w, int h) {
   vp_[0] = x;
@@ -537,6 +545,7 @@ void Context::Viewport(int x, int y, int w, int h) {
 }
 
 void Context::Scissor(int x, int y, int w, int h) {
+  Changed();
   scissor_[0] = x;
   scissor_[1] = y;
   scissor_[2] = w;
@@ -544,20 +553,23 @@ void Context::Scissor(int x, int y, int w, int h) {
 }
 
 void Context::StencilFunc(Enum f, int ref, uint32_t mask) {
+  Changed();
   stencil_func_ = f;
   stencil_ref_ = ref;
   stencil_mask_ = mask;
 }
 
 void Context::StencilOp(Enum fail, Enum zfail, Enum zpass) {
+  Changed();
   stencil_fail_ = fail;
   stencil_zfail_ = zfail;
   stencil_zpass_ = zpass;
 }
 
-void Context::StencilMask(uint32_t m) { stencil_write_ = m; }
+void Context::StencilMask(uint32_t m) { Changed(); stencil_write_ = m; }
 
 void Context::Fog(Enum pname, const float* v) {
+  Changed();
   switch (pname) {
     case FOG_MODE: fog_mode_ = Enum(v[0]); break;
     case FOG_DENSITY: fog_density_ = v[0]; break;
@@ -570,6 +582,7 @@ void Context::Fog(Enum pname, const float* v) {
 
 // Planes are given in object space and kept in eye space, as GL does.
 void Context::ClipPlane(Enum plane, const double eqn[4]) {
+  Changed();
   int i = int(plane - CLIP_PLANE0);
   if (i < 0 || i >= 6) return Unsupported("glClipPlane", plane);
   // eye = object plane * inverse(modelview): solve by transposed inverse.
@@ -649,6 +662,7 @@ void Context::PixelStore(Enum pname, int v) {
 // ---- lighting ---------------------------------------------------------------------
 
 void Context::Light(Enum light, Enum pname, const float* v) {
+  Changed();
   int i = int(light - LIGHT0);
   if (i < 0 || i >= 8) return Error(INVALID_ENUM, "glLight");
   LightState& L = lights_[i];
@@ -675,6 +689,7 @@ void Context::Light(Enum light, Enum pname, const float* v) {
 }
 
 void Context::LightModel(Enum pname, const float* v) {
+  Changed();
   switch (pname) {
     case LIGHT_MODEL_AMBIENT: std::copy_n(v, 4, model_ambient_); break;
     case LIGHT_MODEL_LOCAL_VIEWER:
@@ -686,6 +701,7 @@ void Context::LightModel(Enum pname, const float* v) {
 }
 
 void Context::Material(Enum face, Enum pname, const float* v) {
+  Changed();
   if (face == BACK) return;  // one-sided lighting: back materials unused
   switch (pname) {
     case AMBIENT: std::copy_n(v, 4, mat_ambient_); break;
@@ -702,6 +718,7 @@ void Context::Material(Enum face, Enum pname, const float* v) {
 }
 
 void Context::ColorMaterial(Enum face, Enum mode) {
+  Changed();
   if (face == BACK) return Unsupported("glColorMaterial face", face);
   color_material_ = mode;
 }
@@ -842,6 +859,8 @@ void Context::RS(uint32_t s, uint32_t v) { ff_.rs[s] = v; }
 void Context::TSS(uint32_t stage, uint32_t type, uint32_t v) { ff_.tss[stage][type] = v; }
 
 void Context::ApplyState() {
+  if (!state_dirty_) return;
+  state_dirty_ = false;
   bool depth = enabled_.count(DEPTH_TEST);
   RS(RS_ZENABLE, depth ? 1 : 0);
   RS(RS_ZWRITEENABLE, depth && depth_mask_ ? 1 : 0);
@@ -965,6 +984,8 @@ Context::Texture* Context::Bound(int unit) {
 }
 
 int Context::ApplyTextures() {
+  if (!tex_dirty_) return tex_sets_;
+  tex_dirty_ = false;
   int last = -1;
   bool live[kUnits] = {};
   for (int u = 0; u < kUnits; u++) {
@@ -1101,7 +1122,8 @@ int Context::ApplyTextures() {
     TSS(end, TSS_COLOROP, TOP_DISABLE);
     TSS(end, TSS_ALPHAOP, TOP_DISABLE);
   }
-  return last + 1;
+  tex_sets_ = last + 1;
+  return tex_sets_;
 }
 
 // ---- textures --------------------------------------------------------------------
@@ -1115,6 +1137,7 @@ void Context::GenTextures(int n, uint32_t* names) {
 }
 
 void Context::DeleteTextures(int n, const uint32_t* names) {
+  Changed();
   for (int i = 0; i < n; i++) {
     uint32_t name = names[i];
     if (!name) continue;
@@ -1129,12 +1152,14 @@ void Context::DeleteTextures(int n, const uint32_t* names) {
 }
 
 void Context::BindTexture(Enum target, uint32_t name) {
+  Changed();
   if (target != TEXTURE_2D) return Unsupported("glBindTexture target", target);
   if (!textures_.count(name)) textures_[name] = new Texture;  // GL creates on bind
   units_[active_unit_].bound = name;
 }
 
 void Context::TexParameter(Enum target, Enum pname, const float* v) {
+  Changed();
   if (target != TEXTURE_2D) return Unsupported("glTexParameter target", target);
   Texture* t = Bound(active_unit_);
   Enum e = Enum(v[0]);
@@ -1222,6 +1247,7 @@ bool ToArgb(Enum internal, Enum format, int w, int h, int row_length, int alignm
 
 void Context::TexImage2D(Enum target, int level, Enum internal, int w, int h, int border,
                          Enum format, Enum type, const void* pixels) {
+  Changed();
   if (target != TEXTURE_2D) return Unsupported("glTexImage2D target", target);
   if (border) return Unsupported("glTexImage2D border", Enum(border));
   if (type != UNSIGNED_BYTE) return Unsupported("glTexImage2D type", type);
@@ -1256,6 +1282,7 @@ void Context::TexImage2D(Enum target, int level, Enum internal, int w, int h, in
 
 void Context::TexSubImage2D(Enum target, int level, int x, int y, int w, int h,
                             Enum format, Enum type, const void* pixels) {
+  Changed();
   if (target != TEXTURE_2D) return Unsupported("glTexSubImage2D target", target);
   if (type != UNSIGNED_BYTE) return Unsupported("glTexSubImage2D type", type);
   Texture* t = Bound(active_unit_);
@@ -1272,6 +1299,7 @@ void Context::TexSubImage2D(Enum target, int level, int x, int y, int w, int h,
 
 void Context::CompressedTexImage2D(Enum target, int level, Enum internal, int w, int h,
                                    int border, int size, const void* data) {
+  Changed();
   if (target != TEXTURE_2D || border) return Unsupported("glCompressedTexImage2D", target);
   gfx::Format fmt;
   bool alpha = true;
@@ -1306,6 +1334,7 @@ void Context::CompressedTexImage2D(Enum target, int level, Enum internal, int w,
 }
 
 void Context::TexEnv(Enum target, Enum pname, const float* v) {
+  Changed();
   if (target != TEXTURE_ENV) return Unsupported("glTexEnv target", target);
   Unit& u = units_[active_unit_];
   Enum e = Enum(v[0]);
@@ -1348,6 +1377,20 @@ void Context::VertexPointer(int size, Enum type, int stride, const void* p) {
   vertex_.type = type;
   vertex_.stride = stride;
   vertex_.ptr = static_cast<const uint8_t*>(p);
+}
+
+void Context::LockArrays(int first, int count) {
+  if (first < 0 || count <= 0) return Error(INVALID_VALUE, "glLockArraysEXT");
+  if (lock_) return Error(INVALID_OPERATION, "glLockArraysEXT");
+  static std::atomic<uint32_t> serial{0};  // unique across contexts sharing a device
+  do lock_ = ++serial; while (!lock_);
+  locked_vertex_ = vertex_;
+  locked_normal_ = normal_;
+}
+
+void Context::UnlockArrays() {
+  if (!lock_) return Error(INVALID_OPERATION, "glUnlockArraysEXT");
+  lock_ = 0;
 }
 
 void Context::ColorPointer(int size, Enum type, int stride, const void* p) {
@@ -1433,6 +1476,11 @@ bool Context::ArrayDraw(Enum mode, uint32_t first, uint32_t last, gfx::FfDraw* d
   };
   if (!on(vertex_) || vertex_.type != FLOAT || vertex_.size < 3) return false;
   d->position = stream(vertex_);
+  auto locked = [&](const Array& a, const Array& at_lock) {
+    return lock_ && a.ptr == at_lock.ptr && a.size == at_lock.size && a.type == at_lock.type &&
+           a.stride == at_lock.stride ? lock_ : 0u;
+  };
+  d->position.lock = locked(vertex_, locked_vertex_);
   if (vertex_.size > 3)
     for (uint32_t v = first; v <= last; v++)
       if (Load<float>(vertex_.ptr + size_t(v) * d->position.stride + 12, false) != 1)
@@ -1444,6 +1492,7 @@ bool Context::ArrayDraw(Enum mode, uint32_t first, uint32_t last, gfx::FfDraw* d
   if (enabled_.count(LIGHTING)) {
     if (!on(normal_) || normal_.type != FLOAT) return false;
     d->normal = stream(normal_);
+    d->normal.lock = locked(normal_, locked_normal_);
     d->fvf |= FVF_NORMAL;
   }
   int sets;

@@ -203,6 +203,12 @@ class Context {
   void TexCoordPointer(int size, Enum type, int stride, const void* p);
   void NormalPointer(Enum type, int stride, const void* p);
   void SetClientState(Enum array, bool on);
+  // EXT_compiled_vertex_array: while locked, the vertex and normal arrays
+  // as set at the lock keep their contents, and draws pass their streams
+  // to the device as locked (gfx::FfStream::lock: uploaded once), as
+  // drivers of the extension's day cached those arrays only.
+  void LockArrays(int first, int count);
+  void UnlockArrays();
   void DrawArrays(Enum mode, int first, int count);
   void DrawElements(Enum mode, int count, Enum type, const void* indices);
   void ArrayElement(int i);
@@ -260,6 +266,9 @@ class Context {
   void Unsupported(const char* what, Enum v);
   float* Top();  // current matrix
   void MarkMatrix();
+  // The state ApplyState and ApplyTextures derive changed: the next draw
+  // derives it again.
+  void Changed() { state_dirty_ = tex_dirty_ = true; }
   Texture* Bound(int unit);
   void ApplyState();
   int ApplyTextures();  // returns the texture coordinate sets needed
@@ -339,6 +348,8 @@ class Context {
 
   // arrays and immediate mode
   Array vertex_, color_, normal_, texcoord_[kUnits];
+  uint32_t lock_ = 0;  // the current lock's FfStream::lock, 0 when unlocked
+  Array locked_vertex_, locked_normal_;  // as at the lock
   bool in_begin_ = false;
   Enum begin_mode_ = POINTS;
   std::vector<Vtx> immediate_;
@@ -351,6 +362,8 @@ class Context {
 
   // the device state draws have (ApplyState, ApplyTextures, ApplyMatrices)
   gfx::FfState ff_ = gfx::DefaultFfState();
+  bool state_dirty_ = true, tex_dirty_ = true;
+  int tex_sets_ = 0;  // ApplyTextures' last result
   std::vector<uint8_t> draw_buf_;  // a draw's vertices and indices
   std::vector<uint16_t> draw_idx_;
   bool scene_ = false;
