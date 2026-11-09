@@ -14,6 +14,7 @@
 
 #include "ppc/fatal.h"
 #include "xbox360/config.h"
+#include "xbox360/edram.h"
 #include "xbox360/hle.h"
 #include "xbox360/kernel.h"
 
@@ -74,16 +75,6 @@ void SetReg(uint32_t r, uint32_t v) { Wr32(kGpuRegisters + 4 * r, v); }
 
 uint32_t Bswap(uint32_t v) { return v >> 24 | (v >> 8 & 0xFF00) | (v << 8 & 0xFF0000) | v << 24; }
 
-// The endian swap of a GPU address's low two bits: none, bytes in
-// halfwords, bytes in words, halfwords in words.
-uint32_t GpuSwap(uint32_t v, uint32_t endian) {
-  switch (endian & 3) {
-    case 1: return (v << 8 & 0xFF00FF00) | (v >> 8 & 0x00FF00FF);
-    case 2: return Bswap(v);
-    case 3: return v >> 16 | v << 16;
-    default: return v;
-  }
-}
 // The GPU's own word accesses: little-endian, after the swap.
 uint32_t GpuRead(uint32_t addr) {
   return GpuSwap(Bswap(Rd32(PhysicalToVirtual(addr & ~3u))), addr);
@@ -290,9 +281,13 @@ void Type3(Reader& in, uint32_t packet) {
     }
     case kPm4DrawIndx:
     case kPm4DrawIndx2:
+      // A draw in copy mode is a resolve; other draws: nothing is drawn yet.
+      in.Skip(count);
+      if ((GpuRegister(kRegRbModeControl) & 7) == kEdramModeCopy) Resolve();
+      return;
     case kPm4ImLoad:
     case kPm4ImLoadImmediate:
-      // Draws and shader loads: nothing is drawn yet.
+      // Shader loads: nothing is drawn yet.
       in.Skip(count);
       return;
     case kPm4VizQuery:
@@ -417,6 +412,15 @@ void VerticalBlank(void*) {
 
 uint32_t GpuRegister(uint32_t r) { return Rd32(kGpuRegisters + 4 * r); }
 
+uint32_t GpuSwap(uint32_t v, uint32_t endian) {
+  switch (endian & 3) {
+    case 1: return (v << 8 & 0xFF00FF00) | (v >> 8 & 0x00FF00FF);
+    case 2: return Bswap(v);
+    case 3: return v >> 16 | v << 16;
+    default: return v;
+  }
+}
+
 // Registers whose power-on values titles read: EDRAM timing, BC control
 // and the HSIO aligner (Xenia's), the interrupt status (a vertical blank),
 // the viewport's size.
@@ -427,6 +431,7 @@ void StartGpu() {
   SetReg(kRegRbHsioAligner, 0x00BBBBBB);
   SetReg(kRegInterruptStatus, 1);
   SetReg(kRegD1ModeViewportSize, m.width << 16 | m.height);
+  StartEdram();
   CreateSystemThread(CommandProcessor, nullptr);
   CreateSystemThread(VerticalBlank, nullptr);
 }

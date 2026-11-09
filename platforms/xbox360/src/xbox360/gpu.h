@@ -21,10 +21,17 @@ constexpr uint32_t kRegCpRbRptr = 0x01C4, kRegCpRbWptr = 0x01C5, kRegScratchUmsk
                    kRegRbEdramTiming = 0x0F00, kRegRbBcControl = 0x0F01,
                    kRegRbHsioAligner = 0x0F2D, kRegD1ModeVCounter = 0x194C,
                    kRegInterruptStatus = 0x1951, kRegD1ModeViewportSize = 0x1961,
-                   kRegVgtEventInitiator = 0x21F9, kRegRbSampleCountAddr = 0x2325,
+                   kRegVgtEventInitiator = 0x21F9, kRegRbModeControl = 0x2208,
+                   kRegRbSampleCountAddr = 0x2325,
                    kRegShaderConstantFetch = 0x4800;
 
 uint32_t GpuRegister(uint32_t r);
+// RB_MODECONTROL's EDRAM mode for a resolve.
+constexpr uint32_t kEdramModeCopy = 6;
+
+// The endian swap the low two bits of a GPU address (or an endian field)
+// name: none, bytes in halfwords, bytes in words, halfwords in words.
+uint32_t GpuSwap(uint32_t v, uint32_t endian);
 
 // The GPU at power-on: its registers, the vertical blank. Once, after the
 // process's TLS layout is known (it starts system threads).

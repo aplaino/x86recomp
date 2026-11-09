@@ -234,8 +234,14 @@ and titles see of the Xenos, without drawing yet (docs/xenos.md):
   asked.
 - The vertical blank is another kernel thread, at the video mode's rate.
   Both deliver the graphics interrupt callback as a DPC.
+- The EDRAM is a buffer on the host GPU in the console's layout
+  (`edram.{h,cpp}`); a draw in copy mode is a resolve, compute work that
+  copies a target's rectangle to a tiled texture in memory (raw or
+  converted) and clears it. The device has no window
+  (gfx::CreateGpuDevice(nullptr)) and is made at power-on.
 Drawing (milestone 5) adds a renderer behind the same command processor,
-through gfx::Device.
+through gfx::Device: shaders translated to GLSL programs, drawing into
+host targets that load from and store to the EDRAM buffer.
 
 ### Audio
 The audio render driver (`src/xbox360/audio.{h,cpp}`, docs/xboxkrnl.md
@@ -349,4 +355,7 @@ builds and runs them too.
    controllers, and the imports no title had called yet (xam's network
    stack, structured exceptions, bug checks) are done.
 5. Xenos: drawing, shaders and presentation through gfx::Device, behind
-   the command processor (which runs the ring buffer already).
+   the command processor (which runs the ring buffer already). In
+   progress: the EDRAM and resolves (copies, conversions, sample
+   averages, clears) are done; presentation, shader translation and
+   draws are next.

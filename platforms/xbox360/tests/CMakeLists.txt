@@ -45,8 +45,9 @@ file(WRITE "${_title_game}/Sub/other.dat" "x")
 add_test(NAME xbox360_runtime_data COMMAND "${CMAKE_COMMAND}" -E rm -rf "${_title_data}")
 set_tests_properties(xbox360_runtime_data PROPERTIES FIXTURES_SETUP xbox360_runtime_data)
 add_test(NAME xbox360_runtime COMMAND xbox360_title "${_bin}/title.xex" "${_title_game}" "${_title_data}")
+# Its resolves run on a GPU device (lavapipe will do), without a window.
 set_tests_properties(xbox360_runtime PROPERTIES FAIL_REGULAR_EXPRESSION "FAIL|fatal" TIMEOUT 120
-                     ENVIRONMENT "SDL_AUDIO_DRIVER=dummy;SDL_ASSERT=abort"
+                     ENVIRONMENT "SDL_AUDIO_DRIVER=dummy;SDL_ASSERT=abort;SDL_VIDEO_DRIVER=offscreen"
                      FIXTURES_REQUIRED xbox360_runtime_data)
 # The title settings it wrote, saved in the profile's directory: the
 # 1000-byte one, the one written again (10 bytes), the empty one.

@@ -29,6 +29,7 @@ add_library(recomp_xbox360 SHARED
   src/xbox360/cpu.cpp
   src/xbox360/format.cpp
   src/xbox360/fs.cpp
+  src/xbox360/edram.cpp
   src/xbox360/gpu.cpp
   src/xbox360/hle.cpp
   src/xbox360/memory.cpp
@@ -38,7 +39,7 @@ add_library(recomp_xbox360 SHARED
   src/xbox360/thread.cpp
   src/xbox360/xma.cpp)
 target_link_libraries(recomp_xbox360 PUBLIC recomp_ppc recomp_xbox360_image Threads::Threads
-                      PRIVATE SDL3::SDL3 PkgConfig::FFMPEG recomp_log)
+                      PRIVATE SDL3::SDL3 PkgConfig::FFMPEG recomp_log recomp_gfx)
 recomp_bundle(recomp_xbox360)
 
 # The HLE modules, one shared library per system module, found by nothing

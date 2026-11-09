@@ -59,9 +59,60 @@ console can settle.
   for each processor in the mask), SET_CONSTANT, SET_CONSTANT2,
   SET_SHADER_CONSTANTS, LOAD_ALU_CONSTANT, VIZ_QUERY, the bin masks,
   CONTEXT_UPDATE, WAIT_IB_PFD_COMPLETE, WAIT_FOR_IDLE, INVALIDATE_STATE.
-- Draws (DRAW_INDX, DRAW_INDX_2) and shader loads (IM_LOAD,
+- A draw (DRAW_INDX, DRAW_INDX_2) while RB_MODECONTROL's EDRAM mode is
+  6 (copy) is a resolve (below). Other draws and shader loads (IM_LOAD,
   IM_LOAD_IMMEDIATE) are consumed and nothing is drawn yet.
 - Any other opcode is fatal and names it.
+
+## EDRAM and resolves
+What follows is Xenia's (its render target cache and resolve shaders);
+none of it has been checked on a console yet.
+- The EDRAM is 2048 tiles of 80x16 32-bit samples (10 MiB); tile
+  numbers wrap at 2048. A target's base (RB_COLOR_INFO, RB_COLOR1-3_INFO,
+  RB_DEPTH_INFO) is a tile; its rows of tiles are RB_SURFACE_INFO's pitch
+  in samples over 80, twice that for 64-bit formats, whose tiles hold
+  40x16 samples (Xenia says the real 64-bit layout is not known). With
+  2x MSAA a pixel's samples 0 and 1 are one above the other; with 4x,
+  samples 2 and 3 are right of 0 and 1. A depth tile's two 40-sample
+  halves are swapped. The runtime keeps the EDRAM in this layout in a
+  buffer on the host GPU, so a target written in one format reads in
+  another as it would there.
+- A resolve's rectangle is the three points of vertex fetch 0 (32-bit
+  floats, its endian swap): the corners plus half a pixel when
+  PA_SU_VTX_CNTL's pixel centres are D3D's, in 16.8 fixed point rounded
+  to nearest, then (v + 127) >> 8; moved by the window offset when
+  PA_SU_SC_MODE_CNTL enables it; clipped to the window scissor (moved
+  by the offset unless its TL bit 31 says not to) within the screen
+  scissor; widened to whole blocks of 8 pixels and clipped to the
+  surface's pitch.
+- RB_COPY_CONTROL: the source (colour target 0-3, or 4 and up for depth),
+  the sample (0-3, or 4-6: samples 0-1, 2-3 or 0-3 averaged; narrowed to
+  what the surface has, depth never averaged), clears of the colour
+  (source 0-3 only) and depth targets, and the copy command (0 raw, 1
+  convert; 2 and 3 are fatal).
+- The copy goes first: each pixel of the rectangle to the texel with the
+  same coordinates of a 2D tiled texture at RB_COPY_DEST_BASE (which D3D
+  biases so that this holds, even before the texture), its pitch
+  RB_COPY_DEST_PITCH's aligned to 32, in RB_COPY_DEST_INFO's format and
+  endian swap. Where the target's format and the texture's hold the same
+  bits (8888 as 8_8_8_8, 2_10_10_10, the float formats as themselves) and
+  one sample is copied without an exponent bias, the words go as they
+  are, with copy_dest_swap trading red and blue in place; otherwise the
+  samples are unpacked (7e3 floats, 16_16 fixed point over [-32, 32] with
+  missing channels 0), averaged, scaled by 2^exp_bias, red and blue
+  swapped, and packed (unorm rounded to nearest, 16_16 as unorm).
+  Depth goes as its words. 3D destinations, the gamma format's
+  conversion and formats outside these are fatal, not implemented yet.
+- Then the clears, of every sample in the rectangle: the colour target
+  to RB_COLOR_CLEAR as the EDRAM holds it (red in the low byte of 8888;
+  a 64-bit target's low word, RB_COLOR_CLEAR_LO the high one, an order
+  Xenia is not sure of), the depth target to RB_DEPTH_CLEAR.
+- The tiled address of texel (x, y) (Tiled2D in edram.cpp): macro tiles
+  of 32x32 texels in rows of pitch / 32, micro tiles of 8x2, with bank
+  ((y >> 4) & 1) and pipe (((x >> 3) & 3) ^ ((y >> 3) & 1) << 1) bits
+  interleaved into the offset.
+- The resolve runs as compute on the host GPU and its texels are in
+  memory when the packet is done; the device exists from power-on.
 
 ## Interrupts and the vertical blank
 - VdSetGraphicsInterruptCallback(callback, argument): the callback runs as

@@ -947,6 +947,116 @@ void GraphicsInterrupt(u32 source, u32 user) {
   interrupt_irql = *(volatile uint8_t*)(uintptr_t)(pcr() + 0x18);
 }
 
+// Resolves, with the ring buffer `rb` at its write position `w`: EDRAM
+// cleared through them and copied to tiled textures. Nothing is drawn,
+// so the targets hold only what the clears put there.
+static u32 ResolveAt(volatile u32* rb, u32 w, u32 verts, u32 control, u32 dest, u32 dest_info) {
+  rb[w++] = Type0(0x4800, 2);  // vertex fetch 0: three points, 8 in 32
+  rb[w++] = verts | 3;
+  rb[w++] = 6 << 2 | 2;
+  rb[w++] = Type0(0x2318, 4);  // RB_COPY_CONTROL, DEST_BASE, DEST_PITCH, DEST_INFO
+  rb[w++] = control;
+  rb[w++] = dest;
+  rb[w++] = 64 | 64 << 16;
+  rb[w++] = dest_info;
+  rb[w++] = Type3(0x36, 1);  // DRAW_INDX_2: a rectangle list, 3 auto indices
+  rb[w++] = 3 << 16 | 2 << 6 | 8;
+  return w;
+}
+
+static void Resolves(volatile u32* rb, u32 w, u32 data, u32 pdata) {
+  u32 mem = MmAllocatePhysicalMemoryEx(0, 0x10000, kPageReadWrite, 0, 0, 0x1000), pmem = MmGetPhysicalAddress(mem);
+  u32 scratch = pmem, dest = pmem + 0x4000, depth = pmem + 0x8000;
+  for (u32 k = 0; k < 0x3000; k++) *At(mem + 4 * k) = 0xAAAAAAAA;
+  // The rectangles' corners, pixel centres at integers (PA_SU_VTX_CNTL 0):
+  // the whole 64x64 target, and 8x8 at (8, 16).
+  volatile float* v = (volatile float*)(uintptr_t)(mem + 0xC000);
+  const float corners[12] = {0, 0, 64, 0, 64, 64, 8, 16, 16, 16, 16, 24};
+  for (u32 k = 0; k < 12; k++) v[k] = corners[k];
+  u32 whole = pmem + 0xC000, block = whole + 24;
+  // A 64-pixel pitch without MSAA; colour target 0 at tile 0 (8888),
+  // depth at tile 0x100; scissors open; copy mode.
+  rb[w++] = Type0(0x2000, 3);
+  rb[w++] = 64;
+  rb[w++] = 0;
+  rb[w++] = 0x100;
+  rb[w++] = Type0(0x200E, 2);
+  rb[w++] = 0;
+  rb[w++] = 8192 | 8192 << 16;
+  rb[w++] = Type0(0x2080, 3);
+  rb[w++] = 0;
+  rb[w++] = 0x80000000;
+  rb[w++] = 64 | 64 << 16;
+  rb[w++] = Type0(0x2205, 1);
+  rb[w++] = 0;
+  rb[w++] = Type0(0x2302, 1);
+  rb[w++] = 0;
+  rb[w++] = Type0(0x2208, 1);
+  rb[w++] = 6;
+  rb[w++] = Type0(0x231D, 3);  // RB_DEPTH_CLEAR, RB_COLOR_CLEAR, _LO
+  rb[w++] = 0xABCDEF01;
+  rb[w++] = 0x11223344;
+  rb[w++] = 0;
+  // The target cleared to A, then the block to B (each copy goes to the
+  // scratch texture first, before its clear).
+  w = ResolveAt(rb, w, whole, 0x100, scratch, 6 << 7);
+  rb[w++] = Type0(0x231E, 1);
+  rb[w++] = 0x55667788;
+  w = ResolveAt(rb, w, block, 0x100, scratch, 6 << 7);
+  // The target, red and blue swapped, bytes in words swapped (so this
+  // big-endian CPU reads the swapped value).
+  w = ResolveAt(rb, w, whole, 0, dest, 1u << 24 | 6 << 7 | 2);
+  // The depth target cleared, then copied.
+  w = ResolveAt(rb, w, whole, 0x204, scratch, 6 << 7);
+  w = ResolveAt(rb, w, whole, 4, depth, 6 << 7 | 2);
+  rb[w++] = Type3(0x58, 3);
+  rb[w++] = 0;
+  rb[w++] = (pdata + 0x68) | 2;
+  rb[w++] = 5;
+  *Reg(0x1C5) = w;
+  CHECK(WaitFor(At(data + 0x68), 5));
+  // A is 11223344 (8888 as the EDRAM holds it, red in the low byte), B
+  // 55667788; swapped: 11443322 and 55887766. Texel (8, 16) of a 64-texel
+  // pitch of 4-byte texels is at 0x840 (bank 1, pipe 1), (9, 16) at
+  // 0x844, (8, 17) at 0x850, (15, 23) at 0xB7C; (16, 16) is outside the
+  // block at 0x880.
+  u32 a = 0, b = 0;
+  for (u32 k = 0; k < 0x1000; k++) {
+    u32 t = *At(mem + 0x4000 + 4 * k);
+    a += t == 0x11443322;
+    b += t == 0x55887766;
+  }
+  CHECK(a == 4096 - 64 && b == 64);
+  CHECK(*At(mem + 0x4840) == 0x55887766 && *At(mem + 0x4844) == 0x55887766 && *At(mem + 0x4850) == 0x55887766 &&
+        *At(mem + 0x4B7C) == 0x55887766 && *At(mem + 0x4000) == 0x11443322 && *At(mem + 0x4880) == 0x11443322);
+  u32 d = 0;
+  for (u32 k = 0; k < 0x1000; k++) d += *At(mem + 0x8000 + 4 * k) == 0xABCDEF01;
+  CHECK(d == 4096);
+
+  // A converting copy: a 2x MSAA 7e3 target (format 3, at tile 0x200)
+  // cleared to red 16 (0x380), green 0.375 (0x0C0), blue 2^-9 (0x001, a
+  // denormal: 1/128 of 2^-2), alpha 1 (3), its two samples averaged into
+  // half floats (16_16_16_16_FLOAT, 64-bit texels): 4C00 3600 1800 3C00.
+  u32 wide = MmAllocatePhysicalMemoryEx(0, 0x8000, kPageReadWrite, 0, 0, 0x1000), pwide = MmGetPhysicalAddress(wide);
+  for (u32 k = 0; k < 0x2000; k++) *At(wide + 4 * k) = 0xAAAAAAAA;
+  rb[w++] = Type0(0x2000, 2);
+  rb[w++] = 64 | 1 << 16;
+  rb[w++] = 3 << 16 | 0x200;
+  rb[w++] = Type0(0x231E, 1);
+  rb[w++] = 0xC0130380;
+  w = ResolveAt(rb, w, whole, 0x100, pwide, 32 << 7 | 2);
+  w = ResolveAt(rb, w, whole, 6 << 4, pwide, 32 << 7 | 2);
+  rb[w++] = Type3(0x58, 3);
+  rb[w++] = 0;
+  rb[w++] = (pdata + 0x6C) | 2;
+  rb[w++] = 6;
+  *Reg(0x1C5) = w;
+  CHECK(WaitFor(At(data + 0x6C), 6));
+  u32 h = 0;
+  for (u32 k = 0; k < 0x1000; k++) h += *At(wide + 8 * k) == 0x36004C00 && *At(wide + 8 * k + 4) == 0x3C001800;
+  CHECK(h == 4096);
+}
+
 // Waits up to a second for *p == v.
 static void Gpu(void) {
   CHECK(*Reg(0x1961) == (1280u << 16 | 720) && *Reg(0x1951) == 1);
@@ -1032,6 +1142,7 @@ static void Gpu(void) {
   CHECK(WaitFor(At(data + 0x64), 9) && WaitFor(At(data), w) && *Reg(0x1C4) == w);
   CHECK(query[0] == 0xE8030000 && query[4] == 0xE8030000 && query[1] == 0 && query[3] == 0 && query[7] == 0);
   CHECK(query[8] == 0 && query[12] == 0 && query[15] == 0);
+  Resolves(rb, w, data, pdata);
 }
 
 // A thread that waits on an event and counts itself through.

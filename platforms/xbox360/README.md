@@ -23,8 +23,9 @@ profile settings, notifications, content packages as host directories,
 the XGI and Live apps' messages offline, its network stack with no
 cable) and its message dispatch, timers, controllers through SDL3's
 gamepads, with a GPU command processor that executes a title's ring
-buffer without drawing, audio output through SDL3 and XMA decoding,
-which a test title checks.
+buffer and its resolves (the EDRAM on the host GPU), without drawing
+yet, audio output through SDL3 and XMA decoding, which a test title
+checks.
 
 ## Using it
 
