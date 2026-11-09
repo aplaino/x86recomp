@@ -160,7 +160,8 @@ void KeepWalk(gaddr entry, gaddr fetch, std::shared_ptr<const Code> c) {
 // Whether Resolver::Step does anything for in: the scalar and memory
 // instructions, and the vector ones that write SGPRs (VCC, a
 // v_readfirstlane, a VOP3 with a scalar destination); in code with buffer
-// accesses at 64-bit addresses (vgprs), every one that writes VGPRs too
+// accesses at 64-bit addresses or SGPRs spilled to VGPR lanes
+// (v_writelane_b32) (vgprs), every one that writes VGPRs too
 // (Resolver::vgpr).
 bool Steps(const Instr& in, bool vgprs) {
   switch (in.fmt) {
@@ -184,7 +185,9 @@ void Index(Code& c) {
   c.steps.clear();
   c.fetch_steps.clear();
   bool vgprs = false;
-  for (auto& [pc, in] : c.at) vgprs |= (in.fmt == Fmt::Mubuf || in.fmt == Fmt::Mtbuf) && (in.w0 & 0x8000);
+  for (auto& [pc, in] : c.at)
+    vgprs |= ((in.fmt == Fmt::Mubuf || in.fmt == Fmt::Mtbuf) && (in.w0 & 0x8000)) ||
+             (in.fmt == Fmt::Vop2 && in.op == 2) || (in.fmt == Fmt::Vop3 && in.op == 258);
   for (auto& [pc, in] : c.at)
     if (Steps(in, vgprs)) (c.fetch.count(pc) ? c.fetch_steps : c.steps).emplace_back(pc, in);
 }
@@ -298,6 +301,48 @@ struct Resolver {
   // address (ADDR64) read the range the stage reads from the pointer at
   // known offsets (blocks), as Dyn's loads do.
   Var vgpr[256];
+  // SGPRs spilled to VGPR lanes (v_writelane_b32 at a constant lane) and
+  // restored (v_readlane_b32): each writelane marks its VGPR with a token
+  // (kNone, id from kLaneToken) under which the lanes written so far are
+  // kept; any other write to the VGPR replaces the token, so a restore
+  // finds the value only while the spill stands.
+  struct LaneFact {
+    bool known;
+    uint32_t v;
+    Var var;
+  };
+  static constexpr gaddr kLaneToken = gaddr(1) << 63;
+  gaddr next_lane_token = kLaneToken;
+  std::map<gaddr, std::map<uint32_t, LaneFact>> lanes;
+  void WriteLane(const Instr& in, uint32_t vd, uint32_t src, uint32_t lane_code) {
+    uint32_t lane;
+    const Var old = vgpr[vd & 0xFF];
+    vgpr[vd & 0xFF] = {};
+    if (!Source(s, in, lane_code, &lane) || lane >= 64) return;
+    std::map<uint32_t, LaneFact> kept;
+    if (old.kind == Var::kNone && old.id >= kLaneToken && lanes.count(old.id)) kept = lanes[old.id];
+    LaneFact f{};
+    f.known = Source(s, in, src, &f.v);
+    if (!f.known && src < 128) f.var = s.var[src];
+    kept[lane] = f;
+    const gaddr token = ++next_lane_token;
+    lanes[token] = std::move(kept);
+    vgpr[vd & 0xFF] = {Var::kNone, 0, 0, 0, token};
+  }
+  void ReadLane(const Instr& in, uint32_t sd, uint32_t vsrc, uint32_t lane_code) {
+    uint32_t lane;
+    s.Forget(sd);
+    const Var t = vgpr[vsrc & 0xFF];
+    if (!Source(s, in, lane_code, &lane) || t.kind != Var::kNone || t.id < kLaneToken) return;
+    auto it = lanes.find(t.id);
+    if (it == lanes.end()) return;
+    auto f = it->second.find(lane & 63);
+    if (f == it->second.end()) return;
+    if (f->second.known)
+      s.Set(sd, f->second.v);
+    else
+      s.SetVar(sd, f->second.var);
+  }
   struct Wide {
     gaddr pc, P;
   };
@@ -645,13 +690,25 @@ struct Resolver {
         return true;
       case Fmt::Vop2:
         if (in.op == 1) {  // v_readlane_b32
-          s.Forget((w >> 17) & 0xFF);
+          ReadLane(in, (w >> 17) & 0xFF, (w & 0x1FF) - gcn::kVgpr, (w >> 9) & 0xFF);
+          return true;
+        }
+        if (in.op == 2) {  // v_writelane_b32
+          WriteLane(in, (w >> 17) & 0xFF, w & 0x1FF, (w >> 9) & 0xFF);
           return true;
         }
         return Valu(pc, in, in.op, (w >> 17) & 0xFF, w & 0x1FF, gcn::kVgpr + ((w >> 9) & 0xFF), gcn::kVccLo,
                     gcn::kVccLo);
       case Fmt::Vop3: {
         const uint32_t d = w & 0xFF;
+        if (in.op == 257 && (in.w1 & 0x1FF) >= gcn::kVgpr) {  // v_readlane_b32
+          ReadLane(in, d, (in.w1 & 0x1FF) - gcn::kVgpr, (in.w1 >> 9) & 0x1FF);
+          return true;
+        }
+        if (in.op == 258) {  // v_writelane_b32
+          WriteLane(in, d, in.w1 & 0x1FF, (in.w1 >> 9) & 0x1FF);
+          return true;
+        }
         if (in.op < 256 || in.op == 257 || in.op == 365 || in.op == 366) {
           s.Forget(d), s.Forget(d + 1);
           return true;
@@ -957,6 +1014,9 @@ struct Translator {
   const Resolver& res;
   std::string body, decl, error;
   int max_vgpr = -1;
+  std::set<std::pair<uint32_t, uint32_t>> spill_slots;  // outside waves: SpillLane's (VGPR, lane)
+  std::map<uint32_t, std::set<gaddr>> named_at;        // the instructions that name each VGPR (V())
+  gaddr cur_pc = 0;                                     // the instruction being translated
   std::set<uint32_t> params;           // VS: exported parameters
   std::map<uint32_t, bool> inputs;     // PS: input locations, flat
   std::set<uint32_t> mrts;             // PS: exported targets
@@ -987,6 +1047,7 @@ struct Translator {
 
   std::string V(uint32_t n) {
     max_vgpr = std::max(max_vgpr, int(n));
+    named_at[n].insert(cur_pc);
     return "v" + std::to_string(n) + (wave ? "_" + std::to_string(half) : "");
   }
   // Whether the lane's EXEC bit is set; the lane's index in its wave.
@@ -2055,6 +2116,140 @@ struct Translator {
     return "((" + U(k) + " >> r_sl) & 1u)";
   }
 
+  // Outside waves (one lane per invocation): v_writelane_b32 and
+  // v_readlane_b32 at constant lanes of a VGPR that nothing else reads or
+  // writes (SGPRs spilled to its lanes and restored; checked once the
+  // stage is translated: such a VGPR never goes through V()). Both ignore
+  // EXEC and the value is the wave's, so each (VGPR, lane) is a variable of
+  // its own, r_sp<VGPR>_<lane>. Other cross-lane uses are not translated
+  // yet (false: another instruction).
+  bool SpillLane(gaddr pc, const Instr& in) {
+    const bool vop3 = in.fmt == Fmt::Vop3;
+    uint32_t op = in.op;
+    if (vop3 ? op != 257 && op != 258 : in.fmt != Fmt::Vop2 || (op != 1 && op != 2)) return false;
+    if (vop3) op -= 256;
+    const uint32_t dst = vop3 ? in.w0 & 0xFF : (in.w0 >> 17) & 0xFF;
+    const uint32_t src0 = vop3 ? in.w1 & 0x1FF : in.w0 & 0x1FF;
+    const uint32_t lane_code = vop3 ? (in.w1 >> 9) & 0x1FF : (in.w0 >> 9) & 0xFF;
+    uint32_t lane;
+    Scalars none;
+    if (!Source(none, in, lane_code, &lane)) {
+      Fail(pc, "a lane read or write at a lane not constant outside waves not translated yet");
+      return true;
+    }
+    if (op == 1 && src0 < gcn::kVgpr) {
+      Fail(pc, "a lane read of an SGPR outside waves not translated yet");
+      return true;
+    }
+    const uint32_t vgpr = op == 1 ? src0 - gcn::kVgpr : dst;
+    lane &= 63;
+    spill_slots.insert({vgpr, lane});
+    const std::string slot = "r_sp" + std::to_string(vgpr) + "_" + std::to_string(lane);
+    if (op == 2)
+      Line(slot + " = " + Src(src0, in, pc) + ";");
+    else
+      Line(Dst(dst) + " = " + slot + ";");
+    return true;
+  }
+
+  // Whether SpillLane's slots stand for the lanes exactly: the code has
+  // no backward branch or call (so address order is every path's order),
+  // and for each VGPR with lanes read or written, (1) each v_readlane has
+  // a v_writelane of its lane before it with no other access to the VGPR
+  // in between, which every path to it runs (no branch from before the
+  // write lands past it, up to the read), (2) each other access after a
+  // v_writelane is preceded, after the last one, by an instruction that
+  // only writes the VGPR (a VALU result that reads none of its sources
+  // from it), which every path to the access runs. Other uses before the
+  // first lane write are the VGPR's own.
+  bool SpillsExact() const {
+    if (spill_slots.empty()) return true;
+    const auto& at = res.code().at;
+    std::vector<std::pair<gaddr, gaddr>> branches;  // (source, target)
+    for (auto& [pc, in] : at) {
+      if (in.fmt == Fmt::Sop1 && (in.op == 32 || in.op == 33)) return false;
+      if (in.fmt == Fmt::Sopp && (in.op == 2 || (in.op >= 4 && in.op <= 9))) {
+        const gaddr t = pc + 4 + int64_t(int16_t(in.w0 & 0xFFFF)) * 4;
+        if (t <= pc) return false;
+        branches.push_back({pc, t});
+      }
+    }
+    // Whether a path reaches hi without running lo: a branch from before
+    // lo to a target in (lo, hi].
+    auto skips = [&](gaddr lo, gaddr hi) {
+      for (auto [from, to] : branches)
+        if (from < lo && to > lo && to <= hi) return true;
+      return false;
+    };
+    std::set<uint32_t> vgprs;
+    for (auto [v, l] : spill_slots) vgprs.insert(v);
+    for (uint32_t v : vgprs) {
+      // Lane accesses: (pc, write?, lane).
+      struct Lane { bool write; uint32_t lane; };
+      std::map<gaddr, Lane> lanes;
+      for (auto& [pc, in] : at) {
+        const bool vop3 = in.fmt == Fmt::Vop3;
+        uint32_t op = in.op;
+        if (vop3 ? op != 257 && op != 258 : in.fmt != Fmt::Vop2 || (op != 1 && op != 2)) continue;
+        if (vop3) op -= 256;
+        const uint32_t dst = vop3 ? in.w0 & 0xFF : (in.w0 >> 17) & 0xFF;
+        const uint32_t src0 = vop3 ? in.w1 & 0x1FF : in.w0 & 0x1FF;
+        const uint32_t lane_code = vop3 ? (in.w1 >> 9) & 0x1FF : (in.w0 >> 9) & 0xFF;
+        if (op == 2 ? dst != v : src0 != gcn::kVgpr + v) continue;
+        uint32_t lane;
+        Scalars none;
+        if (!Source(none, in, lane_code, &lane)) return false;
+        lanes[pc] = {op == 2, lane & 63};
+      }
+      static const std::set<gaddr> kNone;
+      auto it_named = named_at.find(v);
+      const std::set<gaddr>& other = it_named == named_at.end() ? kNone : it_named->second;
+      for (auto& [pc, ln] : lanes) {
+        if (ln.write) continue;
+        gaddr w = 0;
+        for (auto& [q, lq] : lanes)
+          if (q < pc && lq.write && lq.lane == ln.lane) w = q;
+        if (!w || skips(w, pc)) return false;
+        auto o = other.upper_bound(w);
+        if (o != other.end() && *o < pc) return false;
+      }
+      gaddr last_write = 0;
+      for (auto& [pc, ln] : lanes)
+        if (ln.write) last_write = pc;
+      for (gaddr o : other) {
+        if (!last_write || o < lanes.begin()->first) continue;
+        if (o < last_write) return false;  // an access among the lane accesses
+        // The first access past the last lane write only writes v.
+        auto first = other.upper_bound(last_write);
+        if (first == other.end() || !OnlyWrites(at.at(*first), v) || skips(last_write, *first)) return false;
+        break;
+      }
+    }
+    return true;
+  }
+
+  // Whether a VALU instruction writes VGPR v and reads none of its
+  // operands from it (VOP1, VOP2 and VOP3 with a VGPR result; not the
+  // accumulating v_mac forms).
+  static bool OnlyWrites(const Instr& in, uint32_t v) {
+    const uint32_t vv = gcn::kVgpr + v;
+    switch (in.fmt) {
+      case Fmt::Vop1:
+        return in.op != 2 && ((in.w0 >> 17) & 0xFF) == v && (in.w0 & 0x1FF) != vv;
+      case Fmt::Vop2:
+        return in.op != 1 && in.op != 2 && in.op != 30 && in.op != 31 && ((in.w0 >> 17) & 0xFF) == v &&
+               (in.w0 & 0x1FF) != vv && ((in.w0 >> 9) & 0xFF) != v;
+      case Fmt::Vop3:
+        if (in.op < 256 || in.op == 257 || in.op == 258 || in.op == 256 + 30 || in.op == 256 + 31 ||
+            (in.op >= 293 && in.op <= 298))
+          return false;
+        return (in.w0 & 0xFF) == v && (in.w1 & 0x1FF) != vv && ((in.w1 >> 9) & 0x1FF) != vv &&
+               ((in.w1 >> 18) & 0x1FF) != vv;
+      default:
+        return false;
+    }
+  }
+
   // In waves: v_readlane_b32, v_writelane_b32 and v_readfirstlane_b32
   // (false: another instruction). An empty EXEC reads lane 0.
   bool CrossLane(gaddr pc, const Instr& in) {
@@ -2130,7 +2325,10 @@ struct Translator {
   // A vector instruction: in waves, for each half, then the ballot of an
   // SGPR pair it writes (comparisons, carries; inactive lanes 0).
   void Vector(gaddr pc, const Instr& in) {
-    if (!wave) return VectorLanes(pc, in, nullptr);
+    if (!wave) {
+      if (SpillLane(pc, in)) return;
+      return VectorLanes(pc, in, nullptr);
+    }
     if (CrossLane(pc, in)) return;
     int ballot = -1;
     for (half = 0; half < 2; half++) VectorLanes(pc, in, &ballot);
@@ -2366,6 +2564,7 @@ struct Translator {
       const auto& [pc, in] = order[i];
       const gaddr next = pc + 4 * uint64_t(in.dwords);
       if (loop && block_of.count(pc)) Line("case " + U(uint32_t(block_of[pc])) + ": {}");
+      cur_pc = pc;
       Instruction(pc, in, next);
       if (!error.empty()) return false;
       // A block that runs into the next one: on to it (if it is next).
@@ -2383,6 +2582,10 @@ struct Translator {
     }
     if (st.stage == Stage::Pixel && st.count >= 0 && mrts.count(uint32_t(st.count))) {
       error = "a pixel shader exporting to the occlusion count's target";
+      return false;
+    }
+    if (!SpillsExact()) {
+      error = "a VGPR's lanes read or written outside waves where other uses or branches meet them not translated yet";
       return false;
     }
     out->stage.glsl = Glsl();
@@ -2542,6 +2745,7 @@ struct Translator {
       g += b;
     }
     g += inputs;
+    for (auto [v, l] : spill_slots) g += "  uint r_sp" + std::to_string(v) + "_" + std::to_string(l) + " = 0u;\n";
     for (uint32_t m : mrts) g += "  r_color" + std::to_string(m) + " = vec4(0.0);\n";
     if (st.stage == Stage::Pixel && st.count >= 0) g += "  r_count = vec4(1.0);\n";
     for (uint32_t p : params) g += "  r_param" + std::to_string(p) + " = vec4(0.0);\n";
