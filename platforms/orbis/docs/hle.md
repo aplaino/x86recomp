@@ -452,10 +452,16 @@ library.
   (title: under 128 bytes, no line break, UTF-8 as its own decoder reads
   it; an icon of 1 to 0x1C800 bytes, or none and size 0; 32 zero bytes),
   for the save type only. The progress message shows the first listed directory that
-  exists and the work going on until the game closes it. Setting the
-  progress bar before Initialize answers not initialized, as 11.00 does.
-  Other modes (the progress bar among them), messages and list types are
-  not implemented.
+  exists and the work going on until the game closes it. The progress
+  bar (mode 5) shows the first listed directory that exists (else the
+  save list's new item), the game's message or the work going on, and
+  the bar the game sets; its parameter's checks are 11.00's (bar type 0,
+  a system message type 0-2, from SDK 2.00 a message or a system message
+  type, a UTF-8 message, zero bytes), and the setter's (not initialized
+  before Initialize, finished after a dialog has finished, target 0, the
+  progress bar mode, the value capped at 100). The restore message, the
+  setter before the first dialog, other modes, messages and list types
+  are not implemented.
 - recomp_orbis_savedata_dialog also: libSceMsgDialog. The library's side
   is 11.00's: the checks of SceMsgDialogParam and what it points to (in
   its order: every parameter before the library's state), the states

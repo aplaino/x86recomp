@@ -7,8 +7,9 @@
 // result's layout. The system's side, the dialog the player sees and
 // answers, is this runtime's own design: the console's look and wording
 // are not copied. docs/hle.md has what is not measured. Implemented: the
-// list for loading, the list for saving with a new item and the progress
-// message; the other lists, messages and modes are fatal.
+// list for loading, the list for saving with a new item, the progress
+// message and the progress bar; the other lists, messages and modes are
+// fatal.
 
 #include <SDL3/SDL.h>
 
@@ -47,14 +48,14 @@ namespace savedata = recomp::orbis::savedata;
 constexpr uint32_t kErrNotInitialized = 0x80B80003, kErrAlreadyInitialized = 0x80B80004,
                    kErrNotFinished = 0x80B80005, kErrFinished = 0x80B80006,
                    kErrParam = 0x80B8000A, kErrNotRunning = 0x80B8000B,
-                   kErrArgNull = 0x80B8000D;
+                   kErrArgNull = 0x80B8000D, kErrMode = 0x80B8000F;
 constexpr uint32_t kUser = 0x10000000;  // the one user (libSceUserService)
 constexpr uint32_t kParamSize = 152;    // SceSaveDataDialogParam after its base
 
 // SceSaveDataDialogStatus.
 enum : uint32_t { kNone, kInitialized, kRunning, kFinished };
 // Modes, list types, system messages, focus positions and item styles.
-enum : uint32_t { kModeList = 1, kModeSystemMsg = 3 };
+enum : uint32_t { kModeList = 1, kModeSystemMsg = 3, kModeProgressBar = 5 };
 enum : uint32_t { kTypeSave = 1, kTypeLoad = 2, kTypeDelete = 3 };
 enum : uint32_t { kMsgNoData = 1, kMsgNoSpace = 4, kMsgProgress = 5, kMsgNoSpaceContinuable = 8 };
 enum : uint32_t {
@@ -76,6 +77,8 @@ struct Item {
 
 struct Dialog {
   uint32_t mode, type, style = 0, msg = 0;
+  uint32_t progress = 0;  // the progress bar's value (0-100)
+  std::string text;       // the progress bar's message
   gaddr user_data;
   std::vector<Item> items;
   size_t focus = 0, top = 0;
@@ -127,9 +130,10 @@ uint32_t CheckItemsCommon(gaddr it, uint32_t type) {
 }
 
 // Text the library accepts: UTF-8 as its decoder reads it (forms of one to
-// six bytes, no overlong form, no surrogate in three bytes) up to the NUL.
-bool ValidUtf8(const uint8_t* s) {
-  while (*s) {
+// six bytes, no overlong form, no surrogate in three bytes) up to the NUL
+// or `max` bytes.
+bool ValidUtf8(const uint8_t* s, size_t max) {
+  for (const uint8_t* end = s + max; s < end && *s;) {
     const uint8_t b = *s;
     int n = b < 0x80 ? 1 : b < 0xC0 ? 0 : b < 0xE0 ? 2 : b < 0xF0 ? 3 : b < 0xF8 ? 4 : b < 0xFC ? 5 : b < 0xFE ? 6 : 0;
     if (!n) return false;
@@ -152,7 +156,7 @@ uint32_t CheckNewItem(gaddr ni) {
   if (const gaddr title = Rd64(ni)) {
     const uint8_t* t = recomp::GPtr(title);
     const size_t n = strnlen(reinterpret_cast<const char*>(t), 0x80);
-    if (n >= 0x80 || std::memchr(t, '\n', n) || std::memchr(t, '\r', n) || !ValidUtf8(t))
+    if (n >= 0x80 || std::memchr(t, '\n', n) || std::memchr(t, '\r', n) || !ValidUtf8(t, n))
       return kErrParam;
   }
   const uint64_t size = Rd64(ni + 16);
@@ -253,6 +257,22 @@ uint32_t CheckParam(gaddr p) {
     if (Rd32(opt) > 1 || Rd32(opt + 4) || !Zero(opt + 8, 28)) return kErrParam;
   if (!Zero(p + 136, 16)) return kErrParam;
   return 0;
+}
+
+// A progress bar ({bar type, message*, system message type, 28 zero
+// bytes}): bar type 0 (a percentage), a system message type 0-2, and
+// from SDK 2.00 either a message (no system message type) or a system
+// message type; a message is UTF-8 (to its NUL or 256 bytes).
+uint32_t CheckProgressBar(gaddr b) {
+  if (Rd32(b) != 0 || Rd32(b + 16) > 2) return kErrParam;
+  const gaddr msg = Rd64(b + 8);
+  const bool text = msg && recomp::GPtr(msg)[0];
+  if (SdkVersion() >= 0x2000000 && text == (Rd32(b + 16) != 0)) return kErrParam;
+  if (text) {
+    const uint8_t* m = recomp::GPtr(msg);
+    if (!ValidUtf8(m, strnlen(reinterpret_cast<const char*>(m), 0x100) + 1)) return kErrParam;
+  }
+  return Zero(b + 20, 28) ? 0 : kErrParam;
 }
 
 std::string Field(const uint8_t* p, size_t n) {
@@ -393,6 +413,11 @@ std::shared_ptr<recomp::ui::Canvas> DrawMessage(const Dialog& d, const std::stri
   }
   const int w = c->Text(x, y + 160, 40, text, kText);
   c->Text(x + w, y + 160, 40, std::string(size_t(dots), '.'), kText);
+  if (d.mode == kModeProgressBar) {
+    const int bw = kW - kListX - x;
+    c->Fill(x, y + 200, bw, 12, 0x40FFFFFF);
+    c->Fill(x, y + 200, bw * int(d.progress) / 100, 12, 0xFF3C8CFF);
+  }
   return c;
 }
 
@@ -574,6 +599,22 @@ ORBIS_HLE("libSceSaveDataDialog", sceSaveDataDialogOpen, 1) {
     static const char* const kVerb[4] = {"", "Saving", "Loading", "Deleting"};
     first = DrawMessage(*d, kVerb[d->type], 0);
     run = [d, verb = std::string(kVerb[d->type])] { RunProgress(d, verb); };
+  } else if (d->mode == kModeProgressBar) {
+    const gaddr b = Rd64(p + 104);
+    if (uint32_t e = CheckMessageItems(items, d->type)) return e;
+    if (uint32_t e = CheckProgressBar(b)) return e;
+    if ((d->type == kTypeLoad || d->type == kTypeDelete) && !Rd32(items + 24)) return kErrParam;
+    if (Rd32(b + 16) == 2)
+      recomp::FatalF("sceSaveDataDialogOpen: the restore message not implemented yet");
+    // The first listed directory that exists, else the new item.
+    d->items = FindItems(items);
+    d->items.resize(std::min<size_t>(d->items.size(), 1));
+    if (d->items.empty() && Rd64(items + 32)) d->items.push_back(NewItem(Rd64(items + 32)));
+    static const char* const kVerb[4] = {"", "Saving", "Loading", "Deleting"};
+    const gaddr msg = Rd64(b + 8);
+    d->text = msg && recomp::GPtr(msg)[0] ? recomp::GStr(msg) : kVerb[d->type];
+    first = DrawMessage(*d, d->text, 0);
+    run = [d] { RunProgress(d, d->text); };
   } else {
     recomp::FatalF("sceSaveDataDialogOpen: mode %u not implemented yet", d->mode);
   }
@@ -623,11 +664,20 @@ ORBIS_HLE("libSceSaveDataDialog", sceSaveDataDialogGetResult, 1) {
 }
 
 // int sceSaveDataDialogProgressBarSetValue(int target, uint32_t rate):
-// before Initialize (or after Terminate) 11.00 answers not initialized,
-// which games that set the bar early get; the bar itself (mode 5) is not
-// implemented yet.
+// 11.00's: not initialized before Initialize (games that set the bar early
+// get it); finished once a dialog has finished (the common dialog
+// client's isFinish); with a dialog open, target 0 (the only bar), the
+// progress bar mode, and the value capped at 100. Before the first
+// dialog, not implemented yet.
 ORBIS_HLE("libSceSaveDataDialog", sceSaveDataDialogProgressBarSetValue, 2) {
   std::lock_guard<std::mutex> l(g_mu);
   if (g_status == kNone) return kErrNotInitialized;
-  recomp::FatalF("sceSaveDataDialogProgressBarSetValue with the library initialized not implemented yet");
+  if (g_status == kFinished) return kErrFinished;
+  if (g_status != kRunning)
+    recomp::FatalF("sceSaveDataDialogProgressBarSetValue before the first dialog not implemented yet");
+  if (int32_t(Arg(c, 0)) != 0) return kErrParam;
+  if (g_dialog->mode != kModeProgressBar) return kErrMode;
+  g_dialog->progress = std::min<uint32_t>(uint32_t(Arg(c, 1)), 100);
+  recomp::orbis::videoout::SetOverlay(DrawMessage(*g_dialog, g_dialog->text, 0));
+  return 0;
 }
