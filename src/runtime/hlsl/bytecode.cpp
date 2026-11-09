@@ -662,12 +662,13 @@ class Translator {
         std::string b = "R_BIAS(" + std::to_string(s[1].num) + ")";
         if (in.ctl == 1) {  // texldp
           if (ty == ParamType::Sampler2D)
-            return DepthTex(s[1].num, "textureProj(" + smp + ", " + c + ", " + b + ")");
+            return Shadow(s[1].num, DepthTex(s[1].num, "textureProj(" + smp + ", " + c + ", " + b + ")"),
+                          "(" + c + ").z / (" + c + ").w");
           return "texture(" + smp + ", (" + c + ").xyz / (" + c + ").w, " + b + ")";
         }
         if (in.ctl == 2)  // texldb
-          return DepthTex(s[1].num, ty, "texture(" + smp + ", " + co + ", (" + c + ").w + " + b + ")");
-        return DepthTex(s[1].num, ty, "texture(" + smp + ", " + co + ", " + b + ")");
+          return Shadow(s[1].num, ty, DepthTex(s[1].num, ty, "texture(" + smp + ", " + co + ", (" + c + ").w + " + b + ")"), c);
+        return Shadow(s[1].num, ty, DepthTex(s[1].num, ty, "texture(" + smp + ", " + co + ", " + b + ")"), c);
       }
       case TEXLDL: {
         need(2);
@@ -1132,6 +1133,16 @@ class Translator {
   }
   std::string DepthTex(uint32_t n, ParamType ty, const std::string& v) {
     return ty == ParamType::Sampler2D ? DepthTex(n, v) : v;
+  }
+  // A pixel shader's 2D read compared as D3D9 does with a depth-stencil
+  // format texture (R_SHADOW, hlsl.h): `ref` is the coordinate's depth.
+  std::string Shadow(uint32_t n, const std::string& v, const std::string& ref) {
+    if (!pixel_) return v;
+    depth_tex_ = true;
+    return "R_SHADOW(" + std::to_string(n) + ", " + v + ", " + ref + ")";
+  }
+  std::string Shadow(uint32_t n, ParamType ty, const std::string& v, const std::string& c) {
+    return ty == ParamType::Sampler2D ? Shadow(n, v, "(" + c + ").z") : v;
   }
 
   // RECOMP_D3D9_LEGACY_MUL=1: every multiply (MUL, MAD, DP3, DP4, LRP)

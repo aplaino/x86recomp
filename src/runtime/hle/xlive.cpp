@@ -288,6 +288,7 @@ HLE_NAMED("xlive.dll", "#5297", XLiveInitializeEx, 2) { return 0; }
 HLE_NAMED("xlive.dll", "#5003", XLiveUninitialize, 0) { return 0; }
 HLE_NAMED("xlive.dll", "#5002", XLiveRender, 0) { return 0; }
 HLE_NAMED("xlive.dll", "#5005", XLiveOnCreateDevice, 2) { return 0; }
+HLE_NAMED("xlive.dll", "#5006", XLiveOnDestroyDevice, 0) { return 0; }
 HLE_NAMED("xlive.dll", "#5007", XLiveOnResetDevice, 1) { return 0; }
 HLE_NAMED("xlive.dll", "#5030", XLivePreTranslateMessage, 1) { return 0; }  // not the guide's
 HLE_NAMED("xlive.dll", "#5022", XLiveGetUpdateInformation, 1) { return 0xFFFFFFFF; }  // no update
@@ -404,6 +405,13 @@ HLE_NAMED("xlive.dll", "#5295", XLivePBufferSetByteArray, 4) {
 }
 
 // ---- users ----------------------------------------------------------------
+
+// (dwUserIndex, PXUID pXuid)
+HLE_NAMED("xlive.dll", "#5261", XUserGetXUID, 2) {
+  if (Arg(c, 0) != 0) return kErrorNoSuchUser;
+  if (gaddr out = Arg(c, 1)) Wr64(out, kXuid);
+  return kErrorSuccess;
+}
 
 HLE_NAMED("xlive.dll", "#5262", XUserGetSigninState, 1) {
   return Arg(c, 0) == 0 ? 1 : 0;  // eXUserSigninState_SignedInLocally

@@ -131,6 +131,7 @@ add_library(recomp_runtime SHARED
   src/runtime/guest_alloc.cpp
   src/runtime/lazy_mem.cpp
   src/runtime/hle/hle.cpp
+  src/runtime/hle/msvcr90.cpp
   src/runtime/hle/kernel32.cpp
   src/runtime/hle/winmm_timer.cpp
   src/runtime/hle/kernel32_file.cpp

@@ -420,3 +420,21 @@ HLE("version.dll", VerQueryValueA, 4) {
 
 }  // namespace
 }  // namespace recomp::hle
+
+namespace recomp { namespace hle {
+
+HLE("kernel32.dll", FormatMessageW, 7) {
+  uint32_t flags = uint32_t(Arg(c,0)), size = uint32_t(Arg(c,2)), buf = Arg(c,5);
+  const char* msg = "Unknown error.";
+  // minimal: FROM_SYSTEM only path
+  (void)flags;
+  std::u16string w;
+  for (const char* p=msg; *p; ++p) w.push_back((unsigned char)*p);
+  if (flags & 0x100 /*ALLOCATE_BUFFER*/) { if (buf) Wr32(buf, 0); return 0; }
+  if (!buf || size == 0) return (uint32_t)w.size()+1;
+  uint32_t n = std::min<uint32_t>(size-1, (uint32_t)w.size());
+  for (uint32_t k=0;k<n;k++) Wr16(buf+k*2,w[k]); Wr16(buf+n*2,0);
+  return n;
+}
+
+}} // compat

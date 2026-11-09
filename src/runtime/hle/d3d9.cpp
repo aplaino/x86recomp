@@ -672,6 +672,24 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::EvictManagedResources", D3DDev9_EvictMa
   return D3D_OK;
 }
 
+// Gamma ramps are not applied (as in d3d8.cpp); the ramp read back is the
+// one set, identity until then.
+std::array<uint16_t, 768> g_gamma9 = [] {
+  std::array<uint16_t, 768> r{};
+  for (int i = 0; i < 256; i++) r[size_t(i)] = r[size_t(256 + i)] = r[size_t(512 + i)] = uint16_t(i * 257);
+  return r;
+}();
+// (iSwapChain, Flags, pRamp); returns void
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::SetGammaRamp", D3DDev9_SetGammaRamp, 4) {
+  if (Arg(c, 3)) std::memcpy(g_gamma9.data(), GPtr(Arg(c, 3)), sizeof g_gamma9);
+  return 0;
+}
+// (iSwapChain, pRamp); returns void
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetGammaRamp", D3DDev9_GetGammaRamp, 3) {
+  if (Arg(c, 2)) std::memcpy(GPtr(Arg(c, 2)), g_gamma9.data(), sizeof g_gamma9);
+  return 0;
+}
+
 HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetDirect3D", D3DDev9_GetDirect3D, 2) {
   uint32_t d3d = Dev(c)->d3d;
   com::AddRef(d3d);

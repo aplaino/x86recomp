@@ -446,6 +446,16 @@ kernel void taa_sharpen_cs(texture2d<half, access::read> src [[texture(0)]],
 }
 )";
 
+// SDL's view calls are AppKit calls and belong on the main thread; a device
+// made on another thread has them run there (the runtime keeps the main
+// thread pumping events while such a thread drives a window).
+template <class F>
+void OnMainThread(F&& f) {
+  if (SDL_IsMainThread()) return f();
+  auto call = [](void* p) { (*static_cast<std::remove_reference_t<F>*>(p))(); };
+  if (!SDL_RunOnMainThread(call, &f, true)) WarnF("gfx: SDL_RunOnMainThread: %s\n", SDL_GetError());
+}
+
 constexpr uint32_t kClearVs = 0x80000001, kClearPs = 0x80000002;
 constexpr uint32_t kQuadVs = 0x80000003, kQuadPs = 0x80000004;
 
@@ -461,12 +471,14 @@ class MetalDevice final : public Device {
         return false;
       }
       queue_ = [dev_ newCommandQueue];
-      view_ = SDL_Metal_CreateView(window_);
+      OnMainThread([&] {
+        view_ = SDL_Metal_CreateView(window_);
+        if (view_) layer_ = (__bridge CAMetalLayer*)SDL_Metal_GetLayer(view_);
+      });
       if (!view_) {
         WarnF("gfx: SDL_Metal_CreateView: %s\n", SDL_GetError());
         return false;
       }
-      layer_ = (__bridge CAMetalLayer*)SDL_Metal_GetLayer(view_);
       layer_.device = dev_;
       layer_.pixelFormat = MTLPixelFormatBGRA8Unorm;
       layer_.framebufferOnly = YES;
@@ -676,7 +688,7 @@ class MetalDevice final : public Device {
     dispatch_sync(AheadQueue(), ^{});
     step("the build ahead");
     StopDisplayLink();
-    if (view_) SDL_Metal_DestroyView(view_);
+    if (view_) OnMainThread([&] { SDL_Metal_DestroyView(view_); });
   }
 
   bool HasFixedFunction() const override { return false; }
@@ -934,6 +946,11 @@ class MetalDevice final : public Device {
     DepthId did = next_id_++;
     depths_[did] = d;
     return did;
+  }
+
+  void SetDepthCompare(TextureId id, bool on) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    if (Tex* t = FindTex(id)) t->compare = on;
   }
 
   TextureId CreateDepthTexture(int w, int h, DepthId* depth) override {
@@ -2489,6 +2506,7 @@ void main() {
     bool rt = false;
     bool cube = false;
     DepthId depth = 0;  // CreateDepthTexture: the depth buffer sharing `tex`
+    bool compare = false;  // SetDepthCompare: read as D3D9 compares (R_SHADOW)
     uint64_t used = 0;  // the last frame (serial_) that drew with or into it
     bool opaque = false;  // alpha read as 1: X8R8G8B8 data uploaded as is
     bool scaled = false;  // made at another size than w x h (ScaledSize)
@@ -2769,8 +2787,10 @@ void main() {
     pst.alpha[3] = pass_.reversed ? 1 : 0;
     // Depth textures sampled: read back as D3D9 stores depth (R_DEPTH_TEX).
     for (uint32_t r = 0; r < ps.samplers; r++)
-      if (const Tex* t = FindTex(d.textures[r]); t && t->depth && ReversedDepth(t->tex.pixelFormat))
-        pst.alpha[2] |= int32_t(1u << r);
+      if (const Tex* t = FindTex(d.textures[r]); t && t->depth) {
+        if (ReversedDepth(t->tex.pixelFormat)) pst.alpha[2] |= int32_t(1u << r);
+        if (t->compare) pst.alpha[2] |= int32_t(1u << (16 + r));
+      }
     const float lod_bias = jitter_draw_ && upscaler_ == Upscaler::Taa ? kTaaLodBias : 0.0f;
     for (uint32_t r = 0; r < 16 && d.sampler_states; r++) pst.bias[r] = AsFloat(d.sampler_states[r][8]) + lod_bias;
     pst.vscale[0] = 1.0f / pass_.sx;

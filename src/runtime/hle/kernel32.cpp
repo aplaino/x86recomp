@@ -549,6 +549,17 @@ HLE64("kernel32.dll", GetCurrentThreadId, 0) { return CurrentThread()->tid; }
 
 HLE64("kernel32.dll", ExitProcess, 1) {
   uint32_t code = uint32_t(Arg(c, 0));
+  if (code) {
+    std::fprintf(stderr, "ExitProcess(%u) esp=%08X ebp=%08X\n", code, c.esp, c.ebp);
+    uint32_t ebp = c.ebp;
+    for (int i = 0; i < 24; i++) {
+      if (!g_proc->mem.IsCommitted(ebp) || !g_proc->mem.IsCommitted(ebp + 4)) break;
+      std::fprintf(stderr, "  #%-2d ret %08X (frame %08X)\n", i, Rd32(ebp + 4), ebp);
+      uint32_t next = Rd32(ebp);
+      if (next <= ebp) break;
+      ebp = next;
+    }
+  }
   if (Game().before_exit) Game().before_exit();
   std::fflush(stdout);
   std::fprintf(stderr, "ExitProcess(%u)\n", code);
@@ -1675,3 +1686,58 @@ void SetSleepFilter(uint32_t (*filter)(uint32_t)) { g_sleep_filter = filter; }
 }  // namespace hle
 
 }  // namespace recomp
+
+namespace recomp { namespace hle {
+
+// Unicode (W) entry points and small process queries
+HLE("kernel32.dll", OutputDebugStringW, 1) { return 0; }
+HLE("kernel32.dll", lstrcmpW, 2) {
+  std::u16string a = GWStr(Arg(c, 0)), b = GWStr(Arg(c, 1));
+  return a < b ? uint32_t(-1) : a > b ? 1 : 0;
+}
+HLE("kernel32.dll", GetSystemDefaultLCID, 0) { return 0x0409; }
+HLE("kernel32.dll", GetSystemDefaultLangID, 0) { return 0x0409; }
+HLE("kernel32.dll", GetExitCodeProcess, 2) { if (Arg(c,1)) Wr32(Arg(c,1), 259 /*STILL_ACTIVE*/); return 1; }
+// The guest reads as created when first asked, its parent a minute earlier:
+// programs that look up their parent check it started before them.
+HLE("kernel32.dll", GetProcessTimes, 5) {
+  using namespace std::chrono;
+  static const uint64_t start =
+      uint64_t(duration_cast<nanoseconds>(system_clock::now().time_since_epoch()).count() / 100) +
+      kFileTimeUnixEpoch;
+  uint32_t h = uint32_t(Arg(c, 0)), pid = kGuestPid;
+  if (h != 0xFFFFFFFF) {
+    auto p = std::dynamic_pointer_cast<ProcessObject>(GetHandle(h));
+    if (!p) { SetLastError(kErrorInvalidHandle); return 0; }
+    pid = p->pid;
+  }
+  if (Arg(c, 1)) Wr64(Arg(c, 1), pid == kGuestPid ? start : start - 60ull * 10000000ull);
+  for (int i = 2; i < 5; i++)
+    if (Arg(c, i)) Wr64(Arg(c, i), 0);
+  return 1;
+}
+HLE("kernel32.dll", LocalFileTimeToFileTime, 2) { if (Arg(c,0)&&Arg(c,1)) Wr64(Arg(c,1), Rd64(Arg(c,0))); return 1; }
+HLE("kernel32.dll", SetThreadIdealProcessor, 2) { return (uint32_t)-1; }
+HLE("kernel32.dll", CreateNamedPipeW, 8) { SetLastError(2); return (g_proc->x64?~0ull:0xFFFFFFFFu); }
+HLE("kernel32.dll", SetNamedPipeHandleState, 4) { return 1; }
+// PROCESSENTRY32W (x86): 9 dwords, then szExeFile[260] at +36; 556 bytes.
+HLE("kernel32.dll", Process32FirstW, 2) {
+  auto o = GetHandle(uint32_t(Arg(c, 0)));
+  gaddr pe = Arg(c, 1);
+  if (!o || o->type != KObject::Type::Snapshot) { SetLastError(kErrorInvalidHandle); return 0; }
+  if (!pe || Rd32(pe) < 556) { SetLastError(24 /*ERROR_BAD_LENGTH*/); return 0; }
+  for (gaddr off = 4; off < 36; off += 4) Wr32(pe + off, 0);
+  Wr32(pe + 8, kGuestPid);
+  Wr32(pe + 20, 1);
+  Wr32(pe + 24, kGuestParentPid);
+  Wr32(pe + 28, 8);
+  const std::u16string w = Widen(Game().exe_name.substr(0, 259));
+  for (size_t i = 0; i < w.size(); i++) Wr16(pe + 36 + 2 * gaddr(i), w[i]);
+  Wr16(pe + 36 + 2 * gaddr(w.size()), 0);
+  return 1;
+}
+HLE("kernel32.dll", Process32NextW, 2) { SetLastError(18); return 0; }
+HLE("kernel32.dll", GetPrivateProfileIntW, 4) { return uint32_t(Arg(c,3)); }
+HLE("kernel32.dll", WritePrivateProfileSectionW, 3) { return 1; }
+
+}} // compat

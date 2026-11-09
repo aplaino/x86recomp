@@ -249,27 +249,62 @@ uint32_t CreateFromMemory(Ctx& c, bool cube, uint32_t device, uint32_t src, uint
   return D3D_OK;
 }
 
-// (pDevice, pSrcData, SrcDataSize, ppTexture)
-HLE("d3dx9_35.dll", D3DXCreateTextureFromFileInMemory, 4) {
+static uint64_t ImplD3DXCreateTextureFromFileInMemory(Ctx& c) {
   return CreateFromMemory(c, false, Arg(c, 0), Arg(c, 1), Arg(c, 2), D3DX_DEFAULT,
                           D3DX_DEFAULT, D3DX_DEFAULT, 0, D3DFMT_UNKNOWN, D3DPOOL_MANAGED, 0,
                           0, Arg(c, 3));
 }
-
-// (pDevice, pSrcData, SrcDataSize, Width, Height, MipLevels, Usage, Format,
-// Pool, Filter, MipFilter, ColorKey, pSrcInfo, pPalette, ppTexture)
-HLE("d3dx9_35.dll", D3DXCreateTextureFromFileInMemoryEx, 15) {
+static uint64_t ImplD3DXCreateTextureFromFileInMemoryEx(Ctx& c) {
   return CreateFromMemory(c, false, Arg(c, 0), Arg(c, 1), Arg(c, 2), Arg(c, 3), Arg(c, 4),
                           Arg(c, 5), Arg(c, 6), Arg(c, 7), Arg(c, 8), Arg(c, 11), Arg(c, 12),
                           Arg(c, 14));
 }
-
-// (pDevice, pSrcData, SrcDataSize, ppCubeTexture)
-HLE("d3dx9_35.dll", D3DXCreateCubeTextureFromFileInMemory, 4) {
+static uint64_t ImplD3DXCreateCubeTextureFromFileInMemory(Ctx& c) {
   return CreateFromMemory(c, true, Arg(c, 0), Arg(c, 1), Arg(c, 2), D3DX_DEFAULT,
                           D3DX_DEFAULT, D3DX_DEFAULT, 0, D3DFMT_UNKNOWN, D3DPOOL_MANAGED, 0,
                           0, Arg(c, 3));
 }
+// D3DXCreate(Cube)Texture: an empty texture through the device, with D3DX's
+// defaults (0 or D3DX_DEFAULT: 256 texels, a full mip chain, A8R8G8B8).
+uint32_t CreateEmpty(bool cube, uint32_t device, uint32_t width, uint32_t height,
+                     uint32_t levels, uint32_t usage, uint32_t format, uint32_t pool,
+                     uint32_t out) {
+  Wr32(out, 0);
+  auto size = [](uint32_t v) { return v == 0 || v == D3DX_DEFAULT ? 256u : v; };
+  uint32_t w = size(width), h = cube ? w : size(height);
+  uint32_t full = 1;
+  for (uint32_t s = std::max(w, h); s > 1; s >>= 1) full++;
+  uint32_t want = levels == 0 || levels == D3DX_DEFAULT ? full : std::min(levels, full);
+  uint32_t fmt = format == D3DFMT_UNKNOWN || format == D3DX_DEFAULT ? D3DFMT_A8R8G8B8 : format;
+  uint32_t tex;
+  uint32_t hr = NewTexture(*DeviceOf(device), device, cube, w, h, want, usage, fmt, pool, &tex);
+  if (hr == D3D_OK) Wr32(out, tex);
+  return hr;
+}
+// (pDevice, EdgeLength, MipLevels, Usage, Format, Pool, ppCubeTexture)
+static uint64_t ImplD3DXCreateCubeTexture(Ctx& c) {
+  return CreateEmpty(true, Arg(c, 0), Arg(c, 1), Arg(c, 1), Arg(c, 2), Arg(c, 3), Arg(c, 4),
+                     Arg(c, 5), Arg(c, 6));
+}
+// (pDevice, Width, Height, MipLevels, Usage, Format, Pool, ppTexture)
+static uint64_t ImplD3DXCreateTexture(Ctx& c) {
+  return CreateEmpty(false, Arg(c, 0), Arg(c, 1), Arg(c, 2), Arg(c, 3), Arg(c, 4), Arg(c, 5),
+                     Arg(c, 6), Arg(c, 7));
+}
+HLE("d3dx9_35.dll", D3DXCreateTextureFromFileInMemory, 4) { return ImplD3DXCreateTextureFromFileInMemory(c); }
+HLE_NAMED("d3dx9_43.dll","D3DXCreateTextureFromFileInMemory", D3DXCreateTextureFromFileInMemory43, 4) { return ImplD3DXCreateTextureFromFileInMemory(c); }
+HLE("d3dx9_35.dll", D3DXCreateTextureFromFileInMemoryEx, 15) { return ImplD3DXCreateTextureFromFileInMemoryEx(c); }
+HLE_NAMED("d3dx9_43.dll","D3DXCreateTextureFromFileInMemoryEx", D3DXCreateTextureFromFileInMemoryEx43, 15) { return ImplD3DXCreateTextureFromFileInMemoryEx(c); }
+HLE("d3dx9_35.dll", D3DXCreateCubeTextureFromFileInMemory, 4) { return ImplD3DXCreateCubeTextureFromFileInMemory(c); }
+// (pDevice, pSrcData, SrcDataSize, Size, MipLevels, Usage, Format, Pool,
+// Filter, MipFilter, ColorKey, pSrcInfo, pPalette, ppCubeTexture)
+HLE_NAMED("d3dx9_43.dll","D3DXCreateCubeTextureFromFileInMemoryEx", D3DXCreateCubeTextureFromFileInMemoryEx43, 14) {
+  return CreateFromMemory(c, true, Arg(c, 0), Arg(c, 1), Arg(c, 2), Arg(c, 3), Arg(c, 3),
+                          Arg(c, 4), Arg(c, 5), Arg(c, 6), Arg(c, 7), Arg(c, 10), Arg(c, 11),
+                          Arg(c, 13));
+}
+HLE_NAMED("d3dx9_43.dll","D3DXCreateCubeTexture", D3DXCreateCubeTexture43, 7) { return ImplD3DXCreateCubeTexture(c); }
+HLE_NAMED("d3dx9_43.dll","D3DXCreateTexture", D3DXCreateTexture43, 8) { return ImplD3DXCreateTexture(c); }
 
 // ---- maths -----------------------------------------------------------------------------
 // In single precision, operations in the order D3DX evaluates them (built
@@ -541,9 +576,7 @@ void DumpShader(const std::string& src, const std::string& profile, const std::s
   }
 }
 
-// (pSrcData, SrcDataLen, pDefines, pInclude, pFunctionName, pProfile,
-// Flags, ppShader, ppErrorMsgs, ppConstantTable)
-HLE("d3dx9_35.dll", D3DXCompileShader, 10) {
+static uint64_t ImplD3DXCompileShader(Ctx& c) {
   uint32_t src = Arg(c, 0), len = Arg(c, 1), defs = Arg(c, 2);
   if (!EnsureReadable(c, src, len)) return D3DERR_INVALIDCALL;
   std::string text(reinterpret_cast<const char*>(GPtr(src)), len);
@@ -572,6 +605,8 @@ HLE("d3dx9_35.dll", D3DXCompileShader, 10) {
   if (Arg(c, 9)) Wr32(Arg(c, 9), NewConstantTable(prog, fn[0]));
   return D3D_OK;
 }
+HLE("d3dx9_35.dll", D3DXCompileShader, 10) { return ImplD3DXCompileShader(c); }
+HLE_NAMED("d3dx9_43.dll","D3DXCompileShader", D3DXCompileShader43, 10) { return ImplD3DXCompileShader(c); }
 
 }  // namespace
 }  // namespace recomp::hle

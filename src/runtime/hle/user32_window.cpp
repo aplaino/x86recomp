@@ -63,7 +63,7 @@ void ShowHostWindow(SDL_Window* w) {
     const char* e = Env("HIDDEN");
     return e && *e && *e != '0';
   }();
-  if (!hidden) SDL_ShowWindow(w);
+  if (!hidden) RunOnUiThread([&] { SDL_ShowWindow(w); });
 }
 
 namespace {
@@ -728,6 +728,7 @@ bool CoversScreen(const Window& w) {
 // or the screen size. Leaving it gives the host window the client size
 // again.
 void UpdateFullscreen(uint32_t hwnd) {
+  if (!OnMainThread()) return RunOnUiThread([&] { UpdateFullscreen(hwnd); });
   using F = GameConfig::Fullscreen;
   SDL_Window* sdl;
   bool want;
@@ -817,6 +818,22 @@ void UpdateFullscreenAll() {
 
 bool OnMainThread() { return std::this_thread::get_id() == g_main_thread_id; }
 
+namespace {
+std::atomic<bool> g_pump_in_waits{false};
+}
+
+bool PumpInWaits() { return g_pump_in_waits.load(std::memory_order_relaxed) && g_sdl_up; }
+
+void RunOnUiThread(const std::function<void()>& fn) {
+  if (OnMainThread()) return fn();
+  if (!g_sdl_up) FatalF("SDL video requested off the main thread before it is up");
+  g_pump_in_waits.store(true, std::memory_order_relaxed);
+  WakeMainThreadWait();
+  auto call = [](void* p) { (*static_cast<const std::function<void()>*>(p))(); };
+  if (!SDL_RunOnMainThread(call, const_cast<std::function<void()>*>(&fn), true))
+    FatalF("SDL_RunOnMainThread: %s", SDL_GetError());
+}
+
 void EnsureSdlVideo() {
   if (g_sdl_up) return;
   if (!OnMainThread()) FatalF("SDL video requested off the main thread");
@@ -898,6 +915,61 @@ struct TestEvent {
   double t;
   SDL_Event e;
 };
+
+// Dev aid: <ID>_INPUT_RECORD=path writes the input the game window gets
+// in the <ID>_TEST_INPUT format, to replay a session: keys with how long
+// they were held, clicks after the pointer position, relative motion
+// summed over 0.1 s.
+void RecordInput(const SDL_Event& e) {
+  static FILE* f = nullptr;
+  static bool opened = false;
+  static Uint64 t0 = 0;
+  static std::map<SDL_Scancode, double> down;
+  static float mx = 0, my = 0;
+  static double mt = -1;
+  if (!opened) {
+    opened = true;
+    t0 = SDL_GetTicks();
+    if (const char* path = Env("INPUT_RECORD")) {
+      f = std::fopen(path, "w");
+      if (!f) WarnF("INPUT_RECORD: cannot open %s\n", path);
+    }
+  }
+  if (!f) return;
+  const double t = (SDL_GetTicks() - t0) / 1000.0;
+  if (mt >= 0 && t - mt >= 0.1) {
+    std::fprintf(f, "%.2f move %.0f %.0f\n", mt, mx, my);
+    mx = my = 0;
+    mt = -1;
+  }
+  switch (e.type) {
+    case SDL_EVENT_KEY_DOWN:
+      if (!e.key.repeat) down[e.key.scancode] = t;
+      break;
+    case SDL_EVENT_KEY_UP:
+      if (auto it = down.find(e.key.scancode); it != down.end()) {
+        std::fprintf(f, "%.2f key %s %.2f\n", it->second, SDL_GetScancodeName(e.key.scancode),
+                     t - it->second);
+        down.erase(it);
+      }
+      break;
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+      std::fprintf(f, "%.2f pointer %.0f %.0f\n%.2f click %s\n", t, e.button.x, e.button.y, t,
+                   e.button.button == SDL_BUTTON_RIGHT ? "right" : "left");
+      break;
+    case SDL_EVENT_MOUSE_MOTION:
+      if (SDL_Window* w = SDL_GetWindowFromID(e.motion.windowID);
+          w && SDL_GetWindowRelativeMouseMode(w)) {
+        if (mt < 0) mt = t;
+        mx += e.motion.xrel;
+        my += e.motion.yrel;
+      }
+      break;
+    default:
+      return;
+  }
+  std::fflush(f);
+}
 
 void InjectTestInput() {
   static std::vector<TestEvent> q;
@@ -1207,6 +1279,7 @@ void PumpHostEvents() {
                          e.type == SDL_EVENT_WINDOW_FOCUS_LOST ||
                          e.type == SDL_EVENT_WINDOW_MOUSE_LEAVE))
       continue;
+    RecordInput(e);
     DeliverHostEvent(e);
   }
   // A window due for fullscreen that is not (refused, or left by the
@@ -1242,7 +1315,7 @@ void SetExclusiveMode(uint32_t hwnd, int w, int h) {
     win->mode_h = h;
     sdl = win->fullscreen ? nullptr : win->sdl;
   }
-  if (sdl && w) SDL_SetWindowSize(sdl, ToPoints(sdl, w), ToPoints(sdl, h));
+  if (sdl && w) RunOnUiThread([&] { SDL_SetWindowSize(sdl, ToPoints(sdl, w), ToPoints(sdl, h)); });
   UpdateFullscreen(hwnd);
 }
 
@@ -1317,6 +1390,7 @@ void RefreshPointerStyle(SDL_Window* w) {
 #endif
 
 void SetRelativeMouse(SDL_Window* w, bool on) {
+  if (!OnMainThread()) return RunOnUiThread([&] { SetRelativeMouse(w, on); });
   if (!w || SDL_GetWindowRelativeMouseMode(w) == on) return;
   SDL_SetWindowRelativeMouseMode(w, on);
 #if defined(__APPLE__) && TARGET_OS_IOS
@@ -1448,9 +1522,11 @@ uint32_t CreateWindowEx(Ctx& c, bool wide) {
     EnsureSdlVideo();
     int cw, ch;
     ClientSize(win, &cw, &ch);
-    win.sdl = SDL_CreateWindow(AnsiToUtf8(win.title).c_str(), ToPoints(nullptr, cw), ToPoints(nullptr, ch),
-                               SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY |
-                                   GfxWindowFlags());
+    RunOnUiThread([&] {
+      win.sdl = SDL_CreateWindow(AnsiToUtf8(win.title).c_str(), ToPoints(nullptr, cw),
+                                 ToPoints(nullptr, ch),
+                                 SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY | GfxWindowFlags());
+    });
     if (!win.sdl) FatalF("SDL_CreateWindow: %s", SDL_GetError());
   }
   uint32_t hwnd = win.hwnd;
@@ -1480,11 +1556,16 @@ uint32_t CreateWindowEx(Ctx& c, bool wide) {
   if (ok) ok = int32_t(Send(hwnd, WM_CREATE, 0, cs)) != -1;
   HeapFreeProcess(cs);
   if (!ok) {
-    std::lock_guard<std::recursive_mutex> l(g_mu);
-    if (Window* wp = Win(hwnd)) {
-      if (wp->sdl) SDL_DestroyWindow(wp->sdl);
-      wp->destroyed = true;
+    SDL_Window* dead = nullptr;
+    {
+      std::lock_guard<std::recursive_mutex> l(g_mu);
+      if (Window* wp = Win(hwnd)) {
+        dead = wp->sdl;
+        wp->sdl = nullptr;
+        wp->destroyed = true;
+      }
     }
+    if (dead) RunOnUiThread([&] { SDL_DestroyWindow(dead); });
     return 0;
   }
   if (style & WS_VISIBLE) {
@@ -1511,20 +1592,32 @@ HLE("user32.dll", DestroyWindow, 1) {
   }
   Send(hwnd, WM_DESTROY, 0, 0);
   Send(hwnd, WM_NCDESTROY, 0, 0);
-  std::lock_guard<std::recursive_mutex> l(g_mu);
-  if (Window* w = Win(hwnd)) {
-    if (g_clip.hwnd == hwnd) {
-      // The clip stays; AttachClip gives it to the next window over it.
-      g_clip.hwnd = 0;
-      if (w->sdl) SetRelativeMouse(w->sdl, false);
+  // The host window goes after the lock is released: off the main thread
+  // that waits for the main thread, which may itself want the lock.
+  SDL_Window* dead = nullptr;
+  bool unclip = false;
+  {
+    std::lock_guard<std::recursive_mutex> l(g_mu);
+    if (Window* w = Win(hwnd)) {
+      if (g_clip.hwnd == hwnd) {
+        // The clip stays; AttachClip gives it to the next window over it.
+        g_clip.hwnd = 0;
+        unclip = true;
+      }
+      dead = w->sdl;
+      w->sdl = nullptr;
+      w->destroyed = true;
     }
-    if (w->sdl) SDL_DestroyWindow(w->sdl);
-    w->sdl = nullptr;
-    w->destroyed = true;
+    std::erase_if(g_timers, [&](const Timer& t) { return t.hwnd == hwnd; });
+    if (g_focus == hwnd) g_focus = 0;
+    if (g_active == hwnd) g_active = 0;
   }
-  std::erase_if(g_timers, [&](const Timer& t) { return t.hwnd == hwnd; });
-  if (g_focus == hwnd) g_focus = 0;
-  if (g_active == hwnd) g_active = 0;
+  if (dead) {
+    RunOnUiThread([&] {
+      if (unclip) SetRelativeMouse(dead, false);
+      SDL_DestroyWindow(dead);
+    });
+  }
   return 1;
 }
 
@@ -1558,16 +1651,18 @@ HLE("user32.dll", ShowWindow, 2) {
     exclusive = w->mode_w != 0;
   }
   if (sdl) {
-    if (!show) {
-      SDL_HideWindow(sdl);
-    } else {
-      ShowHostWindow(sdl);
-      // Behind an exclusive-mode "screen" the game's minimize on
-      // deactivation is not carried out: the window simply stays put
-      // while the game idles, and focusing it again resumes the game.
-      if (minimize && !exclusive) SDL_MinimizeWindow(sdl);
-      if (restore && !exclusive) SDL_RestoreWindow(sdl);
-    }
+    RunOnUiThread([&] {
+      if (!show) {
+        SDL_HideWindow(sdl);
+      } else {
+        ShowHostWindow(sdl);
+        // Behind an exclusive-mode "screen" the game's minimize on
+        // deactivation is not carried out: the window simply stays put
+        // while the game idles, and focusing it again resumes the game.
+        if (minimize && !exclusive) SDL_MinimizeWindow(sdl);
+        if (restore && !exclusive) SDL_RestoreWindow(sdl);
+      }
+    });
   }
   UpdateFullscreen(hwnd);
   if (show != was) Send(hwnd, WM_SHOWWINDOW, show ? 1 : 0, 0);
@@ -1660,7 +1755,7 @@ void ApplyRect(uint32_t hwnd, int x, int y, int w, int h, bool move, bool size) 
     // a fullscreen one the screen's.
     sdl = win->mode_w || win->fullscreen ? nullptr : win->sdl;
   }
-  if (sdl && sized) SDL_SetWindowSize(sdl, ToPoints(sdl, cw), ToPoints(sdl, ch));
+  if (sdl && sized) RunOnUiThread([&] { SDL_SetWindowSize(sdl, ToPoints(sdl, cw), ToPoints(sdl, ch)); });
   if (moved || sized) UpdateFullscreen(hwnd);
   if (sized) Send(hwnd, WM_SIZE, 0, MkLparam(cw, ch));
   if (moved) Send(hwnd, WM_MOVE, 0, MkLparam(x, y));
@@ -1870,7 +1965,7 @@ HLE("user32.dll", SetWindowTextA, 2) {
     w->title = t;
     s = w->sdl;
   }
-  if (s) SDL_SetWindowTitle(s, AnsiToUtf8(t).c_str());
+  if (s) RunOnUiThread([&] { SDL_SetWindowTitle(s, AnsiToUtf8(t).c_str()); });
   return 1;
 }
 
@@ -1960,13 +2055,13 @@ HLE("user32.dll", GetForegroundWindow, 0) {
   return g_active;
 }
 HLE("user32.dll", SetForegroundWindow, 1) {
-  if (SDL_Window* s = SdlWindowFor(Arg(c, 0))) SDL_RaiseWindow(s);
+  if (SDL_Window* s = SdlWindowFor(Arg(c, 0))) RunOnUiThread([&] { SDL_RaiseWindow(s); });
   std::lock_guard<std::recursive_mutex> l(g_mu);
   g_active = g_focus = Arg(c, 0);
   return 1;
 }
 HLE("user32.dll", BringWindowToTop, 1) {
-  if (SDL_Window* s = SdlWindowFor(Arg(c, 0))) SDL_RaiseWindow(s);
+  if (SDL_Window* s = SdlWindowFor(Arg(c, 0))) RunOnUiThread([&] { SDL_RaiseWindow(s); });
   return 1;
 }
 
@@ -2411,10 +2506,8 @@ HLE("user32.dll", ShowCursor, 1) {
   const bool relative = false;
 #endif
   if (g_sdl_up && !Background() && !relative) {
-    if (g_cursor_count >= 0)
-      SDL_ShowCursor();
-    else
-      SDL_HideCursor();
+    const bool shown = g_cursor_count >= 0;
+    RunOnUiThread([&] { shown ? SDL_ShowCursor() : SDL_HideCursor(); });
   }
   return uint32_t(g_cursor_count);
 }
@@ -2604,3 +2697,41 @@ HLE("user32.dll", SetClipboardData, 2) { return 0; }
 }  // namespace
 }  // namespace hle
 }  // namespace recomp
+
+namespace recomp { namespace hle {
+
+// MSG is the same layout in the A and W APIs, so the message W twins are the
+// A handlers verbatim. Only the class registration differs (wide strings).
+HLE("user32.dll", DispatchMessageW, 1) { return hle_DispatchMessageA(c); }
+HLE("user32.dll", PostMessageW, 4) { return hle_PostMessageA(c); }
+HLE("user32.dll", GetMessageW, 4) { return hle_GetMessageA(c); }
+HLE("user32.dll", PeekMessageW, 5) { return hle_PeekMessageA(c); }
+HLE("user32.dll", SetWindowLongW, 3) { return hle_SetWindowLongA(c); }
+
+HLE("user32.dll", PostThreadMessageW, 4) {
+  PostTo(CurrentThread()->tid,
+         Msg{0, uint32_t(Arg(c, 1)), uint32_t(Arg(c, 2)), uint32_t(Arg(c, 3)), TickCount(),
+             g_mouse_x, g_mouse_y});
+  return 1;
+}
+
+HLE("user32.dll", RegisterClassExW, 1) {
+  uint32_t wc = Arg(c, 0);
+  if (Rd32(wc) != 48) {  // cbSize: sizeof(WNDCLASSEXW)
+    SetLastError(87);    // ERROR_INVALID_PARAMETER
+    return 0;
+  }
+  return RegisterWndClass(wc + 4, true);
+}
+
+HLE("user32.dll", LoadCursorW, 2) { return 0x00010000u | (Arg(c, 1) & 0xFFFF); }
+HLE("user32.dll", LoadIconW, 2) { return 0x00020000u | (Arg(c, 1) & 0xFFFF); }
+
+HLE("user32.dll", RegisterWindowMessageW, 1) {
+  const std::string s = Narrow(GWStr(Arg(c, 0)));
+  uint32_t h = 2166136261u;  // FNV-1a, so equal strings get equal atoms
+  for (unsigned char ch : s) h = (h ^ ch) * 16777619u;
+  return 0xC000u | (h & 0x3FFFu);
+}
+
+}} // compat

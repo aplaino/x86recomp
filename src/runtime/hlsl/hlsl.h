@@ -30,7 +30,14 @@
 //   vec4 R_DEPTH_TEX(n, v)          what a 2D sampler register n read: v
 //                                   as the shader expects it (a depth
 //                                   texture stored otherwise than D3D9
-//                                   does; (v) if not defined).
+//                                   does; (v) if not defined);
+//   vec4 R_SHADOW(n, v, ref)        bytecode pixel shaders: a 2D read v
+//                                   (after R_DEPTH_TEX) with ref the
+//                                   coordinate's depth (z, or z / w for a
+//                                   projected read): the result of D3D9's
+//                                   comparison where sampler n has a
+//                                   depth-stencil format texture (hardware
+//                                   shadow maps; (v) if not defined).
 // The body declares, if it reads them:
 //   layout(std140, R_FLOAT_BINDING) uniform r_float_regs { vec4 c[n]; };
 //   layout(std140, R_INT_BINDING) uniform r_int_regs { ivec4 r_i[16];
@@ -52,7 +59,8 @@ namespace recomp::hlsl {
 inline constexpr const char* kDepthOutDefault =
     "#ifndef R_DEPTH_OUT\n#define R_DEPTH_OUT(d) (d)\n#endif\n";
 inline constexpr const char* kDepthTexDefault =
-    "#ifndef R_DEPTH_TEX\n#define R_DEPTH_TEX(n, v) (v)\n#endif\n";
+    "#ifndef R_DEPTH_TEX\n#define R_DEPTH_TEX(n, v) (v)\n#endif\n"
+    "#ifndef R_SHADOW\n#define R_SHADOW(n, v, ref) (v)\n#endif\n";
 
 struct Define {
   std::string name, value;

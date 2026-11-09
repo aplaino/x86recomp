@@ -5,6 +5,7 @@
 #include <SDL3/SDL.h>
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -30,6 +31,17 @@ uint32_t WindowForDc(uint32_t hdc);
 // Whether the caller is the guest's main thread (the one SDL's video and
 // events belong to).
 bool OnMainThread();
+
+// Runs fn on the main thread and returns once it has run (directly when
+// the caller is the main thread). macOS allows window calls only there,
+// and some games create and drive their window from another thread. The
+// main thread runs fn when it next pumps host events; once any other
+// thread has asked, it also pumps while it is blocked in a wait.
+void RunOnUiThread(const std::function<void()>& fn);
+
+// Whether the main thread should pump host events while blocked in a wait
+// (another thread has used RunOnUiThread).
+bool PumpInWaits();
 
 // Ensures SDL video is initialised (main thread only).
 void EnsureSdlVideo();

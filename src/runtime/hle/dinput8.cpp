@@ -28,6 +28,7 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <string>
 #include <set>
 
 #include "runtime/hle/com.h"
@@ -154,6 +155,7 @@ struct InputDevice : com::Object {
   uint32_t coop = 0;
   uint32_t hwnd = 0;
   bool acquired = false;
+  std::string logged_keys;  // <ID>_KEY_LOG: the held keys last logged
   bool grabbed = false;  // exclusive mouse: host pointer in relative mode
   uint32_t buffer_size = 0;
   bool overflow = false;
@@ -569,7 +571,10 @@ uint32_t EnumDevices(Ctx& c, bool wide) {
     // The first pad's slot even before one connects (pads that connect
     // later, over Bluetooth for one, then still work). Not in automated
     // runs, which see the host's pads only through the test pad.
-    if (list.empty() && !Background()) list.push_back({0, 0, 0, "Controller"});
+    // <ID>_PAD_SLOT=0|1 overrides GameConfig::pad_slot_without_pad.
+    const char* slot = Env("PAD_SLOT");
+    const bool pad_slot = slot && *slot ? *slot != '0' : Game().pad_slot_without_pad;
+    if (list.empty() && !Background() && pad_slot) list.push_back({0, 0, 0, "Controller"});
     for (const XInputPad& pad : list) {
       if (!more) break;
       std::fprintf(stderr, "dinput8: game controller %u: %s\n", pad.index, pad.name.c_str());
@@ -799,6 +804,22 @@ HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::GetDeviceState", DID8_GetDeviceS
   std::lock_guard<std::mutex> l(g_mu);
   if (d->keyboard) {
     std::memcpy(GPtr(out), d->keys, 256);
+    // Dev aid: <ID>_KEY_LOG=1 logs each change of the keys a keyboard
+    // device's reads see (DIK codes held), per device.
+    static const bool key_log = [] {
+      const char* e = Env("KEY_LOG");
+      return e && *e == '1';
+    }();
+    if (key_log) {
+      std::string held;
+      for (int k = 0; k < 256; k++)
+        if (d->keys[k]) held += " " + std::to_string(k);
+      if (held != d->logged_keys) {
+        std::fprintf(stderr, "dinput8: keyboard %08X reads:%s\n", Arg(c, 0),
+                     held.empty() ? " none" : held.c_str());
+        d->logged_keys = held;
+      }
+    }
     return DI_OK;
   }
   for (int a = 0; a < 3; a++) Wr32(out + 4 * uint32_t(a), uint32_t(d->axis[a]));

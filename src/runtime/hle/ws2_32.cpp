@@ -476,4 +476,21 @@ RECOMP_WS2_32(52, gethostbyname, 1) {
   return 0;
 }
 
+// ---- WSA async/event and DNS, offline -----------------------------------------
+RECOMP_WS2_32(101, WSAAsyncSelect, 4) { return 0; }
+RECOMP_WS2_32(102, WSAEventSelect, 3) { return 0; }
+RECOMP_WS2_32(31, WSACreateEvent, 0) {
+  static uint32_t ev = 0x80010000;
+  return ++ev;
+}
+RECOMP_WS2_32(29, WSACloseEvent, 1) { return 1; }
+RECOMP_WS2_32(36, WSAEnumNetworkEvents, 3) {
+  if (Arg(c, 2)) std::memset(GPtr(Arg(c, 2)), 0, 44); // WSA_NETWORK_EVENTS
+  return 0;
+}
+RECOMP_WS2_32(58, WSAWaitForMultipleEvents, 5) { return 0x102; } // WSA_WAIT_TIMEOUT
+RECOMP_WS2_32(51, gethostbyaddr, 3) { t_wsa_error = 11001; return 0; }
+RECOMP_WS2_32(55, getservbyname, 2) { t_wsa_error = 11001; return 0; }
+RECOMP_WS2_32(56, getservbyport, 2) { t_wsa_error = 11001; return 0; }
+
 }  // namespace recomp::hle

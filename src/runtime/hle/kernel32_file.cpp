@@ -340,6 +340,23 @@ uint32_t CreateFile(Ctx& c, const std::string& gpath) {
     std::fprintf(stderr, "file: %8.2f %s%s\n", TickCount() / 1000.0, gpath.c_str(),
                  (access & 0x40000000) ? " (write)" : "");
   std::string path = HostPath(gpath);
+  if (Lower(gpath).rfind("\\\\.\\pipe\\", 0) == 0) {
+    // Nothing on the host serves named pipes, so the file HostPath maps the
+    // name to stands in for one. Games that open a pipe of the process that
+    // started them only hold the handle open, so it gets created on demand
+    // instead of failing with FILE_NOT_FOUND.
+    path = HostPath(gpath, PathAccess::kWrite);
+    MakeDirs(path.substr(0, path.find_last_of('/')));
+    int fd = open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0) {
+      SetLastError(ErrnoToWin(errno));
+      return kInvalidHandle;
+    }
+    auto f = std::make_shared<FileObject>();
+    f->fd = fd;
+    SetLastError(0);
+    return NewHandle(f);
+  }
   bool write = access & 0x40000000;  // GENERIC_WRITE
   bool read = access & 0x80000000;   // GENERIC_READ
   int flags = write ? (read ? O_RDWR : O_WRONLY) : O_RDONLY;
@@ -359,8 +376,21 @@ uint32_t CreateFile(Ctx& c, const std::string& gpath) {
     case 5: flags |= O_TRUNC; break;                  // TRUNCATE_EXISTING
   }
   if (exists && S_ISDIR(st.st_mode)) {
-    SetLastError(kErrorAccessDenied);
-    return kInvalidHandle;
+    // A directory opens only with FILE_FLAG_BACKUP_SEMANTICS, and only to
+    // query or close it (POSIX has no write access to a directory).
+    if (!(Arg(c, 5) & 0x02000000) || disp == 1 || disp == 2 || disp == 5) {
+      SetLastError(kErrorAccessDenied);
+      return kInvalidHandle;
+    }
+    int fd = open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) {
+      SetLastError(ErrnoToWin(errno));
+      return kInvalidHandle;
+    }
+    auto f = std::make_shared<FileObject>();
+    f->fd = fd;
+    SetLastError(0);
+    return NewHandle(f);
   }
   if (flags & O_CREAT) {
     // Make sure the parent exists in the per-user tree.
@@ -778,6 +808,8 @@ HLE64("kernel32.dll", MoveFileExW, 3) {
   return MoveFile(WidePath(Arg(c, 0)), WidePath(Arg(c, 1)), flags & 1);
 }
 
+HLE64("kernel32.dll", MoveFileW, 2) { return MoveFile(WidePath(Arg(c, 0)), WidePath(Arg(c, 1)), false); }
+
 uint32_t CreateDirectory(const std::string& g) {
   if (Exists(HostPath(g))) {
     SetLastError(kErrorAlreadyExists);
@@ -839,6 +871,25 @@ HLE("kernel32.dll", GetFullPathNameA, 4) {
   return r;
 }
 
+HLE("kernel32.dll", GetFullPathNameW, 4) {
+  std::string full = AbsGuest(WidePath(Arg(c, 0)));
+  uint32_t size = Arg(c, 1), buf = Arg(c, 2), filepart = Arg(c, 3);
+  // CopyOutW-ish: write UTF-16
+  std::u16string w = Widen(full);
+  if (buf && size) {
+    uint32_t n = std::min<uint32_t>(size - 1, (uint32_t)w.size());
+    for (uint32_t k = 0; k < n; k++) Wr16(buf + k*2, w[k]);
+    Wr16(buf + n*2, 0);
+    if (filepart) {
+      size_t sl = full.find_last_of('\\');
+      Wr32(filepart, sl == std::string::npos || sl + 1 == full.size() ? buf : buf + uint32_t((sl + 1) * 2));
+    }
+    return n < (uint32_t)w.size() ? (uint32_t)w.size() + 1 : n;
+  }
+  return (uint32_t)w.size() + 1;
+}
+
+
 HLE("kernel32.dll", GetLongPathNameA, 3) {
   std::string full = GStr(Arg(c, 0));
   uint32_t buf = Arg(c, 1), size = Arg(c, 2);
@@ -850,6 +901,16 @@ HLE("kernel32.dll", GetTempPathA, 2) {
   MakeDirs(UserDataRoot() + "/TEMP");
   return CopyOut(Arg(c, 1), Arg(c, 0), t);
 }
+
+HLE("kernel32.dll", GetTempPathW, 2) {
+  std::u16string t = u"C:\\TEMP\\";
+  MakeDirs(UserDataRoot() + "/TEMP");
+  uint32_t cap = Arg(c, 0), buf = Arg(c, 1);
+  if (!buf || cap <= t.size()) return (uint32_t)t.size() + 1;
+  for (size_t k = 0; k <= t.size(); k++) Wr16(buf + k*2, k < t.size() ? t[k] : 0);
+  return (uint32_t)t.size();
+}
+
 
 HLE("kernel32.dll", GetTempFileNameA, 4) {
   static uint32_t counter = 1;
@@ -868,6 +929,22 @@ HLE("kernel32.dll", GetTempFileNameA, 4) {
   }
   return unique;
 }
+
+HLE("kernel32.dll", GetTempFileNameW, 4) {
+  static uint32_t counter = 0x8000;
+  std::string dir = WidePath(Arg(c, 0));
+  std::u16string prefix = GWStr(Arg(c, 1)); if (prefix.size() > 3) prefix.resize(3);
+  std::string pfx(prefix.begin(), prefix.end());
+  uint32_t unique = Arg(c, 2) ? Arg(c, 2) : counter++;
+  char name[32]; std::snprintf(name, sizeof name, "%s%X.TMP", pfx.c_str(), unique & 0xFFFF);
+  std::string full = dir; if (!full.empty() && full.back() != '\\') full += '\\'; full += name;
+  std::u16string w = Widen(full);
+  gaddr out = Arg(c, 3);
+  for (size_t k = 0; k <= w.size(); k++) Wr16(out + k*2, k < w.size() ? w[k] : 0);
+  if (!Arg(c, 2)) { int fd = open(HostPath(full, PathAccess::kWrite).c_str(), O_CREAT|O_WRONLY|O_CLOEXEC, 0644); if (fd>=0) close(fd); }
+  return unique & 0xFFFF;
+}
+
 
 // ---- find ------------------------------------------------------------------
 
@@ -955,6 +1032,8 @@ HLE("kernel32.dll", GetLogicalDriveStringsA, 2) {
   std::memcpy(GPtr(Arg(c, 1)), s, sizeof s);
   return sizeof s - 1;
 }
+HLE("kernel32.dll", GetDriveTypeW, 1) { return 3; }
+
 
 HLE("kernel32.dll", GetVolumeInformationA, 8) {
   if (Arg(c, 1) && Arg(c, 2)) PutStr(Arg(c, 1), win32::Upper(Game().id));
@@ -972,6 +1051,24 @@ HLE("kernel32.dll", GetDiskFreeSpaceExA, 4) {
   if (Arg(c, 3)) Wr64(Arg(c, 3), 8ull << 30);
   return 1;
 }
+
+HLE("kernel32.dll", GetDiskFreeSpaceExW, 4) {
+  if (Arg(c, 1)) Wr64(Arg(c, 1), 8ull << 30);
+  if (Arg(c, 2)) Wr64(Arg(c, 2), 64ull << 30);
+  if (Arg(c, 3)) Wr64(Arg(c, 3), 8ull << 30);
+  return 1;
+}
+// (lpRootPathName, lpSectorsPerCluster, lpBytesPerSector,
+// lpNumberOfFreeClusters, lpTotalNumberOfClusters): 4 KiB clusters, 16 GiB
+// free of 32 GiB.
+HLE("kernel32.dll", GetDiskFreeSpaceW, 5) {
+  if (Arg(c, 1)) Wr32(Arg(c, 1), 8);
+  if (Arg(c, 2)) Wr32(Arg(c, 2), 512);
+  if (Arg(c, 3)) Wr32(Arg(c, 3), 0x400000);
+  if (Arg(c, 4)) Wr32(Arg(c, 4), 0x800000);
+  return 1;
+}
+
 
 }  // namespace
 }  // namespace hle

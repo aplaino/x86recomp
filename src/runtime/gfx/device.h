@@ -239,6 +239,11 @@ class Device {
     (void)w, (void)h;
     return 0;
   }
+  // A depth texture of a depth-stencil format (D24S8, D16) rather than
+  // INTZ: Direct3D 9 compares a read of it with the coordinate's depth
+  // (hardware shadow maps; R_SHADOW, hlsl.h). Backends without R_SHADOW
+  // read it as INTZ.
+  virtual void SetDepthCompare(TextureId t, bool on) { (void)t, (void)on; }
   virtual void DestroyDepth(DepthId d) = 0;
 
   // ---- render target (color 0 = back buffer; Present copies it to the
