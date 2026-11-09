@@ -102,4 +102,12 @@ if(RECOMP_HOST)
   add_test(NAME gfx_program COMMAND gfx_program_test)
   set_tests_properties(gfx_program PROPERTIES SKIP_RETURN_CODE 77
                        ENVIRONMENT "SDL_VIDEO_DRIVER=offscreen;SDL_GPU_DRIVER=vulkan")
+
+# gfx_ff_test: explicit fixed-function draws (DrawFf) against the
+# stateful ones on SDL_GPU; skipped without a Vulkan device.
+  add_executable(gfx_ff_test gfx_ff_test.cpp)
+  target_link_libraries(gfx_ff_test PRIVATE recomp_gfx recomp_log)
+  add_test(NAME gfx_ff COMMAND gfx_ff_test)
+  set_tests_properties(gfx_ff PROPERTIES SKIP_RETURN_CODE 77
+                       ENVIRONMENT "SDL_VIDEO_DRIVER=offscreen;SDL_GPU_DRIVER=vulkan")
 endif()

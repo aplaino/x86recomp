@@ -13,7 +13,9 @@
 // for quads may include a trailing partial one. Vertices and index order may be laid out differently; the
 // expanded primitives may not differ.
 //
-// Also: every UNSIGNED_BYTE colour component comes back as the same byte.
+// Also: every UNSIGNED_BYTE colour component comes back as the same byte,
+// and draws from the arrays as streams (Context::ArrayDraw) expand to the
+// same primitives where the context offers them.
 // Scenarios come from raw mt19937 output, which the standard fixes.
 
 #include <algorithm>
@@ -108,6 +110,14 @@ class RecordingDevice final : public gfx::Device {
   }
   void DrawMapped(uint32_t prim, uint32_t fvf) override {
     draws.push_back({prim, fvf, map_stride_, map_v_, map_i_});
+  }
+  void DrawFf(const gfx::FfState&, const gfx::FfDraw& d) override {
+    uint32_t stride = gfx::FvfStride(d.fvf);
+    std::vector<uint8_t> v(size_t(d.vertex_count) * stride);
+    gfx::InterleaveFf(d, v.data());
+    std::vector<uint16_t> idx;
+    for (uint32_t i = 0; d.indices && i < d.index_count; i++) idx.push_back(uint16_t(gfx::FfIndex(d, i)));
+    draws.push_back({d.prim, d.fvf, stride, v, idx});
   }
   void Present() override {}
 
@@ -342,8 +352,10 @@ struct Arrays {
 };
 
 // Random client arrays over `n` elements: packed or interleaved, every
-// type, some disabled.
-void SetUpArrays(std::mt19937& r, g::Context& gl, Arrays& a, size_t n) {
+// type, some disabled; or, `streams`, all enabled in the types and sizes
+// the device takes as they are (float positions, normals and texture
+// coordinates, colour bytes R, G, B, A).
+void SetUpArrays(std::mt19937& r, g::Context& gl, Arrays& a, size_t n, bool streams) {
   struct Spec {
     RefArray* ref;
     int size;
@@ -360,6 +372,16 @@ void SetUpArrays(std::mt19937& r, g::Context& gl, Arrays& a, size_t n) {
   for (int u = 0; u < g::Context::kUnits; u++)
     specs.push_back({&a.m.tc[u], 1 + int(Pick(r, 4)), Pick(r, 2) ? g::FLOAT : kTypes[Pick(r, 8)],
                      Pick(r, 3) != 0});
+  if (streams) {
+    specs[0].size = std::max(specs[0].size, 3);
+    for (Spec& s : specs) {
+      s.type = g::FLOAT;
+      s.on = true;
+    }
+    specs[2].type = g::UNSIGNED_BYTE;
+    specs[2].size = 4;
+    for (size_t i = 3; i < specs.size(); i++) specs[i].size = std::max(specs[i].size, 2);
+  }
   bool interleaved = Pick(r, 2);
   int stride = 0;
   if (interleaved)
@@ -455,13 +477,16 @@ int main() {
 
   std::mt19937 r(12345);
   Arrays a;
-  for (int sc = 0; sc < 3000; sc++) {
+  int array_draws = 0;
+  // Then scenarios with arrays the device takes as streams.
+  for (int sc = 0; sc < 4500; sc++) {
+    const bool streams = sc >= 3000;
     bool lighting = Pick(r, 2);
     gl.SetEnabled(g::LIGHTING, lighting);
     int ntex = SetUpTextures(r, gl, names);
     g::Enum mode = kModes[Pick(r, 10)];
     size_t before = dev.draws.size();
-    uint32_t kind = Pick(r, 3);
+    uint32_t kind = streams ? Pick(r, 2) : Pick(r, 3);
     if (kind == 2) {
       // Immediate mode: current values change between vertices.
       Model m;
@@ -504,7 +529,7 @@ int main() {
       continue;
     }
     size_t n = 1 + Pick(r, 300);
-    SetUpArrays(r, gl, a, n);
+    SetUpArrays(r, gl, a, n, streams);
     std::vector<RefVertex> verts(n);
     for (size_t i = 0; i < n; i++) verts[i] = a.m.Fetch(uint32_t(i));
     std::vector<uint32_t> seq;
@@ -528,7 +553,21 @@ int main() {
     }
     if (seq.empty()) continue;
     Check(sc, dev, before, mode, verts, seq, lighting, ntex);
+    // The same draw from the arrays as streams (ArrayDraw), where the
+    // device takes them as they are: the same expanded primitives.
+    auto [lo, hi] = std::minmax_element(seq.begin(), seq.end());
+    gfx::FfDraw fd;
+    const gfx::FfState* state;
+    if (!gl.ArrayDraw(mode, *lo, *hi, &fd, &state)) continue;
+    fd.indices = seq.data();
+    fd.index_count = uint32_t(seq.size());
+    fd.index_size = 4;
+    before = dev.draws.size();
+    dev.DrawFf(*state, fd);
+    Check(sc, dev, before, mode, verts, seq, lighting, ntex);
+    array_draws++;
   }
-  std::printf("%d failures\n", g_failures);
+  std::printf("%d failures, %d array draws\n", g_failures, array_draws);
+  if (array_draws < 500) return 1;
   return g_failures ? 1 : 0;
 }

@@ -587,7 +587,7 @@ class GpuDevice final : public Device {
     if (bound) BindTarget();
     SDL_ReleaseGPUTexture(dev_, it->second.tex);
     textures_.erase(it);
-    for (TextureId& s : stage_tex_)
+    for (TextureId& s : st_.textures)
       if (s == id) s = 0;
     fs_dirty_ = true;
   }
@@ -891,62 +891,46 @@ class GpuDevice final : public Device {
 
   void SetRenderState(uint32_t s, uint32_t v) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
-    if (s >= rs_.size()) return;
-    rs_[s] = v;
-    vs_dirty_ = fs_dirty_ = true;
+    if (s >= 256) return;
+    st_.rs[s] = v;
   }
 
   void SetTextureStageState(uint32_t stage, uint32_t type, uint32_t v) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     if (stage >= 8 || type >= 33) return;
-    tss_[stage][type] = v;
-    vs_dirty_ = fs_dirty_ = true;
+    st_.tss[stage][type] = v;
   }
 
   void SetTexture(uint32_t stage, TextureId t) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     if (stage >= 8) return;
-    stage_tex_[stage] = t;
-    fs_dirty_ = true;
+    st_.textures[stage] = t;
   }
 
   void SetTransform(uint32_t type, const float m[16]) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
-    Mat x;
-    std::memcpy(x.data(), m, sizeof(float) * 16);
-    switch (type) {
-      case 1: world_[0] = x; break;
-      case 2: view_ = x; break;
-      case 3: proj_ = x; break;
-      case 4: case 5: case 6: world_[type - 3] = x; break;
-      default:
-        if (type >= 16 && type < 24) tex_[type - 16] = x;
-        break;
-    }
-    vs_dirty_ = true;
+    if (float* to = FfTransform(st_, type)) std::memcpy(to, m, sizeof(float) * 16);
   }
 
   void SetViewport(const Viewport& v) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
-    viewport_ = v;
-    vs_dirty_ = true;
+    st_.viewport = v;
   }
 
   void SetScissor(const Rect& r) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
-    scissor_ = r;
+    st_.scissor = r;
   }
 
   void SetMaterial(const Material& m) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
-    material_ = m;
-    vs_dirty_ = true;
+    st_.material = m;
   }
 
   void SetLight(uint32_t i, const Light& li) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     lights_[i] = li;
-    vs_dirty_ = true;
+    SyncLights();
   }
 
   void LightEnable(uint32_t i, bool e) override {
@@ -957,14 +941,13 @@ class GpuDevice final : public Device {
     } else {
       lights_on_.erase(i);
     }
-    vs_dirty_ = true;
+    SyncLights();
   }
 
   void SetClipPlane(uint32_t i, const float p[4]) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     if (i >= 8) return;
-    std::memcpy(clip_[i].data(), p, sizeof(float) * 4);
-    vs_dirty_ = true;
+    std::memcpy(st_.clip[i], p, sizeof(float) * 4);
   }
 
   // ---- drawing
@@ -975,8 +958,8 @@ class GpuDevice final : public Device {
     if (!pass_depth_) flags &= ~6u;
     if (!pass_stencil_) flags &= ~4u;
     if (!(flags & 7)) return;
-    Rect area = ViewportRect();
-    if (rs_[174]) area = Intersect(area, scissor_);
+    Rect area = ViewportRect(st_, pass_w_, pass_h_);
+    if (st_.rs[174]) area = Intersect(area, st_.scissor);
     std::vector<Rect> todo;
     if (!count || !rects) {
       todo.push_back(area);
@@ -1044,7 +1027,32 @@ class GpuDevice final : public Device {
             const uint16_t* indices, uint32_t ni) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     if (!vertices || !nv || !stride || (stride & 3)) return;
-    uint32_t count = PrimitiveCountFromVertices(prim, indices ? ni : nv);
+    DrawWith(
+        st_, prim, fvf, nv, stride, indices != nullptr, ni,
+        [&](uint8_t* to) { std::memcpy(to, vertices, size_t(nv) * stride); },
+        [&](uint32_t i) {
+          uint32_t v = indices ? indices[i] : i;
+          return v < nv ? v : nv - 1;
+        });
+  }
+
+  void DrawFf(const FfState& s, const FfDraw& d) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    uint32_t stride = FvfStride(d.fvf);
+    if (!d.vertex_count || !stride) return;
+    DrawWith(
+        s, d.prim, d.fvf, d.vertex_count, stride, d.indices != nullptr, d.index_count,
+        [&](uint8_t* to) { InterleaveFf(d, to); }, [&](uint32_t i) { return FfIndex(d, i); });
+  }
+
+  // A fixed-function draw with state `s` of `nv` vertices (`stride`
+  // apart, laid out by the FVF), which fill(to) writes into the arena;
+  // index(i) is index i < ni of an indexed draw (clamped to the
+  // vertices), i itself otherwise.
+  template <class Fill, class Index>
+  void DrawWith(const FfState& s, uint32_t prim, uint32_t fvf, uint32_t nv, uint32_t stride,
+                bool indexed, uint32_t ni, Fill fill, Index index) {
+    uint32_t count = PrimitiveCountFromVertices(prim, indexed ? ni : nv);
     if (!count) return;
     SDL_GPUPrimitiveType type;
     uint32_t n;  // vertices or indices used
@@ -1060,36 +1068,33 @@ class GpuDevice final : public Device {
     FvfLayout lay = DecodeFvf(fvf, stride);
 
     Cmd c{};
-    c.key = DrawKey(type);
-    if (!SetupScissor(c, lay.pos_kind == 1)) return;
-    BuildUniforms();
+    c.key = DrawKey(s, type);
+    if (!SetupScissor(s, c, lay.pos_kind == 1)) return;
+    BuildUniforms(s);
     VsUniforms vu = vs_cur_;
     PatchLayout(vu, lay);
     c.vs = PushVs(vu);
     c.fs = PushFs(fs_cur_);
-    BindStageTextures(c);
-    c.stencil_ref = uint8_t(rs_[57]);
-    c.viewport = lay.pos_kind == 1 ? FullViewport() : D3DViewport();
+    BindStageTextures(s, c);
+    c.stencil_ref = uint8_t(s.rs[57]);
+    c.viewport = lay.pos_kind == 1 ? FullViewport() : D3DViewport(s);
 
-    uint32_t first_vertex = AppendVertices(vertices, nv, stride);
+    uint32_t first_vertex;
+    fill(ReserveVertices(nv, stride, &first_vertex));
     // Indices as 32-bit, fans as lists, out-of-range ones clamped (D3D7
     // tolerates them; the shader would read other draws' vertices).
-    if (indices || prim == 6) {
+    if (indexed || prim == 6) {
       c.indexed = true;
       c.first = uint32_t(indices_.size());
-      auto at = [&](uint32_t i) -> uint32_t {
-        uint32_t v = indices ? indices[i] : i;
-        return v < nv ? v : nv - 1;
-      };
       if (prim == 6) {
         for (uint32_t t = 0; t < count; t++) {
-          indices_.push_back(at(0));
-          indices_.push_back(at(t + 1));
-          indices_.push_back(at(t + 2));
+          indices_.push_back(index(0));
+          indices_.push_back(index(t + 1));
+          indices_.push_back(index(t + 2));
         }
         c.count = count * 3;
       } else {
-        for (uint32_t i = 0; i < n; i++) indices_.push_back(at(i));
+        for (uint32_t i = 0; i < n; i++) indices_.push_back(index(i));
         c.count = n;
       }
       c.base = int32_t(first_vertex);
@@ -1316,29 +1321,29 @@ void r_color0(inout vec4 c) {
     WarnUnsupportedShaderState();
 
     Cmd c{};
-    if (!SetupScissor(c, false)) return;
-    c.viewport = D3DViewport();
-    c.stencil_ref = uint8_t(rs_[57]);
+    if (!SetupScissor(st_, c, false)) return;
+    c.viewport = D3DViewport(st_);
+    c.stencil_ref = uint8_t(st_.rs[57]);
     ShaderCmd sc;
-    sc.key.k = DrawKey(type);
+    sc.key.k = DrawKey(st_, type);
     // Front faces are D3D's (clockwise) whatever is culled, for VFACE.
     PipelineKey& k = sc.key.k;
     if (k.cull != SDL_GPU_CULLMODE_NONE)
-      k.cull = rs_[22] == 2 ? SDL_GPU_CULLMODE_FRONT : SDL_GPU_CULLMODE_BACK;
+      k.cull = st_.rs[22] == 2 ? SDL_GPU_CULLMODE_FRONT : SDL_GPU_CULLMODE_BACK;
     k.front = SDL_GPU_FRONTFACE_CLOCKWISE;
-    for (int i = 1; i < 4; i++) k.mask[i - 1] = i < pass_targets_ ? uint8_t(rs_[189 + i] & 0xF) : 0;
+    for (int i = 1; i < 4; i++) k.mask[i - 1] = i < pass_targets_ ? uint8_t(st_.rs[189 + i] & 0xF) : 0;
     sc.key.vs = d.vs;
     sc.key.ps = d.ps;
-    if (k.blend && rs_[206]) {  // SEPARATEALPHABLENDENABLE
-      sc.key.src_a = uint8_t(D3DBlendFactor(rs_[207], pass_alpha_));
-      sc.key.dst_a = uint8_t(D3DBlendFactor(rs_[208], pass_alpha_));
-      sc.key.op_a = uint8_t(D3DBlendOp(rs_[209]));
+    if (k.blend && st_.rs[206]) {  // SEPARATEALPHABLENDENABLE
+      sc.key.src_a = uint8_t(D3DBlendFactor(st_.rs[207], pass_alpha_));
+      sc.key.dst_a = uint8_t(D3DBlendFactor(st_.rs[208], pass_alpha_));
+      sc.key.op_a = uint8_t(D3DBlendOp(st_.rs[209]));
     } else {
       sc.key.src_a = k.src;
       sc.key.dst_a = k.dst;
       sc.key.op_a = k.op;
     }
-    Argb(&sc.blend_constant.r, rs_[193]);
+    Argb(&sc.blend_constant.r, st_.rs[193]);
 
     // Vertices: each stream's range copied to the arena once.
     bool indexed = d.indices != nullptr;
@@ -1369,8 +1374,8 @@ void r_color0(inout vec4 c) {
       st.in[i][1] = int32_t(vsm.stride);
       st.in[i][2] = int32_t(in.type);
     }
-    st.pixel[0] = 1.0f / float(std::max(viewport_.width, 1u));
-    st.pixel[1] = 1.0f / float(std::max(viewport_.height, 1u));
+    st.pixel[0] = 1.0f / float(std::max(st_.viewport.width, 1u));
+    st.pixel[1] = 1.0f / float(std::max(st_.viewport.height, 1u));
 
     if (indexed || d.prim == 6) {
       c.indexed = true;
@@ -1414,8 +1419,8 @@ void r_color0(inout vec4 c) {
     auto pi = ints(d.ps_int, d.ps_bool);
     PushUniform(sc, 4, pi.data(), sizeof pi);
     PsState pst{};
-    pst.alpha[0] = rs_[15] ? int32_t(rs_[25]) : 8;
-    pst.alpha[1] = int32_t(rs_[24] & 0xFF);
+    pst.alpha[0] = st_.rs[15] ? int32_t(st_.rs[25]) : 8;
+    pst.alpha[1] = int32_t(st_.rs[24] & 0xFF);
     for (uint32_t r = 0; r < 16 && d.sampler_states; r++) pst.bias[r] = AsFloat(d.sampler_states[r][8]);
     PushUniform(sc, 5, &pst, sizeof pst);
 
@@ -2071,53 +2076,17 @@ void r_color0(inout vec4 c) {
   // what changes)
 
   void InitDefaults() {
-    rs_.fill(0);
-    rs_[8] = 3;            // FILLMODE solid
-    rs_[9] = 2;            // SHADEMODE gouraud
-    rs_[14] = 1;           // ZWRITEENABLE
-    rs_[16] = 1;           // LASTPIXEL
-    rs_[19] = 2;           // SRCBLEND one
-    rs_[20] = 1;           // DESTBLEND zero
-    rs_[22] = 3;           // CULLMODE ccw
-    rs_[23] = 4;           // ZFUNC lessequal
-    rs_[25] = 8;           // ALPHAFUNC always
-    rs_[37] = FloatBits(1.0f);  // FOGEND
-    rs_[38] = FloatBits(1.0f);  // FOGDENSITY
-    rs_[53] = rs_[54] = rs_[55] = 1;  // stencil ops keep
-    rs_[56] = 8;           // STENCILFUNC always
-    rs_[58] = rs_[59] = 0xFFFFFFFFu;
-    rs_[60] = 0xFFFFFFFFu;  // TEXTUREFACTOR
-    rs_[136] = 1;          // CLIPPING
-    rs_[137] = 1;          // LIGHTING
-    rs_[141] = 1;          // COLORVERTEX
-    rs_[142] = 1;          // LOCALVIEWER
-    rs_[145] = 1;          // DIFFUSEMATERIALSOURCE color1
-    rs_[146] = 2;          // SPECULARMATERIALSOURCE color2
-    rs_[154] = FloatBits(1.0f);  // POINTSIZE
-    rs_[168] = 0xF;        // COLORWRITEENABLE
-    rs_[171] = 1;          // BLENDOP add
-    for (uint32_t s = 0; s < 8; s++) {
-      auto& t = tss_[s];
-      t.fill(0);
-      t[1] = s == 0 ? 4 : 1;   // COLOROP modulate / disable
-      t[2] = 2;                // COLORARG1 texture
-      t[3] = 1;                // COLORARG2 current
-      t[4] = s == 0 ? 2 : 1;   // ALPHAOP selectarg1 / disable
-      t[5] = 2;
-      t[6] = 1;
-      t[11] = s;               // TEXCOORDINDEX
-      t[12] = t[13] = t[14] = 1;  // ADDRESS wrap
-      t[16] = t[17] = 1;       // MAG/MINFILTER point
-      t[18] = 1;               // MIPFILTER none
-      t[21] = 1;               // MAXANISOTROPY
-      t[26] = t[27] = t[28] = 1;  // COLORARG0, ALPHAARG0, RESULTARG current
+    st_ = DefaultFfState();
+    SyncLights();
+  }
+
+  // The first eight enabled lights into st_.
+  void SyncLights() {
+    st_.light_count = 0;
+    for (uint32_t idx : lights_on_) {
+      if (st_.light_count == 8) break;
+      st_.lights[st_.light_count++] = lights_[idx];
     }
-    for (Mat& m : world_) m = Identity();
-    view_ = proj_ = Identity();
-    for (Mat& m : tex_) m = Identity();
-    for (auto& c : clip_) c.fill(0);
-    material_ = Material{};
-    viewport_ = {0, 0, 1, 1, 0, 1};
   }
 
   static Light DefaultLight() {
@@ -2312,10 +2281,17 @@ void r_color0(inout vec4 c) {
   }
 
   uint32_t AppendVertices(const void* v, uint32_t n, uint32_t stride) {
+    uint32_t first;
+    std::memcpy(ReserveVertices(n, stride, &first), v, size_t(n) * stride);
+    return first;
+  }
+
+  // Room for n vertices in the arena, the first of them vertex *first.
+  uint8_t* ReserveVertices(uint32_t n, uint32_t stride, uint32_t* first) {
     size_t pos = (verts_.size() + stride - 1) / stride * stride;
     verts_.resize(pos + size_t(n) * stride);
-    std::memcpy(verts_.data() + pos, v, size_t(n) * stride);
-    return uint32_t(pos / stride);
+    *first = uint32_t(pos / stride);
+    return verts_.data() + pos;
   }
 
   SDL_GPUBuffer* EnsureBuffer(SDL_GPUBuffer*& b, uint32_t& cap, size_t need,
@@ -2954,47 +2930,47 @@ void r_color0(inout vec4 c) {
     return k;
   }
 
-  PipelineKey DrawKey(SDL_GPUPrimitiveType prim) const {
+  PipelineKey DrawKey(const FfState& st, SDL_GPUPrimitiveType prim) const {
     PipelineKey k = BaseKey(prim);
-    if (rs_[8] != 3) k.fill = SDL_GPU_FILLMODE_LINE;
+    if (st.rs[8] != 3) k.fill = SDL_GPU_FILLMODE_LINE;
     bool tri = prim == SDL_GPU_PRIMITIVETYPE_TRIANGLELIST ||
                prim == SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP;
     // D3D culls by screen winding: CW (2) or CCW (3) triangles.
-    if (tri && rs_[22] == 2) {
+    if (tri && st.rs[22] == 2) {
       k.cull = SDL_GPU_CULLMODE_BACK;
       k.front = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
-    } else if (tri && rs_[22] == 3) {
+    } else if (tri && st.rs[22] == 3) {
       k.cull = SDL_GPU_CULLMODE_BACK;
       k.front = SDL_GPU_FRONTFACE_CLOCKWISE;
     }
-    if (rs_[27]) {
+    if (st.rs[27]) {
       k.blend = 1;
-      uint32_t s = rs_[19], d = rs_[20];
+      uint32_t s = st.rs[19], d = st.rs[20];
       if (s == 12) { s = 5; d = 6; }        // BOTHSRCALPHA
       else if (s == 13) { s = 6; d = 5; }   // BOTHINVSRCALPHA
       k.src = uint8_t(D3DBlendFactor(s, pass_alpha_));
       k.dst = uint8_t(D3DBlendFactor(d, pass_alpha_));
-      k.op = uint8_t(D3DBlendOp(rs_[171]));
+      k.op = uint8_t(D3DBlendOp(st.rs[171]));
     }
-    k.write_mask = uint8_t(rs_[168] & 0xF);
+    k.write_mask = uint8_t(st.rs[168] & 0xF);
     if (pass_depth_) {
-      k.depth_test = rs_[7] ? 1 : 0;
-      k.depth_write = (rs_[7] && rs_[14]) ? 1 : 0;
-      k.depth_func = uint8_t(D3DCompareOp(rs_[23]));
-      if (pass_stencil_ && rs_[52]) {
+      k.depth_test = st.rs[7] ? 1 : 0;
+      k.depth_write = (st.rs[7] && st.rs[14]) ? 1 : 0;
+      k.depth_func = uint8_t(D3DCompareOp(st.rs[23]));
+      if (pass_stencil_ && st.rs[52]) {
         k.stencil = 1;
-        k.s_fail = uint8_t(D3DStencilOp(rs_[53]));
-        k.s_zfail = uint8_t(D3DStencilOp(rs_[54]));
-        k.s_pass = uint8_t(D3DStencilOp(rs_[55]));
-        k.s_func = uint8_t(D3DCompareOp(rs_[56]));
-        k.s_read = uint8_t(rs_[58]);
-        k.s_write = uint8_t(rs_[59]);
+        k.s_fail = uint8_t(D3DStencilOp(st.rs[53]));
+        k.s_zfail = uint8_t(D3DStencilOp(st.rs[54]));
+        k.s_pass = uint8_t(D3DStencilOp(st.rs[55]));
+        k.s_func = uint8_t(D3DCompareOp(st.rs[56]));
+        k.s_read = uint8_t(st.rs[58]);
+        k.s_write = uint8_t(st.rs[59]);
       }
       // D3D9's DEPTHBIAS is in depth-range units; D3D7's ZBIAS 0..16
       // as the d3d9 backend maps it.
-      float bias = AsFloat(rs_[195]) - float(rs_[47]) * 0.000005f;
+      float bias = AsFloat(st.rs[195]) - float(st.rs[47]) * 0.000005f;
       k.bias_const = bias * pass_bias_scale_;
-      k.bias_slope = AsFloat(rs_[175]);
+      k.bias_slope = AsFloat(st.rs[175]);
     }
     return k;
   }
@@ -3081,8 +3057,8 @@ void r_color0(inout vec4 c) {
     return s;
   }
 
-  SamplerKey StageSampler(int s) const {
-    const auto& t = tss_[s];
+  SamplerKey StageSampler(const FfState& st, int s) const {
+    const uint32_t* t = st.tss[s];
     SamplerKey k{};
     k.mag = (t[16] == 1) ? SDL_GPU_FILTER_NEAREST : SDL_GPU_FILTER_LINEAR;
     k.min = (t[17] == 1) ? SDL_GPU_FILTER_NEAREST : SDL_GPU_FILTER_LINEAR;
@@ -3097,11 +3073,11 @@ void r_color0(inout vec4 c) {
     return k;
   }
 
-  void BindStageTextures(Cmd& c) {
+  void BindStageTextures(const FfState& st, Cmd& c) {
     for (int s = 0; s < 8; s++) {
-      auto it = textures_.find(stage_tex_[s]);
+      auto it = textures_.find(st.textures[s]);
       c.tex[s] = it != textures_.end() ? it->second.tex : nullptr;
-      c.smp[s] = Sampler(StageSampler(s));
+      c.smp[s] = Sampler(StageSampler(st, s));
     }
   }
 
@@ -3123,46 +3099,54 @@ void r_color0(inout vec4 c) {
     u.mode[0] = l.pos_kind;
   }
 
-  void BuildUniforms() {
+  void BuildUniforms(const FfState& st) {
+    if (std::memcmp(&st, &built_, sizeof st) != 0) {
+      built_ = st;
+      vs_dirty_ = fs_dirty_ = true;
+    }
     if (vs_dirty_) {
+      Mat view, proj;
+      std::memcpy(view.data(), st.view, 64);
+      std::memcpy(proj.data(), st.proj, 64);
       VsUniforms& u = vs_cur_;
       std::memset(&u, 0, sizeof u);
       for (int i = 0; i < 4; i++) {
-        Mat wv = Mul(world_[i], view_);
+        Mat world;
+        std::memcpy(world.data(), st.world[i], 64);
+        Mat wv = Mul(world, view);
         std::memcpy(u.world_view[i], wv.data(), 64);
         Mat nm = NormalMatrix(wv);
         std::memcpy(u.normal[i], nm.data(), 64);
       }
-      std::memcpy(u.proj, proj_.data(), 64);
-      for (int i = 0; i < 8; i++) std::memcpy(u.tex[i], tex_[i].data(), 64);
-      u.viewport[0] = float(viewport_.x);
-      u.viewport[1] = float(viewport_.y);
-      u.viewport[2] = float(std::max(viewport_.width, 1u));
-      u.viewport[3] = float(std::max(viewport_.height, 1u));
+      std::memcpy(u.proj, st.proj, 64);
+      std::memcpy(u.tex, st.tex, sizeof u.tex);
+      u.viewport[0] = float(st.viewport.x);
+      u.viewport[1] = float(st.viewport.y);
+      u.viewport[2] = float(std::max(st.viewport.width, 1u));
+      u.viewport[3] = float(std::max(st.viewport.height, 1u));
       u.target[0] = float(pass_w_);
       u.target[1] = float(pass_h_);
-      u.target[2] = proj_[11] != 0 ? 1.0f : 0.0f;  // _34: perspective
-      Argb(u.ambient, rs_[139]);
-      Vec4(u.mat_diffuse, material_.diffuse);
-      Vec4(u.mat_ambient, material_.ambient);
-      Vec4(u.mat_specular, material_.specular);
-      Vec4(u.mat_emissive, material_.emissive);
-      u.mat_power[0] = material_.power;
-      u.fog[0] = AsFloat(rs_[36]);
-      u.fog[1] = AsFloat(rs_[37]);
-      u.fog[2] = AsFloat(rs_[38]);
+      u.target[2] = proj[11] != 0 ? 1.0f : 0.0f;  // _34: perspective
+      Argb(u.ambient, st.rs[139]);
+      Vec4(u.mat_diffuse, st.material.diffuse);
+      Vec4(u.mat_ambient, st.material.ambient);
+      Vec4(u.mat_specular, st.material.specular);
+      Vec4(u.mat_emissive, st.material.emissive);
+      u.mat_power[0] = st.material.power;
+      u.fog[0] = AsFloat(st.rs[36]);
+      u.fog[1] = AsFloat(st.rs[37]);
+      u.fog[2] = AsFloat(st.rs[38]);
       // Clip planes are in world space; the shader has view space.
-      Mat vinv = Inverse(view_);
+      Mat vinv = Inverse(view);
       for (int i = 0; i < 8; i++)
         for (int j = 0; j < 4; j++) {
           float s = 0;
-          for (int k = 0; k < 4; k++) s += vinv[j * 4 + k] * clip_[i][k];
+          for (int k = 0; k < 4; k++) s += vinv[j * 4 + k] * st.clip[i][k];
           u.clip[i][j] = s;
         }
       int n = 0;
-      for (uint32_t idx : lights_on_) {
-        if (n == 8) break;
-        const Light& l = lights_[idx];
+      for (uint32_t li = 0; li < st.light_count; li++) {
+        const Light& l = st.lights[li];
         GpuLight& g = u.lights[n++];
         Vec4(g.diffuse, l.diffuse);
         Vec4(g.specular, l.specular);
@@ -3170,8 +3154,8 @@ void r_color0(inout vec4 c) {
         float p[4] = {l.position[0], l.position[1], l.position[2], 1};
         float d[4] = {l.direction[0], l.direction[1], l.direction[2], 0};
         for (int c = 0; c < 3; c++) {
-          g.position[c] = p[0] * view_[c] + p[1] * view_[4 + c] + p[2] * view_[8 + c] + view_[12 + c];
-          g.direction[c] = -(d[0] * view_[c] + d[1] * view_[4 + c] + d[2] * view_[8 + c]);
+          g.position[c] = p[0] * view[c] + p[1] * view[4 + c] + p[2] * view[8 + c] + view[12 + c];
+          g.direction[c] = -(d[0] * view[c] + d[1] * view[4 + c] + d[2] * view[8 + c]);
         }
         float len = std::sqrt(g.direction[0] * g.direction[0] + g.direction[1] * g.direction[1] +
                               g.direction[2] * g.direction[2]);
@@ -3186,35 +3170,35 @@ void r_color0(inout vec4 c) {
         g.spot[0] = std::cos(l.theta / 2);
         g.spot[1] = std::cos(l.phi / 2);
       }
-      u.mode[1] = rs_[137] ? 1 : 0;
-      u.mode[2] = rs_[143] ? 1 : 0;
-      u.mode[3] = rs_[142] ? 1 : 0;
-      u.mode2[0] = rs_[141] ? 1 : 0;
-      u.mode2[1] = int(rs_[145]);
-      u.mode2[2] = int(rs_[146]);
-      u.mode2[3] = int(rs_[147]);
-      u.mode3[0] = int(rs_[148]);
-      u.mode3[1] = int(rs_[140]);
-      u.mode3[2] = int(rs_[35]);
-      u.mode3[3] = rs_[48] ? 1 : 0;
-      u.mode4[0] = rs_[29] ? 1 : 0;
-      uint32_t vb = rs_[151];
+      u.mode[1] = st.rs[137] ? 1 : 0;
+      u.mode[2] = st.rs[143] ? 1 : 0;
+      u.mode[3] = st.rs[142] ? 1 : 0;
+      u.mode2[0] = st.rs[141] ? 1 : 0;
+      u.mode2[1] = int(st.rs[145]);
+      u.mode2[2] = int(st.rs[146]);
+      u.mode2[3] = int(st.rs[147]);
+      u.mode3[0] = int(st.rs[148]);
+      u.mode3[1] = int(st.rs[140]);
+      u.mode3[2] = int(st.rs[35]);
+      u.mode3[3] = st.rs[48] ? 1 : 0;
+      u.mode4[0] = st.rs[29] ? 1 : 0;
+      uint32_t vb = st.rs[151];
       u.mode4[1] = (vb >= 1 && vb <= 3) ? int(vb) : 0;
-      u.mode4[2] = int(rs_[152] & 0xFF);
+      u.mode4[2] = int(st.rs[152] & 0xFF);
       u.mode4[3] = n;
-      u.mode5[0] = rs_[28] ? 1 : 0;
+      u.mode5[0] = st.rs[28] ? 1 : 0;
       for (int s = 0; s < 8; s++) {
-        u.tci[s] = int(tss_[s][11]);
-        u.ttf[s] = int(tss_[s][24]);
+        u.tci[s] = int(st.tss[s][11]);
+        u.ttf[s] = int(st.tss[s][24]);
       }
-      u.point[0] = AsFloat(rs_[154]);
+      u.point[0] = AsFloat(st.rs[154]);
       vs_dirty_ = false;
     }
     if (fs_dirty_) {
       FsUniforms& u = fs_cur_;
       std::memset(&u, 0, sizeof u);
       for (int s = 0; s < 8; s++) {
-        const auto& t = tss_[s];
+        const auto& t = st.tss[s];
         u.color[s][0] = int(t[1]);
         u.color[s][1] = int(t[2]);
         u.color[s][2] = int(t[3]);
@@ -3224,21 +3208,21 @@ void r_color0(inout vec4 c) {
         u.alpha[s][2] = int(t[6]);
         u.alpha[s][3] = int(t[27]);
         u.stage[s][0] = int(t[28]);
-        u.stage[s][1] = textures_.count(stage_tex_[s]) ? 1 : 0;
+        u.stage[s][1] = textures_.count(st.textures[s]) ? 1 : 0;
         uint32_t ttf = t[24], count = ttf & 0xFF;
         u.stage[s][2] = (ttf & 256) && count >= 2 ? int(count) - 1 : -1;
       }
-      Argb(u.tfactor, rs_[60]);
-      Argb(u.fog_color, rs_[34]);
-      u.fog[0] = AsFloat(rs_[36]);
-      u.fog[1] = AsFloat(rs_[37]);
-      u.fog[2] = AsFloat(rs_[38]);
-      u.mode[0] = rs_[15] ? int(rs_[25]) : 0;
-      u.mode[1] = int(rs_[24] & 0xFF);
-      u.mode[2] = rs_[28] ? (rs_[35] ? 2 : 1) : 0;
-      u.mode[3] = int(rs_[35]);
-      u.mode2[0] = rs_[9] == 1 ? 1 : 0;
-      u.mode2[1] = rs_[29] ? 1 : 0;
+      Argb(u.tfactor, st.rs[60]);
+      Argb(u.fog_color, st.rs[34]);
+      u.fog[0] = AsFloat(st.rs[36]);
+      u.fog[1] = AsFloat(st.rs[37]);
+      u.fog[2] = AsFloat(st.rs[38]);
+      u.mode[0] = st.rs[15] ? int(st.rs[25]) : 0;
+      u.mode[1] = int(st.rs[24] & 0xFF);
+      u.mode[2] = st.rs[28] ? (st.rs[35] ? 2 : 1) : 0;
+      u.mode[3] = int(st.rs[35]);
+      u.mode2[0] = st.rs[9] == 1 ? 1 : 0;
+      u.mode2[1] = st.rs[29] ? 1 : 0;
       fs_dirty_ = false;
     }
     // The render target size feeds the vertex shader too.
@@ -3266,15 +3250,15 @@ void r_color0(inout vec4 c) {
   }
   static Rect Clip(const Rect& r, int w, int h) { return Intersect(r, {0, 0, w, h}); }
 
-  Rect ViewportRect() const {
-    Rect v{int32_t(viewport_.x), int32_t(viewport_.y), int32_t(viewport_.x + viewport_.width),
-           int32_t(viewport_.y + viewport_.height)};
-    return Clip(v, pass_w_, pass_h_);
+  static Rect ViewportRect(const FfState& st, int w, int h) {
+    Rect v{int32_t(st.viewport.x), int32_t(st.viewport.y), int32_t(st.viewport.x + st.viewport.width),
+           int32_t(st.viewport.y + st.viewport.height)};
+    return Clip(v, w, h);
   }
 
-  SDL_GPUViewport D3DViewport() const {
-    return {float(viewport_.x), float(viewport_.y), float(std::max(viewport_.width, 1u)),
-            float(std::max(viewport_.height, 1u)), viewport_.min_z, viewport_.max_z};
+  static SDL_GPUViewport D3DViewport(const FfState& st) {
+    return {float(st.viewport.x), float(st.viewport.y), float(std::max(st.viewport.width, 1u)),
+            float(std::max(st.viewport.height, 1u)), st.viewport.min_z, st.viewport.max_z};
   }
   SDL_GPUViewport FullViewport() const {
     return {0, 0, float(pass_w_), float(pass_h_), 0, 1};
@@ -3283,10 +3267,10 @@ void r_color0(inout vec4 c) {
   // Scissor of a draw: the target, the scissor rect if enabled, and for
   // pre-transformed vertices (drawn with a full-target viewport) the
   // viewport. False if nothing is left.
-  bool SetupScissor(Cmd& c, bool rhw) const {
+  bool SetupScissor(const FfState& st, Cmd& c, bool rhw) const {
     Rect r{0, 0, pass_w_, pass_h_};
-    if (rs_[174]) r = Intersect(r, scissor_);
-    if (rhw) r = Intersect(r, ViewportRect());
+    if (st.rs[174]) r = Intersect(r, st.scissor);
+    if (rhw) r = Intersect(r, ViewportRect(st, pass_w_, pass_h_));
     if (r.right <= r.left || r.bottom <= r.top) return false;
     c.scissor = {r.left, r.top, r.right - r.left, r.bottom - r.top};
     return true;
@@ -3355,7 +3339,7 @@ void r_color0(inout vec4 c) {
         {185, "TWOSIDEDSTENCILMODE"}, {152, "CLIPPLANEENABLE"}, {194, "SRGBWRITEENABLE"},
     };
     for (const Check& ch : kChecks) {
-      if (!rs_[ch.rs] || (warned_rs_ & (1ull << (&ch - kChecks)))) continue;
+      if (!st_.rs[ch.rs] || (warned_rs_ & (1ull << (&ch - kChecks)))) continue;
       warned_rs_ |= 1ull << (&ch - kChecks);
       WarnF("gfx: %s with shaders is not supported yet\n", ch.name);
     }
@@ -3982,19 +3966,13 @@ void r_color0(inout vec4 c) {
   SDL_GPUGraphicsPipeline* present_pipeline_ = nullptr;
   SDL_GPUTexture* dummy_array_ = nullptr;
 
-  // D3D state.
-  std::array<uint32_t, 256> rs_{};
-  std::array<std::array<uint32_t, 33>, 8> tss_{};
-  std::array<TextureId, 8> stage_tex_{};
-  std::array<Mat, 4> world_;
-  Mat view_, proj_;
-  std::array<Mat, 8> tex_;
-  std::array<std::array<float, 4>, 8> clip_{};
-  Viewport viewport_{};
-  Rect scissor_{};
-  Material material_{};
+  // The stateful D3D state (lights by index in lights_, the first eight
+  // enabled ones in st_), and the state the current uniforms were built
+  // from.
+  FfState st_ = DefaultFfState();
   std::map<uint32_t, Light> lights_;
   std::set<uint32_t> lights_on_;
+  FfState built_{};
   bool vs_dirty_ = true, fs_dirty_ = true;
   VsUniforms vs_cur_{};
   FsUniforms fs_cur_{};

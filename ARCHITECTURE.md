@@ -656,6 +656,26 @@ draws). Backends:
    d3d9 kept (where the build has it) as the reference image (it has no
    programmable pipeline: DXVK would need the shaders as D3D bytecode).
 
+Fixed-function draws come in two forms. The stateful one is D3D7's
+(Set* calls, then Draw), whose state lives in the device. DrawFf carries
+its whole state as one value (`FfState`: render and texture-stage
+states, textures, transforms, viewport, scissor, material, the enabled
+lights, clip planes) and its vertices as one stream per attribute
+(`FfDraw`: positions, normals, colours, which may be bytes R, G, B, A,
+and texture coordinates each with their own stride, 16- or 32-bit
+indices over a vertex range), and leaves the stateful state alone. A
+front end that keeps its own state (the GL context, the D3D7 HLE) draws
+with DrawFf, so several writers share one device in any order without
+invalidating each other's state, and the translation from each API's
+state to the device's lives in one place. Native code that replaces a
+game's renderer reuses it: it sets state through the front end (the GL
+context, say), takes the state (gl::Context::DrawState) or the client
+arrays as streams (ArrayDraw), and draws with the device itself,
+without the front end's gathering and copying of vertices. SDL_GPU
+writes the streams straight into its vertex arena (the same layout as
+the stateful draws, so the shaders are shared); d3d9 sets the explicit
+state for the draw and puts the stateful state back.
+
 API front ends:
 - DirectDraw 7 / Direct3D 7 (recomp_d3d7): guest-visible COM objects;
   DirectDraw (surfaces, flipping chain, Lock/Blt, colour keys, display

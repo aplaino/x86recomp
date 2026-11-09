@@ -220,6 +220,23 @@ class Context {
 
   void SetVsync(bool on);
 
+  // ---- for native code that draws with the device itself (DrawFf),
+  // mixed in any order with the context's own draws: the device, the
+  // state a draw would have now (scene begun) with the number of texture
+  // coordinate sets its stages read (set i for unit i; normals too when
+  // LIGHTING is enabled), and ArrayDraw.
+  gfx::Device* Device() const { return dev_; }
+  const gfx::FfState& DrawState(int* tex_sets);
+  // A draw of primitive `mode` from the client arrays' vertices first ..
+  // last as the device's streams, the arrays as they are (no gathering;
+  // the caller adds indices, which number the arrays' elements), and its
+  // state. False when the device does not take the arrays as they are
+  // (other types or sizes, a disabled array, which GL reads as the
+  // current value, positions with w other than 1) or the primitive:
+  // then the context's own draw does it.
+  bool ArrayDraw(Enum mode, uint32_t first, uint32_t last, gfx::FfDraw* d,
+                 const gfx::FfState** state);
+
   static constexpr int kUnits = 4;  // texture units advertised
 
  private:
@@ -332,9 +349,10 @@ class Context {
   std::vector<uint32_t> remap_;  // DrawElements: epoch << 16 | device vertex
   uint32_t remap_epoch_ = 0;
 
-  // applied device state (to skip redundant calls)
-  uint32_t rs_cache_[256];
-  uint32_t tss_cache_[8][32];
+  // the device state draws have (ApplyState, ApplyTextures, ApplyMatrices)
+  gfx::FfState ff_ = gfx::DefaultFfState();
+  std::vector<uint8_t> draw_buf_;  // a draw's vertices and indices
+  std::vector<uint16_t> draw_idx_;
   bool scene_ = false;
   bool vsync_ = false;
 };

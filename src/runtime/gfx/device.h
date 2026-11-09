@@ -13,6 +13,12 @@
 // XYZW position (0x4002: homogeneous, untransformed). Plain data structs mirror the
 // D3D7 ones (which D3D9 also kept unchanged).
 //
+// Fixed-function draws come in two forms: the stateful one (Set* calls,
+// then Draw), and DrawFf, which carries the whole state and the vertex
+// streams with it and leaves the stateful state alone. Front ends that
+// build their own state (the GL context, the D3D7 HLE) and native code
+// draw with DrawFf, so several of them can share a device in any order.
+//
 // Direct3D 9's programmable pipeline (shaders translated from HLSL,
 // runtime/hlsl) is a second way to draw: CreateShader / DrawShader, with
 // up to four render targets (SetRenderTargets). Its render states are
@@ -101,6 +107,62 @@ struct ColorTarget {
   TextureId tex = 0;
   int level = 0;
 };
+
+// ---- explicit fixed-function draws (DrawFf)
+
+// Everything the stateful fixed-function calls set, as one value (no
+// padding, so it can be compared as bytes). Lights are the enabled ones,
+// in order: indices do not matter to the pipeline.
+struct FfState {
+  uint32_t rs[256];      // render states by number (as SetRenderState)
+  uint32_t tss[8][33];   // texture stage states (as SetTextureStageState)
+  TextureId textures[8];
+  float world[4][16];    // D3D transforms: WORLD, WORLD1-3
+  float view[16], proj[16];
+  float tex[8][16];      // TEXTURE0-7
+  Viewport viewport;
+  Rect scissor;
+  Material material;
+  Light lights[8];
+  uint32_t light_count;
+  float clip[8][4];      // clip planes in world space (CLIPPLANEENABLE)
+};
+// Direct3D's initial state (a device's after creation).
+FfState DefaultFfState();
+
+struct FfStream {
+  const void* data = nullptr;  // vertex 0's attribute
+  uint32_t stride = 0;
+};
+// A fixed-function draw from separate streams. The FVF says which
+// attributes there are and their formats; each one of vertex v is at its
+// stream's data + v * stride (position followed by its blend weights).
+// Vertices first_vertex .. + vertex_count - 1 are read; indices number
+// vertices from 0 (the streams' vertex 0) and must fall in that range
+// (others are clamped to it).
+struct FfDraw {
+  uint32_t prim = 4;  // D3DPRIMITIVETYPE
+  uint32_t fvf = 0;
+  FfStream position, normal, psize, diffuse, specular, tex[8];
+  // Diffuse and specular are bytes R, G, B, A in memory (GL's order)
+  // rather than D3DCOLORs.
+  bool rgba_colors = false;
+  uint32_t first_vertex = 0, vertex_count = 0;
+  const void* indices = nullptr;  // null: the vertices in order
+  uint32_t index_count = 0;
+  uint32_t index_size = 2;  // bytes
+};
+// A draw of interleaved vertices laid out by the FVF (`stride` apart), its
+// streams pointing into them.
+FfDraw FfInterleaved(uint32_t prim, uint32_t fvf, const void* vertices, uint32_t stride);
+// A transform state's matrix in an FfState (SetTransform's numbering:
+// WORLD 1, VIEW 2, PROJECTION 3, WORLD1-3 4-6, TEXTURE0-7 16-23), or null.
+float* FfTransform(FfState& s, uint32_t type);
+// Writes a draw's vertices interleaved as its FVF lays them out
+// (vertex_count * FvfStride(fvf) bytes, vertex first_vertex first).
+void InterleaveFf(const FfDraw& d, uint8_t* out);
+// Index i of a draw, relative to first_vertex and clamped to its vertices.
+uint32_t FfIndex(const FfDraw& d, uint32_t i);
 
 // ---- the programmable pipeline (Direct3D 9 shaders translated from HLSL)
 
@@ -402,6 +464,9 @@ class Device {
   virtual Mapped MapDraw(uint32_t vertex_count, uint32_t stride,
                          uint32_t index_count) = 0;
   virtual void DrawMapped(uint32_t prim, uint32_t fvf) = 0;
+  // A draw with its own state (FfState): the render target, BeginScene
+  // and the stateful state are as they were.
+  virtual void DrawFf(const FfState& s, const FfDraw& d) = 0;
   virtual void Present() = 0;
 
   // ---- programmable pipeline. A shader from the HLSL translation (null

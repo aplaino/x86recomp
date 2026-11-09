@@ -2,6 +2,8 @@
 // methods backends need not implement.
 
 #include "runtime/gfx/device.h"
+
+#include <cstring>
 #include "runtime/log.h"
 
 namespace recomp::gfx {
@@ -212,6 +214,159 @@ uint32_t FvfStride(uint32_t fvf) {
     }
   }
   return s;
+}
+
+namespace {
+uint32_t Bits(float f) {
+  uint32_t b;
+  std::memcpy(&b, &f, 4);
+  return b;
+}
+
+void Identity(float* m) {
+  std::memset(m, 0, 64);
+  m[0] = m[5] = m[10] = m[15] = 1;
+}
+}  // namespace
+
+FfState DefaultFfState() {
+  FfState s;
+  std::memset(&s, 0, sizeof s);
+  uint32_t* rs = s.rs;
+  rs[8] = 3;    // FILLMODE solid
+  rs[9] = 2;    // SHADEMODE gouraud
+  rs[14] = 1;   // ZWRITEENABLE
+  rs[16] = 1;   // LASTPIXEL
+  rs[19] = 2;   // SRCBLEND one
+  rs[20] = 1;   // DESTBLEND zero
+  rs[22] = 3;   // CULLMODE ccw
+  rs[23] = 4;   // ZFUNC lessequal
+  rs[25] = 8;   // ALPHAFUNC always
+  rs[37] = Bits(1.0f);  // FOGEND
+  rs[38] = Bits(1.0f);  // FOGDENSITY
+  rs[53] = rs[54] = rs[55] = 1;  // stencil ops keep
+  rs[56] = 8;   // STENCILFUNC always
+  rs[58] = rs[59] = 0xFFFFFFFFu;
+  rs[60] = 0xFFFFFFFFu;  // TEXTUREFACTOR
+  rs[136] = 1;  // CLIPPING
+  rs[137] = 1;  // LIGHTING
+  rs[141] = 1;  // COLORVERTEX
+  rs[142] = 1;  // LOCALVIEWER
+  rs[145] = 1;  // DIFFUSEMATERIALSOURCE color1
+  rs[146] = 2;  // SPECULARMATERIALSOURCE color2
+  rs[154] = Bits(1.0f);  // POINTSIZE
+  rs[168] = 0xF;  // COLORWRITEENABLE
+  rs[171] = 1;  // BLENDOP add
+  for (uint32_t st = 0; st < 8; st++) {
+    uint32_t* t = s.tss[st];
+    t[1] = st == 0 ? 4 : 1;  // COLOROP modulate / disable
+    t[2] = 2;                // COLORARG1 texture
+    t[3] = 1;                // COLORARG2 current
+    t[4] = st == 0 ? 2 : 1;  // ALPHAOP selectarg1 / disable
+    t[5] = 2;
+    t[6] = 1;
+    t[11] = st;              // TEXCOORDINDEX
+    t[12] = t[13] = t[14] = 1;  // ADDRESS wrap
+    t[16] = t[17] = 1;       // MAG/MINFILTER point
+    t[18] = 1;               // MIPFILTER none
+    t[21] = 1;               // MAXANISOTROPY
+    t[26] = t[27] = t[28] = 1;  // COLORARG0, ALPHAARG0, RESULTARG current
+  }
+  for (auto& m : s.world) Identity(m);
+  Identity(s.view);
+  Identity(s.proj);
+  for (auto& m : s.tex) Identity(m);
+  s.viewport = {0, 0, 1, 1, 0, 1};
+  return s;
+}
+
+void InterleaveFf(const FfDraw& d, uint8_t* out) {
+  struct Attr {
+    const FfStream* s;
+    uint32_t size;
+    bool color;
+  };
+  Attr attrs[13];
+  int n = 0;
+  uint32_t pos = 12;
+  switch (d.fvf & 0x400E) {
+    case 0x004: case 0x4002: pos = 16; break;
+    case 0x006: case 0x008: case 0x00A: case 0x00C: case 0x00E:
+      pos = 12 + 4 * (((d.fvf & 0xE) - 4) / 2);
+      break;
+  }
+  attrs[n++] = {&d.position, pos, false};
+  if (d.fvf & 0x010) attrs[n++] = {&d.normal, 12, false};
+  if (d.fvf & 0x020) attrs[n++] = {&d.psize, 4, false};
+  if (d.fvf & 0x040) attrs[n++] = {&d.diffuse, 4, d.rgba_colors};
+  if (d.fvf & 0x080) attrs[n++] = {&d.specular, 4, d.rgba_colors};
+  uint32_t ntex = (d.fvf >> 8) & 0xF;
+  for (uint32_t i = 0; i < ntex && i < 8; i++) {
+    static constexpr uint32_t kSizes[4] = {8, 12, 16, 4};
+    attrs[n++] = {&d.tex[i], kSizes[(d.fvf >> (16 + 2 * i)) & 3], false};
+  }
+  for (uint32_t v = d.first_vertex; v < d.first_vertex + d.vertex_count; v++) {
+    for (int a = 0; a < n; a++) {
+      const Attr& at = attrs[a];
+      if (!at.s->data) {
+        std::memset(out, 0, at.size);
+      } else {
+        const uint8_t* p = static_cast<const uint8_t*>(at.s->data) + size_t(v) * at.s->stride;
+        if (at.color) {
+          out[0] = p[2];
+          out[1] = p[1];
+          out[2] = p[0];
+          out[3] = p[3];
+        } else {
+          std::memcpy(out, p, at.size);
+        }
+      }
+      out += at.size;
+    }
+  }
+}
+
+FfDraw FfInterleaved(uint32_t prim, uint32_t fvf, const void* vertices, uint32_t stride) {
+  FfDraw d;
+  d.prim = prim;
+  d.fvf = fvf;
+  auto at = [&](uint32_t off) { return FfStream{static_cast<const uint8_t*>(vertices) + off, stride}; };
+  uint32_t off = 12;
+  switch (fvf & 0x400E) {
+    case 0x004: case 0x4002: off = 16; break;
+    case 0x006: case 0x008: case 0x00A: case 0x00C: case 0x00E:
+      off = 12 + 4 * (((fvf & 0xE) - 4) / 2);
+      break;
+  }
+  d.position = at(0);
+  if (fvf & 0x010) d.normal = at(off), off += 12;
+  if (fvf & 0x020) d.psize = at(off), off += 4;
+  if (fvf & 0x040) d.diffuse = at(off), off += 4;
+  if (fvf & 0x080) d.specular = at(off), off += 4;
+  uint32_t ntex = (fvf >> 8) & 0xF;
+  for (uint32_t i = 0; i < ntex && i < 8; i++) {
+    static constexpr uint32_t kSizes[4] = {8, 12, 16, 4};
+    d.tex[i] = at(off);
+    off += kSizes[(fvf >> (16 + 2 * i)) & 3];
+  }
+  return d;
+}
+
+float* FfTransform(FfState& s, uint32_t type) {
+  if (type == 1) return s.world[0];
+  if (type == 2) return s.view;
+  if (type == 3) return s.proj;
+  if (type >= 4 && type <= 6) return s.world[type - 3];
+  if (type >= 16 && type < 24) return s.tex[type - 16];
+  return nullptr;
+}
+
+uint32_t FfIndex(const FfDraw& d, uint32_t i) {
+  uint32_t v = !d.indices ? d.first_vertex + i
+             : d.index_size == 4 ? static_cast<const uint32_t*>(d.indices)[i]
+                                 : static_cast<const uint16_t*>(d.indices)[i];
+  v -= d.first_vertex;  // below first_vertex wraps, then clamps
+  return v < d.vertex_count ? v : d.vertex_count - 1;
 }
 
 uint32_t PrimitiveCountFromVertices(uint32_t prim, uint32_t n) {

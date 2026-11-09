@@ -563,6 +563,45 @@ class D3D9Device final : public Device {
     }
   }
 
+  // The explicit state goes through the setters for the draw, then the
+  // stateful state comes back (only what differs, both ways). Lights go
+  // straight to the device: the explicit ones are 0..light_count - 1.
+  void DrawFf(const FfState& s, const FfDraw& d) override {
+    uint32_t stride = FvfStride(d.fvf);
+    if (!d.vertex_count || !stride) return;
+    const State saved = state_;
+    const FfState cur = Current();
+    Apply(cur, s);
+    for (const auto& [i, on] : saved.light_on)
+      if (on) dev_->LightEnable(i, FALSE);
+    for (uint32_t i = 0; i < s.light_count; i++) {
+      dev_->SetLight(i, reinterpret_cast<const D3DLIGHT9*>(&s.lights[i]));
+      dev_->LightEnable(i, TRUE);
+    }
+    ff_vertices_.resize(size_t(d.vertex_count) * stride);
+    InterleaveFf(d, ff_vertices_.data());
+    dev_->SetFVF(d.fvf);
+    if (d.indices) {
+      ff_indices_.resize(d.index_count);
+      for (uint32_t i = 0; i < d.index_count; i++) ff_indices_[i] = FfIndex(d, i);
+      UINT prims = PrimitiveCountFromVertices(d.prim, d.index_count);
+      if (prims)
+        dev_->DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE(d.prim), 0, d.vertex_count, prims,
+                                     ff_indices_.data(), D3DFMT_INDEX32, ff_vertices_.data(),
+                                     stride);
+    } else {
+      UINT prims = PrimitiveCountFromVertices(d.prim, d.vertex_count);
+      if (prims)
+        dev_->DrawPrimitiveUP(D3DPRIMITIVETYPE(d.prim), prims, ff_vertices_.data(), stride);
+    }
+    for (uint32_t i = 0; i < s.light_count; i++) dev_->LightEnable(i, FALSE);
+    for (const auto& [i, l] : saved.lights)
+      dev_->SetLight(i, reinterpret_cast<const D3DLIGHT9*>(&l));
+    for (const auto& [i, on] : saved.light_on) dev_->LightEnable(i, on);
+    Apply(s, cur);
+    state_ = saved;
+  }
+
   Mapped MapDraw(uint32_t nv, uint32_t stride, uint32_t ni) override {
     mapped_ = {nv, stride, ni};
     // Vertices start at a multiple of the stride: the draw finds them by
@@ -851,6 +890,8 @@ class D3D9Device final : public Device {
   DepthId current_depth_ = 0;
   bool in_scene_ = false;
   std::set<uint32_t> ignored_rs_;
+  std::vector<uint8_t> ff_vertices_;  // DrawFf's
+  std::vector<uint32_t> ff_indices_;
 
   // Everything set through the Device interface: D3D9's Reset discards
   // device state, and front ends only send state when it changes.
@@ -866,6 +907,48 @@ class D3D9Device final : public Device {
     std::map<uint32_t, bool> light_on;
     std::map<uint32_t, std::array<float, 4>> clip;
   } state_;
+
+  // The stateful state as an FfState (without lights).
+  FfState Current() const {
+    FfState f = DefaultFfState();
+    for (const auto& [k, v] : state_.rs)
+      if (k < 256) f.rs[k] = v;
+    for (const auto& [k, v] : state_.tss)
+      if (k.first < 8 && k.second < 33) f.tss[k.first][k.second] = v;
+    for (const auto& [k, v] : state_.tex)
+      if (k < 8) f.textures[k] = v;
+    for (const auto& [k, v] : state_.xf)
+      if (float* m = FfTransform(f, k)) std::memcpy(m, v.data(), 64);
+    if (state_.vp) f.viewport = *state_.vp;
+    if (state_.scissor) f.scissor = *state_.scissor;
+    if (state_.mat) f.material = *state_.mat;
+    for (const auto& [k, v] : state_.clip)
+      if (k < 8) std::memcpy(f.clip[k], v.data(), 16);
+    return f;
+  }
+
+  // Sets what differs between two states (not lights).
+  void Apply(const FfState& from, const FfState& to) {
+    for (uint32_t i = 0; i < 256; i++)
+      if (from.rs[i] != to.rs[i]) SetRenderState(i, to.rs[i]);
+    for (uint32_t st = 0; st < 8; st++) {
+      for (uint32_t t = 0; t < 33; t++)
+        if (from.tss[st][t] != to.tss[st][t]) SetTextureStageState(st, t, to.tss[st][t]);
+      if (from.textures[st] != to.textures[st]) SetTexture(st, to.textures[st]);
+    }
+    for (uint32_t type : {1u, 2u, 3u, 4u, 5u, 6u, 16u, 17u, 18u, 19u, 20u, 21u, 22u, 23u}) {
+      const float* a = FfTransform(const_cast<FfState&>(from), type);
+      const float* b = FfTransform(const_cast<FfState&>(to), type);
+      if (std::memcmp(a, b, 64) != 0) SetTransform(type, b);
+    }
+    if (std::memcmp(&from.viewport, &to.viewport, sizeof to.viewport) != 0)
+      SetViewport(to.viewport);
+    if (std::memcmp(&from.scissor, &to.scissor, sizeof to.scissor) != 0) SetScissor(to.scissor);
+    if (std::memcmp(&from.material, &to.material, sizeof to.material) != 0)
+      SetMaterial(to.material);
+    for (uint32_t i = 0; i < 8; i++)
+      if (std::memcmp(from.clip[i], to.clip[i], 16) != 0) SetClipPlane(i, to.clip[i]);
+  }
 
   void RestoreState() {
     const State s = state_;

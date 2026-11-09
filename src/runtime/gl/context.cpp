@@ -77,7 +77,6 @@ enum : uint32_t {
   FVF_XYZ = 0x002, FVF_XYZW = 0x4002, FVF_NORMAL = 0x010, FVF_DIFFUSE = 0x040,
   PT_POINTLIST = 1, PT_LINELIST = 2, PT_LINESTRIP = 3, PT_TRIANGLELIST = 4,
   PT_TRIANGLESTRIP = 5, PT_TRIANGLEFAN = 6,
-  TS_VIEW = 2, TS_PROJECTION = 3, TS_TEXTURE0 = 16, TS_WORLD = 1,
   CLEAR_TARGET = 1, CLEAR_ZBUFFER = 2, CLEAR_STENCIL = 4,
 };
 
@@ -338,8 +337,6 @@ struct Context::Unit {
 Context::Context(gfx::Device* dev, int fb_w, int fb_h)
     : dev_(dev), fb_w_(fb_w), fb_h_(fb_h), units_(new Unit[kUnits]) {
   for (auto& s : stacks_) s.assign(1, Identity());
-  std::fill(std::begin(rs_cache_), std::end(rs_cache_), kUnset);
-  for (auto& s : tss_cache_) std::fill(std::begin(s), std::end(s), kUnset);
   textures_[0] = new Texture;  // the default texture object
   vp_[2] = scissor_[2] = fb_w;
   vp_[3] = scissor_[3] = fb_h;
@@ -348,7 +345,6 @@ Context::Context(gfx::Device* dev, int fb_w, int fb_h)
   current_.normal[2] = 1;
   depth_ = dev_->CreateDepth(fb_w, fb_h, gfx::Format::D24S8);
   dev_->SetRenderTarget(0, depth_);
-  dev_->SetTransform(TS_VIEW, Identity().data());
   for (float* c : {lights_[0].diffuse, lights_[0].specular}) std::fill(c, c + 4, 1.0f);
 }
 
@@ -622,13 +618,23 @@ void Context::Clear(uint32_t mask) {
     dev_->BeginScene();
     scene_ = true;
   }
-  ApplyState();  // scissor
+  ApplyState();  // the scissor
   // GL clears ignore the viewport; the device's are clipped to it.
   dev_->SetViewport({0, 0, uint32_t(fb_w_), uint32_t(fb_h_), 0, 1});
-  gfx::Rect full{0, 0, fb_w_, fb_h_};
-  dev_->Clear(1, &full, flags, Argb(clear_color_), float(clear_depth_),
-              uint32_t(clear_stencil_));
-  matrices_dirty_ = true;  // restores the viewport
+  gfx::Rect r = ff_.rs[RS_SCISSORTESTENABLE] ? ff_.scissor : gfx::Rect{0, 0, fb_w_, fb_h_};
+  if (r.right <= r.left || r.bottom <= r.top) return;
+  dev_->Clear(1, &r, flags, Argb(clear_color_), float(clear_depth_), uint32_t(clear_stencil_));
+}
+
+const gfx::FfState& Context::DrawState(int* tex_sets) {
+  if (!scene_) {
+    dev_->BeginScene();
+    scene_ = true;
+  }
+  ApplyState();
+  *tex_sets = ApplyTextures();
+  ApplyMatrices();
+  return ff_;
 }
 
 void Context::PixelStore(Enum pname, int v) {
@@ -792,7 +798,7 @@ void Context::Rotate(float angle, float x, float y, float z) {
 void Context::ApplyMatrices() {
   if (!matrices_dirty_) return;
   matrices_dirty_ = false;
-  dev_->SetTransform(TS_WORLD, stacks_[0].back().data());
+  std::memcpy(ff_.world[0], stacks_[0].back().data(), 64);
   // Projection: z from -w..w to 0..w, and the half-pixel shift.
   std::array<float, 16> p = stacks_[1].back();
   float vw = float(std::max(vp_[2], 1)), vh = float(std::max(vp_[3], 1));
@@ -802,7 +808,7 @@ void Context::ApplyMatrices() {
     p[k * 4 + 0] -= w / vw;
     p[k * 4 + 1] += w / vh;
   }
-  dev_->SetTransform(TS_PROJECTION, p.data());
+  std::memcpy(ff_.proj, p.data(), 64);
   for (int u = 0; u < kUnits; u++) {
     const auto& m = stacks_[2 + u].back();
     if (IsIdentity(m)) {
@@ -810,14 +816,13 @@ void Context::ApplyMatrices() {
       continue;
     }
     // GL: (s,t,0,1) * columns; device: (u,v,1,0) * rows.
-    float d[16];
+    float* d = ff_.tex[u];
     for (int j = 0; j < 4; j++) {
       d[0 + j] = m[j];
       d[4 + j] = m[4 + j];
       d[8 + j] = m[12 + j];
       d[12 + j] = m[8 + j];
     }
-    dev_->SetTransform(TS_TEXTURE0 + uint32_t(u), d);
     TSS(u, TSS_TEXTURETRANSFORMFLAGS, 2);  // D3DTTFF_COUNT2
   }
   // Viewport, flipped to a top-left origin and clipped to the target.
@@ -826,24 +831,15 @@ void Context::ApplyMatrices() {
   int y1 = std::clamp(y + vp_[3], 0, fb_h_);
   if (x != vp_[0] || y0 != y || x1 != vp_[0] + vp_[2] || y1 != y + vp_[3])
     Unsupported("viewport outside the framebuffer", 0);
-  dev_->SetViewport({uint32_t(x), uint32_t(y0), uint32_t(std::max(x1 - x, 0)),
-                     uint32_t(std::max(y1 - y0, 0)), float(depth_near_),
-                     float(depth_far_)});
+  ff_.viewport = {uint32_t(x), uint32_t(y0), uint32_t(std::max(x1 - x, 0)),
+                  uint32_t(std::max(y1 - y0, 0)), float(depth_near_), float(depth_far_)};
 }
 
 // ---- device state ------------------------------------------------------------------
 
-void Context::RS(uint32_t s, uint32_t v) {
-  if (rs_cache_[s] == v) return;
-  rs_cache_[s] = v;
-  dev_->SetRenderState(s, v);
-}
+void Context::RS(uint32_t s, uint32_t v) { ff_.rs[s] = v; }
 
-void Context::TSS(uint32_t stage, uint32_t type, uint32_t v) {
-  if (tss_cache_[stage][type] == v) return;
-  tss_cache_[stage][type] = v;
-  dev_->SetTextureStageState(stage, type, v);
-}
+void Context::TSS(uint32_t stage, uint32_t type, uint32_t v) { ff_.tss[stage][type] = v; }
 
 void Context::ApplyState() {
   bool depth = enabled_.count(DEPTH_TEST);
@@ -879,7 +875,7 @@ void Context::ApplyState() {
     int x1 = std::clamp(scissor_[0] + scissor_[2], 0, fb_w_);
     int y0 = std::clamp(fb_h_ - (scissor_[1] + scissor_[3]), 0, fb_h_);
     int y1 = std::clamp(fb_h_ - scissor_[1], 0, fb_h_);
-    dev_->SetScissor({x0, y0, x1, y1});
+    ff_.scissor = {x0, y0, x1, y1};
   }
   bool stencil = enabled_.count(STENCIL_TEST);
   RS(RS_STENCILENABLE, stencil ? 1 : 0);
@@ -920,12 +916,11 @@ void Context::ApplyState() {
     RS(RS_SPECULARMATERIALSOURCE, src(SPECULAR));
     RS(RS_EMISSIVEMATERIALSOURCE, src(EMISSION));
     auto col = [](const float* f) { return gfx::Color{f[0], f[1], f[2], f[3]}; };
-    dev_->SetMaterial({col(mat_diffuse_), col(mat_ambient_), col(mat_specular_),
-                       col(mat_emission_), mat_shininess_});
+    ff_.material = {col(mat_diffuse_), col(mat_ambient_), col(mat_specular_),
+                    col(mat_emission_), mat_shininess_};
+    ff_.light_count = 0;
     for (int i = 0; i < 8; i++) {
-      bool on = enabled_.count(LIGHT0 + Enum(i));
-      dev_->LightEnable(uint32_t(i), on);
-      if (!on) continue;
+      if (!enabled_.count(LIGHT0 + Enum(i))) continue;
       const LightState& L = lights_[i];
       gfx::Light d{};
       d.diffuse = col(L.diffuse);
@@ -951,16 +946,14 @@ void Context::ApplyState() {
           d.falloff = 1;
         }
       }
-      dev_->SetLight(uint32_t(i), d);
+      ff_.lights[ff_.light_count++] = d;
     }
   }
   uint32_t planes = 0;
   for (int i = 0; i < 6; i++)
     if (enabled_.count(CLIP_PLANE0 + Enum(i))) {
       // The device's world space is GL's eye space (see the file comment).
-      float p[4] = {float(clip_planes_[i][0]), float(clip_planes_[i][1]),
-                    float(clip_planes_[i][2]), float(clip_planes_[i][3])};
-      dev_->SetClipPlane(uint32_t(i), p);
+      for (int k = 0; k < 4; k++) ff_.clip[i][k] = float(clip_planes_[i][k]);
       planes |= 1u << i;
     }
   RS(RS_CLIPPLANEENABLE, planes);
@@ -986,7 +979,7 @@ int Context::ApplyTextures() {
     Unit& un = units_[u];
     TSS(u, TSS_TEXCOORDINDEX, uint32_t(u));
     if (!live[u]) {  // a disabled unit between enabled ones passes through
-      dev_->SetTexture(uint32_t(u), 0);
+      ff_.textures[u] = 0;
       TSS(u, TSS_COLOROP, TOP_SELECTARG1);
       TSS(u, TSS_COLORARG1, TA_CURRENT);
       TSS(u, TSS_ALPHAOP, TOP_SELECTARG1);
@@ -994,7 +987,7 @@ int Context::ApplyTextures() {
       continue;
     }
     Texture* t = Bound(u);
-    dev_->SetTexture(uint32_t(u), t->id);
+    ff_.textures[u] = t->id;
     // Sampler state from the texture object.
     bool aniso = t->aniso > 1;
     TSS(u, TSS_MAGFILTER, t->mag_filter == NEAREST ? 1 : aniso ? 5 : 2);
@@ -1097,7 +1090,7 @@ int Context::ApplyTextures() {
   // End the chain; with no texture at all, stage 0 passes the vertex color.
   int end = last + 1;
   if (end == 0) {
-    dev_->SetTexture(0, 0);
+    ff_.textures[0] = 0;
     TSS(0, TSS_COLOROP, TOP_SELECTARG1);
     TSS(0, TSS_COLORARG1, TA_DIFFUSE);
     TSS(0, TSS_ALPHAOP, TOP_SELECTARG1);
@@ -1430,6 +1423,42 @@ Context::Sources Context::ClientSources() const {
   return {vertex_, normal_, color_, {texcoord_[0], texcoord_[1], texcoord_[2], texcoord_[3]}};
 }
 
+bool Context::ArrayDraw(Enum mode, uint32_t first, uint32_t last, gfx::FfDraw* d,
+                        const gfx::FfState** state) {
+  if (mode > TRIANGLE_FAN || mode == LINE_LOOP || last < first) return false;
+  d->prim = DevicePrim(mode);
+  auto on = [](const Array& a) { return a.enabled && a.ptr; };
+  auto stream = [](const Array& a) {
+    return gfx::FfStream{a.ptr, uint32_t(a.stride ? a.stride : a.size * TypeSize(a.type))};
+  };
+  if (!on(vertex_) || vertex_.type != FLOAT || vertex_.size < 3) return false;
+  d->position = stream(vertex_);
+  if (vertex_.size > 3)
+    for (uint32_t v = first; v <= last; v++)
+      if (Load<float>(vertex_.ptr + size_t(v) * d->position.stride + 12, false) != 1)
+        return false;
+  if (!on(color_) || color_.type != UNSIGNED_BYTE || color_.size < 4) return false;
+  d->diffuse = stream(color_);
+  d->rgba_colors = true;
+  d->fvf = FVF_XYZ | FVF_DIFFUSE;
+  if (enabled_.count(LIGHTING)) {
+    if (!on(normal_) || normal_.type != FLOAT) return false;
+    d->normal = stream(normal_);
+    d->fvf |= FVF_NORMAL;
+  }
+  int sets;
+  *state = &DrawState(&sets);
+  for (int u = 0; u < sets; u++) {
+    const Array& tc = texcoord_[u];
+    if (!on(tc) || tc.type != FLOAT || tc.size < 2) return false;
+    d->tex[u] = stream(tc);
+  }
+  d->fvf |= uint32_t(sets) << 8;
+  d->first_vertex = first;
+  d->vertex_count = last - first + 1;
+  return true;
+}
+
 void Context::DrawArrays(Enum mode, int first, int count) {
   if (count <= 0) return;
   if (count > 65536) return Unsupported("draw with more than 65536 vertices", mode);
@@ -1531,13 +1560,8 @@ void Context::DrawVertices(Enum mode, const Sources& src) {
   size_t nidx = DeviceIndexCount(mode, draw_seq_.size());
   if (!nidx) return;
 
-  if (!scene_) {
-    dev_->BeginScene();
-    scene_ = true;
-  }
-  ApplyState();
-  int ntex = ApplyTextures();
-  ApplyMatrices();
+  int ntex;
+  const gfx::FfState& state = DrawState(&ntex);
 
   // The device layout: position, normal (lighting only), colour, the
   // texture coordinates ApplyTextures' stages read. Each attribute is
@@ -1566,8 +1590,8 @@ void Context::DrawVertices(Enum mode, const Sources& src) {
   uint32_t nofs = pofs + (normals ? 12 : 0);
   uint32_t stride = nofs + 4 + 8 * uint32_t(ntex);
   size_t nv = vs.size();
-  gfx::Device::Mapped m = dev_->MapDraw(uint32_t(nv), stride, uint32_t(nidx));
-  uint8_t* d = m.vertices;
+  draw_buf_.resize(nv * stride);
+  uint8_t* d = draw_buf_.data();
 
   const Array& pos = src.pos;
   if (!on(pos)) {
@@ -1661,8 +1685,19 @@ void Context::DrawVertices(Enum mode, const Sources& src) {
     }
   }
 
-  ExpandIndices(mode, draw_seq_, m.indices);
-  dev_->DrawMapped(prim, fvf);
+  draw_idx_.resize(nidx);
+  ExpandIndices(mode, draw_seq_, draw_idx_.data());
+  gfx::FfDraw fd;
+  fd.prim = prim;
+  fd.fvf = fvf;
+  fd.position = {d, stride};
+  if (normals) fd.normal = {d + pofs, stride};
+  fd.diffuse = {d + nofs, stride};
+  for (int u = 0; u < ntex; u++) fd.tex[u] = {d + nofs + 4 + 8 * u, stride};
+  fd.vertex_count = uint32_t(nv);
+  fd.indices = draw_idx_.data();
+  fd.index_count = uint32_t(nidx);
+  dev_->DrawFf(state, fd);
 }
 
 // ---- readback ------------------------------------------------------------------------
