@@ -1136,7 +1136,9 @@ Lifter:
   the image base. The bounds check may sit in another block that
   branches to the table code (a taken jbe/jb counts like a ja/jae
   falling through), and the index may be a copy (mov, movsxd, movzx) of
-  the register that was compared. Tables outside .text are read from
+  the register that was compared, or its own low byte zero-extended in
+  place after a compare of that byte (`cmp cl, N; ja; movzx ecx, cl`).
+  Tables outside .text are read from
   the module's read-only data (an ELF's .rodata).
 - Function pointers in x64 code are RIP-relative leas into .text (weak
   entries, like the immediates of 32-bit code); data pointers are

@@ -44,6 +44,40 @@ __attribute__((noinline)) static long sw(int k, long x) {
   }
 }
 
+// A switch on a byte bounded before the index is widened in place (an
+// older clang's code, kept as it was): k's low byte less one picks case
+// 1-8, anything else returns 100.
+long switch_byte(long k);
+__asm__(
+    ".text\n"
+    ".type switch_byte, @function\n"
+    "switch_byte:\n"
+    "  movl %edi, %ecx\n"
+    "  decb %cl\n"
+    "  cmpb $7, %cl\n"
+    "  ja .Lsb_default\n"
+    "  movzbl %cl, %ecx\n"
+    "  leaq .Lsb_table(%rip), %rdx\n"
+    "  movslq (%rdx,%rcx,4), %rcx\n"
+    "  addq %rdx, %rcx\n"
+    "  jmpq *%rcx\n"
+    ".Lsb1: movl $1, %eax\n  ret\n"
+    ".Lsb2: movl $2, %eax\n  ret\n"
+    ".Lsb3: movl $3, %eax\n  ret\n"
+    ".Lsb4: movl $4, %eax\n  ret\n"
+    ".Lsb5: movl $5, %eax\n  ret\n"
+    ".Lsb6: movl $6, %eax\n  ret\n"
+    ".Lsb7: movl $7, %eax\n  ret\n"
+    ".Lsb8: movl $8, %eax\n  ret\n"
+    ".Lsb_default: movl $100, %eax\n  ret\n"
+    ".size switch_byte, .-switch_byte\n"
+    ".section .rodata\n"
+    ".p2align 2\n"
+    ".Lsb_table:\n"
+    "  .long .Lsb1-.Lsb_table, .Lsb2-.Lsb_table, .Lsb3-.Lsb_table, .Lsb4-.Lsb_table\n"
+    "  .long .Lsb5-.Lsb_table, .Lsb6-.Lsb_table, .Lsb7-.Lsb_table, .Lsb8-.Lsb_table\n"
+    ".text\n");
+
 // libTestPrx's setjmp and longjmp (prx.c), found by the lifter by NID.
 int setjmp(long* b) __attribute__((returns_twice));
 __attribute__((noreturn)) void longjmp(long* b, int v);
@@ -101,6 +135,10 @@ long _start(struct args* a, void (*cleanup)(void)) {
 
   static const long want[] = {11, 13, 12, 28, 12, 23, 34, -1};
   for (int k = 0; k < 8; k++) failed += test_check(16 + k, sw(k, 1), want[k]);
+  // 0x101: its low byte only.
+  failed += test_check(38, switch_byte(1) + switch_byte(8) * 10 + switch_byte(0x101) * 100 + switch_byte(4) * 1000,
+                       4181);
+  failed += test_check(39, switch_byte(0) + switch_byte(9), 200);
 
   failed += test_check(24, protected_call(7, 3, 0), 7);   // back past three frames
   failed += test_check(25, protected_call(0, 0, 0), -1);  // no longjmp

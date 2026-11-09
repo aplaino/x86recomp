@@ -189,6 +189,8 @@ uint64_t HomeOf(const Module& m, uint64_t va) {
 // RIP-relative lea put in a register:
 //   lea rB, [table]; ... cmp eI, N; ja default; movsxd rT, [rB + rI*4]
 //   add rT, rB; jmp rT
+// with a byte index sometimes bounded before it is widened in place:
+//   cmp cI, N; ja default; movzx eI, cI
 // Both are "target = B + entry": B and the load's base register are taken
 // from the lea that sets them on every path to the jmp, or are the image
 // base.
@@ -215,6 +217,13 @@ bool RecoverJumpTable64(const Program& p, const Function& f, const Insn& jmp,
   ZydisRegister idx = ZYDIS_REGISTER_NONE, base = ZYDIS_REGISTER_NONE;
   uint64_t table = 0, index = 0, added = image;
   bool two_level = false, sign = false;
+  // The index zero-extended in place from its low `narrow` bits (movzx):
+  // a bound on them or more bounds it.
+  uint32_t narrow = 0;
+  auto hi8 = [](const ZydisDecodedOperand& o) {
+    return o.reg.value == ZYDIS_REGISTER_AH || o.reg.value == ZYDIS_REGISTER_CH ||
+           o.reg.value == ZYDIS_REGISTER_DH || o.reg.value == ZYDIS_REGISTER_BH;
+  };
   // The instruction before `in` on the paths to it: the one falling into
   // it, or where none does (a block the bounds check branches to), the
   // only branch to it (`taken`).
@@ -404,6 +413,9 @@ bool RecoverJumpTable64(const Program& p, const Function& f, const Insn& jmp,
                     (d.mnemonic == ZYDIS_MNEMONIC_MOV && o0.size == 32)) &&
                    reg(o0) == idx && o1.type == ZYDIS_OPERAND_TYPE_REGISTER) {
           idx = Full(o1.reg.value);  // widened from another register
+        } else if (d.mnemonic == ZYDIS_MNEMONIC_MOVZX && !narrow && reg(o0) == idx && reg(o1) == idx &&
+                   !hi8(o1)) {
+          narrow = o1.size;
         } else if (d.mnemonic == ZYDIS_MNEMONIC_CDQE && idx == ZYDIS_REGISTER_RAX) {
           // rax from eax: same register
         } else if (WritesReg(*in, idx) || d.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE) {
@@ -418,7 +430,10 @@ bool RecoverJumpTable64(const Program& p, const Function& f, const Insn& jmp,
         if (d.mnemonic != ZYDIS_MNEMONIC_CMP || o1.type != ZYDIS_OPERAND_TYPE_IMMEDIATE ||
             o1.imm.value.u >= 4096 || reg(o0) == ZYDIS_REGISTER_NONE)
           return unbounded();
-        if (reg(o0) == idx) return bounded(uint32_t(o1.imm.value.u) + !below);
+        if (reg(o0) == idx) {
+          if (narrow && (o0.size < narrow || hi8(o0))) return unbounded();
+          return bounded(uint32_t(o1.imm.value.u) + !below);
+        }
         // Compared in another register that idx was copied from since.
         alias = reg(o0);
         alias_cases = uint32_t(o1.imm.value.u) + !below;
