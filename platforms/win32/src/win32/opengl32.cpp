@@ -26,6 +26,7 @@
 #include "runtime/log.h"
 #include "win32/hle.h"
 #include "win32/kernel32_state.h"
+#include "win32/opengl32.h"
 #include "win32/user32_window.h"
 #include "x86/present.h"
 
@@ -150,9 +151,11 @@ void FramebufferSize(uint32_t hwnd, int* w, int* h) {
   *h = std::max(*h, 1);
 }
 
-// The current GL; a GL call without one is a game bug on Windows too
-// (it does nothing there), so it is reported and ignored.
-gl::Context* Gl() {
+}  // namespace
+
+// A GL call without a current context is a game bug on Windows too (it
+// does nothing there), so it is reported and ignored.
+gl::Context* CurrentGl() {
   if (t_current && t_current->gl) return t_current->gl.get();
   static bool warned = false;
   if (!warned) WarnF("opengl32: GL call without a current context\n");
@@ -160,8 +163,10 @@ gl::Context* Gl() {
   return nullptr;
 }
 
+namespace {
+
 #define GL_OR_RETURN(v)          \
-  gl::Context* g = Gl();         \
+  gl::Context* g = CurrentGl();  \
   if (!g) return v
 
 // ---- pixel formats (gdi32 and the wgl* duplicates) ------------------------------
