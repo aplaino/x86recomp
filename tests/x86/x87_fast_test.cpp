@@ -402,10 +402,14 @@ long DoubleForms() {
     std::printf("FAIL %s %016" PRIX64 " ok=%d\n", what, raw, ok);
     return 1;
   };
+  // ok is taken before v is read (the order of a call's arguments is
+  // unspecified).
   double v = 7.0;
-  fails += load("OperandF32", run::LoadF32(m32), run::OperandF32(m32, &v), v, m32);
+  bool ok = run::OperandF32(m32, &v);
+  fails += load("OperandF32", run::LoadF32(m32), ok, v, m32);
   v = 7.0;
-  fails += load("OperandF64", run::LoadF64(m64), run::OperandF64(m64, &v), v, m64);
+  ok = run::OperandF64(m64, &v);
+  fails += load("OperandF64", run::LoadF64(m64), ok, v, m64);
   // As a run does it: two m64 loads and an operation, from any bits.
   uint64_t n64 = Rand() % 64 ? AnyF64() : Bits(-D(m64));
   double x0, x1;
@@ -426,7 +430,7 @@ long DoubleForms() {
   // FCOM m64 takes any zero or normal value.
   v = 7.0;
   run::RV l64 = run::LoadF64(m64);
-  bool ok = run::CompareOperandF64(m64, &v);
+  ok = run::CompareOperandF64(m64, &v);
   if (ok != (run::Flags(l64) == 0 && run::Ordinary(run::Val(l64)) &&
              (run::Val(l64).se & 0x7FFF) != 0x7FFF) ||
       (ok && Bits(v) != m64) || (!ok && v != 7.0)) {

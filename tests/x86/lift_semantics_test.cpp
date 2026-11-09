@@ -210,13 +210,13 @@ void TestWidth() {
     uint64_t fin = 0x202 | (rng() & kAll);  // random input flags
     uint64_t fo;
     Flags f;
-    uint32_t r;
+    uint32_t r, hw;  // hw: the native result, taken before fo is read
 
 #define BIN(label, native, call, mask)                                   \
     f = Unpack(uint32_t(fin));                                           \
     r = call;                                                            \
-    Check(label, N, a, b, uint32_t(fin), native(N, a, b, fin, &fo),      \
-          uint32_t(fo), r, Pack(f), mask);
+    hw = native(N, a, b, fin, &fo);                                      \
+    Check(label, N, a, b, uint32_t(fin), hw, uint32_t(fo), r, Pack(f), mask);
 
     BIN("add", NAdd, L::Add<N>(f, a, b), kAll)
     BIN("adc", NAdc, L::Adc<N>(f, a, b), kAll)
@@ -229,8 +229,8 @@ void TestWidth() {
 #define UN(label, native, call)                                          \
     f = Unpack(uint32_t(fin));                                           \
     r = call;                                                            \
-    Check(label, N, a, 0, uint32_t(fin), native(N, a, fin, &fo),         \
-          uint32_t(fo), r, Pack(f), kAll);
+    hw = native(N, a, fin, &fo);                                         \
+    Check(label, N, a, 0, uint32_t(fin), hw, uint32_t(fo), r, Pack(f), kAll);
 
     UN("inc", NInc, L::Inc<N>(f, a))
     UN("dec", NDec, L::Dec<N>(f, a))
@@ -245,8 +245,8 @@ void TestWidth() {
 #define SH(label, native, call, mask)                                    \
     f = Unpack(uint32_t(fin));                                           \
     r = call;                                                            \
-    Check(label, N, a, cnt, uint32_t(fin), native(N, a, cnt, fin, &fo),  \
-          uint32_t(fo), r, Pack(f), mask);
+    hw = native(N, a, cnt, fin, &fo);                                    \
+    Check(label, N, a, cnt, uint32_t(fin), hw, uint32_t(fo), r, Pack(f), mask);
     SH("shl", NShl, L::Shl<N>(f, a, cnt), smask)
     SH("shr", NShr, L::Shr<N>(f, a, cnt), smask)
     SH("sar", NSar, L::Sar<N>(f, a, cnt), mc ? (kAll & ~AF & ~(mc == 1 ? 0u : OF)) : kAll)
@@ -264,18 +264,18 @@ void TestWidth() {
         uint32_t dmask = mc == 0 ? kAll : (kAll & ~AF & ~(mc == 1 ? 0u : OF));
         f = Unpack(uint32_t(fin));
         r = L::Shld<N>(f, a, b, cnt);
-        Check("shld", N, a, b, uint32_t(fin), NShld(N, a, b, cnt, fin, &fo),
-              uint32_t(fo), r, Pack(f), dmask);
+        hw = NShld(N, a, b, cnt, fin, &fo);
+        Check("shld", N, a, b, uint32_t(fin), hw, uint32_t(fo), r, Pack(f), dmask);
         f = Unpack(uint32_t(fin));
         r = L::Shrd<N>(f, a, b, cnt);
-        Check("shrd", N, a, b, uint32_t(fin), NShrd(N, a, b, cnt, fin, &fo),
-              uint32_t(fo), r, Pack(f), dmask);
+        hw = NShrd(N, a, b, cnt, fin, &fo);
+        Check("shrd", N, a, b, uint32_t(fin), hw, uint32_t(fo), r, Pack(f), dmask);
       }
       // IMUL r, r/m: only CF/OF defined.
       f = Unpack(uint32_t(fin));
       r = L::Imul2<N>(f, a, b);
-      Check("imul2", N, a, b, 0, NImul2(N, a, b, &fo), uint32_t(fo), r,
-            Pack(f), CF | OF);
+      hw = NImul2(N, a, b, &fo);
+      Check("imul2", N, a, b, 0, hw, uint32_t(fo), r, Pack(f), CF | OF);
     }
     if constexpr (N == 4) {
       for (bool sign : {false, true}) {
@@ -405,29 +405,32 @@ void TestBmi() {
         uint64_t fin = 0x202 | (rng() & kAll), fo;
         Flags f = Unpack(uint32_t(fin));
         uint64_t r = L::Bextr<N>(f, a, ctrl);
-        Check64("bextr", N, a, ctrl, NBextr(N, a, ctrl, fin, &fo), uint32_t(fo), r, Pack(f),
-                ZF | CF | OF);
+        const uint64_t hw = NBextr(N, a, ctrl, fin, &fo);
+        Check64("bextr", N, a, ctrl, hw, uint32_t(fo), r, Pack(f), ZF | CF | OF);
       }
   for (int it = 0; it < 200000; it++) {
     uint64_t a = Interesting64(N), b = Interesting64(N);
-    uint64_t fin = 0x202 | (rng() & kAll), fo;
+    uint64_t fin = 0x202 | (rng() & kAll), fo, hw;  // hw taken before fo is read
     Flags f = Unpack(uint32_t(fin));
     uint64_t r = L::Andn<N>(f, a, b);
-    Check64("andn", N, a, b, NAndn(N, a, b, fin, &fo), uint32_t(fo), r, Pack(f),
-            SF | ZF | CF | OF);
+    hw = NAndn(N, a, b, fin, &fo);
+    Check64("andn", N, a, b, hw, uint32_t(fo), r, Pack(f), SF | ZF | CF | OF);
     f = Unpack(uint32_t(fin));
     r = L::Blsi<N>(f, a);
-    Check64("blsi", N, a, 0, NBlsi(N, a, fin, &fo), uint32_t(fo), r, Pack(f), SF | ZF | CF | OF);
+    hw = NBlsi(N, a, fin, &fo);
+    Check64("blsi", N, a, 0, hw, uint32_t(fo), r, Pack(f), SF | ZF | CF | OF);
     f = Unpack(uint32_t(fin));
     r = L::Blsr<N>(f, a);
-    Check64("blsr", N, a, 0, NBlsr(N, a, fin, &fo), uint32_t(fo), r, Pack(f), SF | ZF | CF | OF);
+    hw = NBlsr(N, a, fin, &fo);
+    Check64("blsr", N, a, 0, hw, uint32_t(fo), r, Pack(f), SF | ZF | CF | OF);
     f = Unpack(uint32_t(fin));
     r = L::Blsmsk<N>(f, a);
-    Check64("blsmsk", N, a, 0, NBlsmsk(N, a, fin, &fo), uint32_t(fo), r, Pack(f),
-            SF | ZF | CF | OF);
+    hw = NBlsmsk(N, a, fin, &fo);
+    Check64("blsmsk", N, a, 0, hw, uint32_t(fo), r, Pack(f), SF | ZF | CF | OF);
     f = Unpack(uint32_t(fin));
     r = L::Popcnt<N>(f, a);
-    Check64("popcnt", N, a, 0, NPopcnt(N, a, fin, &fo), uint32_t(fo), r, Pack(f), kAll);
+    hw = NPopcnt(N, a, fin, &fo);
+    Check64("popcnt", N, a, 0, hw, uint32_t(fo), r, Pack(f), kAll);
   }
 }
 
