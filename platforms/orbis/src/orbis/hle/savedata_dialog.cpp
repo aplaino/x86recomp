@@ -552,3 +552,13 @@ ORBIS_HLE("libSceSaveDataDialog", sceSaveDataDialogGetResult, 1) {
   recomp::Wr64(r + 32, g_dialog->user_data);
   return 0;
 }
+
+// int sceSaveDataDialogProgressBarSetValue(int target, uint32_t rate):
+// before Initialize (or after Terminate) 11.00 answers not initialized,
+// which games that set the bar early get; the bar itself (mode 5) is not
+// implemented yet.
+ORBIS_HLE("libSceSaveDataDialog", sceSaveDataDialogProgressBarSetValue, 2) {
+  std::lock_guard<std::mutex> l(g_mu);
+  if (g_status == kNone) return kErrNotInitialized;
+  recomp::FatalF("sceSaveDataDialogProgressBarSetValue with the library initialized not implemented yet");
+}

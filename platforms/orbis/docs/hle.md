@@ -445,8 +445,10 @@ library.
   (the newest file's, also given as the param's mtime) and size, and the
   focused one's details; up and down move, cross picks, circle backs
   out. The progress message shows the first listed directory that
-  exists and the work going on until the game closes it. Other modes,
-  messages and list types are not implemented.
+  exists and the work going on until the game closes it. Setting the
+  progress bar before Initialize answers not initialized, as 11.00 does.
+  Other modes (the progress bar among them), messages and list types are
+  not implemented.
 - recomp_orbis_savedata_dialog also: libSceMsgDialog. The library's side
   is 11.00's: the checks of SceMsgDialogParam and what it points to (in
   its order: every parameter before the library's state), the states
