@@ -60,12 +60,22 @@ std::atomic<const Slot*> g_slot_table[kMaxSlots];
 // a PE header; nothing in the game dereferences these, so a recognisable
 // value outside the arena's used ranges is enough.
 const std::vector<std::string>& KnownDlls() {
-  static const std::vector<std::string> dlls = {
-      "kernel32.dll", "user32.dll",  "gdi32.dll",    "advapi32.dll",
-      "ole32.dll",    "version.dll", "winmm.dll",    "wsock32.dll",
-      "ddraw.dll",    "mss32.dll",   "binkw32.dll",  "dbghelp.dll",
-      "imm32.dll",    "shfolder.dll", "ntdll.dll",   "opengl32.dll",
-      "d3d9.dll",     "xinput1_3.dll"};
+  static const std::vector<std::string> dlls = [] {
+    std::vector<std::string> d = {
+        "kernel32.dll", "user32.dll",  "gdi32.dll",    "advapi32.dll",
+        "ole32.dll",    "version.dll", "winmm.dll",    "wsock32.dll",
+        "ddraw.dll",    "mss32.dll",   "binkw32.dll",  "dbghelp.dll",
+        "imm32.dll",    "shfolder.dll", "ntdll.dll",   "opengl32.dll",
+        "d3d9.dll",     "xinput1_3.dll"};
+    // Loadable only where the game links their HLE library: middleware that
+    // probes for them (LoadLibrary) then picks another output without it.
+    // Appended, so the handles above stay put.
+    for (const char* opt : {"dsound.dll"}) {
+      auto it = Registry().lower_bound({opt, std::string()});
+      if (it != Registry().end() && it->first.first == opt) d.push_back(opt);
+    }
+    return d;
+  }();
   return dlls;
 }
 
