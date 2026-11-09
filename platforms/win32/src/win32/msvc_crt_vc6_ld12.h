@@ -1,5 +1,7 @@
 // VC6's 12-byte extended arithmetic (_LDBL12), which its floating-point
-// conversions share (msvc_crt_vc6_output.cpp). Internal to them.
+// conversions share: _output's (msvc_crt_vc6_output.cpp) and the
+// parsing of _input, _fltin2 and atof (msvc_crt_vc6_input.cpp). Internal
+// to those files.
 
 #pragma once
 

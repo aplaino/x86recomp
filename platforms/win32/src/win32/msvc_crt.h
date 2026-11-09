@@ -10,10 +10,10 @@ namespace recomp::native::msvc_crt::vc6 {
 // Where a VC6 CRT keeps its locale state (guest addresses of its
 // globals): __lc_handle[LC_CTYPE] (0 in the C locale), __lc_codepage,
 // __mb_cur_max, _pctype (the ctype table, from index -1) and
-// __decimal_point (the LC_NUMERIC decimal point, a char; _output's
-// floating-point conversions). The natives of the locale-dependent
-// functions (msvc_crt::vc6::) read them; the program sets them before it
-// runs any.
+// __decimal_point (the LC_NUMERIC decimal point, a char; the
+// floating-point conversions of _output, _input, _fltin2 and atof). The
+// natives of the locale-dependent functions (msvc_crt::vc6::) read them;
+// the program sets them before it runs any.
 struct Locale {
   uint32_t ctype_handle = 0, codepage = 0, mb_cur_max = 0, pctype = 0, decimal_point = 0;
 };

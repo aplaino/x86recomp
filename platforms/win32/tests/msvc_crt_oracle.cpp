@@ -921,6 +921,336 @@ void Output(bool wide_engine) {
   SetLocale(Locale::C);
 }
 
+// A code page table whose bytes 0xB2, 0xB3 and 0xB9 are digits (C1_DIGIT,
+// as superscripts are in some code pages) and 0xC4 a hex digit: the
+// parsers take what the table calls a digit, with its byte's value.
+constexpr uint32_t kDigitTable = kTable + 0x800;
+
+// The exact decimal digits of a finite double (no sign) and the power of
+// ten of the first.
+std::pair<std::string, int> ExactDecimal(double v) {
+  char buf[1200];
+  std::snprintf(buf, sizeof buf, "%.1100e", v);  // exact: every double has fewer digits
+  std::string d = std::string(1, buf[0]) + std::string(buf + 2, buf + 1102);
+  return {d, std::atoi(buf + 1103)};
+}
+
+// A halfway point between two neighbouring doubles (or floats), exactly
+// in decimal (v and half its ulp added digit by digit), cut to 20..32
+// significant digits and now and then moved by one in the last: where
+// the 25-digit mantissa and _ld12cvt's rounding decide the result.
+std::string RandHalfway() {
+  const bool f32 = Rand(3) == 0;
+  double v;
+  int ulp_exp;
+  if (f32) {
+    const float x = std::ldexp(1.0f + float(Rand(1 << 23)) / float(1 << 23), int(Rand(270)) - 150);
+    int e;
+    std::frexp(x, &e);
+    v = x;
+    ulp_exp = std::max(e - 24, -149);
+  } else {
+    const uint64_t b = (Rand(8) ? 1 + Rand(2045) : Rand(2)) << 20 | Rand(1 << 20);
+    const uint64_t bits = b << 32 | g_rng();
+    std::memcpy(&v, &bits, 8);
+    int e;
+    std::frexp(v, &e);
+    ulp_exp = std::max(e - 53, -1074);
+  }
+  auto [a, ea] = ExactDecimal(v);
+  // Half the ulp: the ulp's digits times 5, a place lower (2^-1075 is no
+  // double).
+  auto [h, eh] = ExactDecimal(std::ldexp(1.0, ulp_exp));
+  int carry = 0;
+  for (size_t k = h.size(); k-- > 0;) {
+    const int d = (h[k] - '0') * 5 + carry;
+    h[k] = char('0' + d % 10);
+    carry = d / 10;
+  }
+  if (carry) h.insert(h.begin(), char('0' + carry)), eh++;
+  eh--;
+  const int last = std::min(ea - int(a.size()) + 1, eh - int(h.size()) + 1);
+  const int top = std::max(ea, eh) + 1;
+  std::string sum(size_t(top - last + 1), '0');
+  // sum[i] has place top - i; digit k of d has place e - k.
+  auto add = [&](const std::string& d, int e) {
+    int carry = 0;
+    size_t at = size_t(top - e) + d.size();
+    for (size_t k = d.size(); k-- > 0;) {
+      const int s = sum[--at] - '0' + d[k] - '0' + carry;
+      sum[at] = char('0' + s % 10);
+      carry = s / 10;
+    }
+    while (carry) {
+      const int s = sum[--at] - '0' + carry;
+      sum[at] = char('0' + s % 10);
+      carry = s / 10;
+    }
+  };
+  add(a, ea);
+  add(h, eh);
+  size_t first = sum.find_first_not_of('0');
+  if (first == std::string::npos) return "0";
+  std::string digits = sum.substr(first);
+  const int exp10 = top - int(first);
+  digits.resize(std::min(digits.size(), size_t(20 + Rand(13))));
+  if (!Rand(3)) {
+    char& c = digits.back();
+    c = c == '9' ? '8' : c == '0' ? '1' : char(c + (Rand(2) ? 1 : -1));
+  }
+  // The point after some of the digits.
+  const size_t point = 1 + Rand(uint32_t(digits.size()));
+  return digits.substr(0, point) + "." + digits.substr(point) + "e" + std::to_string(exp10 + 1 - int(point));
+}
+
+// A decimal number as the float parsers meet it: spaces, then one of a
+// value between half the smallest denormal (double or float) and it; a
+// halfway point (above); a double or float printed to 8..25 digits, now
+// and then moved in its last; or a sign, digits (now and then far more
+// than 25, or with the table's other digits), the locale's decimal point
+// (or the other one) and an exponent with any of E e D d, a sign and
+// digits (around the ends of the ranges, to past 5200, a table digit among
+// them). Junk after it.
+std::string RandFloatText(char dp) {
+  static const char* const spaces[] = {"", "", "", " ", "\t", "\n\r", "\xA0", "\x0B"};
+  std::string t = spaces[Rand(8)];
+  if (Rand(16) == 0) {
+    // Below the smallest denormal and above half of it, of a double or a
+    // float (_ld12cvt's last case before zero).
+    char buf[64];
+    if (Rand(2))
+      std::snprintf(buf, sizeof buf, "%.*fe-324", int(Rand(20)), 1.2 + Rand(1000) / 790.0);
+    else
+      std::snprintf(buf, sizeof buf, "%.*fe-46", int(Rand(20)), 3.5 + Rand(1000) / 285.0);
+    for (char* q = buf; *q; q++)
+      if (*q == '.') *q = dp;
+    t += buf;
+  } else if (Rand(2) == 0) {
+    std::string h = RandHalfway();
+    for (char& c : h)
+      if (c == '.') c = dp;
+    t += h;
+  } else if (Rand(3) == 0) {
+    double v;
+    switch (Rand(5)) {
+      case 0: {
+        const uint64_t b = RandF64();
+        std::memcpy(&v, &b, 8);
+        break;
+      }
+      case 1: v = std::ldexp(1.0 + Rand(1 << 20) / double(1 << 20), int(Rand(2100)) - 1100); break;
+      case 2: v = double(float(std::ldexp(1.0 + Rand(1 << 20) / double(1 << 20), int(Rand(300)) - 160))); break;
+      default: {
+        const uint64_t b = RandDecimal();
+        std::memcpy(&v, &b, 8);
+      }
+    }
+    char buf[64];
+    std::snprintf(buf, sizeof buf, Rand(2) ? "%.*e" : "%.*g", int(8 + Rand(18)), v);
+    for (char* q = buf; *q; q++)
+      if (*q == '.') *q = dp;
+    t += buf;
+    if (Rand(2)) t[t.size() - 1 - Rand(std::min<size_t>(t.size(), 4))] += char(Rand(3)) - 1;
+  } else {
+    static const char* const signs[] = {"", "", "-", "+", "--", "+-", "-."};
+    t += signs[Rand(7)];
+    auto digits = [&](uint32_t n) {
+      for (uint32_t i = 0; i < n; i++)
+        t += char(Rand(12) ? "0123456789000999"[Rand(16)] : "\xB2\xB3\xB9\xC4" "a/:"[Rand(7)]);
+    };
+    auto count = [] { return Rand(4) ? Rand(6) : Rand(50) ? Rand(40) : Rand(500); };
+    digits(count());
+    if (Rand(4)) t += Rand(8) ? dp : char(dp ^ ('.' ^ ','));
+    digits(count());
+    if (Rand(2)) {
+      t += "EeDdx"[Rand(5)];
+      t += Rand(2) ? "" : Rand(2) ? "-" : "+";
+      if (Rand(4)) {
+        static const char* const zeros[] = {"", "", "0", "000"};
+        t += zeros[Rand(4)];
+        // Around the ends of the float, double and 12-byte ranges, and
+        // the cap at 5200.
+        static const int kEdges[] = {38, 39, 45, 46, 307, 308, 309, 323, 324, 325,
+                                     4931, 4940, 4950, 4960, 5199, 5200, 5201, 5300};
+        const int e = Rand(3) ? int(Rand(400)) : Rand(2) ? kEdges[Rand(18)] + int(Rand(5)) - 2 : int(Rand(8000));
+        t += std::to_string(e);
+        if (!Rand(8)) t.insert(t.size() - Rand(2), 1, "\xB2\xB3\xB9"[Rand(3)]);
+      }
+    }
+  }
+  if (Rand(2)) t += " 7"[Rand(2)];
+  return t;
+}
+
+uint32_t PutBytes(const std::string& t, uint32_t at) {
+  for (uint32_t i = 0; i < t.size(); i++) g_mem.write<uint8_t>(at + i, uint8_t(t[i]));
+  g_mem.write<uint8_t>(at + uint32_t(t.size()), 0);
+  return at;
+}
+
+// The code page locale's table, or (half the time) one with more digits.
+void CodePageTable(Locale l) {
+  if (l == Locale::CodePage)
+    g_mem.write<uint32_t>(recomp::native::msvc_crt::vc6::GetLocale().pctype,
+                          Rand(2) ? kTable + 2 : kDigitTable + 2);
+}
+
+void PrepareTables() {
+  for (int ch = -1; ch < 256; ch++) {
+    uint16_t t = g_mem.read<uint16_t>(kTable + 2 + 2 * ch);
+    if (ch == 0xB2 || ch == 0xB3 || ch == 0xB9) t |= 0x84;
+    if (ch == 0xC4) t |= 0x80;
+    g_mem.write<uint16_t>(kDigitTable + 2 + 2 * ch, t);
+  }
+}
+
+// _fltin2 and atof: the text above, at every decimal point; the FLT in
+// the data area; the x87 stack and control word as for floor/ceil.
+void FloatParsers() {
+  if (!Bound("vc6::_fltin2") && !Bound("vc6::atof")) return;
+  if (!LocaleTables("_fltin2/atof")) return;
+  PrepareTables();
+  const auto& loc = recomp::native::msvc_crt::vc6::GetLocale();
+  for (Locale l : {Locale::C, Locale::CodePage, Locale::Multibyte}) {
+    SetLocale(l);
+    for (int i = 0; i < (l == Locale::Multibyte ? 20000 : 300000); i++) {
+      FillData();
+      CodePageTable(l);
+      const char dp = Rand(4) ? '.' : ',';
+      g_mem.write<uint8_t>(loc.decimal_point, uint8_t(dp));
+      const std::string t = RandFloatText(dp);
+      const uint32_t s = PutBytes(t, kData + 0x1000 + Rand(0x100));
+      const std::string w = std::string(LocaleName(l)) + " " + std::to_string(i) + " \"" + t + "\"";
+      for (const char* name : {"vc6::_fltin2", "vc6::atof"}) {
+        const bool fltin2 = name[5] == '_';
+        Ctx c = fltin2 ? Frame({kData + 0x3F00 + 4 * Rand(8), s, uint32_t(t.size()), 0, 0}) : Frame({s});
+        for (int k = Rand(4) ? Rand(4) : Rand(9); k > 0; k--) recomp::x87::LoadF80(c.fpu, RandF80());
+        recomp::x87::SetControlWord(c.fpu, Rand(4) ? 0x27F : uint16_t(0x7F | Rand(4) << 8 | Rand(4) << 10));
+        c.fpu.sw |= uint16_t(Rand(0x40) & 0x3D);
+        Check(name, c, kFpu, w);
+      }
+    }
+  }
+  SetLocale(Locale::C);
+}
+
+// _input on a string stream as sscanf sets it up (_IOREAD|_IOSTRG|
+// _IOMYBUF, the count the string's length, now and then less or with _ptr
+// past _base): formats of whitespace, literal text and conversions with
+// `*`, a width (0 among them), sizes (h hh l L w I64, a bare I, F N) and
+// every type, sets with ranges, ']' first and '^', and unknown types;
+// input made from what the format asks for, with junk and early ends.
+// Arguments point into the output area. In the three locales (the code
+// page one also with the table of more digits), decimal point '.' or ','.
+void Input() {
+  if (!Bound("vc6::_input")) return;
+  if (!LocaleTables("_input")) return;
+  PrepareTables();
+  const auto& loc = recomp::native::msvc_crt::vc6::GetLocale();
+  for (Locale l : {Locale::C, Locale::CodePage, Locale::Multibyte}) {
+    SetLocale(l);
+    for (int i = 0; i < (l == Locale::Multibyte ? 20000 : 300000); i++) {
+      FillData();
+      CodePageTable(l);
+      const char dp = Rand(4) ? '.' : ',';
+      g_mem.write<uint8_t>(loc.decimal_point, uint8_t(dp));
+      std::string fmt, text;
+      auto junk = [&] {
+        if (!Rand(4)) text += "aZ7-+x.,% \t\x80\xC4\xFF\xB2"[Rand(15)];
+      };
+      auto word = [&](uint32_t n) {
+        for (uint32_t k = 0; k < n; k++) text += "abcxyzAZ019_-]^\x80\xC4\xE4\xFF"[Rand(20)];
+      };
+      const int pieces = 1 + int(Rand(7));
+      for (int p = 0; p < pieces && fmt.size() < 0x700; p++) {
+        switch (Rand(8)) {
+          case 0: {  // whitespace
+            fmt += " \t\n"[Rand(3)];
+            if (Rand(2)) text += " \t\n\xA0"[Rand(4)];
+            continue;
+          }
+          case 1: {  // literal text
+            const char c = "abZ,:-%\x80\xC4"[Rand(10)];
+            fmt += c;
+            text += Rand(6) ? c : 'q';
+            if (c == '%') fmt += '%';
+            continue;
+          }
+          default: break;
+        }
+        fmt += '%';
+        if (!Rand(5)) fmt += '*';
+        if (Rand(3) == 0) fmt += std::to_string(Rand(6) ? Rand(12) : Rand(400));
+        static const char* const kSizes[] = {"", "", "", "", "h", "hh", "l", "L", "w", "I64", "I", "F", "N", "lw"};
+        const std::string size = kSizes[Rand(sizeof kSizes / sizeof *kSizes)];
+        fmt += size;
+        static const char kTypes[] = "cCsS[[duioxXpneEfgG%aB";
+        const char type = kTypes[Rand(sizeof kTypes - 1)];
+        fmt += type;
+        if (Rand(3)) text += Rand(3) ? " " : "\t \n";
+        switch (type) {
+          case 'c': case 'C': case 's': case 'S':
+            word(Rand(4) ? Rand(8) : Rand(60));
+            break;
+          case '[': {
+            if (!Rand(3)) fmt += '^';
+            if (!Rand(4)) fmt += ']';
+            for (int n = int(Rand(5)); n > 0; n--) {
+              fmt += "abxz-019]^\x80\xC4"[Rand(12)];
+              if (fmt.back() == ']') fmt.pop_back();
+            }
+            fmt += ']';
+            word(Rand(4) ? Rand(8) : Rand(60));
+            break;
+          }
+          case 'e': case 'E': case 'f': case 'g': case 'G':
+            // Now and then a field around the 349 characters it takes.
+            text += Rand(16) ? RandFloatText(dp) : std::string(340 + Rand(20), "019"[Rand(3)]);
+            break;
+          case 'd': case 'u': case 'i': case 'o': case 'x': case 'X': case 'p': {
+            static const char* const signs[] = {"", "", "", "-", "+"};
+            static const char* const prefixes[] = {"", "", "", "0", "0x", "0X", "00x"};
+            text += signs[Rand(5)];
+            text += prefixes[Rand(7)];
+            for (uint32_t n = Rand(4) ? Rand(10) : Rand(30); n > 0; n--)
+              text += Rand(10) ? "0123456789abcdefABCDEF"[Rand(22)] : "\xB2\xC4g8"[Rand(4)];
+            break;
+          }
+          default:
+            if (Rand(2)) text += type;
+            break;
+        }
+        junk();
+      }
+      if (Rand(3) == 0) text.resize(Rand(uint32_t(text.size()) + 1));  // the input ends early
+      if (text.size() > 0x300) text.resize(0x300);  // what a wide %S of it writes fits the area
+      // The format and the input.
+      PutBytes(fmt, kFmt);
+      // A set runs to its ']', past the format's end if it has none.
+      g_mem.write<uint8_t>(kFmt + uint32_t(fmt.size()) + 1 + Rand(4), ']');
+      const uint32_t in = kData + 0x1000 + Rand(0x100);
+      PutBytes(text, in);
+      // Every argument a pointer into the output area, with room for twice
+      // the input after it.
+      for (uint32_t a = kArgs; a < kOut; a += 4) g_mem.write<uint32_t>(a, kOut + Rand(kOutEnd - kOut - 0x610));
+      // The stream.
+      const uint32_t len = uint32_t(text.size());
+      const uint32_t skip = Rand(8) ? 0 : Rand(len + 1);
+      g_mem.write<uint32_t>(kFile, in + skip);
+      g_mem.write<uint32_t>(kFile + 4, Rand(8) ? len - skip : Rand(len + 1));
+      g_mem.write<uint32_t>(kFile + 8, in);
+      g_mem.write<uint32_t>(kFile + 12, Rand(8) ? 0x49 : 0x59);
+      Ctx c = Frame({kFile, kFmt, kArgs});
+      std::string shown;
+      for (char ch : fmt) shown += uint8_t(ch) < 0x80 && uint8_t(ch) >= 0x20 ? ch : '?';
+      shown += "\" \"";
+      for (char ch : text) shown += uint8_t(ch) < 0x80 && uint8_t(ch) >= 0x20 ? ch : '?';
+      Check("vc6::_input", c, kFpu, std::string(LocaleName(l)) + " " + std::to_string(i) + " \"" + shown + "\"");
+    }
+  }
+  SetLocale(Locale::C);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -955,6 +1285,8 @@ int main(int argc, char** argv) {
   Intrinsics();
   Output(false);
   Output(true);
+  FloatParsers();
+  Input();
   // Every bound function, prefixed as the manifest names it.
   for (uint32_t i = 0; i < kNativeCount; i++)
     if (!g_checked.count(kNatives[i].name)) {

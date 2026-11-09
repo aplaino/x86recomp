@@ -29,7 +29,7 @@ Checked against: VC6 (Visual C++ 6.0's static CRT, LIBC/LIBCMT). A
 program with another version runs the oracle against its own copies; a
 function whose behaviour differs gets a variant under the version's
 namespace, as the locale functions, floor, ceil, _CIpow, _CIfmod,
-_output and _woutput have (`msvc_crt::vc6::`).
+_output, _woutput, _input, _fltin2 and atof have (`msvc_crt::vc6::`).
 
 ## Strings, memory, integers (msvc_crt::)
 memset, memcpy, memmove, memchr, strlen, strcpy, strcat, strncpy,
@@ -192,3 +192,57 @@ to the original. It reads the locale globals of `SetLocale`, with
   original).
 - Not kept: wctomb's, mbtowc's and tolower's locale lock (as for the
   locale functions).
+
+## _input, _fltin2 and atof (msvc_crt::vc6::)
+`_input(FILE*, format, va_list)` is the engine of sscanf (and of
+fscanf and scanf), natively for string streams (_IOSTRG); `_fltin2(FLT*,
+string, length, scale, decpt)` and `atof(string)` convert a decimal
+number (strtod-like code calls _fltin2 too). They read the locale
+globals of `SetLocale`, with `decimal_point`.
+- The format: whitespace skips whitespace in the input (isspace, the
+  locale's table); `%` takes `*`, a width and the sizes h, l, L, w and
+  I64 (F and N ignored; h and l count up and down, so hh is a long
+  again, and l with w is wide), then a type; any other character must
+  match the input's next one (a lead byte its trail too). %c (width 1 by
+  default), %s and %[...] read through one set table: %c's rejects
+  nothing, %s's rejects ' ' and \t..\r, %[ takes the format's (']'
+  first is a member, `^` inverts, a-z a range in either order, `-`
+  plain when first or last); a set runs to its `]`, past the format's
+  end if it has none. With l or w, or as %C/%S, they store wide
+  characters (mbtowc). d i o u x p read 32 bits (h a short) or 64 with
+  I64: a sign, for i a 0x (hex) or 0 (octal) prefix, for x a 0x one
+  (prefix characters not counted against the width); p is hex as 32
+  bits and decimal with I64. e f g collect at most 349 characters
+  (sign, digits, the locale's decimal point, `e` and a signed exponent)
+  and give them to _fassign (a float, or a double with l, L or h). %n
+  stores the characters read so far; a type it does not know (%% among
+  them) matches itself after skipping whitespace. The count of
+  assignments is returned, or EOF when the input ends before any
+  directive matched.
+- Input: _inc (`--_cnt`, a byte at `_ptr`, and for a string EOF once
+  `_cnt` is below zero, which keeps going down) and _ungetc_lk (for a
+  string only when the byte before `_ptr` is the one put back; at
+  `_base` only with `_cnt` zero). The format and argument pointers are
+  left in the argument slots as the original leaves them.
+- Numbers: __strgtold12 (after spaces, tabs, CR and LF; a sign, digits
+  and a decimal point, then E, e, D or d with a signed exponent; a sign
+  after the digits ends the number) keeps 25 significant digits, the
+  25th dropped and rounding the 24th up when that is over 4, exponents
+  capped at 5200; any byte the table calls a digit counts, with its
+  value less '0' as a signed byte. __mtold12 builds the 12-byte integer,
+  __multtenpow12 (without its mult12, so the guard word is cleared
+  first) scales it, and _ld12cvt rounds it to a double or a float with
+  _RoundMan, which rounds up only when the tail after the bit below the
+  rounding bit is not zero (a half rounds down, the next bit is never
+  looked at); denormals are rounded again after the shift and always
+  report an underflow. _fltin2's flags: 0x200 for no digits, 0x80 an
+  overflow, 0x100 an underflow; its double goes through fld/fstp, and
+  atof leaves it in ST0 (EAX at atof's own FLT).
+- The original runs, from the start (what the native code wrote put
+  back), for: a file stream; a multibyte `__mb_cur_max` (_isctype); a
+  wide character beyond ASCII outside the C locale, or a lead byte;
+  a float field with a width past INT_MAX (the original overruns its
+  buffer); the last character read before any was (the original's is
+  whatever its stack holds); digits that sum to zero (__mtold12 loops
+  forever); in _fltin2 and atof an exception unmasked in the control
+  word.
