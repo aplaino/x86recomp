@@ -4,6 +4,8 @@
 
 #include <string>
 
+#include "runtime/env.h"
+
 namespace recomp::xbox360 {
 
 struct GameConfig {
@@ -32,9 +34,6 @@ struct GameConfig {
 // with the title's exit status; fatal if the title cannot be loaded.
 [[noreturn]] void RunProcess(const GameConfig& cfg);
 
-// Dev/test switch NAME: the environment's <ID>_NAME (GameConfig::id in
-// upper case), nullptr if unset or before RunProcess.
-const char* Env(const char* name);
 // <ID>_BACKGROUND set (not 0): an automated run, which takes no host input.
 bool Background();
 

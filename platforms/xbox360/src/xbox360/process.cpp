@@ -2,7 +2,6 @@
 
 #include <unistd.h>
 
-#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -27,8 +26,6 @@ using ppc::Fatal;
 // console check is pending), and the TLS slots when the XEX has no TLS
 // info, as ReXGlue chose them.
 constexpr uint32_t kDefaultStackSize = 1 << 20, kDefaultTlsSlots = 1024;
-
-std::string g_id;  // GameConfig::id
 
 // Maps an image at its base in the image heap that holds it, with its
 // sections' protections.
@@ -78,22 +75,13 @@ void MountFiles(const GameConfig& cfg) {
 
 }  // namespace
 
-const char* Env(const char* name) {
-  if (g_id.empty()) return nullptr;
-  std::string var;
-  for (char ch : g_id) var += char(std::toupper(uint8_t(ch)));
-  var += '_';
-  var += name;
-  return std::getenv(var.c_str());
-}
-
 bool Background() {
   const char* e = Env("BACKGROUND");
   return e && *e && *e != '0';
 }
 
 void RunProcess(const GameConfig& cfg) {
-  g_id = cfg.id;
+  SetEnvId(cfg.id);
   XexModule m;
   std::string err;
   if (!LoadXex(cfg.xex, m, err)) Fatal(nullptr, "%s", err.c_str());
