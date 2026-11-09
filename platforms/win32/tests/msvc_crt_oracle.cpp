@@ -32,6 +32,7 @@
 // the CRT's _lock), which the program's sources define too.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -312,11 +313,19 @@ void Check(const std::string& name, const Ctx& c0, unsigned regs, const std::str
     if (regs & kEcx) ok &= x.ecx == y.ecx;
     if (regs & kFpu) ok &= SameFpu(x.fpu, y.fpu);
     if (!ok && g_failures++ < 30) {
+      std::string data = "same";
+      for (uint32_t k = 0; k < kDataSize; k++)
+        if (a.data[k] != b.data[k]) {
+          char m[48];
+          std::snprintf(m, sizeof m, "differs at %08X (%02X/%02X)", kData + k, a.data[k], b.data[k]);
+          data = m;
+          break;
+        }
       std::printf(
           "%s %08X (%s): eax %08X/%08X edx %08X/%08X ecx %08X/%08X esp %08X/%08X data %s stack "
           "%s\n",
           name.c_str(), f.va, what.c_str(), x.eax, y.eax, x.edx, y.edx, x.ecx, y.ecx, x.esp, y.esp,
-          a.data == b.data ? "same" : "differs", a.stack == b.stack ? "same" : "differs");
+          data.c_str(), a.stack == b.stack ? "same" : "differs");
     }
   }
 }
@@ -663,21 +672,28 @@ const char* const kVc6LocaleFunctions[] = {
     "vc6::isalnum", "vc6::iscntrl", "vc6::_isctype", "vc6::atoi", "vc6::atol",
     "vc6::strtol"};
 
-void Vc6LocaleFunctions() {
-  if (std::none_of(std::begin(kVc6LocaleFunctions), std::end(kVc6LocaleFunctions), Bound)) return;
+// The code page's ctype table: the C locale's below 0x80 (the image's),
+// Latin-1 classes above. False (a failure counted) if Setup() set no
+// locale.
+bool LocaleTables(const char* what) {
   if (!recomp::native::msvc_crt::vc6::GetLocale().pctype) {
-    std::printf("VC6 locale functions bound, but Setup() set no locale\n");
+    std::printf("%s bound, but Setup() set no locale\n", what);
     g_failures++;
-    return;
+    return false;
   }
-  // The code page's ctype table: the C locale's below 0x80 (the image's),
-  // Latin-1 classes above.
+  if (g_c_pctype) return true;
   g_mem.Commit(kTable & ~0xFFFu, 0x1000, recomp::Prot::RW);
   g_c_pctype = g_mem.read<uint32_t>(recomp::native::msvc_crt::vc6::GetLocale().pctype);
   for (int ch = -1; ch < 256; ch++)
     g_mem.write<uint16_t>(kTable + 2 + 2 * ch,
                           ch < 0x80 ? g_mem.read<uint16_t>(g_c_pctype + 2 * ch)
                                     : recomp::CharType1(uint32_t(ch)));
+  return true;
+}
+
+void Vc6LocaleFunctions() {
+  if (std::none_of(std::begin(kVc6LocaleFunctions), std::end(kVc6LocaleFunctions), Bound)) return;
+  if (!LocaleTables("VC6 locale functions")) return;
   for (Locale l : {Locale::C, Locale::CodePage, Locale::Multibyte}) {
     SetLocale(l);
     for (int i = 0; i < 40000; i++) {
@@ -716,6 +732,195 @@ void Vc6LocaleFunctions() {
   SetLocale(Locale::C);
 }
 
+// _output and _woutput on string streams, as sprintf, _snprintf,
+// _vsnprintf and _vsnwprintf set them up (_IOWRT|_IOSTRG, now and then
+// _IOERR already set): formats of literal text (bytes over 0x7F, DBCS
+// lead bytes, wide characters and U+FFFF among it) and conversions with every
+// flag, width and precision (with `*`), size (h l w I64, a bare I, the
+// ignored F L N) and type (with %B, which reprints the last text);
+// arguments as each asks (strings and wide strings in the data area or
+// null, %Z's counted strings, %n pointers, integers at the edges, doubles
+// of every class and decimal values at rounding edges); the stream's
+// count from 0, so that output overflows, to all of its area. In the three
+// locales (the multibyte one with lead bytes), decimal point '.' or ',';
+// the x87 stack and control word as for floor/ceil (floats go through
+// fld/fstp).
+constexpr uint32_t kFmt = kData + 0x2000, kArgs = kData + 0x2800, kOut = kData + 0x3000,
+                   kOutEnd = kData + 0x3E00, kCounts = kData + 0x3E00, kFile = kData + 0x3F00,
+                   kWide = kData + 0x1800, kCounted = kData + 0x1F00;
+
+uint64_t RandDecimal() {
+  // Values whose digits sit at the rounding edges of a precision.
+  static const double kEdges[] = {0.5, 1.5, 2.5, 0.05, 0.15, 0.25, 0.35, 0.45, 9.5, 99.5,
+                                  0.995, 9.9999995, 1e15, 1e16, 1e17, 123456789.125, 0.1,
+                                  0.3, 1.0 / 3, 2.0 / 3, 1e-5, 9.5e-5, 1e21, 1e22, 1e-300,
+                                  1e308, 4.9e-324, 2.2250738585072014e-308, 100, 1e100};
+  double d = kEdges[Rand(sizeof kEdges / sizeof *kEdges)];
+  if (Rand(2)) d *= std::pow(10.0, int(Rand(13)) - 6);
+  if (Rand(2)) d = -d;
+  uint64_t v;
+  std::memcpy(&v, &d, 8);
+  return v;
+}
+
+std::u16string Units(const std::string& t) { return std::u16string(t.begin(), t.end()); }
+
+// A code page table with DBCS lead bytes (0x81-0x9F, 0xE0-0xFC) for the
+// multibyte locale.
+constexpr uint32_t kLeadTable = kTable + 0x400;
+
+void Output(bool wide_engine) {
+  const char* const name = wide_engine ? "vc6::_woutput" : "vc6::_output";
+  if (!Bound(name)) return;
+  if (!LocaleTables(name)) return;
+  const auto& loc = recomp::native::msvc_crt::vc6::GetLocale();
+  for (int ch = -1; ch < 256; ch++)
+    g_mem.write<uint16_t>(kLeadTable + 2 + 2 * ch,
+                          uint16_t(g_mem.read<uint16_t>(kTable + 2 + 2 * ch) |
+                                   ((ch >= 0x81 && ch <= 0x9F) || (ch >= 0xE0 && ch <= 0xFC) ? 0x8000 : 0)));
+  for (Locale l : {Locale::C, Locale::CodePage, Locale::Multibyte}) {
+    SetLocale(l);
+    if (l == Locale::Multibyte) g_mem.write<uint32_t>(loc.pctype, kLeadTable + 2);
+    for (int i = 0; i < 100000; i++) {
+      FillData();
+      g_mem.write<uint8_t>(loc.decimal_point, Rand(4) ? '.' : ',');
+      // Strings for %s, wide ones for %S and %ls, counted ones for %Z.
+      uint32_t strings[4], wides[4], counted[4];
+      for (uint32_t& s : strings) s = PutText(Rand(4) ? Rand(12) : Rand(40), 0, 0x1800, true);
+      for (int k = 0; k < 4; k++) {
+        const uint32_t at = kWide + 0x180 * k, n = Rand(12);
+        for (uint32_t j = 0; j < n; j++)
+          g_mem.write<uint16_t>(at + 2 * j, Rand(4) ? uint16_t("aZ 1."[Rand(5)]) : uint16_t(Rand(4) ? Rand(0x100) : Rand(0x10000)));
+        g_mem.write<uint16_t>(at + 2 * n, 0);
+        wides[k] = at;
+        const uint32_t z = kCounted + 0x10 * k;
+        g_mem.write<uint16_t>(z, uint16_t(Rand(4) ? Rand(24) : Rand(0x400)));
+        g_mem.write<uint32_t>(z + 4, Rand(6) ? (Rand(2) ? strings[k] : at) : 0);
+        counted[k] = z;
+      }
+      // Every argument slot a readable string by default, then the
+      // conversions' own.
+      for (uint32_t a = kArgs; a < kOut; a += 4) g_mem.write<uint32_t>(a, strings[Rand(4)]);
+      std::u16string fmt;  // units of the engine's width
+      uint32_t ap = kArgs;
+      auto push = [&](uint32_t v) {
+        if (ap < kOut) g_mem.write<uint32_t>(ap, v);
+        ap += 4;
+      };
+      auto edge = [&] {
+        static const uint32_t k[] = {0, 1, 7, 9, 10, 0x7F, 0x80, 0xFF, 0x8000, 0xFFFF,
+                                     0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 1000000};
+        return Rand(3) ? k[Rand(sizeof k / sizeof *k)] : uint32_t(g_rng()) >> Rand(32);
+      };
+      const int pieces = 1 + int(Rand(8));
+      for (int p = 0; p < pieces && fmt.size() < 0x380; p++) {
+        if (Rand(3) == 0) {  // literal text
+          static const char16_t kNarrow[] = u"ab Z.\x80\xC4\xA0\x7F\x81";
+          static const char16_t kWideText[] = u"ab Z.\x80\xC4\x20AC\x4E2D\xFFFF";
+          for (int n = int(Rand(8)); n > 0; n--) {
+            fmt += wide_engine ? kWideText[Rand(10)] : kNarrow[Rand(10)];
+            if (fmt.back() == 0x81) fmt += u'a';  // a lead byte's trail, not a '%'
+          }
+          continue;
+        }
+        if (!Rand(16)) {
+          fmt += u"%%";
+          continue;
+        }
+        fmt += '%';
+        bool large = false;  // %f with it takes a value below 10 (that fits)
+        for (char f : std::string(" #+-0"))
+          if (!Rand(4)) fmt += f;
+        switch (Rand(4)) {
+          case 1: fmt += Units(std::to_string(Rand(4) ? Rand(30) : Rand(700))); break;
+          case 2: fmt += '*'; push(uint32_t(int32_t(Rand(81)) - 40)); break;
+          default: break;
+        }
+        switch (Rand(5)) {
+          case 1: fmt += '.'; break;
+          // Large ones up to where the original's 512-byte buffer ends
+          // (the native code hands those over).
+          case 2:
+            large = !Rand(4);
+            fmt += u'.' + Units(std::to_string(large ? 400 + Rand(106) : Rand(25)));
+            break;
+          case 3: fmt += u".*"; push(uint32_t(int32_t(Rand(46)) - 5)); break;
+          default: break;
+        }
+        static const char* const kSizes[] = {"", "", "", "h", "l", "w", "I64", "I", "L", "F", "N"};
+        const std::string size = kSizes[Rand(sizeof kSizes / sizeof *kSizes)];
+        fmt += Units(size);
+        static const char kTypes[] = "cCdiouxXeEfgGnpsSZB";
+        const char type = kTypes[Rand(sizeof kTypes - 1)];
+        fmt += type;
+        if (size == "I") continue;  // 'I' without 64 and what follows are text
+        const bool l = size == "l", w = size == "w", h = size == "h";
+        switch (type) {
+          case 'c':
+          case 'C':
+            push(Rand(4) ? Rand(0x100) : g_rng());
+            break;
+          case 'd': case 'i': case 'o': case 'u': case 'x': case 'X': case 'p':
+            push(edge());
+            if (size == "I64") push(Rand(2) ? 0 : edge());
+            break;
+          case 'e': case 'E': case 'f': case 'g': case 'G': {
+            uint64_t d = Rand(2) ? RandF64() : RandDecimal();
+            if (large && type == 'f') {
+              double v = (Rand(2) ? 1 : -1) * Rand(100000) / 10000.0;
+              std::memcpy(&d, &v, 8);
+            }
+            push(uint32_t(d));
+            push(uint32_t(d >> 32));
+            break;
+          }
+          case 'n':
+            push(kCounts + 4 * Rand(64));
+            break;
+          case 's':
+          case 'S': {
+            // The narrow engine's %s is wide with l or w, %S unless h; the
+            // wide engine (which ignores l) has %s wide unless h, %S with w.
+            const bool wide = (type == 'S') != wide_engine ? !h : (wide_engine ? w : l || w);
+            push(Rand(8) ? (wide ? wides[Rand(4)] : strings[Rand(4)]) : 0);
+            break;
+          }
+          case 'Z':
+            push(Rand(8) ? counted[Rand(4)] : 0);
+            break;
+          default:
+            break;
+        }
+      }
+      for (uint32_t j = 0; j <= fmt.size(); j++) {
+        const char16_t u = j < fmt.size() ? fmt[j] : 0;
+        if (wide_engine)
+          g_mem.write<uint16_t>(kFmt + 2 * j, uint16_t(u));
+        else
+          g_mem.write<uint8_t>(kFmt + j, uint8_t(u));
+      }
+      // The stream: a buffer in the data area, its count.
+      const uint32_t out = kOut + Rand(0x200);
+      // As much as the area holds (sprintf's INT_MAX would run past it), or
+      // less, so that output overflows.
+      const uint32_t cnt = Rand(4) ? kOutEnd - out : Rand(4) ? Rand(40) : Rand(kOutEnd - out);
+      g_mem.write<uint32_t>(kFile, out);
+      g_mem.write<uint32_t>(kFile + 4, cnt);
+      g_mem.write<uint32_t>(kFile + 8, out);
+      g_mem.write<uint32_t>(kFile + 12, Rand(8) ? 0x42 : 0x62);
+      Ctx c = Frame({kFile, kFmt, kArgs});
+      for (int k = Rand(4) ? Rand(4) : Rand(9); k > 0; k--) recomp::x87::LoadF80(c.fpu, RandF80());
+      recomp::x87::SetControlWord(
+          c.fpu, Rand(4) ? 0x27F : uint16_t(0x7F | Rand(4) << 8 | Rand(4) << 10));
+      c.fpu.sw |= uint16_t(Rand(0x40) & 0x3D);
+      std::string shown;
+      for (char16_t u : fmt) shown += u < 0x80 ? char(u) : '?';
+      Check(name, c, kFpu, std::string(LocaleName(l)) + " " + std::to_string(i) + " \"" + shown + "\"");
+    }
+  }
+  SetLocale(Locale::C);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -748,6 +953,8 @@ int main(int argc, char** argv) {
   Ftol();
   FloorCeil();
   Intrinsics();
+  Output(false);
+  Output(true);
   // Every bound function, prefixed as the manifest names it.
   for (uint32_t i = 0; i < kNativeCount; i++)
     if (!g_checked.count(kNatives[i].name)) {

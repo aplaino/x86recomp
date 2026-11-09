@@ -28,8 +28,8 @@ functions, SOURCES defines them and `Setup()`.
 Checked against: VC6 (Visual C++ 6.0's static CRT, LIBC/LIBCMT). A
 program with another version runs the oracle against its own copies; a
 function whose behaviour differs gets a variant under the version's
-namespace, as the locale functions, floor, ceil, _CIpow and _CIfmod
-have (`msvc_crt::vc6::`).
+namespace, as the locale functions, floor, ceil, _CIpow, _CIfmod,
+_output and _woutput have (`msvc_crt::vc6::`).
 
 ## Strings, memory, integers (msvc_crt::)
 memset, memcpy, memmove, memchr, strlen, strcpy, strcat, strncpy,
@@ -131,3 +131,64 @@ status word and EAX are the originals' (ECX and EDX are not kept).
   fmod: an argument that is not normal), with _adjust_fdiv set, when the
   caller has an exception unmasked, and when the stack lacks the
   registers the original pushes (_CIpow: two).
+
+## _output and _woutput (msvc_crt::vc6::)
+The engines of sprintf, _snprintf, _vsnprintf (and printf/fprintf) and
+of _vsnwprintf (and the other wide ones): `_output(FILE*, format,
+va_list)` and `_woutput`, the same machine over 16-bit units. Natively for string streams
+(_IOSTRG, as the string functions set them up); a stream to a file goes
+to the original. It reads the locale globals of `SetLocale`, with
+`decimal_point` (__decimal_point) for the floating-point conversions.
+- The format: VC6's state machine (its character classes for ' '..'x'
+  and transitions), flags `-+ #0`, width and precision with `*` (a
+  negative width means `-`, a negative precision none), sizes h, l, w,
+  I64 (a bare I and what follows are text; F, L and N are ignored), and
+  c C d i o u x X e E f g G n p s S Z. A lead byte of the code page
+  (_pctype) takes the next byte with it, even the terminating NUL. A
+  type it does not know (B) prints the last conversion's text again.
+- Output: write_char's `--_cnt`, a byte at `_ptr`; below zero _flsbuf
+  sets _IOERR and the count becomes -1, padding and strings stop, the
+  format stops at its next character. The format and argument pointers
+  are left in the argument slots as the original leaves them.
+- Integers: 64-bit with I64, digits into the 512-byte buffer from its
+  end, precision as the minimum digit count (zero padding off when one
+  is given), `#` with o forcing a leading 0, with x/X a 0x/0X prefix
+  (not for 0); %p is %.8X.
+- Strings: %s up to the precision, "(null)" for a null pointer; %Z a
+  counted string (ANSI_STRING/UNICODE_STRING; with w, Length / 2 wide
+  characters).
+- Floating point (VC6's own conversion, through the pointers
+  _cfltcvt_init sets): the double goes through fld/fstp (on the x87
+  model: a signalling NaN comes out quiet with IE, a denormal sets DE),
+  __dtold widens it to 80 bits, $I10_OUTPUT estimates the decimal
+  exponent, scales by a power of ten in VC6's 12-byte arithmetic
+  (__multtenpow12, __ld12mul: only the high partial products, a carry
+  bumping one 16-bit word, round to nearest even), takes 18 digits and
+  rounds them to 17. Its tables of 10^(j 8^g) round the significand to
+  nearest at 64 bits and keep, as guard bits, the low 16 bits of the
+  80-bit rounding (__multtenpow12 takes one off where they are 0x8000 or
+  more). _fptostr rounds those digits again to the precision; _cftoe
+  writes three exponent digits ("e+000"), _cftog chooses %e when the
+  exponent is below -4 or not below the precision; NaN and infinity
+  print as 1#QNAN, 1#IND, 1#INF.
+- The original runs, from the start (what the native code wrote put
+  back), for: a file stream; a character to convert that the line
+  below does not cover (or one beyond 0xFF in the C locale: EILSEQ in
+  errno); `#` with %.0e/f/g in a multibyte code page (_isctype); a float
+  under a control word with an exception unmasked; text that would not
+  fit the original's 512-byte buffer (it overruns its stack there).
+- _woutput: the format and the output are 16-bit units (_putwc_lk:
+  `_cnt` less 2, a unit at `_ptr`; write_char compares what it returns
+  with 0xFFFF, so writing U+FFFF itself also makes the count -1). It has
+  no `l` prefix (ignored): %s is wide unless h, %S narrow unless w, %c
+  and %C alike. Narrow text (digits, floats, %hs, "(null)", %Z without
+  w) goes out a character at a time through mbtowc (a lead byte taking
+  its trail, a NUL ending it); %hs counts characters, not bytes. Its
+  buffer is 1 KiB, so floats have twice _output's room.
+- Wide and narrow characters across the engines (wctomb, mbtowc): in
+  the C locale any byte and any unit up to 0xFF; in a code page only
+  ASCII, which every Windows ANSI code page maps to itself (anything
+  else is WideCharToMultiByte's or MultiByteToWideChar's, for the
+  original).
+- Not kept: wctomb's, mbtowc's and tolower's locale lock (as for the
+  locale functions).
