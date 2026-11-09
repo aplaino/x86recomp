@@ -491,6 +491,16 @@ uint32_t Enumerate(Ctx& c, bool wide) {
 HLE_NAMED("dsound.dll", "#2", DirectSoundEnumerateA, 2) { return Enumerate(c, false); }
 HLE_NAMED("dsound.dll", "#3", DirectSoundEnumerateW, 2) { return Enumerate(c, true); }
 
+// The same entry points by name (GetProcAddress after LoadLibrary, as
+// middleware that probes for DirectSound does), and DirectSoundCreate (#1):
+// its IDirectSound is the IDirectSound8 object, which answers both.
+HLE_NAMED("dsound.dll", "#1", DirectSoundCreate, 3) { return hle_DirectSoundCreate8(c); }
+HLE_NAMED("dsound.dll", "DirectSoundCreate", DirectSoundCreateName, 3) { return hle_DirectSoundCreate8(c); }
+HLE_NAMED("dsound.dll", "DirectSoundCreate8", DirectSoundCreate8Name, 3) { return hle_DirectSoundCreate8(c); }
+HLE_NAMED("dsound.dll", "GetDeviceID", GetDeviceIDName, 2) { return hle_GetDeviceID(c); }
+HLE_NAMED("dsound.dll", "DirectSoundEnumerateA", DirectSoundEnumerateAName, 2) { return Enumerate(c, false); }
+HLE_NAMED("dsound.dll", "DirectSoundEnumerateW", DirectSoundEnumerateWName, 2) { return Enumerate(c, true); }
+
 HLE_NAMED("dsound.dll", "IDirectSound8::QueryInterface", DS8_QueryInterface, 3) {
   uint32_t riid = Arg(c, 1), out = Arg(c, 2);
   if (com::GuidEq(riid, kIID_IDirectSound8) || com::GuidEq(riid, kIID_IDirectSound)) {
