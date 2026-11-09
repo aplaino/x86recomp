@@ -21,6 +21,7 @@
 #include <mutex>
 
 #include "runtime/gfx/device.h"
+#include "runtime/gfx/present.h"
 #include "runtime/gl/context.h"
 #include "runtime/log.h"
 #include "win32/hle.h"
@@ -229,7 +230,7 @@ HLE("opengl32.dll", wglMakeCurrent, 2) {
   if (!ctx->gl) {
     SDL_Window* w = SdlWindowFor(ctx->hwnd);
     if (!w) return 0;
-    ctx->dev = CreateGfxDevice(w);
+    ctx->dev = gfx::CreateChosenDevice(w);
     int pw, ph;
     FramebufferSize(ctx->hwnd, &pw, &ph);
     ctx->dev->ResetSwapChain(pw, ph, false);

@@ -31,7 +31,7 @@
 #include "win32/kernel32_state.h"
 #include "win32/user32_window.h"
 #include "win32/win32.h"
-#include "x86/present.h"
+#include "runtime/gfx/present.h"
 #include "x86/watchdog.h"
 
 namespace recomp {
@@ -1014,7 +1014,7 @@ uint32_t CreateSdl2Window(const std::string& title_utf8, int w, int h, SDL_Windo
   EnsureSdlVideo();
   Window win;
   win.sdl = SDL_CreateWindow(title_utf8.c_str(), ToPoints(nullptr, w), ToPoints(nullptr, h),
-                             flags | SDL_WINDOW_HIGH_PIXEL_DENSITY | hle::GfxWindowFlags());
+                             flags | SDL_WINDOW_HIGH_PIXEL_DENSITY | gfx::ChosenWindowFlags());
   if (!win.sdl) return 0;
   win.title = title_utf8;
   win.w = w;
@@ -1255,7 +1255,7 @@ HLE("user32.dll", CreateWindowExA, 12) {
     ClientSize(win, &cw, &ch);
     win.sdl = SDL_CreateWindow(AnsiToUtf8(win.title).c_str(), ToPoints(nullptr, cw), ToPoints(nullptr, ch),
                                SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY |
-                                   GfxWindowFlags());
+                                   gfx::ChosenWindowFlags());
     if (!win.sdl) FatalF("SDL_CreateWindow: %s", SDL_GetError());
   }
   uint32_t hwnd = win.hwnd;

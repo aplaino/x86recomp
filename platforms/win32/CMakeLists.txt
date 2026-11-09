@@ -40,7 +40,7 @@ add_library(recomp_win32 SHARED
   src/win32/com.cpp)
 target_include_directories(recomp_win32 PUBLIC src)
 target_link_libraries(recomp_win32 PUBLIC recomp_x86 recomp_pe SDL3::SDL3
-                      PRIVATE recomp_gfx)  # user32: gfx::FitRect, x86/present.h
+                      PRIVATE recomp_gfx)  # user32: gfx::FitRect, gfx/present.h
 # Nothing in a game refers to an HLE module's symbols: keep the linker
 # from dropping them where it links --as-needed (ld64 keeps every dylib).
 if(NOT APPLE)
