@@ -27,6 +27,7 @@
 #include "orbis/hle/kernel.h"
 #include "orbis/host.h"
 #include "runtime/gfx/device.h"
+#include "runtime/gfx/present.h"
 #include "runtime/log.h"
 #include "x86/present.h"
 #include "x86/runtime.h"
@@ -109,9 +110,9 @@ void OpenWindow(Port& p, int w, int h) {
   const float pts = scale / (d > 0 ? d : 1.0f);
   p.window = SDL_CreateWindow("", std::max(1, int(float(w) * pts)), std::max(1, int(float(h) * pts)),
                               SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY |
-                                  hle::GfxWindowFlags());
+                                  gfx::ChosenWindowFlags());
   if (!p.window) FatalF("SDL_CreateWindow: %s", SDL_GetError());
-  p.dev = hle::CreateGfxDevice(p.window);
+  p.dev = gfx::CreateChosenDevice(p.window);
   p.w = w;
   p.h = h;
   p.dev->ResetSwapChain(w, h, false);
