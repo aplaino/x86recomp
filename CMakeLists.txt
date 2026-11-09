@@ -272,9 +272,6 @@ add_library(recomp_x86 SHARED
   src/x86/watchdog.cpp)
 target_link_libraries(recomp_x86 PUBLIC recomp_base recomp_x87 SDL3::SDL3
                       PRIVATE recomp_gfx)  # presentation (x86/present.cpp)
-if(DXVK_NATIVE_DIR)
-  target_compile_definitions(recomp_x86 PUBLIC RECOMP_HAVE_D3D9)
-endif()
 
 # recomp_add_lifted(<target> <dir> [LINK <platform library>]): the
 # lifter's output in <dir> (globbed, so re-run cmake after lifting), with

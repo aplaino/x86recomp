@@ -9,7 +9,6 @@
 
 #include <thread>
 #include <algorithm>
-#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -52,15 +51,6 @@ Thread* CurrentThread() { return t_current; }
 uint32_t GuestProcessorCount() {
   unsigned n = std::thread::hardware_concurrency();
   return std::clamp<unsigned>(n, 2, 8);  // capped: 2002 code may assume few
-}
-
-const char* Env(const char* name) {
-  if (!g_proc) return nullptr;
-  std::string var;
-  for (char ch : g_proc->game.id) var += char(std::toupper(uint8_t(ch)));
-  var += '_';
-  var += name;
-  return std::getenv(var.c_str());
 }
 
 bool Background() {
@@ -344,6 +334,7 @@ Process& StartProcess(const GameConfig& game, const std::string& game_dir, bool 
   g_proc = new Process;
   Process& p = *g_proc;
   p.game = game;
+  SetEnvId(game.id);
   p.game_dir = game_dir;
   const char* runs = Env("X87_RUNS");
   x87::run::g_enabled = !(runs && runs[0] == '0');

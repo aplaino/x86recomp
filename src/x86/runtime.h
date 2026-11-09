@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "runtime/env.h"
 #include "runtime/guest_alloc.h"
 #include "runtime/guest_memory.h"
 #include "x86/ctx.h"
@@ -22,13 +23,9 @@ namespace recomp {
 struct GameConfig {
   // Short id, e.g. "game": the per-user data directory is
   // $XDG_DATA_HOME/<id>, and dev/test switches are read from environment
-  // variables named <ID>_<SWITCH> (GAME_TRACE, ...).
+  // variables named <ID>_<SWITCH> (GAME_TRACE, ...; runtime/env.h).
   std::string id;
 };
-
-// Dev/test switch `name` from the environment: getenv("<ID>_<name>"),
-// e.g. Env("TRACE") reads GAME_TRACE for id "game". Null if unset.
-const char* Env(const char* name);
 
 // Processors reported to the game (PEB, GetSystemInfo): never 1. Games
 // that see one CPU may install uniprocessor lock functions (plain inc/dec),
