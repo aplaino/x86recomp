@@ -13,11 +13,10 @@
 // XYZW position (0x4002: homogeneous, untransformed). Plain data structs mirror the
 // D3D7 ones (which D3D9 also kept unchanged).
 //
-// Fixed-function draws come in two forms: the stateful one (Set* calls,
-// then Draw), and DrawFf, which carries the whole state and the vertex
-// streams with it and leaves the stateful state alone. Front ends that
-// build their own state (the GL context, the D3D7 HLE) and native code
-// draw with DrawFf, so several of them can share a device in any order.
+// A fixed-function draw (DrawFf) carries its whole state and its vertex
+// streams with it: the device keeps no fixed-function state, so front
+// ends (each with its own state: the GL context, the D3D7 and D3D9 HLE)
+// and native code share a device in any order.
 //
 // Direct3D 9's programmable pipeline (shaders translated from HLSL,
 // runtime/hlsl) is a second way to draw: CreateShader / DrawShader, with
@@ -29,6 +28,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "runtime/hlsl/hlsl.h"
 
@@ -108,14 +108,14 @@ struct ColorTarget {
   int level = 0;
 };
 
-// ---- explicit fixed-function draws (DrawFf)
+// ---- fixed-function draws (DrawFf)
 
-// Everything the stateful fixed-function calls set, as one value (no
-// padding, so it can be compared as bytes). Lights are the enabled ones,
-// in order: indices do not matter to the pipeline.
+// A fixed-function draw's whole state, as one value (no padding, so it
+// can be compared as bytes): Direct3D 7's device state. Lights are the
+// enabled ones, in order: indices do not matter to the pipeline.
 struct FfState {
-  uint32_t rs[256];      // render states by number (as SetRenderState)
-  uint32_t tss[8][33];   // texture stage states (as SetTextureStageState)
+  uint32_t rs[256];      // render states by number (D3DRENDERSTATETYPE)
+  uint32_t tss[8][33];   // texture stage states (D3DTEXTURESTAGESTATETYPE)
   TextureId textures[8];
   float world[4][16];    // D3D transforms: WORLD, WORLD1-3
   float view[16], proj[16];
@@ -167,6 +167,9 @@ float* FfTransform(FfState& s, uint32_t type);
 void InterleaveFf(const FfDraw& d, uint8_t* out);
 // Index i of a draw, relative to first_vertex and clamped to its vertices.
 uint32_t FfIndex(const FfDraw& d, uint32_t i);
+// `rects` (all of `area` when there are none) clipped to `area`, empty
+// ones left out: what a Clear clipped to a viewport or scissor covers.
+std::vector<Rect> ClipRects(uint32_t count, const Rect* rects, const Rect& area);
 
 // ---- the programmable pipeline (Direct3D 9 shaders translated from HLSL)
 
@@ -210,6 +213,8 @@ struct ShaderDraw {
   // D3DSAMPLERSTATETYPE values (index 1-13).
   TextureId textures[20] = {};
   const uint32_t (*sampler_states)[14] = nullptr;
+  // Render states, viewport and scissor (the rest is the shaders').
+  const FfState* state = nullptr;
 };
 
 // ---- programs: console GPUs' shaders, which their front ends translate
@@ -433,50 +438,23 @@ class Device {
   // Shows the front buffer as it is now.
   virtual void PresentFront() = 0;
 
-  // ---- fixed-function state (D3D7 enums)
-  virtual void SetRenderState(uint32_t state, uint32_t value) = 0;
-  virtual void SetTextureStageState(uint32_t stage, uint32_t type,
-                                    uint32_t value) = 0;
-  virtual void SetTexture(uint32_t stage, TextureId t) = 0;
-  virtual void SetTransform(uint32_t type, const float m[16]) = 0;
-  virtual void SetViewport(const Viewport& v) = 0;
-  // In render-target pixels; used while SCISSORTESTENABLE (174) is set.
-  virtual void SetScissor(const Rect& r) = 0;
-  virtual void SetMaterial(const Material& m) = 0;
-  virtual void SetLight(uint32_t index, const Light& l) = 0;
-  virtual void LightEnable(uint32_t index, bool enable) = 0;
-  virtual void SetClipPlane(uint32_t index, const float plane[4]) = 0;
-
   // ---- drawing
+  // D3DCLEAR flags over `rects` in render-target pixels (clipped to it),
+  // or the whole target when there are none: no viewport or scissor
+  // applies (callers clip to theirs, ClipRects).
   virtual void Clear(uint32_t count, const Rect* rects, uint32_t flags,
                      uint32_t color, float z, uint32_t stencil) = 0;
   virtual void BeginScene() = 0;
   virtual void EndScene() = 0;
-  // Non-indexed when `indices` is null. `stride` from the FVF.
-  virtual void Draw(uint32_t prim, uint32_t fvf, const void* vertices,
-                    uint32_t vertex_count, uint32_t stride,
-                    const uint16_t* indices, uint32_t index_count) = 0;
-  // Indexed draw built in place: MapDraw returns room for `vertex_count`
-  // vertices (`stride` bytes each) and `index_count` indices in memory the
-  // device reads them from, for the caller to fill and then draw with
-  // DrawMapped before the next MapDraw. Saves Draw's copy for vertices
-  // made per draw.
-  struct Mapped {
-    uint8_t* vertices;
-    uint16_t* indices;
-  };
-  virtual Mapped MapDraw(uint32_t vertex_count, uint32_t stride,
-                         uint32_t index_count) = 0;
-  virtual void DrawMapped(uint32_t prim, uint32_t fvf) = 0;
-  // A draw with its own state (FfState): the render target, BeginScene
-  // and the stateful state are as they were.
+  // A fixed-function draw with its state (FfState) into the render
+  // target as set above.
   virtual void DrawFf(const FfState& s, const FfDraw& d) = 0;
   virtual void Present() = 0;
 
   // ---- programmable pipeline. A shader from the HLSL translation (null
   // on failure); render states (blend, depth, stencil, cull, colour
-  // write, alpha test, scissor), the viewport and the targets as set
-  // above, the rest per draw.
+  // write, alpha test, scissor), the viewport and scissor from the draw's
+  // state (ShaderDraw::state), the targets as set above.
   virtual ShaderId CreateShader(const hlsl::Program& p) = 0;
   virtual void DestroyShader(ShaderId s) = 0;
   virtual void DrawShader(const ShaderDraw& d) = 0;

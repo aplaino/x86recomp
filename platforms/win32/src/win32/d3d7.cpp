@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <vector>
 
 #include "runtime/log.h"
 #include "win32/ddraw_impl.h"
@@ -423,9 +424,11 @@ HLE_NAMED("ddraw.dll", "IDirect3DDevice7::Clear", D3DD7_Clear, 7) {
            color = Arg(c, 4), zbits = Arg(c, 5), stencil = Arg(c, 6);
   float z;
   std::memcpy(&z, &zbits, 4);
-  Gfx()->SetViewport(d->ff.viewport);  // clears are clipped to it
-  Gfx()->Clear(count, rects ? G<gfx::Rect>(rects) : nullptr, flags, color, z,
-               stencil);
+  const gfx::Viewport& v = d->ff.viewport;  // clears are clipped to it
+  const std::vector<gfx::Rect> r =
+      gfx::ClipRects(count, rects ? G<gfx::Rect>(rects) : nullptr,
+                     {int32_t(v.x), int32_t(v.y), int32_t(v.x + v.width), int32_t(v.y + v.height)});
+  if (!r.empty()) Gfx()->Clear(uint32_t(r.size()), r.data(), flags, color, z, stencil);
   return D3D_OK;
 }
 

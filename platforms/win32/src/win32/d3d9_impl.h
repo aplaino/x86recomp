@@ -182,9 +182,6 @@ struct Device : com::Object {
   int32_t vs_i[16][4] = {}, ps_i[16][4] = {};
   guest::BOOL vs_b[16] = {}, ps_b[16] = {};
   int scene_depth = 0;
-  // Render states as gfx has them (SyncState); all sent on the first sync.
-  uint32_t sent_rs[256] = {};
-  bool synced = false;
   // The D3D cursor (SetCursorProperties / ShowCursor).
   bool cursor_shown = false, cursor_set = false;
 };
@@ -212,9 +209,6 @@ uint32_t NewSurface(Device& d, uint32_t device, Surface::Kind kind, uint32_t w,
 // The gfx render targets and depth buffer for the current bindings.
 void BindTargets(Device& d);
 
-// Sends gfx the render states that changed, the viewport and the scissor
-// rectangle (before draws and clears; d3d9_draw.cpp).
-void SyncState(Device& d);
 
 // CreateTexture / CreateCubeTexture (cube: w = h = edge length): the
 // HRESULT; the new texture's guest pointer in *out (0 on failure).

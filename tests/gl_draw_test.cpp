@@ -86,34 +86,9 @@ class RecordingDevice final : public gfx::Device {
                  const gfx::Rect&) override {}
   void ReadBackFront(const gfx::Rect&, void*, uint32_t, gfx::Format) override {}
   void PresentFront() override {}
-  void SetRenderState(uint32_t, uint32_t) override {}
-  void SetTextureStageState(uint32_t, uint32_t, uint32_t) override {}
-  void SetTexture(uint32_t, gfx::TextureId) override {}
-  void SetTransform(uint32_t, const float*) override {}
-  void SetViewport(const gfx::Viewport&) override {}
-  void SetScissor(const gfx::Rect&) override {}
-  void SetMaterial(const gfx::Material&) override {}
-  void SetLight(uint32_t, const gfx::Light&) override {}
-  void LightEnable(uint32_t, bool) override {}
-  void SetClipPlane(uint32_t, const float*) override {}
   void Clear(uint32_t, const gfx::Rect*, uint32_t, uint32_t, float, uint32_t) override {}
   void BeginScene() override {}
   void EndScene() override {}
-  void Draw(uint32_t prim, uint32_t fvf, const void* v, uint32_t nv, uint32_t stride,
-            const uint16_t* idx, uint32_t ni) override {
-    auto* b = static_cast<const uint8_t*>(v);
-    draws.push_back({prim, fvf, stride, {b, b + size_t(nv) * stride}, {idx, idx + ni}});
-  }
-  Mapped MapDraw(uint32_t nv, uint32_t stride, uint32_t ni) override {
-    // Garbage, so a byte the context does not write shows.
-    map_v_.assign(size_t(nv) * stride, 0xCD);
-    map_i_.assign(ni, 0xCDCD);
-    map_stride_ = stride;
-    return {map_v_.data(), map_i_.data()};
-  }
-  void DrawMapped(uint32_t prim, uint32_t fvf) override {
-    draws.push_back({prim, fvf, map_stride_, map_v_, map_i_});
-  }
   void DrawFf(const gfx::FfState&, const gfx::FfDraw& d) override {
     uint32_t stride = gfx::FvfStride(d.fvf);
     std::vector<uint8_t> v(size_t(d.vertex_count) * stride);
@@ -126,9 +101,6 @@ class RecordingDevice final : public gfx::Device {
 
  private:
   uint32_t ids_ = 0;
-  std::vector<uint8_t> map_v_;
-  std::vector<uint16_t> map_i_;
-  uint32_t map_stride_ = 0;
 };
 
 // ---- reference model

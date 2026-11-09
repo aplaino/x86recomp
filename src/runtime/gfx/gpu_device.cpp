@@ -29,7 +29,6 @@
 #include <deque>
 #include <map>
 #include <mutex>
-#include <set>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
@@ -468,7 +467,6 @@ class GpuDevice final : public Device {
       for (int l = 0; l < layers; l++) QueueUpload(*t, 0, 0, 0, 1, 1, &black, 4, 1, 4, false, false, l);
     }
 
-    InitDefaults();
     std::fprintf(stderr, "gfx: SDL_GPU (%s)\n", SDL_GetGPUDeviceDriver(dev_));
     return true;
   }
@@ -597,8 +595,6 @@ class GpuDevice final : public Device {
     SDL_ReleaseGPUTexture(dev_, it->second.tex);
     textures_.erase(it);
     tex_gen_++;
-    for (TextureId& s : st_.textures)
-      if (s == id) s = 0;
     fs_dirty_ = true;
   }
 
@@ -898,69 +894,6 @@ class GpuDevice final : public Device {
     SubmitOpen();
   }
 
-  // ---- fixed-function state
-
-  void SetRenderState(uint32_t s, uint32_t v) override {
-    std::lock_guard<std::recursive_mutex> l(mu_);
-    if (s >= 256) return;
-    st_.rs[s] = v;
-  }
-
-  void SetTextureStageState(uint32_t stage, uint32_t type, uint32_t v) override {
-    std::lock_guard<std::recursive_mutex> l(mu_);
-    if (stage >= 8 || type >= 33) return;
-    st_.tss[stage][type] = v;
-  }
-
-  void SetTexture(uint32_t stage, TextureId t) override {
-    std::lock_guard<std::recursive_mutex> l(mu_);
-    if (stage >= 8) return;
-    st_.textures[stage] = t;
-  }
-
-  void SetTransform(uint32_t type, const float m[16]) override {
-    std::lock_guard<std::recursive_mutex> l(mu_);
-    if (float* to = FfTransform(st_, type)) std::memcpy(to, m, sizeof(float) * 16);
-  }
-
-  void SetViewport(const Viewport& v) override {
-    std::lock_guard<std::recursive_mutex> l(mu_);
-    st_.viewport = v;
-  }
-
-  void SetScissor(const Rect& r) override {
-    std::lock_guard<std::recursive_mutex> l(mu_);
-    st_.scissor = r;
-  }
-
-  void SetMaterial(const Material& m) override {
-    std::lock_guard<std::recursive_mutex> l(mu_);
-    st_.material = m;
-  }
-
-  void SetLight(uint32_t i, const Light& li) override {
-    std::lock_guard<std::recursive_mutex> l(mu_);
-    lights_[i] = li;
-    SyncLights();
-  }
-
-  void LightEnable(uint32_t i, bool e) override {
-    std::lock_guard<std::recursive_mutex> l(mu_);
-    if (e) {
-      lights_on_.insert(i);
-      if (!lights_.count(i)) lights_[i] = DefaultLight();
-    } else {
-      lights_on_.erase(i);
-    }
-    SyncLights();
-  }
-
-  void SetClipPlane(uint32_t i, const float p[4]) override {
-    std::lock_guard<std::recursive_mutex> l(mu_);
-    if (i >= 8) return;
-    std::memcpy(st_.clip[i], p, sizeof(float) * 4);
-  }
-
   // ---- drawing
 
   void Clear(uint32_t count, const Rect* rects, uint32_t flags, uint32_t color, float z,
@@ -969,17 +902,7 @@ class GpuDevice final : public Device {
     if (!pass_depth_) flags &= ~6u;
     if (!pass_stencil_) flags &= ~4u;
     if (!(flags & 7)) return;
-    Rect area = ViewportRect(st_, pass_w_, pass_h_);
-    if (st_.rs[174]) area = Intersect(area, st_.scissor);
-    std::vector<Rect> todo;
-    if (!count || !rects) {
-      todo.push_back(area);
-    } else {
-      for (uint32_t i = 0; i < count; i++) {
-        Rect c = Intersect(rects[i], area);
-        if (c.right > c.left && c.bottom > c.top) todo.push_back(c);
-      }
-    }
+    const std::vector<Rect> todo = ClipRects(count, rects, {0, 0, pass_w_, pass_h_});
     if (todo.empty()) return;
     // A clear of the whole target before anything was drawn is the
     // render pass's load operation.
@@ -1033,24 +956,6 @@ class GpuDevice final : public Device {
 
   void BeginScene() override {}
   void EndScene() override {}
-
-  void Draw(uint32_t prim, uint32_t fvf, const void* vertices, uint32_t nv, uint32_t stride,
-            const uint16_t* indices, uint32_t ni) override {
-    std::lock_guard<std::recursive_mutex> l(mu_);
-    if (!vertices || !nv || !stride || (stride & 3)) return;
-    DrawWith(
-        st_, prim, fvf, nv, indices != nullptr, ni,
-        [&](VsLayout& vl) {
-          uint32_t first;
-          std::memcpy(ReserveVertices(nv, stride, &first), vertices, size_t(nv) * stride);
-          PatchLayout(vl, DecodeFvf(fvf, stride));
-          return first;
-        },
-        [&](uint32_t i) {
-          uint32_t v = indices ? indices[i] : i;
-          return v < nv ? v : nv - 1;
-        });
-  }
 
   // The streams as they lie (PlaceStreams), or interleaved when one is
   // not aligned for the shader's reads.
@@ -1141,22 +1046,6 @@ class GpuDevice final : public Device {
       c.count = std::min(n, nv);
     }
     cmds_.push_back(c);
-  }
-
-  // Draw records into CPU arenas anyway (uploaded at the next flush), so
-  // mapped draws are built in scratch memory and recorded like any other.
-  Mapped MapDraw(uint32_t nv, uint32_t stride, uint32_t ni) override {
-    std::lock_guard<std::recursive_mutex> l(mu_);
-    mapped_ = {nv, stride, ni};
-    mapped_vertices_.resize(size_t(nv) * stride);
-    mapped_indices_.resize(ni);
-    return {mapped_vertices_.data(), mapped_indices_.data()};
-  }
-
-  void DrawMapped(uint32_t prim, uint32_t fvf) override {
-    std::lock_guard<std::recursive_mutex> l(mu_);
-    Draw(prim, fvf, mapped_vertices_.data(), mapped_.nv, mapped_.stride,
-         mapped_indices_.data(), mapped_.ni);
   }
 
 
@@ -1356,32 +1245,34 @@ void r_color0(inout vec4 c) {
       default: return;
     }
     if (!count) return;
-    WarnUnsupportedShaderState();
+    if (!d.state) FatalF("gfx: DrawShader without its state");
+    const FfState& state = *d.state;
+    WarnUnsupportedShaderState(state);
 
     Cmd c{};
-    if (!SetupScissor(st_, c, false)) return;
-    c.viewport = D3DViewport(st_);
-    c.stencil_ref = uint8_t(st_.rs[57]);
+    if (!SetupScissor(state, c, false)) return;
+    c.viewport = D3DViewport(state);
+    c.stencil_ref = uint8_t(state.rs[57]);
     ShaderCmd sc;
-    sc.key.k = DrawKey(st_, type);
+    sc.key.k = DrawKey(state, type);
     // Front faces are D3D's (clockwise) whatever is culled, for VFACE.
     PipelineKey& k = sc.key.k;
     if (k.cull != SDL_GPU_CULLMODE_NONE)
-      k.cull = st_.rs[22] == 2 ? SDL_GPU_CULLMODE_FRONT : SDL_GPU_CULLMODE_BACK;
+      k.cull = state.rs[22] == 2 ? SDL_GPU_CULLMODE_FRONT : SDL_GPU_CULLMODE_BACK;
     k.front = SDL_GPU_FRONTFACE_CLOCKWISE;
-    for (int i = 1; i < 4; i++) k.mask[i - 1] = i < pass_targets_ ? uint8_t(st_.rs[189 + i] & 0xF) : 0;
+    for (int i = 1; i < 4; i++) k.mask[i - 1] = i < pass_targets_ ? uint8_t(state.rs[189 + i] & 0xF) : 0;
     sc.key.vs = d.vs;
     sc.key.ps = d.ps;
-    if (k.blend && st_.rs[206]) {  // SEPARATEALPHABLENDENABLE
-      sc.key.src_a = uint8_t(D3DBlendFactor(st_.rs[207], pass_alpha_));
-      sc.key.dst_a = uint8_t(D3DBlendFactor(st_.rs[208], pass_alpha_));
-      sc.key.op_a = uint8_t(D3DBlendOp(st_.rs[209]));
+    if (k.blend && state.rs[206]) {  // SEPARATEALPHABLENDENABLE
+      sc.key.src_a = uint8_t(D3DBlendFactor(state.rs[207], pass_alpha_));
+      sc.key.dst_a = uint8_t(D3DBlendFactor(state.rs[208], pass_alpha_));
+      sc.key.op_a = uint8_t(D3DBlendOp(state.rs[209]));
     } else {
       sc.key.src_a = k.src;
       sc.key.dst_a = k.dst;
       sc.key.op_a = k.op;
     }
-    Argb(&sc.blend_constant.r, st_.rs[193]);
+    Argb(&sc.blend_constant.r, state.rs[193]);
 
     // Vertices: each stream's range copied to the arena once.
     bool indexed = d.indices != nullptr;
@@ -1412,8 +1303,8 @@ void r_color0(inout vec4 c) {
       st.in[i][1] = int32_t(vsm.stride);
       st.in[i][2] = int32_t(in.type);
     }
-    st.pixel[0] = 1.0f / float(std::max(st_.viewport.width, 1u));
-    st.pixel[1] = 1.0f / float(std::max(st_.viewport.height, 1u));
+    st.pixel[0] = 1.0f / float(std::max(state.viewport.width, 1u));
+    st.pixel[1] = 1.0f / float(std::max(state.viewport.height, 1u));
 
     if (indexed || d.prim == 6) {
       c.indexed = true;
@@ -1457,8 +1348,8 @@ void r_color0(inout vec4 c) {
     auto pi = ints(d.ps_int, d.ps_bool);
     PushUniform(sc, 4, pi.data(), sizeof pi);
     PsState pst{};
-    pst.alpha[0] = st_.rs[15] ? int32_t(st_.rs[25]) : 8;
-    pst.alpha[1] = int32_t(st_.rs[24] & 0xFF);
+    pst.alpha[0] = state.rs[15] ? int32_t(state.rs[25]) : 8;
+    pst.alpha[1] = int32_t(state.rs[24] & 0xFF);
     for (uint32_t r = 0; r < 16 && d.sampler_states; r++) pst.bias[r] = AsFloat(d.sampler_states[r][8]);
     PushUniform(sc, 5, &pst, sizeof pst);
 
@@ -2110,31 +2001,6 @@ void r_color0(inout vec4 c) {
     SDL_GPUFence* fence = nullptr;
     bool own = false;
   };
-
-  // ---- defaults (D3D9's, which the front ends rely on: they only send
-  // what changes)
-
-  void InitDefaults() {
-    st_ = DefaultFfState();
-    SyncLights();
-  }
-
-  // The first eight enabled lights into st_.
-  void SyncLights() {
-    st_.light_count = 0;
-    for (uint32_t idx : lights_on_) {
-      if (st_.light_count == 8) break;
-      st_.lights[st_.light_count++] = lights_[idx];
-    }
-  }
-
-  static Light DefaultLight() {
-    Light l{};
-    l.type = 3;
-    l.diffuse = {1, 1, 1, 0};
-    l.direction[2] = 1;
-    return l;
-  }
 
   // ---- render targets and passes
 
@@ -3509,7 +3375,7 @@ void r_color0(inout vec4 c) {
   }
 
   // State the translated-shader path does not model yet, named once.
-  void WarnUnsupportedShaderState() {
+  void WarnUnsupportedShaderState(const FfState& st) {
     struct Check {
       uint32_t rs;
       const char* name;
@@ -3518,7 +3384,7 @@ void r_color0(inout vec4 c) {
         {185, "TWOSIDEDSTENCILMODE"}, {152, "CLIPPLANEENABLE"}, {194, "SRGBWRITEENABLE"},
     };
     for (const Check& ch : kChecks) {
-      if (!st_.rs[ch.rs] || (warned_rs_ & (1ull << (&ch - kChecks)))) continue;
+      if (!st.rs[ch.rs] || (warned_rs_ & (1ull << (&ch - kChecks)))) continue;
       warned_rs_ |= 1ull << (&ch - kChecks);
       WarnF("gfx: %s with shaders is not supported yet\n", ch.name);
     }
@@ -4076,11 +3942,6 @@ void r_color0(inout vec4 c) {
   std::vector<Upload> uploads_;
   std::vector<uint8_t> upload_bytes_;
   std::vector<BlitTex> blit_pool_;
-  struct {
-    uint32_t nv, stride, ni;
-  } mapped_{};
-  std::vector<uint8_t> mapped_vertices_;
-  std::vector<uint16_t> mapped_indices_;
   size_t blit_used_ = 0;
 
   SDL_GPUBuffer* vbuf_ = nullptr;
@@ -4168,12 +4029,7 @@ void r_color0(inout vec4 c) {
   SDL_GPUGraphicsPipeline* present_pipeline_ = nullptr;
   SDL_GPUTexture* dummy_array_ = nullptr;
 
-  // The stateful D3D state (lights by index in lights_, the first eight
-  // enabled ones in st_), and the state the current uniforms were built
-  // from.
-  FfState st_ = DefaultFfState();
-  std::map<uint32_t, Light> lights_;
-  std::set<uint32_t> lights_on_;
+  // The state the current uniforms were built from.
   FfState built_{};
   bool vs_dirty_ = true, fs_dirty_ = true;
   VsUniforms vs_cur_{};

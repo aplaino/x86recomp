@@ -774,15 +774,26 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::Clear", D3DDev9_Clear, 7) {
   float z;
   uint32_t zbits = Arg(c, 5);
   std::memcpy(&z, &zbits, 4);
-  std::vector<gfx::Rect> r;
+  std::vector<gfx::Rect> given;
   for (uint32_t i = 0; rects && i < count; i++) {
     const D3DRECT& dr = G<D3DRECT>(rects)[i];
-    r.push_back({dr.x1, dr.y1, dr.x2, dr.y2});
+    given.push_back({dr.x1, dr.y1, dr.x2, dr.y2});
   }
-  SyncState(*d);
+  // Clipped to the viewport and, while the scissor test is on, the
+  // scissor rectangle.
+  const D3DVIEWPORT9& v = d->viewport;
+  gfx::Rect area{LONG(v.X), LONG(v.Y), LONG(v.X + v.Width), LONG(v.Y + v.Height)};
+  if (d->rs[174]) {
+    const gfx::Rect sc{d->scissor.x1, d->scissor.y1, d->scissor.x2, d->scissor.y2};
+    const std::vector<gfx::Rect> in = gfx::ClipRects(1, &sc, area);
+    if (in.empty()) return D3D_OK;
+    area = in[0];
+  }
+  const std::vector<gfx::Rect> r =
+      gfx::ClipRects(uint32_t(given.size()), given.empty() ? nullptr : given.data(), area);
+  if (r.empty()) return D3D_OK;
   BindTargets(*d);
-  d->gfx->Clear(uint32_t(r.size()), r.empty() ? nullptr : r.data(), Arg(c, 3),
-                Arg(c, 4), z, Arg(c, 6));
+  d->gfx->Clear(uint32_t(r.size()), r.data(), Arg(c, 3), Arg(c, 4), z, Arg(c, 6));
   return D3D_OK;
 }
 

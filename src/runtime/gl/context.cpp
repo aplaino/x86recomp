@@ -631,9 +631,7 @@ void Context::Clear(uint32_t mask) {
     dev_->BeginScene();
     scene_ = true;
   }
-  ApplyState();  // the scissor
-  // GL clears ignore the viewport; the device's are clipped to it.
-  dev_->SetViewport({0, 0, uint32_t(fb_w_), uint32_t(fb_h_), 0, 1});
+  ApplyState();  // the scissor (GL clears ignore the viewport)
   gfx::Rect r = ff_.rs[RS_SCISSORTESTENABLE] ? ff_.scissor : gfx::Rect{0, 0, fb_w_, fb_h_};
   if (r.right <= r.left || r.bottom <= r.top) return;
   dev_->Clear(1, &r, flags, Argb(clear_color_), float(clear_depth_), uint32_t(clear_stencil_));

@@ -14,12 +14,10 @@
 #include <SDL3/SDL_video.h>
 
 #include <algorithm>
-#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
-#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -93,7 +91,6 @@ class D3D9Device final : public Device {
     for (auto& [id, d] : depths_) d.surf->Release();
     if (staging_) staging_->Release();
     if (readback_) readback_->Release();
-    ReleaseRings();
     ReleaseTargets();
     if (dev_) dev_->Release();
     if (d3d_) d3d_->Release();
@@ -144,7 +141,6 @@ class D3D9Device final : public Device {
         readback_->Release();
         readback_ = nullptr;
       }
-      ReleaseRings();
       Check(dev_->Reset(&pp), "Reset");
       reset = true;
       for (auto& [id, d] : depths_)
@@ -173,7 +169,9 @@ class D3D9Device final : public Device {
     if (reset) {
       // Reset also unbinds the targets.
       SetRenderTarget(current_color_, current_depth_);
-      RestoreState();
+      // and returns the device's state to its defaults.
+      applied_ = DefaultFfState();
+      applied_lights_ = 0;
     }
   }
 
@@ -422,8 +420,9 @@ class D3D9Device final : public Device {
     reads_.erase(it);
   }
 
-  void SetRenderState(uint32_t s, uint32_t v) override {
-    state_.rs[s] = v;
+  // ---- an FfState's parts on the D3D9 device (Apply)
+
+  void SetRenderState(uint32_t s, uint32_t v) {
     switch (s) {
       case 47: {  // D3DRENDERSTATE_ZBIAS (0..16) -> DEPTHBIAS
         float bias = -float(v) * 0.000005f;
@@ -445,8 +444,7 @@ class D3D9Device final : public Device {
     }
   }
 
-  void SetTextureStageState(uint32_t stage, uint32_t type, uint32_t v) override {
-    state_.tss[{stage, type}] = v;
+  void SetTextureStageState(uint32_t stage, uint32_t type, uint32_t v) {
     switch (type) {
       case 12:  // ADDRESS (both)
         dev_->SetSamplerState(stage, D3DSAMP_ADDRESSU, v);
@@ -478,15 +476,12 @@ class D3D9Device final : public Device {
     }
   }
 
-  void SetTexture(uint32_t stage, TextureId id) override {
-    if (stage >= 8) return;
-    state_.tex[stage] = id;
+  void SetTexture(uint32_t stage, TextureId id) {
     auto it = textures_.find(id);
     dev_->SetTexture(stage, it == textures_.end() ? nullptr : it->second);
   }
 
-  void SetTransform(uint32_t type, const float m[16]) override {
-    std::memcpy(state_.xf[type].data(), m, sizeof(float) * 16);
+  void SetTransform(uint32_t type, const float m[16]) {
     D3DTRANSFORMSTATETYPE t;
     switch (type) {
       case 1: t = D3DTS_WORLD; break;
@@ -498,37 +493,22 @@ class D3D9Device final : public Device {
     dev_->SetTransform(t, reinterpret_cast<const D3DMATRIX*>(m));
   }
 
-  void SetViewport(const Viewport& v) override {
-    state_.vp = v;
+  void SetViewport(const Viewport& v) {
     D3DVIEWPORT9 vp{v.x, v.y, v.width, v.height, v.min_z, v.max_z};
     dev_->SetViewport(&vp);
   }
 
-  void SetScissor(const Rect& r) override {
-    state_.scissor = r;
+  void SetScissor(const Rect& r) {
     RECT rc{r.left, r.top, r.right, r.bottom};
     dev_->SetScissorRect(&rc);
   }
 
-  void SetMaterial(const Material& m) override {
-    state_.mat = m;
+  void SetMaterial(const Material& m) {
     static_assert(sizeof(Material) == sizeof(D3DMATERIAL9));
     dev_->SetMaterial(reinterpret_cast<const D3DMATERIAL9*>(&m));
   }
 
-  void SetLight(uint32_t i, const Light& l) override {
-    state_.lights[i] = l;
-    static_assert(sizeof(Light) == sizeof(D3DLIGHT9));
-    dev_->SetLight(i, reinterpret_cast<const D3DLIGHT9*>(&l));
-  }
-
-  void LightEnable(uint32_t i, bool e) override {
-    state_.light_on[i] = e;
-    dev_->LightEnable(i, e);
-  }
-
-  void SetClipPlane(uint32_t i, const float p[4]) override {
-    std::memcpy(state_.clip[i].data(), p, sizeof(float) * 4);
+  void SetClipPlane(uint32_t i, const float p[4]) {
     dev_->SetClipPlane(i, p);
   }
 
@@ -536,8 +516,22 @@ class D3D9Device final : public Device {
              float z, uint32_t stencil) override {
     static_assert(sizeof(Rect) == sizeof(D3DRECT));
     if (!current_depth_) flags &= ~(D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL);
+    // D3D9 clips clears to the viewport and the scissor: the whole target
+    // for this one, then the draws' back.
+    IDirect3DSurface9* rt = nullptr;
+    dev_->GetRenderTarget(0, &rt);
+    D3DSURFACE_DESC td{};
+    if (rt) {
+      rt->GetDesc(&td);
+      rt->Release();
+    }
+    D3DVIEWPORT9 whole{0, 0, td.Width, td.Height, 0, 1};
+    dev_->SetViewport(&whole);
+    dev_->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
     dev_->Clear(count, reinterpret_cast<const D3DRECT*>(rects), flags, color, z,
                 stencil);
+    SetViewport(applied_.viewport);
+    SetRenderState(174, applied_.rs[174]);
   }
 
   void BeginScene() override {
@@ -549,35 +543,20 @@ class D3D9Device final : public Device {
     in_scene_ = false;
   }
 
-  void Draw(uint32_t prim, uint32_t fvf, const void* v, uint32_t nv,
-            uint32_t stride, const uint16_t* idx, uint32_t ni) override {
-    dev_->SetFVF(fvf);
-    if (idx) {
-      UINT prims = PrimitiveCountFromVertices(prim, ni);
-      if (prims)
-        dev_->DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE(prim), 0, nv, prims, idx,
-                                     D3DFMT_INDEX16, v, stride);
-    } else {
-      UINT prims = PrimitiveCountFromVertices(prim, nv);
-      if (prims) dev_->DrawPrimitiveUP(D3DPRIMITIVETYPE(prim), prims, v, stride);
-    }
-  }
-
-  // The explicit state goes through the setters for the draw, then the
-  // stateful state comes back (only what differs, both ways). Lights go
-  // straight to the device: the explicit ones are 0..light_count - 1.
+  // What differs from the state of the draw before goes through the
+  // setters; lights straight to the device (the state's are 0..
+  // light_count - 1).
   void DrawFf(const FfState& s, const FfDraw& d) override {
     uint32_t stride = FvfStride(d.fvf);
     if (!d.vertex_count || !stride) return;
-    const State saved = state_;
-    const FfState cur = Current();
-    Apply(cur, s);
-    for (const auto& [i, on] : saved.light_on)
-      if (on) dev_->LightEnable(i, FALSE);
+    Apply(applied_, s);
     for (uint32_t i = 0; i < s.light_count; i++) {
       dev_->SetLight(i, reinterpret_cast<const D3DLIGHT9*>(&s.lights[i]));
       dev_->LightEnable(i, TRUE);
     }
+    for (uint32_t i = s.light_count; i < applied_lights_; i++) dev_->LightEnable(i, FALSE);
+    applied_ = s;
+    applied_lights_ = s.light_count;
     ff_vertices_.resize(size_t(d.vertex_count) * stride);
     InterleaveFf(d, ff_vertices_.data());
     dev_->SetFVF(d.fvf);
@@ -594,35 +573,6 @@ class D3D9Device final : public Device {
       if (prims)
         dev_->DrawPrimitiveUP(D3DPRIMITIVETYPE(d.prim), prims, ff_vertices_.data(), stride);
     }
-    for (uint32_t i = 0; i < s.light_count; i++) dev_->LightEnable(i, FALSE);
-    for (const auto& [i, l] : saved.lights)
-      dev_->SetLight(i, reinterpret_cast<const D3DLIGHT9*>(&l));
-    for (const auto& [i, on] : saved.light_on) dev_->LightEnable(i, on);
-    Apply(s, cur);
-    state_ = saved;
-  }
-
-  Mapped MapDraw(uint32_t nv, uint32_t stride, uint32_t ni) override {
-    mapped_ = {nv, stride, ni};
-    // Vertices start at a multiple of the stride: the draw finds them by
-    // base vertex index.
-    auto* v = static_cast<uint8_t*>(LockRing(vb_, stride, nv * stride, &mapped_.vofs));
-    auto* i = static_cast<uint16_t*>(LockRing(ib_, 2, ni * 2, &mapped_.iofs));
-    return {v, i};
-  }
-
-  void DrawMapped(uint32_t prim, uint32_t fvf) override {
-    vb_.buf->Unlock();
-    ib_.buf->Unlock();
-    const MappedDraw& m = mapped_;
-    dev_->SetFVF(fvf);
-    // Set every time: the UP draws (DrawImage) unbind both.
-    dev_->SetStreamSource(0, vb_.buf, 0, m.stride);
-    dev_->SetIndices(ib_.buf);
-    UINT prims = PrimitiveCountFromVertices(prim, m.ni);
-    if (prims)
-      dev_->DrawIndexedPrimitive(D3DPRIMITIVETYPE(prim), INT(m.vofs / m.stride), 0, m.nv,
-                                 m.iofs / 2, prims);
   }
 
   void Present() override {
@@ -793,55 +743,6 @@ class D3D9Device final : public Device {
       }
   }
 
-  // A dynamic buffer that draws take consecutive ranges of (NOOVERWRITE:
-  // earlier draws may still read what came before), starting over in
-  // fresh memory (DISCARD) when it is full. Not WRITEONLY: dxvk then keeps
-  // it in cached host memory, which the CPU writes quickly, instead of
-  // write-combined device memory.
-  template <class B>
-  struct Ring {
-    B* buf = nullptr;
-    uint32_t size = 0, pos = 0;
-  };
-
-  void Create(uint32_t size, IDirect3DVertexBuffer9** b) {
-    Check(dev_->CreateVertexBuffer(size, D3DUSAGE_DYNAMIC, 0, D3DPOOL_DEFAULT, b, nullptr),
-          "CreateVertexBuffer(ring)");
-  }
-  void Create(uint32_t size, IDirect3DIndexBuffer9** b) {
-    Check(dev_->CreateIndexBuffer(size, D3DUSAGE_DYNAMIC, D3DFMT_INDEX16, D3DPOOL_DEFAULT, b,
-                                  nullptr),
-          "CreateIndexBuffer(ring)");
-  }
-
-  template <class B>
-  void* LockRing(Ring<B>& r, uint32_t align, uint32_t bytes, uint32_t* offset) {
-    uint32_t ofs = (r.pos + align - 1) / align * align;
-    DWORD flags = D3DLOCK_NOOVERWRITE;
-    if (!r.buf || ofs + bytes > r.size) {
-      if (bytes > r.size) {
-        if (r.buf) r.buf->Release();
-        r.size = std::max(r.size, 1u << 22);
-        while (r.size < bytes) r.size *= 2;
-        Create(r.size, &r.buf);
-      }
-      ofs = 0;
-      flags = D3DLOCK_DISCARD;
-    }
-    void* p = nullptr;
-    Check(r.buf->Lock(ofs, bytes, &p, flags), "Lock(ring)");
-    r.pos = ofs + bytes;
-    *offset = ofs;
-    return p;
-  }
-
-  void ReleaseRings() {
-    if (vb_.buf) vb_.buf->Release();
-    if (ib_.buf) ib_.buf->Release();
-    vb_ = {};
-    ib_ = {};
-  }
-
   void EnsureStaging(int w, int h) {
     if (staging_) {
       D3DSURFACE_DESC d;
@@ -876,11 +777,6 @@ class D3D9Device final : public Device {
   };
   std::map<uint32_t, Read> reads_;  // StartReadBack tickets
   uint32_t next_read_ = 1;
-  Ring<IDirect3DVertexBuffer9> vb_;
-  Ring<IDirect3DIndexBuffer9> ib_;
-  struct MappedDraw {
-    uint32_t nv, stride, ni, vofs = 0, iofs = 0;
-  } mapped_{};
   std::map<uint32_t, IDirect3DTexture9*> textures_;
   std::map<uint32_t, IDirect3DCubeTexture9*> cubes_;  // same id space
   std::map<uint32_t, Target> targets_;  // render-target textures (default pool)
@@ -893,39 +789,10 @@ class D3D9Device final : public Device {
   std::vector<uint8_t> ff_vertices_;  // DrawFf's
   std::vector<uint32_t> ff_indices_;
 
-  // Everything set through the Device interface: D3D9's Reset discards
-  // device state, and front ends only send state when it changes.
-  struct State {
-    std::map<uint32_t, uint32_t> rs;
-    std::map<std::pair<uint32_t, uint32_t>, uint32_t> tss;
-    std::map<uint32_t, TextureId> tex;
-    std::map<uint32_t, std::array<float, 16>> xf;
-    std::optional<Viewport> vp;
-    std::optional<Rect> scissor;
-    std::optional<Material> mat;
-    std::map<uint32_t, Light> lights;
-    std::map<uint32_t, bool> light_on;
-    std::map<uint32_t, std::array<float, 4>> clip;
-  } state_;
-
-  // The stateful state as an FfState (without lights).
-  FfState Current() const {
-    FfState f = DefaultFfState();
-    for (const auto& [k, v] : state_.rs)
-      if (k < 256) f.rs[k] = v;
-    for (const auto& [k, v] : state_.tss)
-      if (k.first < 8 && k.second < 33) f.tss[k.first][k.second] = v;
-    for (const auto& [k, v] : state_.tex)
-      if (k < 8) f.textures[k] = v;
-    for (const auto& [k, v] : state_.xf)
-      if (float* m = FfTransform(f, k)) std::memcpy(m, v.data(), 64);
-    if (state_.vp) f.viewport = *state_.vp;
-    if (state_.scissor) f.scissor = *state_.scissor;
-    if (state_.mat) f.material = *state_.mat;
-    for (const auto& [k, v] : state_.clip)
-      if (k < 8) std::memcpy(f.clip[k], v.data(), 16);
-    return f;
-  }
+  // The state the D3D9 device has (the last draw's; D3D9's defaults after
+  // a Reset) and its lights 0 .. applied_lights_ - 1 enabled.
+  FfState applied_ = DefaultFfState();
+  uint32_t applied_lights_ = 0;
 
   // Sets what differs between two states (not lights).
   void Apply(const FfState& from, const FfState& to) {
@@ -948,20 +815,6 @@ class D3D9Device final : public Device {
       SetMaterial(to.material);
     for (uint32_t i = 0; i < 8; i++)
       if (std::memcmp(from.clip[i], to.clip[i], 16) != 0) SetClipPlane(i, to.clip[i]);
-  }
-
-  void RestoreState() {
-    const State s = state_;
-    for (const auto& [k, v] : s.rs) SetRenderState(k, v);
-    for (const auto& [k, v] : s.tss) SetTextureStageState(k.first, k.second, v);
-    for (const auto& [k, v] : s.tex) SetTexture(k, v);
-    for (const auto& [k, v] : s.xf) SetTransform(k, v.data());
-    if (s.vp) SetViewport(*s.vp);
-    if (s.scissor) SetScissor(*s.scissor);
-    if (s.mat) SetMaterial(*s.mat);
-    for (const auto& [k, v] : s.lights) SetLight(k, v);
-    for (const auto& [k, v] : s.light_on) LightEnable(k, v);
-    for (const auto& [k, v] : s.clip) SetClipPlane(k, v.data());
   }
 };
 

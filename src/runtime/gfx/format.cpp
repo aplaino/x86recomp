@@ -3,6 +3,7 @@
 
 #include "runtime/gfx/device.h"
 
+#include <algorithm>
 #include <cstring>
 #include "runtime/log.h"
 
@@ -367,6 +368,18 @@ uint32_t FfIndex(const FfDraw& d, uint32_t i) {
                                  : static_cast<const uint16_t*>(d.indices)[i];
   v -= d.first_vertex;  // below first_vertex wraps, then clamps
   return v < d.vertex_count ? v : d.vertex_count - 1;
+}
+
+std::vector<Rect> ClipRects(uint32_t count, const Rect* rects, const Rect& area) {
+  std::vector<Rect> out;
+  auto add = [&](const Rect& r) {
+    Rect c{std::max(r.left, area.left), std::max(r.top, area.top), std::min(r.right, area.right),
+           std::min(r.bottom, area.bottom)};
+    if (c.right > c.left && c.bottom > c.top) out.push_back(c);
+  };
+  if (!count || !rects) add(area);
+  for (uint32_t i = 0; rects && i < count; i++) add(rects[i]);
+  return out;
 }
 
 uint32_t PrimitiveCountFromVertices(uint32_t prim, uint32_t n) {
