@@ -274,12 +274,15 @@ class Decoder {
     }
   }
 
-  // The container's duration; else the packets' summed up (then back to
-  // the start).
+  // The container's duration; else, or when ffmpeg only estimates it
+  // from the bitrate (wrong for a variable bitrate file without a header
+  // that gives its length), the packets' summed up (then back to the
+  // start).
   int64_t FindDuration() {
-    if (fmt_->duration != AV_NOPTS_VALUE && fmt_->duration > 0)
+    const bool estimate = fmt_->duration_estimation_method == AVFMT_DURATION_FROM_BITRATE;
+    if (!estimate && fmt_->duration != AV_NOPTS_VALUE && fmt_->duration > 0)
       return av_rescale(fmt_->duration, 10000000, AV_TIME_BASE);
-    if (st_->duration != AV_NOPTS_VALUE && st_->duration > 0)
+    if (!estimate && st_->duration != AV_NOPTS_VALUE && st_->duration > 0)
       return av_rescale_q(st_->duration, st_->time_base, AVRational{1, 10000000});
     int64_t sum = 0;
     while (av_read_frame(fmt_, pkt_) >= 0) {
