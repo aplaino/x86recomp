@@ -35,6 +35,7 @@ namespace recomp::orbis::videoout {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+using Vblanks = std::chrono::duration<int64_t, std::ratio<1001, 60000>>;
 
 // Error codes.
 constexpr int32_t kErrInvalidValue = int32_t(0x80290001);
@@ -207,7 +208,7 @@ void RunFlip() {
 void FlipThread() {
   const auto start = Clock::now();
   uint64_t vblank = 1;
-  auto next = start + std::chrono::nanoseconds(1001000000 / 60000);
+  auto next = start + std::chrono::ceil<Clock::duration>(Vblanks(1));
   std::unique_lock<std::mutex> l(g_mu);
   for (;;) {
     auto until = next;
@@ -230,7 +231,7 @@ void FlipThread() {
     }
     if (at_vblank) {
       vblank++;
-      next = start + std::chrono::nanoseconds(vblank * 1001000000 / 60000);
+      next = start + std::chrono::ceil<Clock::duration>(Vblanks(vblank));
     }
   }
 }
