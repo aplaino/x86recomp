@@ -57,6 +57,9 @@ struct Device : com::Object {
   std::map<uint32_t, guest::D3DLIGHT7> lights;
   std::map<uint32_t, bool> light_on;
   float clip_planes[32][4] = {};
+  // What draws are made with: the state set so far over the gfx device's
+  // defaults (DrawFf).
+  gfx::FfState ff = gfx::DefaultFfState();
 };
 
 guest::D3DDEVICEDESC7 DeviceDesc(bool tnl) {
@@ -277,7 +280,7 @@ HLE_NAMED("ddraw.dll", "IDirect3D7::CreateDevice", D3D7_CreateDevice, 4) {
   d->rs[7] = t->zbuffer ? 1 : 0;
   d->viewport = {0, 0, uint32_t(t->width), uint32_t(t->height), 0.0f, 1.0f};
   BindTarget(*d);
-  Gfx()->SetViewport({0, 0, uint32_t(t->width), uint32_t(t->height), 0.0f, 1.0f});
+  d->ff.viewport = {0, 0, uint32_t(t->width), uint32_t(t->height), 0.0f, 1.0f};
   Wr32(out, com::Publish(d, DeviceVtable()));
 
   uint32_t coop = St().coop_flags;
@@ -415,11 +418,12 @@ HLE_NAMED("ddraw.dll", "IDirect3DDevice7::GetRenderTarget", D3DD7_GetRenderTarge
 }
 
 HLE_NAMED("ddraw.dll", "IDirect3DDevice7::Clear", D3DD7_Clear, 7) {
-  Dev(c);
+  Device* d = Dev(c);
   uint32_t count = Arg(c, 1), rects = Arg(c, 2), flags = Arg(c, 3),
            color = Arg(c, 4), zbits = Arg(c, 5), stencil = Arg(c, 6);
   float z;
   std::memcpy(&z, &zbits, 4);
+  Gfx()->SetViewport(d->ff.viewport);  // clears are clipped to it
   Gfx()->Clear(count, rects ? G<gfx::Rect>(rects) : nullptr, flags, color, z,
                stencil);
   return D3D_OK;
@@ -438,7 +442,7 @@ HLE_NAMED("ddraw.dll", "IDirect3DDevice7::SetTransform", D3DD7_SetTransform, 3) 
   Device* d = Dev(c);
   const guest::D3DMATRIX& m = *G<guest::D3DMATRIX>(Arg(c, 2));
   d->transforms[Arg(c, 1)] = m;
-  Gfx()->SetTransform(Arg(c, 1), &m.m[0][0]);
+  if (float* f = gfx::FfTransform(d->ff, Arg(c, 1))) std::memcpy(f, &m, 64);
   return D3D_OK;
 }
 
@@ -461,7 +465,7 @@ HLE_NAMED("ddraw.dll", "IDirect3DDevice7::MultiplyTransform", D3DD7_MultiplyTran
     for (int j = 0; j < 4; j++)
       for (int k = 0; k < 4; k++) r.m[i][j] += b.m[i][k] * a.m[k][j];
   d->transforms[Arg(c, 1)] = r;
-  Gfx()->SetTransform(Arg(c, 1), &r.m[0][0]);
+  if (float* f = gfx::FfTransform(d->ff, Arg(c, 1))) std::memcpy(f, &r, 64);
   return D3D_OK;
 }
 
@@ -469,7 +473,7 @@ HLE_NAMED("ddraw.dll", "IDirect3DDevice7::SetViewport", D3DD7_SetViewport, 2) {
   Device* d = Dev(c);
   d->viewport = *G<guest::D3DVIEWPORT7>(Arg(c, 1));
   const auto& v = d->viewport;
-  Gfx()->SetViewport({v.dwX, v.dwY, v.dwWidth, v.dwHeight, v.dvMinZ, v.dvMaxZ});
+  d->ff.viewport = {v.dwX, v.dwY, v.dwWidth, v.dwHeight, v.dvMinZ, v.dvMaxZ};
   return D3D_OK;
 }
 
@@ -481,10 +485,8 @@ HLE_NAMED("ddraw.dll", "IDirect3DDevice7::GetViewport", D3DD7_GetViewport, 2) {
 HLE_NAMED("ddraw.dll", "IDirect3DDevice7::SetMaterial", D3DD7_SetMaterial, 2) {
   Device* d = Dev(c);
   d->material = *G<guest::D3DMATERIAL7>(Arg(c, 1));
-  gfx::Material m;
-  static_assert(sizeof m == sizeof d->material);
-  std::memcpy(&m, &d->material, sizeof m);
-  Gfx()->SetMaterial(m);
+  static_assert(sizeof d->ff.material == sizeof d->material);
+  std::memcpy(&d->ff.material, &d->material, sizeof d->material);
   return D3D_OK;
 }
 
@@ -493,14 +495,32 @@ HLE_NAMED("ddraw.dll", "IDirect3DDevice7::GetMaterial", D3DD7_GetMaterial, 2) {
   return D3D_OK;
 }
 
+// The first eight enabled lights into the draw state; one enabled but
+// never set is D3D's default light (white, directional along +z).
+void SyncLights(Device& d) {
+  d.ff.light_count = 0;
+  for (const auto& [i, on] : d.light_on) {
+    if (!on) continue;
+    if (d.ff.light_count == 8) break;
+    gfx::Light& l = d.ff.lights[d.ff.light_count++];
+    auto it = d.lights.find(i);
+    if (it != d.lights.end()) {
+      static_assert(sizeof l == sizeof it->second);
+      std::memcpy(&l, &it->second, sizeof l);
+    } else {
+      l = {};
+      l.type = 3;
+      l.diffuse = {1, 1, 1, 0};
+      l.direction[2] = 1;
+    }
+  }
+}
+
 HLE_NAMED("ddraw.dll", "IDirect3DDevice7::SetLight", D3DD7_SetLight, 3) {
   Device* d = Dev(c);
   const guest::D3DLIGHT7& l = *G<guest::D3DLIGHT7>(Arg(c, 2));
   d->lights[Arg(c, 1)] = l;
-  gfx::Light gl;
-  static_assert(sizeof gl == sizeof l);
-  std::memcpy(&gl, &l, sizeof gl);
-  Gfx()->SetLight(Arg(c, 1), gl);
+  SyncLights(*d);
   return D3D_OK;
 }
 
@@ -515,7 +535,7 @@ HLE_NAMED("ddraw.dll", "IDirect3DDevice7::GetLight", D3DD7_GetLight, 3) {
 HLE_NAMED("ddraw.dll", "IDirect3DDevice7::LightEnable", D3DD7_LightEnable, 3) {
   Device* d = Dev(c);
   d->light_on[Arg(c, 1)] = Arg(c, 2) != 0;
-  Gfx()->LightEnable(Arg(c, 1), Arg(c, 2) != 0);
+  SyncLights(*d);
   return D3D_OK;
 }
 
@@ -528,8 +548,9 @@ HLE_NAMED("ddraw.dll", "IDirect3DDevice7::GetLightEnable", D3DD7_GetLightEnable,
 HLE_NAMED("ddraw.dll", "IDirect3DDevice7::SetRenderState", D3DD7_SetRenderState, 3) {
   Device* d = Dev(c);
   uint32_t s = Arg(c, 1), v = Arg(c, 2);
-  if (s < 256) d->rs[s] = v;
-  Gfx()->SetRenderState(s, v);
+  if (s >= 256) return D3D_OK;
+  d->rs[s] = v;
+  d->ff.rs[s] = v;
   return D3D_OK;
 }
 
@@ -544,7 +565,7 @@ HLE_NAMED("ddraw.dll", "IDirect3DDevice7::SetTextureStageState", D3DD7_SetTextur
   Device* d = Dev(c);
   uint32_t st = Arg(c, 1), type = Arg(c, 2), v = Arg(c, 3);
   if (st < 8 && type < 32) d->tss[st][type] = v;
-  Gfx()->SetTextureStageState(st, type, v);
+  if (st < 8 && type < 33) d->ff.tss[st][type] = v;
   return D3D_OK;
 }
 
@@ -564,7 +585,7 @@ HLE_NAMED("ddraw.dll", "IDirect3DDevice7::SetTexture", D3DD7_SetTexture, 3) {
   if (surf) com::AddRef(surf);
   if (d->textures[st]) com::Release(d->textures[st]);
   d->textures[st] = surf;
-  Gfx()->SetTexture(st, s ? s->tex : 0);
+  d->ff.textures[st] = s ? s->tex : 0;
   return D3D_OK;
 }
 
@@ -587,7 +608,7 @@ HLE_NAMED("ddraw.dll", "IDirect3DDevice7::SetClipPlane", D3DD7_SetClipPlane, 3) 
   uint32_t i = Arg(c, 1);
   if (i >= 32) return D3DERR_INVALIDCALL;
   std::memcpy(d->clip_planes[i], GPtr(Arg(c, 2)), 16);
-  Gfx()->SetClipPlane(i, d->clip_planes[i]);
+  if (i < 8) std::memcpy(d->ff.clip[i], d->clip_planes[i], 16);
   return D3D_OK;
 }
 
@@ -615,42 +636,52 @@ void CheckIndices(const char* fn, const uint16_t* idx, uint32_t ni, uint32_t nv)
     WarnF("%s: max index %u >= vertex count %u (%u indices)\n", fn, mx, nv, ni);
 }
 
+// nv vertices from `verts` with the device's state; 16-bit indices, or
+// none if null.
+void Draw(Device& d, uint32_t prim, uint32_t fvf, const void* verts, uint32_t stride,
+          uint32_t nv, const void* idx, uint32_t ni) {
+  gfx::FfDraw fd = gfx::FfInterleaved(prim, fvf, verts, stride);
+  fd.vertex_count = nv;
+  fd.indices = idx;
+  fd.index_count = ni;
+  Gfx()->DrawFf(d.ff, fd);
+}
+
 HLE_NAMED("ddraw.dll", "IDirect3DDevice7::DrawPrimitive", D3DD7_DrawPrimitive, 6) {
-  Dev(c);
+  Device* d = Dev(c);
   uint32_t prim = Arg(c, 1), fvf = Arg(c, 2), verts = Arg(c, 3), n = Arg(c, 4);
-  Gfx()->Draw(prim, fvf, GPtr(verts), n, gfx::FvfStride(fvf), nullptr, 0);
+  Draw(*d, prim, fvf, GPtr(verts), gfx::FvfStride(fvf), n, nullptr, 0);
   return D3D_OK;
 }
 
 HLE_NAMED("ddraw.dll", "IDirect3DDevice7::DrawIndexedPrimitive", D3DD7_DrawIndexedPrimitive, 8) {
-  Dev(c);
+  Device* d = Dev(c);
   uint32_t prim = Arg(c, 1), fvf = Arg(c, 2), verts = Arg(c, 3), nv = Arg(c, 4),
            idx = Arg(c, 5), ni = Arg(c, 6);
   CheckIndices("DrawIndexedPrimitive", reinterpret_cast<const uint16_t*>(GPtr(idx)), ni, nv);
-  Gfx()->Draw(prim, fvf, GPtr(verts), nv, gfx::FvfStride(fvf),
-              reinterpret_cast<const uint16_t*>(GPtr(idx)), ni);
+  Draw(*d, prim, fvf, GPtr(verts), gfx::FvfStride(fvf), nv, GPtr(idx), ni);
   return D3D_OK;
 }
 
 HLE_NAMED("ddraw.dll", "IDirect3DDevice7::DrawPrimitiveVB", D3DD7_DrawPrimitiveVB, 6) {
-  Dev(c);
+  Device* d = Dev(c);
   auto* vb = com::As<VertexBuffer>(Arg(c, 2));
   if (!vb) return D3DERR_INVALIDCALL;
   uint32_t prim = Arg(c, 1), start = Arg(c, 3), n = Arg(c, 4);
-  Gfx()->Draw(prim, vb->desc.dwFVF, GPtr(vb->mem + start * vb->stride), n,
-              vb->stride, nullptr, 0);
+  Draw(*d, prim, vb->desc.dwFVF, GPtr(vb->mem + start * vb->stride), vb->stride, n, nullptr,
+       0);
   return D3D_OK;
 }
 
 HLE_NAMED("ddraw.dll", "IDirect3DDevice7::DrawIndexedPrimitiveVB", D3DD7_DrawIndexedPrimitiveVB, 8) {
-  Dev(c);
+  Device* d = Dev(c);
   auto* vb = com::As<VertexBuffer>(Arg(c, 2));
   if (!vb) return D3DERR_INVALIDCALL;
   uint32_t prim = Arg(c, 1), start = Arg(c, 3), nv = Arg(c, 4), idx = Arg(c, 5),
            ni = Arg(c, 6);
   CheckIndices("DrawIndexedPrimitiveVB", reinterpret_cast<const uint16_t*>(GPtr(idx)), ni, nv);
-  Gfx()->Draw(prim, vb->desc.dwFVF, GPtr(vb->mem + start * vb->stride), nv,
-              vb->stride, reinterpret_cast<const uint16_t*>(GPtr(idx)), ni);
+  Draw(*d, prim, vb->desc.dwFVF, GPtr(vb->mem + start * vb->stride), vb->stride, nv, GPtr(idx),
+       ni);
   return D3D_OK;
 }
 
