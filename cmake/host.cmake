@@ -24,8 +24,8 @@ set(RECOMP_LLVM_ROOT "${_llvm_default}" CACHE PATH
 # game project sets the default; recomp_d3d7 exists only when it is set.
 set(DXVK_NATIVE_DIR "" CACHE PATH "dxvk-native install prefix")
 
-# Logging (runtime/log.h).
-add_library(recomp_log SHARED src/runtime/log.cpp)
+# Logging and dev switches (runtime/log.h, runtime/env.h).
+add_library(recomp_log SHARED src/runtime/log.cpp src/runtime/env.cpp)
 target_include_directories(recomp_log PUBLIC src)
 target_compile_features(recomp_log PUBLIC cxx_std_20)
 
@@ -42,14 +42,16 @@ target_include_directories(recomp_hlsl PUBLIC src)
 target_compile_features(recomp_hlsl PUBLIC cxx_std_20)
 add_subdirectory(tools/hlslc)
 
-# gfx::Device and its backends; no HLE in it, shared by the graphics API
-# modules below. Backends:
+# gfx::Device and its backends, and frame presentation with its dev aids
+# (gfx/present.h); no HLE in it, shared by the graphics API modules
+# below. Backends:
 # - SDL_GPU (gfx/gpu_device.cpp): always; Vulkan, or Metal on macOS;
 # - d3d9 through dxvk-native (gfx/d3d9_device.cpp): when DXVK_NATIVE_DIR
-#   is set (Linux), with RECOMP_HAVE_D3D9 defined for the x86 runtime too.
+#   is set (Linux), with RECOMP_HAVE_D3D9 defined for its users too.
 add_library(recomp_gfx SHARED
   src/runtime/gfx/format.cpp
   src/runtime/gfx/device.cpp
+  src/runtime/gfx/present.cpp
   src/runtime/gfx/gpu_device.cpp
   src/runtime/gfx/shader_compile.cpp)
 target_include_directories(recomp_gfx PUBLIC src)
