@@ -657,9 +657,12 @@ HLE("opengl32.dll", glDrawElements, 4) {
   return 0;
 }
 HLE("opengl32.dll", glArrayElement, 1) { GL_OR_RETURN(0); g->ArrayElement(int32_t(Arg(c, 0))); return 0; }
-// Compiled vertex arrays are a hint that the arrays stay unchanged.
-HLE("opengl32.dll", glLockArraysEXT, 2) { return 0; }
-HLE("opengl32.dll", glUnlockArraysEXT, 0) { return 0; }
+HLE("opengl32.dll", glLockArraysEXT, 2) {
+  GL_OR_RETURN(0);
+  g->LockArrays(int32_t(Arg(c, 0)), int32_t(Arg(c, 1)));
+  return 0;
+}
+HLE("opengl32.dll", glUnlockArraysEXT, 0) { GL_OR_RETURN(0); g->UnlockArrays(); return 0; }
 
 // immediate mode
 HLE("opengl32.dll", glBegin, 1) { GL_OR_RETURN(0); g->Begin(Arg(c, 0)); return 0; }
