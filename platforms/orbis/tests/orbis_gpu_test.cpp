@@ -1042,6 +1042,54 @@ int main() {
       }
     Check(ok, "s_wqm_b64 in a pixel shader sets a lane of a quad with any lane set, and only it");
   }
+  // A buffer load at a 64-bit address in a pixel shader, its lane offset
+  // 0 or 16 (x > 0: the right half), so its reach known: words 1-4 or 5-8
+  // of the table at s[0:1] (word i holding i), loaded over the address.
+  {
+    static const uint32_t kWidePs[] = {
+        0xC8080000,              // v_interp_p1_f32 v2, v0, attr0.x
+        0xC8090001,              // v_interp_p2_f32 v2, v1, attr0.x
+        0x7C020480,              // v_cmp_lt_f32 vcc, 0, v2
+        0xD2000006, 0x01A90280,  // v_cndmask_b32 v6, 0, 1, vcc
+        0xD2D20006, 0x00020C90,  // v_mul_lo_u32 v6, 16, v6
+        0x4A0E0C00,              // v_add_i32 v7, vcc, s0, v6
+        0x7E100201,              // v_mov_b32 v8, s1
+        0x50101080,              // v_addc_u32 v8, vcc, 0, v8, vcc
+        0xBE840380,              // s_mov_b32 s4, 0
+        0xBE8503FF, 0x00040000,  // s_mov_b32 s5, 0x40000
+        0xBE8603C1,              // s_mov_b32 s6, -1
+        0xBE8703FF, 0x20024004,  // s_mov_b32 s7, 0x20024004
+        0xE0388004, 0x80010707,  // buffer_load_dwordx4 v[7:10], v[7:8], s[4:7], 0 addr64 offset:4
+        0xBF8C0F70,              // s_waitcnt vmcnt(0)
+        0xF800180F, 0x0A090807,  // exp mrt0 v7, v8, v9, v10 done vm
+        0xBF810000,              // s_endpgm
+    };
+    constexpr gaddr kWidePsAt = kCode + 0x1A00, kWideTarget = 0x1C0000, kTable = kOut + 0x7000;
+    std::memcpy(GPtr(kWidePsAt), kWidePs, sizeof kWidePs);
+    for (uint32_t i = 0; i < 9; i++) {
+      const float f = float(i);
+      std::memcpy(GPtr(kTable + 4 * i), &f, 4);
+    }
+    verts({{-1, -1}, {1, -1}, {-1, 1}});
+    Regs r;
+    DrawRegs(r, 0x11, kWideTarget, kVsAt);
+    r.sh[0x08] = uint32_t(kWidePsAt >> 8);
+    r.sh[0x0B] = 2u << 1;  // SPI_SHADER_PGM_RSRC2_PS: 2 user SGPRs
+    r.sh[0x0C] = uint32_t(kTable);
+    r.sh[0x0D] = uint32_t(kTable >> 32);
+    Draw(r, {3, 1, 0, 2});
+    Settle(true);
+    float px[8 * 8 * 4] = {};
+    const gfx::TextureId tex = TargetAt(kWideTarget, 8, 8);
+    if (tex) dev->ReadImage(tex, 0, 0, {0, 0, 8, 8}, px, 8 * 16);
+    bool ok = tex;
+    for (int i = 0; i < 64 && ok; i++) {
+      const float first = i % 8 < 4 ? 1.0f : 5.0f;
+      for (int c = 0; c < 4; c++) ok &= px[4 * i + c] == first + float(c);
+      if (!ok) std::printf("  pixel %d: %g %g %g %g\n", i, px[4 * i], px[4 * i + 1], px[4 * i + 2], px[4 * i + 3]);
+    }
+    Check(ok, "a pixel shader's buffer load at a 64-bit address reads what its lane offset reaches");
+  }
   // Levels 0 and 1 of an 8x8 texture of four floats (1D thin, 16 bytes an
   // element: level 1 at 1024) drawn as targets, level 1 with w = 2 (its
   // red twice the clip-space x); a load of level 1 through the T# reads

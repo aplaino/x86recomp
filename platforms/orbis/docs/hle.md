@@ -180,10 +180,12 @@ library.
   word 0x7FC00, the only one handled: a query's begin at +0, its end at
   +8). Backend 0 carries the whole count and the rest stay at 0, so the
   begin-to-end differences add up as the console's do. Buffer loads at a 64-bit address (ADDR64, a V# of base
-  0 and no range) whose address is a lane's offset added to a pointer the
-  stage reads at known offsets read that pointer's range the same way,
-  checked the same way (compute stages; stores and other stages are
-  fatal). CLEAR_STATE loads the Sea
+  0 and no range) whose address is a lane's offset added to a known
+  pointer read the bytes that offset can reach when its range is known
+  (small constants picked per lane, added and multiplied: any stage, no
+  check needed), or else the range the stage reads from the pointer at
+  known offsets, checked the same way (compute stages; stores and other
+  stages are fatal). CLEAR_STATE loads the Sea
   Islands clear state's scissors, masks and depth ranges (AMD's published
   values), not the console's driver's, which are not measured. A draw with
   an ES, a GS and a copy shader runs the ES and the GS as compute passes

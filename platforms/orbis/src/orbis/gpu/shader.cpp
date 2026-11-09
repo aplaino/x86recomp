@@ -201,12 +201,15 @@ void Index(Code& c) {
 //   kHigh: the pointer's high half P_hi (p) plus that carry, so that the
 //     two halves are the 64-bit address P + (uint32_t)(c + stride * X);
 //   kLoaded: word c of what dynamic load id (Resolver::dyn) read.
-// kCarry: a VCC (or SGPR pair) holding the carries of a VGPR's kLow sum
-// (Resolver::vgpr).
+// kCarry: a VCC (or SGPR pair) holding the carries of a VGPR's kLow sum;
+// kRange: a VGPR that holds a value in [lo, hi] in every lane, and a kLow
+// whose lane offset does (bounded) (Resolver::vgpr).
 struct Var {
-  enum Kind : uint8_t { kNone, kValue, kLow, kHigh, kLoaded, kCarry } kind = kNone;
+  enum Kind : uint8_t { kNone, kValue, kLow, kHigh, kLoaded, kCarry, kRange } kind = kNone;
   uint32_t c = 0, stride = 0, p = 0;
   gaddr id = 0;
+  bool bounded = false;
+  uint32_t lo = 0, hi = 0;
 };
 
 // SGPRs 0-103, VCC 106-107, M0 124 and EXEC 126-127, and whether each is
@@ -266,7 +269,8 @@ struct Site {
   uint32_t vsharp[4] = {};  // buffer instructions: their V#
   // A scalar load at a run-time offset (Resolver::Dyn), or a buffer
   // access at a 64-bit address from VGPRs (addr64, Resolver::Wide):
-  // checked against its range as it runs.
+  // checked against its range as it runs (dynamic; an addr64 one whose
+  // offset's reach is its range is not).
   bool dynamic = false, addr64 = false;
   // An image access whose T# or S# was loaded at a run-time offset: the
   // descriptors it can find there (images) and where their words are in
@@ -297,9 +301,11 @@ struct Resolver {
   // VGPRs the scalar run knows of: a uniform value (kValue, no stride), a
   // lane's offset added to a known pointer's low half (kLow, p: that half)
   // and the carry of that sum added to its high half (kHigh, p: that half;
-  // the same id, the sum's address). Buffer accesses at such a 64-bit
-  // address (ADDR64) read the range the stage reads from the pointer at
-  // known offsets (blocks), as Dyn's loads do.
+  // the same id, the sum's address), and lane values in a known range
+  // (kRange: small constants picked, added and multiplied). Buffer accesses
+  // at such a 64-bit address (ADDR64) read the range their bounded offset
+  // can reach, or else the range the stage reads from the pointer at known
+  // offsets (blocks), as Dyn's loads do.
   Var vgpr[256];
   // SGPRs spilled to VGPR lanes (v_writelane_b32 at a constant lane) and
   // restored (v_readlane_b32): each writelane marks its VGPR with a token
@@ -614,19 +620,34 @@ struct Resolver {
                                                       (in.op >= 48 && in.op <= 64)
                                                 : in.op >= 4;
         if (in.fmt == Fmt::Mubuf && in.op >= 112) return true;  // cache control
+        const uint32_t va = in.w1 & 0xFF;
+        const Var l = vgpr[va], h = vgpr[(va + 1) & 0xFF];  // before a load replaces them
         if (!store)
           for (uint32_t i = 0; i < 4; i++) vgpr[((in.w1 >> 8) + i) & 0xFF] = {};
         if (in.w0 & 0x8000) {  // ADDR64: the address in VGPRs, the V# only its base (0) and no range
-          const uint32_t va = in.w1 & 0xFF;
-          const Var l = vgpr[va], h = vgpr[(va + 1) & 0xFF];
           if (l.kind != Var::kLow || h.kind != Var::kHigh || h.id != l.id)
             return Fail(pc, "a buffer access at a 64-bit address not known to the scalar run");
           if (v[0] || (v[1] & 0xFF) || v[2] != ~0u || (v[1] >> 31) || ((v[3] >> 23) & 1) || (in.w0 & 0x3000))
             return Fail(pc, "a buffer access at a 64-bit address with a V# range not translated yet");
           if (store) return Fail(pc, "a buffer store at a 64-bit address not translated yet");
+          const gaddr P = l.p | uint64_t(h.p & 0xFFFF) << 32;
+          uint32_t soff;
+          if (l.bounded && Source(s, in, in.w1 >> 24, &soff)) {  // the reach of the offset: no check needed
+            if (in.fmt != Fmt::Mubuf || in.op < 12 || in.op > 15)
+              return Fail(pc, "a buffer instruction at a 64-bit address not translated yet");
+            const uint32_t n = in.op == 12 ? 1 : in.op == 13 ? 2 : in.op == 14 ? 4 : 3;
+            const gaddr base = P + l.lo + soff + (in.w0 & 0xFFF);
+            const uint32_t size = l.hi - l.lo + 4 * n;
+            if (!Readable(base, size)) return Fail(pc, "a buffer access at a 64-bit address outside memory");
+            Site& site = NewSite(pc);
+            site.addr64 = true;
+            site.buffer = Buffer(base, size, false);
+            std::memcpy(site.vsharp, v, sizeof v);
+            return true;
+          }
           if (st.stage != Stage::Compute)
             return Fail(pc, "a buffer access at a 64-bit address outside a compute stage not translated yet");
-          wides.push_back({pc, l.p | uint64_t(h.p & 0xFFFF) << 32});
+          wides.push_back({pc, P});
           Site& site = NewSite(pc);
           site.dynamic = site.addr64 = true;
           std::memcpy(site.vsharp, v, sizeof v);
@@ -641,8 +662,11 @@ struct Resolver {
         return true;
       }
       case Fmt::Mimg: {
-        if (!(in.op >= 8 && in.op <= 11))
-          for (uint32_t i = 0; i < 5; i++) vgpr[((in.w1 >> 8) + i) & 0xFF] = {};
+        if (!(in.op >= 8 && in.op <= 11)) {  // the dmask's components (a gather's 4), one more for TFE/LWE
+          const uint32_t n = (in.op >= 64 ? 4 : uint32_t(__builtin_popcount((in.w0 >> 8) & 0xF))) +
+                             ((in.w0 >> 16) & 3 ? 1 : 0);
+          for (uint32_t i = 0; i < n; i++) vgpr[((in.w1 >> 8) + i) & 0xFF] = {};
+        }
         ImageRef ref;
         const uint32_t t = ((in.w1 >> 16) & 0x1F) * 4, smp = ((in.w1 >> 21) & 0x1F) * 4;
         const int words = (in.w0 & 0x8000) ? 4 : 8;
@@ -747,10 +771,31 @@ struct Resolver {
       *k = v.c;
       return true;
     };
+    // A lane value's range: a uniform one's, or a kRange's.
+    auto range = [&](uint32_t code, uint64_t* lo, uint64_t* hi) {
+      uint32_t k;
+      if (uniform(code, &k)) return *lo = *hi = k, true;
+      if (code < gcn::kVgpr || vgpr[code - gcn::kVgpr].kind != Var::kRange) return false;
+      *lo = vgpr[code - gcn::kVgpr].lo, *hi = vgpr[code - gcn::kVgpr].hi;
+      return true;
+    };
+    auto ranged = [&](uint64_t lo, uint64_t hi) {
+      Var v;
+      if (hi <= ~0u) v = {Var::kRange, 0, 0, 0, pc, false, uint32_t(lo), uint32_t(hi)};
+      return v;
+    };
     uint32_t a, b;
+    uint64_t lo0, hi0, lo1, hi1;
     const bool ka = uniform(s0, &a), kb = uniform(s1, &b);
+    const bool r0 = range(s0, &lo0, &hi0), r1 = range(s1, &lo1, &hi1);
     Var out;
     switch (op) {
+      case 0:  // v_cndmask_b32: one of the two in each lane
+        if (r0 && r1) out = ranged(std::min(lo0, lo1), std::max(hi0, hi1));
+        break;
+      case 361:  // v_mul_lo_u32
+        if (r0 && r1 && hi0 * hi1 <= ~0u) out = ranged(lo0 * lo1, hi0 * hi1);
+        break;
       case 384 + 1:  // v_mov_b32
         if (ka) out = {Var::kValue, a, 0, 0, pc};
         break;
@@ -759,7 +804,11 @@ struct Resolver {
         return true;
       case 37:  // v_add_i32: a pointer's low half plus a lane's offset
         if (ka && kb) out = {Var::kValue, a + b, 0, 0, pc};
-        else if (ka || kb) out = {Var::kLow, 0, 0, ka ? a : b, pc};
+        else if (ka || kb) {
+          out = {Var::kLow, 0, 0, ka ? a : b, pc};
+          if (ka ? r1 : r0)
+            out.bounded = true, out.lo = uint32_t(ka ? lo1 : lo0), out.hi = uint32_t(ka ? hi1 : hi0);
+        }
         s.Forget(sd + 1);
         if (out.kind == Var::kLow) s.SetVar(sd, {Var::kCarry, 0, 0, 0, pc});
         else s.Forget(sd);
@@ -768,6 +817,8 @@ struct Resolver {
         const Var carry = s2 < 128 ? s.var[s2] : Var{};
         if (carry.kind == Var::kCarry && ka && kb && (a == 0 || b == 0))
           out = {Var::kHigh, 0, 0, a | b, carry.id};
+        else if (carry.kind != Var::kCarry && r0 && r1)  // a lane's carry in: 0 or 1
+          out = ranged(lo0 + lo1, hi0 + hi1 + 1);
         s.Forget(sd), s.Forget(sd + 1);
         break;
       }
@@ -1516,8 +1567,8 @@ struct Translator {
   }
 
   // A buffer load at a 64-bit address (ADDR64: VGPRs vaddr, vaddr + 1,
-  // plus the offsets; the V# adds nothing): from the range resolved for it
-  // (Resolver::Wide), checked.
+  // plus the offsets; the V# adds nothing): from the range resolved for it,
+  // checked (Resolver::Wide) unless its offset's reach is the range.
   void Wide(gaddr pc, const Instr& in, const Site& site) {
     const uint32_t vdata = (in.w1 >> 8) & 0xFF, vaddr = in.w1 & 0xFF, soff = in.w1 >> 24;
     const int b = ro_of[size_t(site.buffer)];
@@ -1526,6 +1577,11 @@ struct Translator {
     if (b < 0) return Fail(pc, "a buffer load at a 64-bit address from a written range not translated yet");
     const uint32_t n = in.op == 12 ? 1 : in.op == 13 ? 2 : in.op == 14 ? 4 : 3;
     Line("r_t = " + U(in.w0 & 0xFFF) + " + " + Src(soff, in, pc) + "; r_a = " + V(vaddr) + " + r_t;");
+    if (!site.dynamic) {
+      for (uint32_t i = 0; i < n; i++)
+        Line(V(vdata + i) + " = r_rd(" + std::to_string(b) + ", r_a + " + U(4 * i) + ");");
+      return;
+    }
     Line("if (" + V(vaddr + 1) + " + (r_a < r_t ? 1u : 0u) != r_region[" + std::to_string(b) + "].y) r_fault(" +
          U(uint32_t(pc)) + ");");
     for (uint32_t i = 0; i < n; i++)
