@@ -672,9 +672,13 @@ game's renderer reuses it: it sets state through the front end (the GL
 context, say), takes the state (gl::Context::DrawState) or the client
 arrays as streams (ArrayDraw), and draws with the device itself,
 without the front end's gathering and copying of vertices. SDL_GPU
-writes the streams straight into its vertex arena (the same layout as
-the stateful draws, so the shaders are shared); d3d9 sets the explicit
-state for the draw and puts the stateful state back.
+copies the streams into its vertex arena as they lie (streams within
+the same records together) and its vertex shader reads each attribute
+at its own address and stride, from a small uniform block of its own so
+that the state's block stays the same from draw to draw; a stream
+marked locked (`FfStream::lock`, GL's glLockArraysEXT through the
+context) is copied once for all the draws that pass the lock. d3d9 sets
+the explicit state for the draw and puts the stateful state back.
 
 API front ends:
 - DirectDraw 7 / Direct3D 7 (recomp_d3d7): guest-visible COM objects;

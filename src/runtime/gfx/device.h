@@ -133,6 +133,10 @@ FfState DefaultFfState();
 struct FfStream {
   const void* data = nullptr;  // vertex 0's attribute
   uint32_t stride = 0;
+  // Nonzero: the bytes this stream reads are the same in every draw that
+  // passes the same lock until the next Present, so the device may keep
+  // what it took of them for one draw for the others.
+  uint32_t lock = 0;
 };
 // A fixed-function draw from separate streams. The FVF says which
 // attributes there are and their formats; each one of vertex v is at its

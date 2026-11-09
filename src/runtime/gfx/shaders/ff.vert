@@ -3,13 +3,15 @@
 // whose behaviour comes from uniforms (the D3D state), so no shader is
 // ever compiled per state combination.
 //
-// The uniform layout here and VsUniforms in gpu_device.cpp must agree
-// (std140: every member is a vec4, ivec4 or mat4). Matrices are uploaded
-// as D3D stores them (row-major, row vectors), which GLSL reads as the
-// transpose: D3D's v * M is M * v here.
+// The uniform layouts here and VsUniforms, VsLayout in gpu_device.cpp
+// must agree (std140: every member is a vec4, ivec4 or mat4). Matrices are
+// uploaded as D3D stores them (row-major, row vectors), which GLSL reads
+// as the transpose: D3D's v * M is M * v here.
 //
-// Vertices are pulled from a storage buffer (vb) with the FVF's offsets in
-// the uniforms, so the vertex layout is not part of any pipeline.
+// Vertices are pulled from a storage buffer (vb): each attribute of vertex
+// v at its address + v * its stride, both in the uniforms, so the vertex
+// layout is not part of any pipeline and the attributes may be
+// interleaved or in separate streams.
 //
 // Bindings follow SDL_GPU's SPIR-V conventions for vertex shaders: storage
 // buffers in set 0, uniform buffers in set 1. The Metal build (METAL
@@ -17,9 +19,11 @@
 // indices) needs its order instead: uniform buffers, then storage buffers.
 #ifdef METAL
 #define UNIFORMS_BINDING set = 0, binding = 0
-#define VERTICES_BINDING set = 0, binding = 1
+#define LAYOUT_BINDING set = 0, binding = 1
+#define VERTICES_BINDING set = 0, binding = 2
 #else
 #define UNIFORMS_BINDING set = 1, binding = 0
+#define LAYOUT_BINDING set = 1, binding = 1
 #define VERTICES_BINDING set = 0, binding = 0
 #endif
 
@@ -44,10 +48,6 @@ layout(std140, UNIFORMS_BINDING) uniform VsUniforms {
   vec4 fog;             // start, end, density
   vec4 clip[8];         // user clip planes, view space
   Light lights[8];
-  ivec4 layout0;        // stride, position offset, normal offset, diffuse offset
-  ivec4 layout2;        // specular offset, point size offset, blend weights in the FVF, base (bytes)
-  ivec4 tex_offset[2];  // per coordinate set: byte offset, -1 if absent
-  ivec4 tex_size[2];    // per coordinate set: components
   ivec4 mode;           // position kind (0 xyz, 1 xyzrhw, 2 xyzw), lighting, normalize, local viewer
   ivec4 mode2;          // color vertex, diffuse/specular/ambient material source
   ivec4 mode3;          // emissive source, fog vertex mode, fog table mode, range fog
@@ -57,6 +57,18 @@ layout(std140, UNIFORMS_BINDING) uniform VsUniforms {
   ivec4 ttf[2];         // per stage TEXTURETRANSFORMFLAGS
   vec4 point;           // x: POINTSIZE
 } u;
+
+// Where the draw's vertices are (VsLayout), apart so that the block above
+// stays the same from draw to draw. Attribute addresses are vertex 0's in
+// bytes, -1 if absent.
+layout(std140, LAYOUT_BINDING) uniform VsLayout {
+  ivec4 layout0;        // position stride, position, normal, diffuse addresses
+  ivec4 layout2;        // specular, point size addresses, blend weights in the FVF, R, G, B, A colours
+  ivec4 strides;        // normal, diffuse, specular, point size strides
+  ivec4 tex_offset[2];  // per coordinate set: address
+  ivec4 tex_stride[2];  // per coordinate set: stride
+  ivec4 tex_size[2];    // per coordinate set: components
+} l;
 
 layout(std430, VERTICES_BINDING) readonly buffer Vertices { uint vb[]; };
 
@@ -75,7 +87,9 @@ layout(location = 12) out float o_fog;  // vertex fog factor, or the depth table
 
 float Rf(int byte_offset) { return uintBitsToFloat(vb[byte_offset >> 2]); }
 
+// A D3DCOLOR, or bytes R, G, B, A when layout2.w is set.
 vec4 Color(uint c) {
+  if (l.layout2.w != 0) c = (c & 0xFF00FF00u) | ((c >> 16) & 0xFFu) | ((c & 0xFFu) << 16);
   return vec4(float((c >> 16) & 0xFFu), float((c >> 8) & 0xFFu), float(c & 0xFFu),
               float(c >> 24)) / 255.0;
 }
@@ -96,15 +110,15 @@ float FogFactor(int mode, float d, vec4 fog) {
 }
 
 void main() {
-  int base = u.layout2.w + gl_VertexIndex * u.layout0.x;
-  int po = base + u.layout0.y;
+  int v = gl_VertexIndex;
+  int po = l.layout0.y + v * l.layout0.x;
 
-  bool has_normal = u.layout0.z >= 0, has_diffuse = u.layout0.w >= 0;
-  bool has_specular = u.layout2.x >= 0;
-  vec4 vdiff = has_diffuse ? Color(vb[(base + u.layout0.w) >> 2]) : vec4(1.0);
-  vec4 vspec = has_specular ? Color(vb[(base + u.layout2.x) >> 2]) : vec4(0.0);
-  vec3 nrm = has_normal ? vec3(Rf(base + u.layout0.z), Rf(base + u.layout0.z + 4),
-                               Rf(base + u.layout0.z + 8))
+  bool has_normal = l.layout0.z >= 0, has_diffuse = l.layout0.w >= 0;
+  bool has_specular = l.layout2.x >= 0;
+  vec4 vdiff = has_diffuse ? Color(vb[(l.layout0.w + v * l.strides.y) >> 2]) : vec4(1.0);
+  vec4 vspec = has_specular ? Color(vb[(l.layout2.x + v * l.strides.z) >> 2]) : vec4(0.0);
+  int no = l.layout0.z + v * l.strides.x;
+  vec3 nrm = has_normal ? vec3(Rf(no), Rf(no + 4), Rf(no + 8))
                         : vec3(0.0);
 
   vec4 view_pos = vec4(0.0, 0.0, 0.0, 1.0);
@@ -128,7 +142,7 @@ void main() {
       float wsum = 0.0;
       view_pos = vec4(0.0);
       for (int i = 0; i < nb; i++) {
-        float wt = i < u.layout2.z ? Rf(po + 12 + 4 * i) : 0.0;
+        float wt = i < l.layout2.z ? Rf(po + 12 + 4 * i) : 0.0;
         wsum += wt;
         view_pos += wt * (u.world_view[i] * p);
         view_n += wt * (u.normal[i] * vec4(nrm, 0.0)).xyz;
@@ -225,12 +239,13 @@ void main() {
       vec3 E = u.mode.w != 0 ? normalize(-view_pos.xyz / view_pos.w) : vec3(0.0, 0.0, -1.0);
       t = vec4(2.0 * dot(E, view_n) * view_n - E, 1.0); comps = 3;
     } else {
-      int off = u.tex_offset[set >> 2][set & 3];
-      comps = u.tex_size[set >> 2][set & 3];
+      int off = l.tex_offset[set >> 2][set & 3];
+      comps = l.tex_size[set >> 2][set & 3];
       t = vec4(0.0, 0.0, 0.0, 1.0);
       if (off >= 0) {
+        off += v * l.tex_stride[set >> 2][set & 3];
         for (int k = 0; k < 4; k++)
-          if (k < comps) t[k] = Rf(base + off + 4 * k);
+          if (k < comps) t[k] = Rf(off + 4 * k);
       }
     }
     int ttf = u.ttf[s >> 2][s & 3];
@@ -248,5 +263,5 @@ void main() {
   for (int i = 0; i < 8; i++)
     gl_ClipDistance[i] = (u.mode.x != 1 && (u.mode4.z & (1 << i)) != 0)
                              ? dot(u.clip[i], view_pos) : 1.0;
-  gl_PointSize = u.layout2.y >= 0 ? Rf(base + u.layout2.y) : u.point.x;
+  gl_PointSize = l.layout2.y >= 0 ? Rf(l.layout2.y + v * l.strides.w) : u.point.x;
 }

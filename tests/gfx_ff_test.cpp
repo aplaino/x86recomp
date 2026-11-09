@@ -2,8 +2,10 @@
 // backend: a draw from separate streams (RGBA colours, 32-bit indices,
 // a first vertex past 0) with its own state gives the same pixels as the
 // same vertices drawn interleaved after the same state set statefully,
-// and leaves the stateful state as it was. Needs a Vulkan device
-// (lavapipe will do); exits 77 (skipped) without one.
+// and leaves the stateful state as it was; so do unaligned streams (drawn
+// interleaved) and interleaved ones; an absent stream reads as zeros; a
+// locked stream is taken once per lock. Needs a Vulkan device (lavapipe
+// will do); exits 77 (skipped) without one.
 
 #include <SDL3/SDL.h>
 
@@ -234,6 +236,97 @@ int main() {
   dev->DrawFf(st, fan);
   Check(Read(*dev) == want_fan, "a non-indexed fan through DrawFf");
 
+  // ---- 5. Unaligned streams: a stream off a word boundary (copied to
+  // one), records with colours 2 bytes past one (drawn interleaved); and
+  // interleaved streams.
+  std::vector<uint8_t> shifted(sc.pos.size() * 4 + 2);
+  std::memcpy(shifted.data() + 2, sc.pos.data(), sc.pos.size() * 4);
+  FfDraw odd = fd;
+  odd.position = {shifted.data() + 2, 16};
+  Clear(*dev);
+  dev->DrawFf(st, odd);
+  Check(Read(*dev) == want, "a stream off a word boundary");
+  const uint32_t nall = uint32_t(sc.pos.size() / 4);
+  std::vector<uint8_t> recs(size_t(nall) * 20);  // position, 2 bytes, colour
+  for (uint32_t v = 0; v < nall; v++) {
+    std::memcpy(&recs[v * 20], &sc.pos[v * 4], 12);
+    std::memcpy(&recs[v * 20 + 14], &sc.rgba[v * 4], 4);
+  }
+  odd = fd;
+  odd.position = {recs.data(), 20};
+  odd.diffuse = {recs.data() + 14, 20};
+  Clear(*dev);
+  dev->DrawFf(st, odd);
+  Check(Read(*dev) == want, "attributes off word boundaries in their records");
+  FfDraw inter_d = FfInterleaved(4, fvf, inter.data(), stride);
+  inter_d.vertex_count = nv;
+  inter_d.indices = idx16.data();
+  inter_d.index_count = uint32_t(idx16.size());
+  Clear(*dev);
+  dev->DrawFf(st, inter_d);
+  Check(Read(*dev) == want, "interleaved streams");
+
+  // ---- 6. A draw with another texture after one with the first (the
+  // device keeps each stage's binding from the draw before).
+  const TextureId tex2 = dev->CreateTexture(2, 2, 1, Format::A8R8G8B8, false);
+  const uint32_t texels2[4] = {0xFF0000FF, 0xFF00FFFF, 0x80FF00FF, 0xFFFFFF00};
+  dev->UpdateTexture(tex2, 0, {0, 0, 2, 2}, texels2, 8);
+  FfState other_tex = st;
+  other_tex.textures[0] = tex2;
+  auto forget = [&] { dev->DestroyTexture(dev->CreateTexture(1, 1, 1, Format::A8R8G8B8, false)); };
+  forget();
+  Clear(*dev);
+  dev->DrawFf(other_tex, fd);
+  const std::vector<uint32_t> want_tex2 = Read(*dev);
+  forget();
+  Clear(*dev);
+  dev->DrawFf(st, fd);
+  Clear(*dev);
+  dev->DrawFf(other_tex, fd);
+  Check(want_tex2 != want && Read(*dev) == want_tex2, "a draw with another texture after one");
+
+  // ---- 7. An absent stream reads as zeros.
+  const std::vector<uint8_t> zeros(sc.rgba.size(), 0);
+  FfDraw black = fd;
+  black.diffuse = {zeros.data(), 4};
+  Clear(*dev);
+  dev->DrawFf(st, black);
+  const std::vector<uint32_t> want_black = Read(*dev);
+  black.diffuse = {};
+  Clear(*dev);
+  dev->DrawFf(st, black);
+  Check(Read(*dev) == want_black, "an absent stream reads as zeros");
+
+  // ---- 8. A locked stream, opaque, drawn twice between flushes (a
+  // readback flushes): with the same lock the second draw keeps the
+  // first one's positions, though they changed in between (which a
+  // lock's promise rules out, to see it); with another lock it takes them
+  // again.
+  FfState opaque = st;
+  opaque.rs[27] = 0;
+  std::vector<float> pos = sc.pos;
+  auto twice = [&](uint32_t lock1, uint32_t lock2) {
+    pos = sc.pos;
+    FfDraw ld = fd;
+    ld.position = {pos.data(), 16, lock1};
+    Clear(*dev);
+    dev->DrawFf(opaque, ld);
+    for (size_t i = 0; i < pos.size(); i += 4) pos[i] = pos[i] * 0.5f - 0.4f;
+    ld.position.lock = lock2;
+    dev->DrawFf(opaque, ld);
+    return Read(*dev);
+  };
+  const std::vector<uint32_t> both = twice(0, 0);
+  FfDraw once = fd;
+  once.position = {sc.pos.data(), 16};
+  Clear(*dev);
+  dev->DrawFf(opaque, once);
+  const std::vector<uint32_t> first_only = Read(*dev);
+  Check(both != first_only, "the moved positions draw elsewhere");
+  Check(twice(7, 7) == first_only, "the same lock keeps its stream");
+  Check(twice(8, 9) == both, "another lock takes the stream again");
+
+  dev->DestroyTexture(tex2);
   dev->DestroyTexture(tex);
   if (failures) return 1;
   std::printf("ok\n");

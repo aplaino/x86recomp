@@ -66,14 +66,21 @@ struct VsUniforms {
   float fog[4];
   float clip[8][4];
   GpuLight lights[8];
-  int32_t layout[4];
-  int32_t layout2[4];
-  int32_t tex_offset[8];
-  int32_t tex_size[8];
   int32_t mode[4], mode2[4], mode3[4], mode4[4], mode5[4];
   int32_t tci[8];
   int32_t ttf[8];
   float point[4];
+};
+
+// Where the vertex shader reads a draw's vertices (uniform slot 1 beside
+// VsUniforms, which then stays the same from draw to draw).
+struct VsLayout {
+  int32_t layout[4];
+  int32_t layout2[4];
+  int32_t strides[4];
+  int32_t tex_offset[8];
+  int32_t tex_stride[8];
+  int32_t tex_size[8];
 };
 
 struct FsUniforms {
@@ -412,10 +419,11 @@ class GpuDevice final : public Device {
     vs.entrypoint = entry;
     vs.format = format;
     vs.stage = SDL_GPU_SHADERSTAGE_VERTEX;
-    vs.num_uniform_buffers = 1;
+    vs.num_uniform_buffers = 2;
     vs.num_storage_buffers = 1;
     vs_ = SDL_CreateGPUShader(dev_, &vs);
     SDL_GPUShaderCreateInfo fs = vs;
+    fs.num_uniform_buffers = 1;
     fs.code = reinterpret_cast<const Uint8*>(kFfFrag);
     fs.code_size = fs_size;
     fs.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
@@ -572,6 +580,7 @@ class GpuDevice final : public Device {
     if (fmt == Format::P8) WarnF("gfx: P8 texture (no palette support): drawn as magenta\n");
     TextureId id = next_id_++;
     textures_[id] = t;
+    tex_gen_++;
     return id;
   }
 
@@ -587,6 +596,7 @@ class GpuDevice final : public Device {
     if (bound) BindTarget();
     SDL_ReleaseGPUTexture(dev_, it->second.tex);
     textures_.erase(it);
+    tex_gen_++;
     for (TextureId& s : st_.textures)
       if (s == id) s = 0;
     fs_dirty_ = true;
@@ -666,6 +676,7 @@ class GpuDevice final : public Device {
     }
     TextureId id = next_id_++;
     textures_[id] = t;
+    tex_gen_++;
     return id;
   }
 
@@ -1028,30 +1039,54 @@ class GpuDevice final : public Device {
     std::lock_guard<std::recursive_mutex> l(mu_);
     if (!vertices || !nv || !stride || (stride & 3)) return;
     DrawWith(
-        st_, prim, fvf, nv, stride, indices != nullptr, ni,
-        [&](uint8_t* to) { std::memcpy(to, vertices, size_t(nv) * stride); },
+        st_, prim, fvf, nv, indices != nullptr, ni,
+        [&](VsLayout& vl) {
+          uint32_t first;
+          std::memcpy(ReserveVertices(nv, stride, &first), vertices, size_t(nv) * stride);
+          PatchLayout(vl, DecodeFvf(fvf, stride));
+          return first;
+        },
         [&](uint32_t i) {
           uint32_t v = indices ? indices[i] : i;
           return v < nv ? v : nv - 1;
         });
   }
 
+  // The streams as they lie (PlaceStreams), or interleaved when one is
+  // not aligned for the shader's reads.
   void DrawFf(const FfState& s, const FfDraw& d) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     uint32_t stride = FvfStride(d.fvf);
-    if (!d.vertex_count || !stride) return;
-    DrawWith(
-        s, d.prim, d.fvf, d.vertex_count, stride, d.indices != nullptr, d.index_count,
-        [&](uint8_t* to) { InterleaveFf(d, to); }, [&](uint32_t i) { return FfIndex(d, i); });
+    const uint32_t nv = d.vertex_count, first = d.first_vertex;
+    if (!nv || !stride) return;
+    auto place = [&](VsLayout& vl) {
+      if (PlaceStreams(d, vl)) return 0u;
+      uint32_t at;
+      InterleaveFf(d, ReserveVertices(nv, stride, &at));
+      PatchLayout(vl, DecodeFvf(d.fvf, stride));
+      return at;
+    };
+    auto draw = [&](auto index) {
+      DrawWith(s, d.prim, d.fvf, nv, d.indices != nullptr, d.index_count, place, index);
+    };
+    // Indices relative to first_vertex, clamped to the vertices (FfIndex).
+    auto clamp = [nv](uint32_t v) { return v < nv ? v : nv - 1; };
+    if (!d.indices)
+      draw([&](uint32_t i) { return clamp(i); });
+    else if (d.index_size == 4)
+      draw([&, p = static_cast<const uint32_t*>(d.indices)](uint32_t i) { return clamp(p[i] - first); });
+    else
+      draw([&, p = static_cast<const uint16_t*>(d.indices)](uint32_t i) { return clamp(p[i] - first); });
   }
 
-  // A fixed-function draw with state `s` of `nv` vertices (`stride`
-  // apart, laid out by the FVF), which fill(to) writes into the arena;
-  // index(i) is index i < ni of an indexed draw (clamped to the
-  // vertices), i itself otherwise.
-  template <class Fill, class Index>
-  void DrawWith(const FfState& s, uint32_t prim, uint32_t fvf, uint32_t nv, uint32_t stride,
-                bool indexed, uint32_t ni, Fill fill, Index index) {
+  // A fixed-function draw with state `s` of `nv` vertices laid out by the
+  // FVF: place(vl) puts them in the arena, points the layout uniforms at
+  // them and returns the vertex number the draw's vertex 0 has; index(i)
+  // is index i < ni of an indexed draw (clamped to the vertices), i
+  // itself otherwise.
+  template <class Place, class Index>
+  void DrawWith(const FfState& s, uint32_t prim, uint32_t fvf, uint32_t nv, bool indexed,
+                uint32_t ni, Place place, Index index) {
     uint32_t count = PrimitiveCountFromVertices(prim, indexed ? ni : nv);
     if (!count) return;
     SDL_GPUPrimitiveType type;
@@ -1065,22 +1100,23 @@ class GpuDevice final : public Device {
       case 6: type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST; n = count + 2; break;  // fan
       default: return;
     }
-    FvfLayout lay = DecodeFvf(fvf, stride);
+    const int pos_kind = DecodeFvf(fvf, 0).pos_kind;
+    const bool rhw = pos_kind == 1;
 
     Cmd c{};
     c.key = DrawKey(s, type);
-    if (!SetupScissor(s, c, lay.pos_kind == 1)) return;
+    if (!SetupScissor(s, c, rhw)) return;
     BuildUniforms(s);
     VsUniforms vu = vs_cur_;
-    PatchLayout(vu, lay);
+    vu.mode[0] = pos_kind;
+    VsLayout vl;
+    const uint32_t first_vertex = place(vl);
     c.vs = PushVs(vu);
+    c.vl = PushVl(vl);
     c.fs = PushFs(fs_cur_);
     BindStageTextures(s, c);
     c.stencil_ref = uint8_t(s.rs[57]);
-    c.viewport = lay.pos_kind == 1 ? FullViewport() : D3DViewport(s);
-
-    uint32_t first_vertex;
-    fill(ReserveVertices(nv, stride, &first_vertex));
+    c.viewport = rhw ? FullViewport() : D3DViewport(s);
     // Indices as 32-bit, fans as lists, out-of-range ones clamped (D3D7
     // tolerates them; the shader would read other draws' vertices).
     if (indexed || prim == 6) {
@@ -1094,7 +1130,9 @@ class GpuDevice final : public Device {
         }
         c.count = count * 3;
       } else {
-        for (uint32_t i = 0; i < n; i++) indices_.push_back(index(i));
+        indices_.resize(c.first + n);
+        uint32_t* to = indices_.data() + c.first;
+        for (uint32_t i = 0; i < n; i++) to[i] = index(i);
         c.count = n;
       }
       c.base = int32_t(first_vertex);
@@ -1562,6 +1600,7 @@ void r_color0(inout vec4 c) {
     }
     const TextureId id = next_id_++;
     textures_[id] = t;
+    tex_gen_++;
     return id;
   }
 
@@ -2024,7 +2063,7 @@ void r_color0(inout vec4 c) {
   };
   struct Cmd {
     PipelineKey key;
-    int vs = 0, fs = 0;
+    int vs = 0, fs = 0, vl = 0;  // vs_list_, fs_list_, vl_list_
     SDL_GPUTexture* tex[8] = {};
     SDL_GPUSampler* smp[8] = {};
     SDL_GPUViewport viewport{};
@@ -2294,6 +2333,13 @@ void r_color0(inout vec4 c) {
     return verts_.data() + pos;
   }
 
+  // Room for `bytes` in the vertex arena, 4-byte aligned: its offset.
+  size_t ReserveBytes(size_t bytes) {
+    size_t pos = (verts_.size() + 3) & ~size_t(3);
+    verts_.resize(pos + bytes);
+    return pos;
+  }
+
   SDL_GPUBuffer* EnsureBuffer(SDL_GPUBuffer*& b, uint32_t& cap, size_t need,
                               SDL_GPUBufferUsageFlags usage) {
     if (b && cap >= need) return b;
@@ -2493,7 +2539,7 @@ void r_color0(inout vec4 c) {
       if (ibuf_ && ibytes) bind_indices(ibuf_);
       SDL_GPUGraphicsPipeline* bound = nullptr;
       bool vertex_storage = vbuf_ != nullptr;  // vbuf_ at slot 0 for the other draws
-      int vs = -1, fs = -1;
+      int vs = -1, fs = -1, vl = -1;
       uint32_t pushed[6];  // ubytes_ offsets pushed per shader uniform slot
       std::fill(std::begin(pushed), std::end(pushed), ~0u);
       bool have_constant = false;
@@ -2510,7 +2556,7 @@ void r_color0(inout vec4 c) {
             bound = pc.pipeline;
           }
           std::fill(std::begin(pushed), std::end(pushed), ~0u);
-          vs = fs = -1;
+          vs = fs = vl = -1;
           for (int st = 0; st < 2; st++) {
             const ProgramStageCmd& sc = pc.stage[st];
             for (uint32_t i = 0; i < sc.nuni; i++) {
@@ -2565,7 +2611,7 @@ void r_color0(inout vec4 c) {
             else SDL_PushGPUFragmentUniformData(cmd, Uint32(i - 3), data, sc.ulen[i]);
             pushed[i] = sc.uoff[i];
           }
-          vs = fs = -1;  // the fixed-function uniforms' slot 0 was overwritten
+          vs = fs = vl = -1;  // the fixed-function uniforms' slots were overwritten
           SDL_GPUTextureSamplerBinding tb[20];
           for (uint32_t i = 0; i < 20; i++) tb[i] = {sc.tex[i], sc.smp[i]};
           if (sc.nvs) SDL_BindGPUVertexSamplers(rp, 0, tb + 16, sc.nvs);
@@ -2585,6 +2631,10 @@ void r_color0(inout vec4 c) {
           if (c.vs != vs) {
             SDL_PushGPUVertexUniformData(cmd, 0, &vs_list_[size_t(c.vs)], sizeof(VsUniforms));
             vs = c.vs;
+          }
+          if (c.vl != vl) {
+            SDL_PushGPUVertexUniformData(cmd, 1, &vl_list_[size_t(c.vl)], sizeof(VsLayout));
+            vl = c.vl;
           }
           if (c.fs != fs) {
             SDL_PushGPUFragmentUniformData(cmd, 0, &fs_list_[size_t(c.fs)], sizeof(FsUniforms));
@@ -2617,8 +2667,11 @@ void r_color0(inout vec4 c) {
     uploads_.clear();
     upload_bytes_.clear();
     verts_.clear();
+    zeros_at_ = -1;
+    locked_ = {};
     indices_.clear();
     vs_list_.clear();
+    vl_list_.clear();
     fs_list_.clear();
     blit_used_ = 0;
     pass_clear_color_ = pass_clear_depth_ = pass_clear_stencil_ = false;
@@ -2872,8 +2925,9 @@ void r_color0(inout vec4 c) {
     Cmd c{};
     c.key = k;
     VsUniforms vu{};
-    FvfLayout lay = DecodeFvf(fvf, fvf & 0x100 ? 24 : 20);
-    PatchLayout(vu, lay);
+    VsLayout vl;
+    PatchLayout(vl, DecodeFvf(fvf, fvf & 0x100 ? 24 : 20));
+    c.vl = PushVl(vl);
     vu.target[0] = float(pass_w_);
     vu.target[1] = float(pass_h_);
     vu.mode[0] = 1;
@@ -2976,11 +3030,11 @@ void r_color0(inout vec4 c) {
   }
 
   SDL_GPUGraphicsPipeline* Pipeline(const PipelineKey& k) {
+    if (last_pipeline_ && k == last_key_) return last_pipeline_;
     auto it = pipelines_.find(k);
-    if (it != pipelines_.end()) return it->second;
-    SDL_GPUGraphicsPipeline* p = CreatePipeline(k, vs_, fs_, nullptr);
-    pipelines_[k] = p;
-    return p;
+    if (it == pipelines_.end()) it = pipelines_.emplace(k, CreatePipeline(k, vs_, fs_, nullptr)).first;
+    last_key_ = k;
+    return last_pipeline_ = it->second;
   }
 
   // `alpha`: separate alpha blend factors and op (src, dst, op), or null
@@ -3073,17 +3127,31 @@ void r_color0(inout vec4 c) {
     return k;
   }
 
+  // Each stage's texture and sampler, kept per stage from the draw before.
   void BindStageTextures(const FfState& st, Cmd& c) {
     for (int s = 0; s < 8; s++) {
-      auto it = textures_.find(st.textures[s]);
-      c.tex[s] = it != textures_.end() ? it->second.tex : nullptr;
-      c.smp[s] = Sampler(StageSampler(st, s));
+      StageBinding& b = stage_bindings_[s];
+      if (b.gen != tex_gen_ || b.id != st.textures[s]) {
+        auto it = textures_.find(st.textures[s]);
+        b.gen = tex_gen_;
+        b.id = st.textures[s];
+        b.tex = it != textures_.end() ? it->second.tex : nullptr;
+      }
+      const SamplerKey k = StageSampler(st, s);
+      if (!b.smp || std::memcmp(&k, &b.key, sizeof k) != 0) {
+        b.key = k;
+        b.smp = Sampler(k);
+      }
+      c.tex[s] = b.tex;
+      c.smp[s] = b.smp;
     }
   }
 
   // ---- uniforms from the D3D state
 
-  void PatchLayout(VsUniforms& u, const FvfLayout& l) const {
+  // Interleaved vertices (the vertex number counting from the arena's
+  // start).
+  void PatchLayout(VsLayout& u, const FvfLayout& l) const {
     u.layout[0] = l.stride;
     u.layout[1] = 0;
     u.layout[2] = l.normal;
@@ -3092,11 +3160,116 @@ void r_color0(inout vec4 c) {
     u.layout2[1] = l.psize;
     u.layout2[2] = l.weights;
     u.layout2[3] = 0;
+    for (int& st : u.strides) st = l.stride;
     for (int i = 0; i < 8; i++) {
       u.tex_offset[i] = l.tex_offset[i];
+      u.tex_stride[i] = l.stride;
       u.tex_size[i] = l.tex_size[i] ? l.tex_size[i] : 2;
     }
-    u.mode[0] = l.pos_kind;
+  }
+
+  // Puts a draw's streams in the vertex arena as they lie, each attribute
+  // of vertex v at its address + v * its stride: streams within the same
+  // records (interleaved ones) copied together, a locked stream once per
+  // lock, an absent one as zeros. False, placing no vertices, when a
+  // stride is not a multiple of 4 or attributes in one record are not 4
+  // bytes apart (the shader reads words).
+  bool PlaceStreams(const FfDraw& d, VsLayout& u) {
+    const FvfLayout lay = DecodeFvf(d.fvf, 0);
+    struct Attr {
+      const FfStream* s;
+      uint32_t size;
+      int32_t *addr, *stride;
+    };
+    Attr at[13];
+    int n = 0;
+    u.layout[2] = u.layout[3] = u.layout2[0] = u.layout2[1] = -1;
+    at[n++] = {&d.position, lay.pos_kind ? 16u : 12u + 4 * uint32_t(lay.weights), &u.layout[1],
+               &u.layout[0]};
+    if (lay.normal >= 0) at[n++] = {&d.normal, 12, &u.layout[2], &u.strides[0]};
+    if (lay.psize >= 0) at[n++] = {&d.psize, 4, &u.layout2[1], &u.strides[3]};
+    if (lay.diffuse >= 0) at[n++] = {&d.diffuse, 4, &u.layout[3], &u.strides[1]};
+    if (lay.specular >= 0) at[n++] = {&d.specular, 4, &u.layout2[0], &u.strides[2]};
+    for (int i = 0; i < 8; i++) {
+      u.tex_offset[i] = -1;
+      u.tex_size[i] = lay.tex_size[i] ? lay.tex_size[i] : 2;
+      if (lay.tex_offset[i] >= 0)
+        at[n++] = {&d.tex[i], 4 * uint32_t(lay.tex_size[i]), &u.tex_offset[i], &u.tex_stride[i]};
+    }
+    for (int a = 0; a < n; a++)
+      if (at[a].s->stride & 3) return false;
+    u.layout2[2] = lay.weights;
+    u.layout2[3] = d.rgba_colors ? 1 : 0;
+
+    const uint32_t first = d.first_vertex, count = d.vertex_count;
+    // Runs of streams within one record: [lo, hi) of the first vertex's.
+    struct Run {
+      uintptr_t lo, hi;
+      uint32_t stride;
+      int32_t at = -1;
+    };
+    Run runs[13];
+    int run_of[13], nruns = 0;
+    for (int a = 0; a < n; a++) {
+      const FfStream& st = *at[a].s;
+      run_of[a] = -1;
+      if (!st.data) {  // zeros
+        if (zeros_at_ < 0) {
+          zeros_at_ = int32_t(ReserveBytes(64));
+          std::memset(verts_.data() + zeros_at_, 0, 64);
+        }
+        *at[a].addr = zeros_at_;
+        *at[a].stride = 0;
+        continue;
+      }
+      if (st.lock) {
+        auto it = std::find_if(locked_.begin(), locked_.end(), [&](const Locked& k) {
+          return k.lock == st.lock && k.data == st.data && k.stride == st.stride &&
+                 k.first == first && k.count == count && k.size == at[a].size;
+        });
+        if (it != locked_.end()) {
+          *at[a].addr = it->at;
+          *at[a].stride = int32_t(st.stride);
+          continue;
+        }
+      }
+      uintptr_t lo = uintptr_t(st.data) + uintptr_t(first) * st.stride, hi = lo + at[a].size;
+      int r = 0;
+      for (; r < nruns; r++) {
+        Run& run = runs[r];
+        if (run.stride == st.stride && st.stride &&
+            std::max(run.hi, hi) - std::min(run.lo, lo) <= st.stride) {
+          run.lo = std::min(run.lo, lo);
+          run.hi = std::max(run.hi, hi);
+          break;
+        }
+      }
+      if (r == nruns) runs[nruns++] = {lo, hi, st.stride};
+      run_of[a] = r;
+    }
+    for (int a = 0; a < n; a++)
+      if (run_of[a] >= 0 &&
+          ((uintptr_t(at[a].s->data) + uintptr_t(first) * at[a].s->stride - runs[run_of[a]].lo) & 3))
+        return false;
+    for (int r = 0; r < nruns; r++) {
+      Run& run = runs[r];
+      size_t bytes = size_t(run.stride) * (count - 1) + (run.hi - run.lo);
+      run.at = int32_t(ReserveBytes(bytes));
+      std::memcpy(verts_.data() + run.at, reinterpret_cast<const void*>(run.lo), bytes);
+    }
+    for (int a = 0; a < n; a++) {
+      if (run_of[a] < 0) continue;
+      const FfStream& st = *at[a].s;
+      const Run& run = runs[run_of[a]];
+      uintptr_t lo = uintptr_t(st.data) + uintptr_t(first) * st.stride;
+      *at[a].addr = run.at + int32_t(lo - run.lo);
+      *at[a].stride = int32_t(st.stride);
+      if (st.lock) {
+        locked_[locked_next_] = {st.lock, st.data, st.stride, first, count, at[a].size, *at[a].addr};
+        locked_next_ = (locked_next_ + 1) % locked_.size();
+      }
+    }
+    return true;
   }
 
   void BuildUniforms(const FfState& st) {
@@ -3234,6 +3407,12 @@ void r_color0(inout vec4 c) {
     if (vs_list_.empty() || std::memcmp(&vs_list_.back(), &u, sizeof u) != 0)
       vs_list_.push_back(u);
     return int(vs_list_.size()) - 1;
+  }
+
+  int PushVl(const VsLayout& u) {
+    if (vl_list_.empty() || std::memcmp(&vl_list_.back(), &u, sizeof u) != 0)
+      vl_list_.push_back(u);
+    return int(vl_list_.size()) - 1;
   }
 
   int PushFs(const FsUniforms& u) {
@@ -3879,8 +4058,20 @@ void r_color0(inout vec4 c) {
   uint8_t clear_stencil_ = 0;
   std::vector<Cmd> cmds_;
   std::vector<VsUniforms> vs_list_;
+  std::vector<VsLayout> vl_list_;
   std::vector<FsUniforms> fs_list_;
-  std::vector<uint8_t> verts_;
+  std::vector<uint8_t, NoZero<uint8_t>> verts_;
+  int32_t zeros_at_ = -1;  // 64 zero bytes in verts_ (PlaceStreams), -1 if none yet
+  // Locked streams placed since the last flush (PlaceStreams), the last
+  // few: a lock's stages reuse the vertices they share.
+  struct Locked {
+    uint32_t lock = 0;
+    const void* data = nullptr;
+    uint32_t stride = 0, first = 0, count = 0, size = 0;
+    int32_t at = 0;
+  };
+  std::array<Locked, 4> locked_{};
+  size_t locked_next_ = 0;
   std::vector<uint32_t, NoZero<uint32_t>> indices_;
   std::vector<Upload> uploads_;
   std::vector<uint8_t> upload_bytes_;
@@ -3930,6 +4121,17 @@ void r_color0(inout vec4 c) {
   uint32_t next_read_ = 1;
   uint32_t upload_tb_cap_ = 0, download_tb_cap_ = 0;
   std::unordered_map<PipelineKey, SDL_GPUGraphicsPipeline*, BytesHash<PipelineKey>> pipelines_;
+  PipelineKey last_key_{};  // Pipeline's last lookup
+  SDL_GPUGraphicsPipeline* last_pipeline_ = nullptr;
+  uint64_t tex_gen_ = 0;  // changes when textures_ does
+  struct StageBinding {  // BindStageTextures' per stage
+    uint64_t gen = ~0ull;
+    TextureId id = 0;
+    SDL_GPUTexture* tex = nullptr;
+    SamplerKey key{};
+    SDL_GPUSampler* smp = nullptr;
+  };
+  StageBinding stage_bindings_[8];
   std::unordered_map<ShaderKey, SDL_GPUGraphicsPipeline*, BytesHash<ShaderKey>> shader_pipelines_;
   std::map<ShaderId, Shader> shaders_;
   std::vector<ShaderCmd> shader_cmds_;
