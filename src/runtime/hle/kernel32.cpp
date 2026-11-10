@@ -1738,9 +1738,20 @@ HLE("kernel32.dll", Process32FirstW, 2) {
 }
 HLE("kernel32.dll", Process32NextW, 2) { SetLastError(18); return 0; }
 // (app, key, nDefault, file): nothing writes .ini files here
-// (WritePrivateProfileSectionW is a no-op), so the key is never found and
-// Windows returns nDefault.
-HLE("kernel32.dll", GetPrivateProfileIntW, 4) { return uint32_t(Arg(c,2)); }
+// (WritePrivateProfileSectionW is a no-op), so a key is found only in
+// GameConfig::profile_ints; any other gets nDefault, as on Windows for a
+// missing file.
+HLE("kernel32.dll", GetPrivateProfileIntW, 4) {
+  auto str = [](gaddr p) {
+    std::string s;
+    if (p) for (char16_t ch : GWStr(p)) s += char(ch);
+    return Lower(s);
+  };
+  const std::string section = str(Arg(c, 0)), key = str(Arg(c, 1));
+  for (const auto& e : Game().profile_ints)
+    if (Lower(e.section) == section && Lower(e.key) == key) return uint32_t(e.value);
+  return uint32_t(Arg(c, 2));
+}
 HLE("kernel32.dll", WritePrivateProfileSectionW, 3) { return 1; }
 
 }} // compat
