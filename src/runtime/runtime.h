@@ -74,6 +74,15 @@ struct GameConfig {
   // with the mouse: while the window has focus, its client area is treated
   // as clipped, so the pointer is grabbed and cannot leave it.
   bool capture_cursor = false;
+  // What GetPrivateProfileInt finds for these keys (section and key match
+  // without case, as on Windows); every other key gets the caller's
+  // default, as for a missing .ini. For settings whose defaults select a
+  // path the runtime does not render correctly.
+  struct ProfileInt {
+    std::string section, key;
+    int value;
+  };
+  std::vector<ProfileInt> profile_ints;
 
   // Post-process anti-aliasing (SMAA 1x) of the presented frame (SDL_GPU
   // backend); <ID>_AA=0|1 overrides.
