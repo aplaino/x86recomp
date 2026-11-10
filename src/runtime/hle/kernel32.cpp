@@ -1737,7 +1737,10 @@ HLE("kernel32.dll", Process32FirstW, 2) {
   return 1;
 }
 HLE("kernel32.dll", Process32NextW, 2) { SetLastError(18); return 0; }
-HLE("kernel32.dll", GetPrivateProfileIntW, 4) { return uint32_t(Arg(c,3)); }
+// (app, key, nDefault, file): nothing writes .ini files here
+// (WritePrivateProfileSectionW is a no-op), so the key is never found and
+// Windows returns nDefault.
+HLE("kernel32.dll", GetPrivateProfileIntW, 4) { return uint32_t(Arg(c,2)); }
 HLE("kernel32.dll", WritePrivateProfileSectionW, 3) { return 1; }
 
 }} // compat
