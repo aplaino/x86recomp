@@ -432,6 +432,18 @@ class InsnEmitter {
           Hex(in_.va).c_str(), ZydisMnemonicGetString(d_.mnemonic)));
   }
 
+  // A move to or from a control or debug register: privileged, never in a
+  // game's own code, so data the scan decoded as code; it becomes an
+  // unimplemented site rather than an operand with no C++ name.
+  bool SystemRegMove() const {
+    for (int i = 0; i < 2; i++) {
+      if (!IsReg(i)) continue;
+      const ZydisRegisterClass k = ZydisRegisterGetClass(Op(i).reg.value);
+      if (k == ZYDIS_REGCLASS_CONTROL || k == ZYDIS_REGCLASS_DEBUG) return true;
+    }
+    return false;
+  }
+
   // ---- operands -----------------------------------------------------------
   // x64 images: registers are uint64_t locals rax..r15, addresses 64-bit.
   bool X64() const { return p_.x64; }
@@ -2586,6 +2598,7 @@ void InsnEmitter::Emit64() {
     case ZYDIS_MNEMONIC_PAUSE:
       return;
     case ZYDIS_MNEMONIC_MOV:
+      if (SystemRegMove()) return Unimpl();
       L(Write(0, Read(1, n)));
       return;
     case ZYDIS_MNEMONIC_MOVZX:
@@ -2988,6 +3001,7 @@ void InsnEmitter::Emit() {
     case ZYDIS_MNEMONIC_PAUSE:
       return;
     case ZYDIS_MNEMONIC_MOV:
+      if (SystemRegMove()) return Unimpl();
       L(Write(0, Read(1, Bytes(0))));
       return;
     case ZYDIS_MNEMONIC_MOVZX:
