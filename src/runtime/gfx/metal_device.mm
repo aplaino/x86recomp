@@ -4151,7 +4151,12 @@ void main() {
       Rect c = Clip(r, tw, th);
       const int w = c.right - c.left, h = c.bottom - c.top;
       if (w <= 0 || h <= 0) return;
-      const size_t bytes = size_t(w) * h * 4;
+      // Float targets are read as they are stored (Metal's float formats
+      // lay out pixels as D3D's do), at their own size; the rest as 8-bit
+      // colour, converted to `fmt`.
+      const bool raw = IsFloat(fmt);
+      const uint32_t src_bpp = raw ? BitsPerPixel(fmt) / 8 : 4;
+      const size_t bytes = size_t(w) * h * src_bpp;
       if (!readback_ || readback_.length < bytes) {
         Keep(readback_);
         readback_ = [dev_ newBufferWithLength:std::max<size_t>(bytes, 1u << 20)
@@ -4170,7 +4175,7 @@ void main() {
                           sourceSize:MTLSizeMake(NSUInteger(w), NSUInteger(h), 1)
                             toBuffer:out
                    destinationOffset:0
-              destinationBytesPerRow:NSUInteger(w) * 4
+              destinationBytesPerRow:NSUInteger(w) * src_bpp
             destinationBytesPerImage:bytes];
         [bl endEncoding];
       });
@@ -4181,6 +4186,13 @@ void main() {
       const uint32_t bpp = BitsPerPixel(fmt) / 8;
       // Rows of the requested rectangle outside the target stay as they were.
       const int ox = c.left - r.left, oy = c.top - r.top;
+      if (raw) {
+        for (int y = 0; y < h; y++)
+          std::memcpy(static_cast<uint8_t*>(dst) + size_t(y + oy) * pitch + size_t(ox) * bpp,
+                      static_cast<const uint8_t*>(readback_.contents) + size_t(y) * w * src_bpp,
+                      size_t(w) * src_bpp);
+        return;
+      }
       for (int y = 0; y < h; y++) {
         const uint32_t* s = px + size_t(y) * uint32_t(w);
         uint8_t* out = static_cast<uint8_t*>(dst) + size_t(y + oy) * pitch + size_t(ox) * bpp;
