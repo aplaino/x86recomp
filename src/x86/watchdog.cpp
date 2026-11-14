@@ -1,11 +1,13 @@
 #include "x86/watchdog.h"
 
+#include <errno.h>
 #include <execinfo.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -39,15 +41,35 @@ struct HostThread {
   pthread_t th;
   std::string name;
   unsigned tid;
+  uint64_t id;  // unique per registration
 };
 
+// Registered threads, each removed when it exits (Registration): a thread
+// is signalled only under g_mu while it is still listed, so never after
+// it has finished.
 std::mutex g_mu;
 std::vector<HostThread> g_threads;
+uint64_t g_next_id = 0;
+struct Registration {
+  uint64_t id = 0;
+  ~Registration() {
+    if (!id) return;
+    std::lock_guard<std::mutex> l(g_mu);
+    std::erase_if(g_threads, [&](const HostThread& t) { return t.id == id; });
+  }
+};
+thread_local Registration t_registration;
+
 std::atomic<int64_t> g_beat{0};  // steady-clock ms of the last heartbeat
 std::atomic<int64_t> g_frame{0};  // ... and of the last presented frame
 std::atomic<bool> g_active{true};  // the game presents only while active
+// One dump request at a time: the thread asked (g_dump_th) claims it
+// (requested -> writing) before it writes to g_dump_fd, so a late answer
+// to an abandoned request writes nothing.
+enum DumpState { kIdle, kRequested, kWriting, kDone };
+std::atomic<int> g_dump_state{kIdle};
+std::atomic<pthread_t> g_dump_th{};
 std::atomic<int> g_dump_fd{-1};
-std::atomic<bool> g_dump_done{false};
 
 int64_t NowMs() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -67,8 +89,11 @@ void WriteAll(int fd, const char* s) {
 
 // Runs on the interrupted thread.
 void OnDumpSignal(int) {
-  int fd = g_dump_fd.load();
-  if (fd >= 0) {
+  const int saved_errno = errno;
+  int requested = kRequested;
+  if (pthread_equal(g_dump_th.load(), pthread_self()) &&
+      g_dump_state.compare_exchange_strong(requested, kWriting)) {
+    const int fd = g_dump_fd.load();
     if (const char* n = t_wd_hle_name) {
       char buf[160];
       std::snprintf(buf, sizeof buf, "in import (last entered): %s, called from guest %08llX\n",
@@ -78,8 +103,9 @@ void OnDumpSignal(int) {
     void* frames[512];
     int n = backtrace(frames, 512);
     backtrace_symbols_fd(frames, n, fd);
+    g_dump_state.store(kDone);
   }
-  g_dump_done.store(true);
+  errno = saved_errno;
 }
 
 void Dump(const char* what, double stalled) {
@@ -95,19 +121,37 @@ void Dump(const char* what, double stalled) {
     std::lock_guard<std::mutex> l(g_mu);
     threads = g_threads;
   }
+  g_dump_fd.store(fd);
   for (const HostThread& t : threads) {
     std::snprintf(buf, sizeof buf, "\n=== thread %s (guest tid %04X) ===\n",
                   t.name.c_str(), t.tid);
     WriteAll(fd, buf);
-    g_dump_fd.store(fd);
-    g_dump_done.store(false);
-    if (pthread_kill(t.th, SIGUSR2) != 0) {
+    g_dump_th.store(t.th);
+    g_dump_state.store(kRequested);
+    bool sent;
+    {
+      std::lock_guard<std::mutex> l(g_mu);
+      sent = std::any_of(g_threads.begin(), g_threads.end(),
+                         [&](const HostThread& u) { return u.id == t.id; }) &&
+             pthread_kill(t.th, SIGUSR2) == 0;
+    }
+    if (!sent) {
+      g_dump_state.store(kIdle);
       WriteAll(fd, "(thread gone)\n");
       continue;
     }
-    for (int i = 0; i < 200 && !g_dump_done.load(); i++)
+    for (int i = 0; i < 200 && g_dump_state.load() != kDone; i++)
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    if (!g_dump_done.load()) WriteAll(fd, "(no response)\n");
+    // Withdraw the request unless the thread has started writing; then
+    // wait for it to finish.
+    int requested = kRequested;
+    if (g_dump_state.compare_exchange_strong(requested, kIdle)) {
+      WriteAll(fd, "(no response)\n");
+      continue;
+    }
+    while (g_dump_state.load() != kDone)
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    g_dump_state.store(kIdle);
   }
   g_dump_fd.store(-1);
   close(fd);
@@ -163,7 +207,8 @@ void StartWatchdog() {
 
 void RegisterGuestHostThread(const char* name, unsigned tid) {
   std::lock_guard<std::mutex> l(g_mu);
-  g_threads.push_back({pthread_self(), name, tid});
+  t_registration.id = ++g_next_id;
+  g_threads.push_back({pthread_self(), name, tid, t_registration.id});
 }
 
 void WatchdogHeartbeat() { g_beat.store(NowMs()); }

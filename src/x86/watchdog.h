@@ -11,7 +11,8 @@
 namespace recomp {
 
 void StartWatchdog();
-// Call on each host thread that runs guest code, once, at its start.
+// Call on each host thread that runs guest code, once, at its start (it
+// leaves the list when the thread exits).
 void RegisterGuestHostThread(const char* name, unsigned tid);
 // Called by the main thread whenever it services the window system.
 void WatchdogHeartbeat();
