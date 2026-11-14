@@ -113,6 +113,11 @@ add_test(NAME hlsl_error COMMAND recomp_hlslc ${CMAKE_CURRENT_SOURCE_DIR}/hlsl/e
          -T ps_3_0 -E main)
 set_tests_properties(hlsl_error PROPERTIES WILL_FAIL TRUE)
 
+# The front end on sources it must translate or refuse (without a crash).
+add_executable(hlsl_frontend_test hlsl_frontend_test.cpp)
+target_link_libraries(hlsl_frontend_test PRIVATE recomp_hlsl)
+add_test(NAME hlsl_frontend COMMAND hlsl_frontend_test)
+
 # The bytecode translator on hand-assembled shaders (shader models
 # 1.1-3.0); each translation must compile with glslangValidator.
 add_executable(hlsl_bytecode_test hlsl_bytecode_test.cpp)

@@ -238,12 +238,13 @@ class Parser {
       Base b;
       std::string bn = Ident();
       if (!ScalarBase(bn, &b)) Fail(loc, "bad " + n + " element type " + bn);
+      // Sizes bind tighter than comparisons, so the '>' closes the type.
       Expect(",");
-      int r = int(ConstInt());
+      int r = int(EvalInt(*Binary(kShiftLevel)));
       int c = 1;
       if (mat) {
         Expect(",");
-        c = int(ConstInt());
+        c = int(EvalInt(*Binary(kShiftLevel)));
       }
       Expect(">");
       if (r < 1 || r > 4 || c < 1 || c > 4) Fail(loc, "bad " + n + " size");
@@ -578,12 +579,16 @@ class Parser {
   }
 
   StmtP Statement() {
+    NestGuard nest(depth_, Cur().loc);
     // [unroll], [loop], [branch], [flatten], [unroll(n)], ...: hints only.
     while (Is("[") && Ahead(1).kind == Tok::Ident &&
            (Ahead(2).text == "]" || Ahead(2).text == "(")) {
       p_ += 2;
       if (Accept("(")) {
-        while (!Accept(")")) p_++;
+        while (!Accept(")")) {
+          if (Cur().kind == Tok::End) Fail(Cur().loc, "unterminated attribute");
+          p_++;
+        }
       }
       Expect("]");
     }
@@ -681,6 +686,7 @@ class Parser {
   }
 
   ExprP Assignment() {
+    NestGuard nest(depth_, Cur().loc);
     ExprP lhs = Conditional();
     static const std::pair<const char*, Op> kOps[] = {
         {"=", Op::None}, {"+=", Op::Add}, {"-=", Op::Sub}, {"*=", Op::Mul}, {"/=", Op::Div},
@@ -726,6 +732,7 @@ class Parser {
         {{"+", Op::Add}, {"-", Op::Sub}},
         {{"*", Op::Mul}, {"/", Op::Div}, {"%", Op::Mod}},
     };
+    static_assert(kShiftLevel == 7);  // kLevels[7]: << >>
     if (level == int(kLevels.size())) return Unary();
     ExprP a = Binary(level + 1);
     for (;;) {
@@ -744,6 +751,7 @@ class Parser {
   }
 
   ExprP Unary() {
+    NestGuard nest(depth_, Cur().loc);
     static const std::pair<const char*, Op> kOps[] = {
         {"-", Op::Neg}, {"+", Op::Plus}, {"!", Op::Not}, {"~", Op::BitNot},
         {"++", Op::PreInc}, {"--", Op::PreDec},
@@ -896,6 +904,8 @@ class Parser {
 
   std::vector<Token> t_;
   size_t p_ = 0;
+  int depth_ = 0;  // NestGuard's
+  static constexpr int kShiftLevel = 7;  // Binary's level of << and >>
   Unit u_;
   std::map<std::string, StructDecl*> structs_;
   std::map<std::string, Type> typedefs_;

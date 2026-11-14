@@ -444,6 +444,7 @@ class Preprocessor {
     for (auto& p : ex) expr_.push_back(std::move(p.t));
     if (expr_.empty()) Fail(loc, "#if with no expression");
     epos_ = 0;
+    depth_ = 0;
     int64_t v = Ternary();
     if (epos_ != expr_.size()) Fail(expr_[epos_].loc, "unexpected '" + expr_[epos_].text + "' in #if");
     return v != 0;
@@ -459,6 +460,7 @@ class Preprocessor {
   }
 
   int64_t Ternary() {
+    NestGuard nest(depth_, Cur() ? Cur()->loc : Loc{});
     int64_t c = Binary(0);
     if (Accept("?")) {
       int64_t a = Ternary();
@@ -502,12 +504,16 @@ class Preprocessor {
       else if (s == "*") a *= b;
       else {
         if (b == 0) Fail(l, "division by zero in #if");
-        a = s == "/" ? a / b : a % b;
+        if (b == -1)  // INT64_MIN / -1 traps
+          a = s == "/" ? int64_t(0 - uint64_t(a)) : 0;
+        else
+          a = s == "/" ? a / b : a % b;
       }
     }
   }
 
   int64_t UnaryE() {
+    NestGuard nest(depth_, Cur() ? Cur()->loc : Loc{});
     if (Accept("-")) return -UnaryE();
     if (Accept("+")) return UnaryE();
     if (Accept("!")) return !UnaryE();
@@ -536,6 +542,7 @@ class Preprocessor {
   std::vector<Token> out_;
   std::vector<Token> expr_;
   size_t epos_ = 0;
+  int depth_ = 0;  // NestGuard's
 };
 
 }  // namespace

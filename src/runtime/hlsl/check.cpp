@@ -422,8 +422,9 @@ class Checker {
         CheckExpr(e.args[0]);
         Use(e.spec);
         const Type& from = e.args[0]->type;
-        bool zero_struct = e.spec.base == Base::Struct && e.args[0]->kind == Expr::Literal &&
-                           e.args[0]->type.Scalar();
+        const Expr& a = *e.args[0];
+        bool zero_struct = e.spec.base == Base::Struct && a.kind == Expr::Literal &&
+                           a.type.Scalar() && (a.spec.Floating() ? a.fval == 0 : a.ival == 0);
         if (!zero_struct && !Convertible(from, e.spec, true))
           Fail(e.loc, "cannot cast " + TypeName(from) + " to " + TypeName(e.spec));
         e.type = e.spec;

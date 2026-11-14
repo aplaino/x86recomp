@@ -21,6 +21,7 @@ bool ParseSemantic(const std::string& s, Semantic* out) {
   size_t d = s.size();
   while (d > 0 && std::isdigit(uint8_t(s[d - 1]))) d--;
   std::string name = s.substr(0, d);
+  if (s.size() - d > 9) return false;  // no usage has an index that large
   for (const auto& [n, usage] : kUsages) {
     if (name != n) continue;
     out->usage = usage;

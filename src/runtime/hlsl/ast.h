@@ -24,6 +24,18 @@ struct Error {
 };
 [[noreturn]] void Fail(Loc loc, std::string msg);
 
+// Bounds the recursion of the recursive-descent parser and the #if
+// evaluator (and so of everything that walks the tree): input nested
+// deeper fails instead of running the host out of stack.
+struct NestGuard {
+  static constexpr int kMax = 128;
+  int& depth;
+  NestGuard(int& d, Loc loc) : depth(d) {
+    if (++depth > kMax) Fail(loc, "nested too deeply");
+  }
+  ~NestGuard() { depth--; }
+};
+
 // ---- Tokens (preprocess.cpp)
 
 enum class Tok : uint8_t {

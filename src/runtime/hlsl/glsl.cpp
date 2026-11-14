@@ -234,6 +234,7 @@ class Emitter {
       case RegisterSet::Sampler: {
         if (!idx.empty() && idx.find_first_not_of("0123456789") != std::string::npos)
           Fail(loc, "samplers can only be indexed with constants");
+        if (idx.size() > 9) Fail(loc, "sampler index out of range");
         uint32_t reg = v.reg_index + (idx.empty() ? 0 : uint32_t(std::stoul(idx)));
         Dim d = v.sampler_dim == Dim::Any ? Dim::D2 : v.sampler_dim;
         samplers_[reg] = d;
@@ -350,7 +351,9 @@ class Emitter {
         return s + ")";
       }
       case Expr::Cast:
-        if (e.type.base == Base::Struct) return Zero(e.type);
+        // (S)0 zeroes a struct; (S)s of the same struct is s.
+        if (e.type.base == Base::Struct)
+          return e.args[0]->type.base == Base::Struct ? E(*e.args[0]) : Zero(e.type);
         return Convert(E(*e.args[0]), e.args[0]->type, e.type, e.loc);
       case Expr::Convert:
         return Convert(E(*e.args[0]), e.args[0]->type, e.type, e.loc);
