@@ -240,124 +240,150 @@ int main(int argc, char** argv) {
     p.weak.clear();
   }
   size_t initial = p.entries.size();
-  std::deque<uint64_t> work(p.entries.begin(), p.entries.end());
-  std::set<uint64_t> done;
   size_t from_code_ptrs = 0, from_data_ptrs = 0;
-  auto candidate = [&](const lifter::Module* m, uint64_t t, size_t* counter) {
-    if (p.TextOf(t) != m || p.entries.count(t)) return;
-    lifter::Insn in;
-    if (!dec.Decode(p, t, &in)) return;
-    p.entries.insert(t);
-    p.weak.insert(t);
-    work.push_back(t);
-    (*counter)++;
-  };
-  for (const auto& m : p.modules)
-    for (const auto& sec : m.img.sections) {
-      if (!only.empty()) break;
-      if (sec.name != ".rdata" && sec.name != ".data") continue;
-      if (p.x64)  // pointers are 8 bytes, 8-aligned
-        for (uint64_t a = sec.va; a + 8 <= sec.va + sec.vsize; a += 8)
-          candidate(&m, p.mem.read<uint64_t>(a), &from_data_ptrs);
-      else
-        for (uint64_t a = sec.va; a + 4 <= sec.va + sec.vsize; a += 4)
-          candidate(&m, p.mem.read<uint32_t>(a), &from_data_ptrs);
-    }
   size_t recovered_tables = 0, completed_tables = 0;
-  std::set<uint64_t> tables_read;  // jmps whose table was read from the image
-  // Instruction bytes of the strong functions built so far: [start, end).
-  std::vector<std::pair<uint64_t, uint64_t>> code;
-  auto drain = [&]() {
-    while (!work.empty()) {
-      uint64_t e = work.front();
-      work.pop_front();
-      if (!done.insert(e).second) continue;
-      lifter::Function f;
-      lifter::BuildFunction(p, dec, e, &f);
-      // Switch tables Ghidra did not export: recover them and rebuild, as
-      // their targets may hold further switches. Tables it did export are
-      // read from the image too, and completed: its list can miss cases (a
-      // four-way switch in g_Rhapsody came with two targets, and the other
-      // two cases jumped out of the lifted code).
-      for (bool more = true; more;) {
-        more = false;
-        for (const auto& [va, in] : f.insns) {
-          if (tables_read.count(va)) continue;
-          std::vector<uint64_t> targets;
-          if (!lifter::RecoverJumpTable(p, f, in, &targets)) continue;
-          tables_read.insert(va);
-          auto known = p.jumptables.find(va);
-          if (known == p.jumptables.end()) {
-            p.jumptables[va] = std::move(targets);
-            recovered_tables++;
-            more = true;
-            continue;
-          }
-          bool added = false;
-          for (uint64_t t : targets)
-            if (std::find(known->second.begin(), known->second.end(), t) == known->second.end()) {
-              known->second.push_back(t);
-              added = true;
-            }
-          if (added) {
-            completed_tables++;
-            more = true;
-          }
-        }
-        if (more) {
-          f = {};
-          lifter::BuildFunction(p, dec, e, &f);
-        }
-      }
-      for (const auto* s : {&f.direct_calls, &f.tail_calls, &f.setjmp_returns})
-        for (uint64_t t : *s) {
-          if (!p.InText(t)) continue;
-          p.weak.erase(t);  // really entered as a function
-          if (p.entries.insert(t).second) work.push_back(t);
-        }
-      const lifter::Module* fm = p.TextOf(e);
-      if (!only.empty()) continue;
-      for (const auto& [va, in] : f.insns) {
-        if (!in.ok) continue;
-        for (int i = 0; i < in.d.operand_count_visible; i++) {
-          const auto& o = in.ops[i];
-          if (o.type == ZYDIS_OPERAND_TYPE_IMMEDIATE && !o.imm.is_relative)
-            candidate(fm, p.x64 ? o.imm.value.u : static_cast<uint32_t>(o.imm.value.u),
-                      &from_code_ptrs);
-          // x64 code takes a function's address with a RIP-relative lea.
-          if (o.type == ZYDIS_OPERAND_TYPE_MEMORY && o.mem.base == ZYDIS_REGISTER_RIP &&
-              in.d.mnemonic == ZYDIS_MNEMONIC_LEA)
-            candidate(fm, in.next() + o.mem.disp.value, &from_code_ptrs);
-        }
-      }
-      if (!p.weak.count(e))
-        for (const auto& [va, in] : f.insns)
-          if (in.ok) code.emplace_back(va, in.next());
-    }
-  };
-  drain();
-  if (only.empty()) {
-    std::sort(code.begin(), code.end());
-    auto in_code = [&](uint64_t a) {
-      auto it = std::upper_bound(code.begin(), code.end(), std::make_pair(a, ~uint64_t(0)));
-      return it != code.begin() && a < std::prev(it)->second;
+  // A weak candidate inside an instruction of a strong function is not
+  // code: it is a constant that happens to fall in .text (0x00B70000, say).
+  // Lifted, it decoded garbage and then re-lifted the rest of the function
+  // it landed in, one large function many times over. Such candidates are
+  // dropped and discovery runs again from the start, so nothing found only
+  // through their decoding remains.
+  std::set<uint64_t> bogus;
+  const std::set<uint64_t> entries0 = p.entries, weak0 = p.weak;
+  const auto tables0 = p.jumptables;
+  for (;;) {
+    p.entries = entries0;
+    p.weak = weak0;
+    p.jumptables = tables0;
+    from_code_ptrs = from_data_ptrs = recovered_tables = completed_tables = 0;
+    std::deque<uint64_t> work(p.entries.begin(), p.entries.end());
+    std::set<uint64_t> done;
+    auto candidate = [&](const lifter::Module* m, uint64_t t, size_t* counter) {
+      if (p.TextOf(t) != m || p.entries.count(t) || bogus.count(t)) return;
+      lifter::Insn in;
+      if (!dec.Decode(p, t, &in)) return;
+      p.entries.insert(t);
+      p.weak.insert(t);
+      work.push_back(t);
+      (*counter)++;
     };
     for (const auto& m : p.modules)
-      for (uint64_t at : m.img.fixups) {
-        const auto sec = std::find_if(m.img.sections.begin(), m.img.sections.end(),
-                                      [&](const auto& s) { return at - s.va < s.vsize; });
-        if (sec == m.img.sections.end() || sec->name == ".rdata" || sec->name == ".data" ||
-            in_code(at))
-          continue;
-        const uint64_t t = p.x64 ? p.mem.read<uint64_t>(at) : p.mem.read<uint32_t>(at);
-        if (p.TextOf(t) != &m || in_code(t)) continue;
-        const uint8_t before = p.mem.read<uint8_t>(t - 1);
-        if (before != 0xCC && before != 0x90 && before != 0xC3 &&
-            p.mem.read<uint8_t>(t - 3) != 0xC2)
-          continue;
-        candidate(&m, t, &from_data_ptrs);
+      for (const auto& sec : m.img.sections) {
+        if (!only.empty()) break;
+        if (sec.name != ".rdata" && sec.name != ".data") continue;
+        if (p.x64)  // pointers are 8 bytes, 8-aligned
+          for (uint64_t a = sec.va; a + 8 <= sec.va + sec.vsize; a += 8)
+            candidate(&m, p.mem.read<uint64_t>(a), &from_data_ptrs);
+        else
+          for (uint64_t a = sec.va; a + 4 <= sec.va + sec.vsize; a += 4)
+            candidate(&m, p.mem.read<uint32_t>(a), &from_data_ptrs);
       }
+    std::set<uint64_t> tables_read;  // jmps whose table was read from the image
+    // Instruction bytes of the strong functions built so far: [start, end).
+    std::vector<std::pair<uint64_t, uint64_t>> code;
+    auto drain = [&]() {
+      while (!work.empty()) {
+        uint64_t e = work.front();
+        work.pop_front();
+        if (!done.insert(e).second) continue;
+        lifter::Function f;
+        lifter::BuildFunction(p, dec, e, &f);
+        // Switch tables Ghidra did not export: recover them and rebuild, as
+        // their targets may hold further switches. Tables it did export are
+        // read from the image too, and completed: its list can miss cases (a
+        // four-way switch in g_Rhapsody came with two targets, and the other
+        // two cases jumped out of the lifted code).
+        for (bool more = true; more;) {
+          more = false;
+          for (const auto& [va, in] : f.insns) {
+            if (tables_read.count(va)) continue;
+            std::vector<uint64_t> targets;
+            if (!lifter::RecoverJumpTable(p, f, in, &targets)) continue;
+            tables_read.insert(va);
+            auto known = p.jumptables.find(va);
+            if (known == p.jumptables.end()) {
+              p.jumptables[va] = std::move(targets);
+              recovered_tables++;
+              more = true;
+              continue;
+            }
+            bool added = false;
+            for (uint64_t t : targets)
+              if (std::find(known->second.begin(), known->second.end(), t) == known->second.end()) {
+                known->second.push_back(t);
+                added = true;
+              }
+            if (added) {
+              completed_tables++;
+              more = true;
+            }
+          }
+          if (more) {
+            f = {};
+            lifter::BuildFunction(p, dec, e, &f);
+          }
+        }
+        for (const auto* s : {&f.direct_calls, &f.tail_calls, &f.setjmp_returns})
+          for (uint64_t t : *s) {
+            if (!p.InText(t)) continue;
+            p.weak.erase(t);  // really entered as a function
+            if (p.entries.insert(t).second) work.push_back(t);
+          }
+        const lifter::Module* fm = p.TextOf(e);
+        if (!only.empty()) continue;
+        for (const auto& [va, in] : f.insns) {
+          if (!in.ok) continue;
+          for (int i = 0; i < in.d.operand_count_visible; i++) {
+            const auto& o = in.ops[i];
+            if (o.type == ZYDIS_OPERAND_TYPE_IMMEDIATE && !o.imm.is_relative)
+              candidate(fm, p.x64 ? o.imm.value.u : static_cast<uint32_t>(o.imm.value.u),
+                        &from_code_ptrs);
+            // x64 code takes a function's address with a RIP-relative lea.
+            if (o.type == ZYDIS_OPERAND_TYPE_MEMORY && o.mem.base == ZYDIS_REGISTER_RIP &&
+                in.d.mnemonic == ZYDIS_MNEMONIC_LEA)
+              candidate(fm, in.next() + o.mem.disp.value, &from_code_ptrs);
+          }
+        }
+        if (!p.weak.count(e))
+          for (const auto& [va, in] : f.insns)
+            if (in.ok) code.emplace_back(va, in.next());
+      }
+    };
     drain();
+    if (only.empty()) {
+      std::sort(code.begin(), code.end());
+      auto in_code = [&](uint64_t a) {
+        auto it = std::upper_bound(code.begin(), code.end(), std::make_pair(a, ~uint64_t(0)));
+        return it != code.begin() && a < std::prev(it)->second;
+      };
+      for (const auto& m : p.modules)
+        for (uint64_t at : m.img.fixups) {
+          const auto sec = std::find_if(m.img.sections.begin(), m.img.sections.end(),
+                                        [&](const auto& s) { return at - s.va < s.vsize; });
+          if (sec == m.img.sections.end() || sec->name == ".rdata" || sec->name == ".data" ||
+              in_code(at))
+            continue;
+          const uint64_t t = p.x64 ? p.mem.read<uint64_t>(at) : p.mem.read<uint32_t>(at);
+          if (p.TextOf(t) != &m || in_code(t)) continue;
+          const uint8_t before = p.mem.read<uint8_t>(t - 1);
+          if (before != 0xCC && before != 0x90 && before != 0xC3 &&
+              p.mem.read<uint8_t>(t - 3) != 0xC2)
+            continue;
+          candidate(&m, t, &from_data_ptrs);
+        }
+      drain();
+    }
+    if (!only.empty()) break;
+    std::sort(code.begin(), code.end());
+    const size_t known = bogus.size();
+    for (uint64_t t : p.weak) {
+      auto it = std::upper_bound(code.begin(), code.end(), std::make_pair(t, ~uint64_t(0)));
+      if (it != code.begin() && std::prev(it)->first < t && t < std::prev(it)->second)
+        bogus.insert(t);
+    }
+    if (bogus.size() == known) break;
+    std::printf("discovery: %zu weak entries inside instructions, again without them\n",
+                bogus.size() - known);
   }
   std::printf("functions: %zu (%zu from Ghidra/exports, %zu discovered: "
               "%zu via code pointers, %zu via data pointers; %zu weak)\n",
