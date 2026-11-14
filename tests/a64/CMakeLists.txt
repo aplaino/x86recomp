@@ -6,13 +6,33 @@
 # and its two supervisor calls are the test platform's
 # (fixture_platform.cpp).
 
-if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
-  message(STATUS "a64: the AArch64 lifter tests build an AArch64 fixture with clang; skipped")
-  return()
-endif()
+# What the fixture's build (clang, ld.lld) and the oracle (RECOMP_PYTHON)
+# need: each one missing fails a64_prerequisites, which names it, unless
+# RECOMP_ALLOW_MISSING_TEST_TOOLS says this host cannot run those tests.
+option(RECOMP_ALLOW_MISSING_TEST_TOOLS "Leave out the tests whose tools are missing instead of failing" OFF)
 find_program(RECOMP_LD_LLD ld.lld)
+set(RECOMP_PYTHON "${RECOMP_ROOT}/.venv/bin/python" CACHE FILEPATH
+    "Python with unicorn for the AArch64 oracle tests")
+set(_missing)
+if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+  list(APPEND _missing "clang as the C compiler")
+endif()
 if(NOT RECOMP_LD_LLD)
-  message(STATUS "a64: ld.lld not found; the AArch64 lifter tests are skipped")
+  list(APPEND _missing ld.lld)
+endif()
+if(NOT EXISTS "${RECOMP_PYTHON}")
+  list(APPEND _missing "RECOMP_PYTHON (${RECOMP_PYTHON})")
+endif()
+if(_missing)
+  string(JOIN ", " _missing ${_missing})
+  message(STATUS "a64: missing ${_missing}; the tests that need them are left out")
+  if(NOT RECOMP_ALLOW_MISSING_TEST_TOOLS)
+    add_test(NAME a64_prerequisites COMMAND "${CMAKE_COMMAND}" -E echo
+             "missing ${_missing} (RECOMP_ALLOW_MISSING_TEST_TOOLS=ON leaves their tests out)")
+    set_tests_properties(a64_prerequisites PROPERTIES FAIL_REGULAR_EXPRESSION .)
+  endif()
+endif()
+if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang" OR NOT RECOMP_LD_LLD)
   return()
 endif()
 
@@ -89,10 +109,7 @@ foreach(_m 0 ${_mutations})
 endforeach()
 
 # --- tests against the oracle ----------------------------------------------
-set(RECOMP_PYTHON "${RECOMP_ROOT}/.venv/bin/python" CACHE FILEPATH
-    "Python with unicorn for the AArch64 oracle tests")
 if(NOT EXISTS "${RECOMP_PYTHON}")
-  message(STATUS "a64: ${RECOMP_PYTHON} missing; the AArch64 oracle tests are skipped")
   return()
 endif()
 set(RECOMP_A64_ORACLE "${CMAKE_CURRENT_SOURCE_DIR}/oracle/oracle.py" CACHE INTERNAL "")
