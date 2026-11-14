@@ -34,6 +34,11 @@ int scePthreadCondInit(Handle* cv, const Handle* attr, const char* name);
 int scePthreadCondWait(Handle* cv, Handle* m);
 int scePthreadCondSignal(Handle* cv);
 int scePthreadCondBroadcast(Handle* cv);
+int scePthreadCondDestroy(Handle* cv);
+// The timeouts are 32-bit (SceKernelUseconds); declared 64-bit here so
+// the register's upper half can be set.
+int scePthreadMutexTimedlock(Handle* m, unsigned long timeout_us);
+int scePthreadCondTimedwait(Handle* cv, Handle* m, unsigned long timeout_us);
 int scePthreadKeyCreate(int* key, void (*dtor)(void*));
 int scePthreadSetspecific(int key, const void* value);
 void* scePthreadGetspecific(int key);
@@ -42,11 +47,13 @@ int sceKernelCreateSema(Handle* s, const char* name, unsigned attr, int init, in
                         const void* opt);
 int sceKernelWaitSema(Handle s, int need, unsigned* timeout_us);
 int sceKernelSignalSema(Handle s, int n);
+int sceKernelDeleteSema(Handle s);
 int sceKernelCreateEventFlag(Handle* f, const char* name, unsigned attr, unsigned long init,
                              const void* opt);
 int sceKernelSetEventFlag(Handle f, unsigned long bits);
 int sceKernelWaitEventFlag(Handle f, unsigned long pattern, unsigned mode,
                            unsigned long* result, unsigned* timeout_us);
+int sceKernelDeleteEventFlag(Handle f);
 int* __error(void);
 int open(const char* path, int flags, int mode);
 int sceKernelOpen(const char* path, int flags, int mode);
@@ -71,7 +78,10 @@ int sceKernelUsleep(unsigned us);
 unsigned long sceKernelGetProcessTime(void);
 int clock_gettime(int clock, long ts[2]);
 
+#define SCE_EPERM 0x80020001
+#define SCE_ESRCH 0x80020003
 #define SCE_EDEADLK 0x8002000B
+#define SCE_EINVAL 0x80020016
 #define SCE_EBUSY 0x80020010
 #define SCE_ETIMEDOUT 0x8002003C
 
@@ -159,6 +169,25 @@ static void* call_once(void* arg) {
   (void)arg;
   scePthreadOnce(&once, once_init);
   return 0;
+}
+
+// Waits on a semaphore or an event flag the main thread deletes.
+static Handle doomed;
+static void* wait_doomed_sema(void* arg) {
+  (void)arg;
+  return (void*)(long)(unsigned)sceKernelWaitSema(doomed, 1, 0);
+}
+static void* wait_doomed_flag(void* arg) {
+  (void)arg;
+  unsigned long bits;
+  return (void*)(long)(unsigned)sceKernelWaitEventFlag(doomed, 1, 1, &bits, 0);
+}
+
+// A timed lock of the mutex the main thread holds, its timeout's upper
+// half set: 1 ms.
+static void* timed_lock(void* arg) {
+  (void)arg;
+  return (void*)(long)(unsigned)scePthreadMutexTimedlock(&counter_mu, 0xFFFFFFFF00000000ul | 1000);
 }
 
 int kernel_checks(void) {
@@ -257,6 +286,48 @@ int kernel_checks(void) {
   for (int i = 0; i < 4; i++) scePthreadCreate(&t[i], 0, call_once, 0, "once");
   for (int i = 0; i < 4; i++) scePthreadJoin(t[i], 0);
   failed += test_check(52, once_runs, 1);
+
+  // 460-461: a semaphore and an event flag deleted under a waiter wake it
+  // with ESRCH.
+  sceKernelCreateSema(&doomed, "doomed", 1, 0, 1, 0);
+  scePthreadCreate(&t[0], 0, wait_doomed_sema, 0, "doomed");
+  sceKernelUsleep(2000);
+  sceKernelDeleteSema(doomed);
+  scePthreadJoin(t[0], &ret);
+  failed += test_check(460, (long)ret, SCE_ESRCH);
+  sceKernelCreateEventFlag(&doomed, "doomed", 0x20, 0, 0);
+  scePthreadCreate(&t[0], 0, wait_doomed_flag, 0, "doomed");
+  sceKernelUsleep(2000);
+  sceKernelDeleteEventFlag(doomed);
+  scePthreadJoin(t[0], &ret);
+  failed += test_check(461, (long)ret, SCE_ESRCH);
+
+  // 462-465: FreeBSD 9's static initialisers and destroyed markers: 1 an
+  // adaptive mutex (its owner's trylock is EBUSY), 2 a destroyed one; 1 a
+  // destroyed condition variable; a static initialiser held by no one.
+  Handle sm = (Handle)1;
+  r1 = scePthreadMutexLock(&sm), r2 = scePthreadMutexTrylock(&sm), r3 = scePthreadMutexUnlock(&sm);
+  failed += test_check(462, r1 == 0 && (unsigned)r2 == SCE_EBUSY && r3 == 0, 1);
+  failed += test_check(463, scePthreadMutexDestroy(&sm) == 0 && sm == (Handle)2 &&
+                                (unsigned)scePthreadMutexLock(&sm) == SCE_EINVAL &&
+                                (unsigned)scePthreadMutexDestroy(&sm) == SCE_EINVAL, 1);
+  sm = 0;
+  failed += test_check(464, (unsigned)scePthreadMutexUnlock(&sm) == SCE_EPERM && sm == 0, 1);
+  Handle dead_cv;
+  scePthreadCondInit(&dead_cv, 0, "dead");
+  failed += test_check(465, scePthreadCondDestroy(&dead_cv) == 0 && dead_cv == (Handle)1 &&
+                                (unsigned)scePthreadCondSignal(&dead_cv) == SCE_EINVAL, 1);
+
+  // 466-467: 32-bit timeouts, whatever the register's upper half holds.
+  scePthreadMutexLock(&counter_mu);
+  scePthreadCreate(&t[0], 0, timed_lock, 0, "timed");
+  scePthreadJoin(t[0], &ret);
+  scePthreadMutexUnlock(&counter_mu);
+  failed += test_check(466, (long)ret, SCE_ETIMEDOUT);
+  scePthreadMutexLock(&cv_mu);
+  failed += test_check(467, (unsigned)scePthreadCondTimedwait(&cv, &cv_mu, 0xFFFFFFFF00000000ul | 1000),
+                       SCE_ETIMEDOUT);
+  scePthreadMutexUnlock(&cv_mu);
 
   // 53-54: errno, and an SCE error code, for a missing file.
   failed += test_check(53, open("/app0/missing", 0, 0), -1);

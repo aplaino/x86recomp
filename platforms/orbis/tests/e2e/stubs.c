@@ -28,7 +28,8 @@ STUB(sceKernelGetdents) STUB(sceKernelCreateEqueue) STUB(sceKernelWaitEqueue) ST
 STUB(sceKernelLoadStartModule) STUB(sceKernelDlsym) STUB(sceKernelAddUserEvent)
 STUB(sceKernelAddUserEventEdge) STUB(sceKernelTriggerUserEvent) STUB(sceKernelDeleteUserEvent)
 STUB(sceKernelGetEventId) STUB(sceKernelGetEventFilter) STUB(sceKernelGetEventData)
-STUB(sceKernelGetEventUserData)
+STUB(sceKernelGetEventUserData) STUB(sceKernelDeleteSema) STUB(sceKernelDeleteEventFlag)
+STUB(scePthreadCondDestroy) STUB(scePthreadMutexTimedlock) STUB(scePthreadCondTimedwait)
 #endif
 
 #ifdef LIB_FIBER

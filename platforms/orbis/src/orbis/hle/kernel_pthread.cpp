@@ -7,8 +7,12 @@
 // Every object is an opaque pointer in guest memory (ScePthreadMutex and
 // friends are pointers): the HLE hands out small guest blocks as handles
 // and keeps the host state for each by its address. A null handle is the
-// static initialiser and gets its object on first use (FreeBSD's 1 and 2
-// for mutexes: recursive and adaptive).
+// static initialiser and gets its object on first use (for mutexes also
+// FreeBSD 9's 1, adaptive). Destroying an object leaves libthr's marker
+// in its variable (2 for mutexes, 1 for condition variables and
+// read-write locks), which later calls refuse with EINVAL. A call holds
+// the object it found until it returns, so one destroyed under it frees
+// nothing it uses.
 //
 // Guest threads are host threads (StartServiceThread); every call that
 // synchronises is a full barrier for guest memory (GuestSyncPoint).
@@ -85,65 +89,72 @@ struct PThread {
   std::map<uint32_t, uint64_t> specific;  // key -> value
 };
 
-// The objects behind the handles (kernel.h, NewHandle).
-std::mutex g_mu;
-std::map<gaddr, std::unique_ptr<MutexAttr>> g_mutex_attrs;
-std::map<gaddr, std::unique_ptr<Mutex>> g_mutexes;
-std::map<gaddr, std::unique_ptr<Cond>> g_conds;
-std::map<gaddr, std::unique_ptr<RwLock>> g_rwlocks;
-std::map<gaddr, std::unique_ptr<ThreadAttr>> g_thread_attrs;
-std::map<gaddr, std::shared_ptr<PThread>> g_threads;  // by handle
-std::map<Thread*, std::shared_ptr<PThread>> g_by_thread;
+// FreeBSD 9 libthr's static initialiser and destroyed markers
+// (thr_private.h).
+constexpr gaddr kAdaptiveInitializer = 1, kMutexDestroyed = 2, kDestroyed = 1;
+
+template <typename T>
+using Objects = std::map<gaddr, std::shared_ptr<T>>;
+
+// The objects behind the handles (kernel.h, NewHandle). Never destroyed:
+// threads may still wait at exit.
+std::mutex& g_mu = *new std::mutex;
+Objects<MutexAttr>& g_mutex_attrs = *new Objects<MutexAttr>;
+Objects<Mutex>& g_mutexes = *new Objects<Mutex>;
+Objects<Cond>& g_conds = *new Objects<Cond>;
+Objects<RwLock>& g_rwlocks = *new Objects<RwLock>;
+Objects<ThreadAttr>& g_thread_attrs = *new Objects<ThreadAttr>;
+Objects<PThread>& g_threads = *new Objects<PThread>;  // by handle
+std::map<Thread*, std::shared_ptr<PThread>>& g_by_thread =
+    *new std::map<Thread*, std::shared_ptr<PThread>>;
 std::map<uint32_t, gaddr> g_key_destructors;  // key -> destructor (0: none)
 uint32_t g_next_key = 1;
 
 template <typename T>
-T* Find(std::map<gaddr, std::unique_ptr<T>>& m, gaddr h) {
+std::shared_ptr<T> Find(Objects<T>& m, gaddr h) {
   auto it = m.find(h);
-  return it == m.end() ? nullptr : it->second.get();
+  return it == m.end() ? nullptr : it->second;
 }
 
 uint32_t Tid() { return CurrentThread()->tid; }
 
-// The handle the guest variable at `slot` holds, made for a static
-// initialiser (null, or for mutexes 1 and 2).
-Mutex* MutexAt(gaddr slot) {
+// The object of the guest variable at `slot`, made for a static
+// initialiser (null, or for mutexes 1); null for a destroyed one.
+std::shared_ptr<Mutex> MutexAt(gaddr slot) {
   std::lock_guard<std::mutex> l(g_mu);
   gaddr h = Rd64(slot);
-  if (h > 2) return Find(g_mutexes, h);
-  auto m = std::make_unique<Mutex>();
-  m->type = h == 1 ? kRecursive : h == 2 ? kAdaptive : kErrorCheck;
+  if (h > kAdaptiveInitializer) return Find(g_mutexes, h);
+  auto m = std::make_shared<Mutex>();
+  m->type = h == kAdaptiveInitializer ? kAdaptive : kErrorCheck;
   gaddr nh = NewHandle();
-  Mutex* raw = m.get();
-  g_mutexes[nh] = std::move(m);
+  g_mutexes[nh] = m;
   Wr64(slot, nh);
-  return raw;
+  return m;
 }
 
 template <typename T>
-T* LazyAt(std::map<gaddr, std::unique_ptr<T>>& objs, gaddr slot) {
+std::shared_ptr<T> LazyAt(Objects<T>& objs, gaddr slot) {
   std::lock_guard<std::mutex> l(g_mu);
   gaddr h = Rd64(slot);
   if (h) return Find(objs, h);
   gaddr nh = NewHandle();
-  T* raw = (objs[nh] = std::make_unique<T>()).get();
   Wr64(slot, nh);
-  return raw;
+  return objs[nh] = std::make_shared<T>();
 }
 
 // ---- mutexes ----------------------------------------------------------
 
 int MutexInit(gaddr slot, gaddr attr_slot, const char* name) {
   std::lock_guard<std::mutex> l(g_mu);
-  auto m = std::make_unique<Mutex>();
+  auto m = std::make_shared<Mutex>();
   if (attr_slot) {
-    MutexAttr* a = Find(g_mutex_attrs, Rd64(attr_slot));
+    const std::shared_ptr<MutexAttr> a = Find(g_mutex_attrs, Rd64(attr_slot));
     if (!a) return kEINVAL;
     m->type = a->type;
   }
   if (name) m->name = name;
   gaddr h = NewHandle();
-  g_mutexes[h] = std::move(m);
+  g_mutexes[h] = m;
   Wr64(slot, h);
   return 0;
 }
@@ -151,7 +162,7 @@ int MutexInit(gaddr slot, gaddr attr_slot, const char* name) {
 // timeout_us < 0: wait for ever; 0 with try: do not wait.
 int MutexLock(gaddr slot, bool try_only, int64_t timeout_us) {
   GuestSyncPoint sync;
-  Mutex* m = MutexAt(slot);
+  const std::shared_ptr<Mutex> m = MutexAt(slot);
   if (!m) return kEINVAL;
   const uint32_t me = Tid();
   std::unique_lock<std::mutex> l(m->mu);
@@ -179,9 +190,12 @@ int MutexLock(gaddr slot, bool try_only, int64_t timeout_us) {
   return 0;
 }
 
+// A static initialiser is not made into a mutex here: nobody holds it.
 int MutexUnlock(gaddr slot) {
   GuestSyncPoint sync;
-  Mutex* m = MutexAt(slot);
+  const gaddr h = Rd64(slot);
+  if (h <= kMutexDestroyed) return h == kMutexDestroyed ? kEINVAL : kEPERM;
+  const std::shared_ptr<Mutex> m = MutexAt(slot);
   if (!m) return kEINVAL;
   std::lock_guard<std::mutex> l(m->mu);
   if (m->owner != Tid()) return kEPERM;
@@ -195,38 +209,46 @@ int MutexUnlock(gaddr slot) {
 int MutexDestroy(gaddr slot) {
   std::lock_guard<std::mutex> l(g_mu);
   gaddr h = Rd64(slot);
+  if (h < kMutexDestroyed) return 0;  // a static initialiser: nothing made yet
   auto it = g_mutexes.find(h);
-  if (it == g_mutexes.end()) return h <= 2 ? 0 : kEINVAL;
-  if (it->second->owner) return kEBUSY;
+  if (it == g_mutexes.end()) return kEINVAL;
+  {
+    std::lock_guard<std::mutex> ml(it->second->mu);
+    if (it->second->owner) return kEBUSY;
+  }
   g_mutexes.erase(it);
   FreeHandle(h);
-  Wr64(slot, 0);
+  Wr64(slot, kMutexDestroyed);
   return 0;
 }
 
 int MutexattrInit(gaddr slot) {
   std::lock_guard<std::mutex> l(g_mu);
   gaddr h = NewHandle();
-  g_mutex_attrs[h] = std::make_unique<MutexAttr>();
+  g_mutex_attrs[h] = std::make_shared<MutexAttr>();
   Wr64(slot, h);
   return 0;
 }
 
 int MutexattrSettype(gaddr slot, int type) {
   std::lock_guard<std::mutex> l(g_mu);
-  MutexAttr* a = Find(g_mutex_attrs, Rd64(slot));
+  const std::shared_ptr<MutexAttr> a = Find(g_mutex_attrs, Rd64(slot));
   if (!a || type < kErrorCheck || type > kAdaptive) return kEINVAL;
   a->type = type;
   return 0;
 }
 
+// Leaves `destroyed` in the variable: libthr's marker for condition
+// variables and read-write locks (below it, 0, a static initialiser has
+// nothing to destroy), null for attributes.
 template <typename T>
-int DestroyObject(std::map<gaddr, std::unique_ptr<T>>& objs, gaddr slot) {
+int DestroyObject(Objects<T>& objs, gaddr slot, gaddr destroyed) {
   std::lock_guard<std::mutex> l(g_mu);
   gaddr h = Rd64(slot);
+  if (h < destroyed) return 0;
   if (!objs.erase(h)) return kEINVAL;
   FreeHandle(h);
-  Wr64(slot, 0);
+  Wr64(slot, destroyed);
   return 0;
 }
 
@@ -237,8 +259,8 @@ int DestroyObject(std::map<gaddr, std::unique_ptr<T>>& objs, gaddr slot) {
 // the mutex is released, so a signal in between is not lost.
 int CondWait(gaddr cond_slot, gaddr mutex_slot, int64_t timeout_us) {
   GuestSyncPoint sync;
-  Cond* cv = LazyAt(g_conds, cond_slot);
-  Mutex* m = MutexAt(mutex_slot);
+  const std::shared_ptr<Cond> cv = LazyAt(g_conds, cond_slot);
+  const std::shared_ptr<Mutex> m = MutexAt(mutex_slot);
   if (!cv || !m) return kEINVAL;
   const uint32_t me = Tid();
   std::unique_lock<std::mutex> cl(cv->mu);
@@ -268,7 +290,7 @@ int CondWait(gaddr cond_slot, gaddr mutex_slot, int64_t timeout_us) {
 
 int CondSignal(gaddr slot, bool all) {
   GuestSyncPoint sync;
-  Cond* cv = LazyAt(g_conds, slot);
+  const std::shared_ptr<Cond> cv = LazyAt(g_conds, slot);
   if (!cv) return kEINVAL;
   std::lock_guard<std::mutex> l(cv->mu);
   cv->seq++;
@@ -282,7 +304,7 @@ int CondSignal(gaddr slot, bool all) {
 int CondInit(gaddr slot) {
   std::lock_guard<std::mutex> l(g_mu);
   gaddr h = NewHandle();
-  g_conds[h] = std::make_unique<Cond>();
+  g_conds[h] = std::make_shared<Cond>();
   Wr64(slot, h);
   return 0;
 }
@@ -291,7 +313,7 @@ int CondInit(gaddr slot) {
 
 int RwAcquire(gaddr slot, bool write, bool try_only) {
   GuestSyncPoint sync;
-  RwLock* rw = LazyAt(g_rwlocks, slot);
+  const std::shared_ptr<RwLock> rw = LazyAt(g_rwlocks, slot);
   if (!rw) return kEINVAL;
   const uint32_t me = Tid();
   std::unique_lock<std::mutex> l(rw->mu);
@@ -308,9 +330,11 @@ int RwAcquire(gaddr slot, bool write, bool try_only) {
   return 0;
 }
 
+// A static initialiser is not made into a lock here: nobody holds it.
 int RwUnlock(gaddr slot) {
   GuestSyncPoint sync;
-  RwLock* rw = LazyAt(g_rwlocks, slot);
+  if (Rd64(slot) <= kDestroyed) return kEINVAL;
+  const std::shared_ptr<RwLock> rw = LazyAt(g_rwlocks, slot);
   if (!rw) return kEINVAL;
   std::lock_guard<std::mutex> l(rw->mu);
   if (rw->writer == Tid())
@@ -326,7 +350,7 @@ int RwUnlock(gaddr slot) {
 int RwInit(gaddr slot) {
   std::lock_guard<std::mutex> l(g_mu);
   gaddr h = NewHandle();
-  g_rwlocks[h] = std::make_unique<RwLock>();
+  g_rwlocks[h] = std::make_shared<RwLock>();
   Wr64(slot, h);
   return 0;
 }
@@ -378,7 +402,7 @@ int Create(gaddr out, gaddr attr_slot, gaddr entry, uint64_t arg, gaddr name) {
   ThreadAttr attr;
   if (attr_slot) {
     std::lock_guard<std::mutex> l(g_mu);
-    ThreadAttr* a = Find(g_thread_attrs, Rd64(attr_slot));
+    const std::shared_ptr<ThreadAttr> a = Find(g_thread_attrs, Rd64(attr_slot));
     if (!a) return kEINVAL;
     attr = *a;
   }
@@ -431,12 +455,12 @@ int Join(gaddr h, gaddr ret_out) {
 int ThreadAttrInit(gaddr slot) {
   std::lock_guard<std::mutex> l(g_mu);
   gaddr h = NewHandle();
-  g_thread_attrs[h] = std::make_unique<ThreadAttr>();
+  g_thread_attrs[h] = std::make_shared<ThreadAttr>();
   Wr64(slot, h);
   return 0;
 }
 
-ThreadAttr* AttrAt(gaddr slot) {
+std::shared_ptr<ThreadAttr> AttrAt(gaddr slot) {
   std::lock_guard<std::mutex> l(g_mu);
   return Find(g_thread_attrs, Rd64(slot));
 }
@@ -444,9 +468,9 @@ ThreadAttr* AttrAt(gaddr slot) {
 // ---- once -------------------------------------------------------------
 
 // pthread_once_t: an int state (0: not run, 1: done, 2: running), then a
-// mutex FreeBSD leaves unused.
-std::mutex g_once_mu;
-std::condition_variable g_once_cv;
+// mutex FreeBSD leaves unused. Never destroyed, as the objects above.
+std::mutex& g_once_mu = *new std::mutex;
+std::condition_variable& g_once_cv = *new std::condition_variable;
 
 int Once(Ctx& c, gaddr once, gaddr fn) {
   GuestSyncPoint sync;
@@ -478,7 +502,7 @@ using recomp::hle::Arg;
 
 ORBIS_HLE("libkernel", scePthreadMutexattrInit, 1) { return Sce(MutexattrInit(Arg(c, 0))); }
 ORBIS_HLE("libkernel", scePthreadMutexattrDestroy, 1) {
-  return Sce(DestroyObject(g_mutex_attrs, Arg(c, 0)));
+  return Sce(DestroyObject(g_mutex_attrs, Arg(c, 0), 0));
 }
 ORBIS_HLE("libkernel", scePthreadMutexattrSettype, 2) {
   return Sce(MutexattrSettype(Arg(c, 0), int(Arg(c, 1))));
@@ -492,9 +516,9 @@ ORBIS_HLE("libkernel", scePthreadMutexInit, 3) {
 ORBIS_HLE("libkernel", scePthreadMutexDestroy, 1) { return Sce(MutexDestroy(Arg(c, 0))); }
 ORBIS_HLE("libkernel", scePthreadMutexLock, 1) { return Sce(MutexLock(Arg(c, 0), false, -1)); }
 ORBIS_HLE("libkernel", scePthreadMutexTrylock, 1) { return Sce(MutexLock(Arg(c, 0), true, 0)); }
-// The timeout is in microseconds from now.
+// The timeout is in microseconds from now (SceKernelUseconds: 32 bits).
 ORBIS_HLE("libkernel", scePthreadMutexTimedlock, 2) {
-  return Sce(MutexLock(Arg(c, 0), false, int64_t(Arg(c, 1))));
+  return Sce(MutexLock(Arg(c, 0), false, int64_t(uint32_t(Arg(c, 1)))));
 }
 ORBIS_HLE("libkernel", scePthreadMutexUnlock, 1) { return Sce(MutexUnlock(Arg(c, 0))); }
 
@@ -505,11 +529,11 @@ ORBIS_HLE("libkernel", scePthreadCondattrInit, 1) {
 }
 ORBIS_HLE("libkernel", scePthreadCondattrDestroy, 1) { return 0; }
 ORBIS_HLE("libkernel", scePthreadCondInit, 3) { return Sce(CondInit(Arg(c, 0))); }
-ORBIS_HLE("libkernel", scePthreadCondDestroy, 1) { return Sce(DestroyObject(g_conds, Arg(c, 0))); }
+ORBIS_HLE("libkernel", scePthreadCondDestroy, 1) { return Sce(DestroyObject(g_conds, Arg(c, 0), kDestroyed)); }
 ORBIS_HLE("libkernel", scePthreadCondWait, 2) { return Sce(CondWait(Arg(c, 0), Arg(c, 1), -1)); }
-// The timeout is in microseconds from now.
+// The timeout is in microseconds from now (SceKernelUseconds: 32 bits).
 ORBIS_HLE("libkernel", scePthreadCondTimedwait, 3) {
-  return Sce(CondWait(Arg(c, 0), Arg(c, 1), int64_t(Arg(c, 2))));
+  return Sce(CondWait(Arg(c, 0), Arg(c, 1), int64_t(uint32_t(Arg(c, 2)))));
 }
 ORBIS_HLE("libkernel", scePthreadCondSignal, 1) { return Sce(CondSignal(Arg(c, 0), false)); }
 ORBIS_HLE("libkernel", scePthreadCondBroadcast, 1) { return Sce(CondSignal(Arg(c, 0), true)); }
@@ -522,7 +546,7 @@ ORBIS_HLE("libkernel", scePthreadRwlockattrInit, 1) {
 ORBIS_HLE("libkernel", scePthreadRwlockattrDestroy, 1) { return 0; }
 ORBIS_HLE("libkernel", scePthreadRwlockInit, 3) { return Sce(RwInit(Arg(c, 0))); }
 ORBIS_HLE("libkernel", scePthreadRwlockDestroy, 1) {
-  return Sce(DestroyObject(g_rwlocks, Arg(c, 0)));
+  return Sce(DestroyObject(g_rwlocks, Arg(c, 0), kDestroyed));
 }
 ORBIS_HLE("libkernel", scePthreadRwlockRdlock, 1) { return Sce(RwAcquire(Arg(c, 0), false, false)); }
 ORBIS_HLE("libkernel", scePthreadRwlockWrlock, 1) { return Sce(RwAcquire(Arg(c, 0), true, false)); }
@@ -583,11 +607,11 @@ ORBIS_HLE("libkernel", scePthreadSetaffinity, 2) {
 
 ORBIS_HLE("libkernel", scePthreadAttrInit, 1) { return Sce(ThreadAttrInit(Arg(c, 0))); }
 ORBIS_HLE("libkernel", scePthreadAttrDestroy, 1) {
-  return Sce(DestroyObject(g_thread_attrs, Arg(c, 0)));
+  return Sce(DestroyObject(g_thread_attrs, Arg(c, 0), 0));
 }
 #define ATTR_SET(name, field, type)                    \
   ORBIS_HLE("libkernel", name, 2) {                     \
-    ThreadAttr* a = AttrAt(Arg(c, 0));                  \
+    const std::shared_ptr<ThreadAttr> a = AttrAt(Arg(c, 0));                  \
     if (!a) return SceError(kEINVAL);                   \
     a->field = type(Arg(c, 1));                         \
     return 0;                                           \
@@ -598,7 +622,7 @@ ATTR_SET(scePthreadAttrSetinheritsched, inherit, int)
 ATTR_SET(scePthreadAttrSetaffinity, affinity, uint64_t)
 // SceKernelSchedParam: the priority as an int.
 ORBIS_HLE("libkernel", scePthreadAttrSetschedparam, 2) {
-  ThreadAttr* a = AttrAt(Arg(c, 0));
+  const std::shared_ptr<ThreadAttr> a = AttrAt(Arg(c, 0));
   if (!a) return SceError(kEINVAL);
   a->prio = int(recomp::Rd32(Arg(c, 1)));
   return 0;
@@ -607,7 +631,7 @@ ORBIS_HLE("libkernel", scePthreadAttrSetschedparam, 2) {
 // SCHED_FIFO (1) or SCHED_RR (3) only, else ENOTSUP; 11.00 also resets
 // the priority to the policy's default (700 for both).
 ORBIS_HLE("libkernel", scePthreadAttrSetschedpolicy, 2) {
-  ThreadAttr* a = AttrAt(Arg(c, 0));
+  const std::shared_ptr<ThreadAttr> a = AttrAt(Arg(c, 0));
   if (!a) return SceError(kEINVAL);
   const int policy = int(Arg(c, 1));
   if ((policy | 2) != 3) return SceError(kENOTSUP);
@@ -617,13 +641,13 @@ ORBIS_HLE("libkernel", scePthreadAttrSetschedpolicy, 2) {
 }
 // PTHREAD_CREATE_JOINABLE (0) or PTHREAD_CREATE_DETACHED (1).
 ORBIS_HLE("libkernel", scePthreadAttrGetdetachstate, 2) {
-  ThreadAttr* a = AttrAt(Arg(c, 0));
+  const std::shared_ptr<ThreadAttr> a = AttrAt(Arg(c, 0));
   if (!a || !Arg(c, 1)) return SceError(kEINVAL);
   recomp::Wr32(Arg(c, 1), a->detached ? 1 : 0);
   return 0;
 }
 ORBIS_HLE("libkernel", scePthreadAttrGetaffinity, 2) {
-  ThreadAttr* a = AttrAt(Arg(c, 0));
+  const std::shared_ptr<ThreadAttr> a = AttrAt(Arg(c, 0));
   if (!a) return SceError(kEINVAL);
   recomp::Wr64(Arg(c, 1), a->affinity);
   return 0;
@@ -632,7 +656,7 @@ ORBIS_HLE("libkernel", scePthreadAttrGetaffinity, 2) {
 // (made with scePthreadAttrInit) describes the thread.
 ORBIS_HLE("libkernel", scePthreadAttrGet, 2) {
   std::shared_ptr<PThread> pt = ThreadOf(Arg(c, 0));
-  ThreadAttr* a = AttrAt(Arg(c, 1));
+  const std::shared_ptr<ThreadAttr> a = AttrAt(Arg(c, 1));
   if (!pt || !a) return SceError(pt ? kEINVAL : kESRCH);
   a->stack = pt->t->stack_hi - pt->t->stack_lo;
   a->detached = pt->detached;
@@ -676,7 +700,7 @@ ORBIS_HLE("libkernel", sched_yield, 0) {
 
 ORBIS_HLE("libScePosix", pthread_mutexattr_init, 1) { return MutexattrInit(Arg(c, 0)); }
 ORBIS_HLE("libScePosix", pthread_mutexattr_destroy, 1) {
-  return DestroyObject(g_mutex_attrs, Arg(c, 0));
+  return DestroyObject(g_mutex_attrs, Arg(c, 0), 0);
 }
 ORBIS_HLE("libScePosix", pthread_mutexattr_settype, 2) {
   return MutexattrSettype(Arg(c, 0), int(Arg(c, 1)));
@@ -688,17 +712,17 @@ ORBIS_HLE("libScePosix", pthread_mutex_trylock, 1) { return MutexLock(Arg(c, 0),
 ORBIS_HLE("libScePosix", pthread_mutex_unlock, 1) { return MutexUnlock(Arg(c, 0)); }
 ORBIS_HLE("libScePosix", pthread_attr_init, 1) { return ThreadAttrInit(Arg(c, 0)); }
 ORBIS_HLE("libScePosix", pthread_attr_destroy, 1) {
-  return DestroyObject(g_thread_attrs, Arg(c, 0));
+  return DestroyObject(g_thread_attrs, Arg(c, 0), 0);
 }
 ORBIS_HLE("libScePosix", pthread_attr_setstacksize, 2) {
-  ThreadAttr* a = AttrAt(Arg(c, 0));
+  const std::shared_ptr<ThreadAttr> a = AttrAt(Arg(c, 0));
   if (!a) return kEINVAL;
   a->stack = Arg(c, 1);
   return 0;
 }
 // PTHREAD_CREATE_DETACHED is 1, JOINABLE 0.
 ORBIS_HLE("libScePosix", pthread_attr_setdetachstate, 2) {
-  ThreadAttr* a = AttrAt(Arg(c, 0));
+  const std::shared_ptr<ThreadAttr> a = AttrAt(Arg(c, 0));
   if (!a) return kEINVAL;
   a->detached = Arg(c, 1) == 1;
   return 0;

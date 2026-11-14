@@ -3,6 +3,12 @@
 // Timeouts are microseconds, passed by pointer: null waits for ever, and
 // the time left is written back. Waiters are served first come, first
 // served, whichever order (FIFO or priority) the attributes ask for.
+//
+// A call holds the object it found until it returns, so deleting one
+// under its waiters frees nothing they use; they wake and return ESRCH,
+// as for a handle no longer there, the way event-queue waiters return
+// EBADF (what the kernel answers waiters of a deleted object is not
+// measured).
 
 #include <chrono>
 #include <condition_variable>
@@ -29,6 +35,7 @@ struct Sema {
   std::deque<uint64_t> queue;  // waiter tickets, first served first
   uint64_t next_ticket = 0;
   uint64_t cancel_gen = 0;
+  bool deleted = false;
 };
 
 // Event flags: a 64-bit pattern. Waits are AND (all bits) or OR (any),
@@ -44,17 +51,38 @@ struct EventFlag {
   bool multi = false;
   int waiters = 0;
   uint64_t cancel_gen = 0;
+  bool deleted = false;
 };
 
-std::mutex g_mu;
-std::map<gaddr, std::unique_ptr<Sema>> g_semas;
-std::map<gaddr, std::unique_ptr<EventFlag>> g_flags;
+// Never destroyed: threads may still wait at exit.
+std::mutex& g_mu = *new std::mutex;
+std::map<gaddr, std::shared_ptr<Sema>>& g_semas = *new std::map<gaddr, std::shared_ptr<Sema>>;
+std::map<gaddr, std::shared_ptr<EventFlag>>& g_flags =
+    *new std::map<gaddr, std::shared_ptr<EventFlag>>;
 
 template <typename T>
-T* Get(std::map<gaddr, std::unique_ptr<T>>& m, gaddr h) {
+std::shared_ptr<T> Get(std::map<gaddr, std::shared_ptr<T>>& m, gaddr h) {
   std::lock_guard<std::mutex> l(g_mu);
   auto it = m.find(h);
-  return it == m.end() ? nullptr : it->second.get();
+  return it == m.end() ? nullptr : it->second;
+}
+
+// Takes h's object out of m and wakes its waiters; false if there is none.
+template <typename T>
+bool Delete(std::map<gaddr, std::shared_ptr<T>>& m, gaddr h) {
+  std::shared_ptr<T> o;
+  {
+    std::lock_guard<std::mutex> l(g_mu);
+    auto it = m.find(h);
+    if (it == m.end()) return false;
+    o = std::move(it->second);
+    m.erase(it);
+    FreeHandle(h);
+  }
+  std::lock_guard<std::mutex> l(o->mu);
+  o->deleted = true;
+  o->cv.notify_all();
+  return true;
 }
 
 // Waits on cv (holding l) until pred, for the time in *timeout_us (null:
@@ -88,7 +116,7 @@ using recomp::hle::Arg;
 ORBIS_HLE("libkernel", sceKernelCreateSema, 6) {
   const int init = int(Arg(c, 3)), max = int(Arg(c, 4));
   if (max <= 0 || init < 0 || init > max) return SceError(kEINVAL);
-  auto s = std::make_unique<Sema>();
+  auto s = std::make_shared<Sema>();
   s->count = init;
   s->max = max;
   const recomp::gaddr h = NewHandle();
@@ -101,17 +129,14 @@ ORBIS_HLE("libkernel", sceKernelCreateSema, 6) {
 }
 
 ORBIS_HLE("libkernel", sceKernelDeleteSema, 1) {
-  std::lock_guard<std::mutex> l(g_mu);
-  if (!g_semas.erase(Arg(c, 0))) return SceError(kESRCH);
-  FreeHandle(Arg(c, 0));
-  return 0;
+  return Delete(g_semas, Arg(c, 0)) ? 0 : SceError(kESRCH);
 }
 
 // int sceKernelWaitSema(SceKernelSema sem, int need, SceKernelUseconds*
 // timeout)
 ORBIS_HLE("libkernel", sceKernelWaitSema, 3) {
   recomp::GuestSyncPoint sync;
-  Sema* s = Get(g_semas, Arg(c, 0));
+  const std::shared_ptr<Sema> s = Get(g_semas, Arg(c, 0));
   const int need = int(Arg(c, 1));
   if (!s) return SceError(kESRCH);
   if (need <= 0 || need > s->max) return SceError(kEINVAL);
@@ -119,10 +144,11 @@ ORBIS_HLE("libkernel", sceKernelWaitSema, 3) {
   const uint64_t ticket = s->next_ticket++, gen = s->cancel_gen;
   s->queue.push_back(ticket);
   const bool ok = WaitFor(s->cv, l, Arg(c, 2), [&] {
-    return s->cancel_gen != gen || (s->queue.front() == ticket && s->count >= need);
+    return s->deleted || s->cancel_gen != gen || (s->queue.front() == ticket && s->count >= need);
   });
   s->queue.erase(std::find(s->queue.begin(), s->queue.end(), ticket));
   s->cv.notify_all();  // the next in line may be satisfied too
+  if (s->deleted) return SceError(kESRCH);
   if (s->cancel_gen != gen) return SceError(kECANCELED);
   if (!ok) return SceError(kETIMEDOUT);
   s->count -= need;
@@ -131,7 +157,7 @@ ORBIS_HLE("libkernel", sceKernelWaitSema, 3) {
 
 ORBIS_HLE("libkernel", sceKernelPollSema, 2) {
   recomp::GuestSyncPoint sync;
-  Sema* s = Get(g_semas, Arg(c, 0));
+  const std::shared_ptr<Sema> s = Get(g_semas, Arg(c, 0));
   const int need = int(Arg(c, 1));
   if (!s) return SceError(kESRCH);
   if (need <= 0 || need > s->max) return SceError(kEINVAL);
@@ -143,7 +169,7 @@ ORBIS_HLE("libkernel", sceKernelPollSema, 2) {
 
 ORBIS_HLE("libkernel", sceKernelSignalSema, 2) {
   recomp::GuestSyncPoint sync;
-  Sema* s = Get(g_semas, Arg(c, 0));
+  const std::shared_ptr<Sema> s = Get(g_semas, Arg(c, 0));
   const int n = int(Arg(c, 1));
   if (!s) return SceError(kESRCH);
   std::lock_guard<std::mutex> l(s->mu);
@@ -157,7 +183,7 @@ ORBIS_HLE("libkernel", sceKernelSignalSema, 2) {
 // every waiter returns ECANCELED; count < 0 keeps the count.
 ORBIS_HLE("libkernel", sceKernelCancelSema, 3) {
   recomp::GuestSyncPoint sync;
-  Sema* s = Get(g_semas, Arg(c, 0));
+  const std::shared_ptr<Sema> s = Get(g_semas, Arg(c, 0));
   if (!s) return SceError(kESRCH);
   std::lock_guard<std::mutex> l(s->mu);
   if (int(Arg(c, 1)) > s->max) return SceError(kEINVAL);
@@ -171,7 +197,7 @@ ORBIS_HLE("libkernel", sceKernelCancelSema, 3) {
 // int sceKernelCreateEventFlag(SceKernelEventFlag* out, const char* name,
 // uint32_t attr, uint64_t init, const SceKernelEventFlagOptParam* opt)
 ORBIS_HLE("libkernel", sceKernelCreateEventFlag, 5) {
-  auto f = std::make_unique<EventFlag>();
+  auto f = std::make_shared<EventFlag>();
   f->bits = Arg(c, 3);
   f->multi = uint32_t(Arg(c, 2)) & kAttrMulti;
   const recomp::gaddr h = NewHandle();
@@ -184,15 +210,12 @@ ORBIS_HLE("libkernel", sceKernelCreateEventFlag, 5) {
 }
 
 ORBIS_HLE("libkernel", sceKernelDeleteEventFlag, 1) {
-  std::lock_guard<std::mutex> l(g_mu);
-  if (!g_flags.erase(Arg(c, 0))) return SceError(kESRCH);
-  FreeHandle(Arg(c, 0));
-  return 0;
+  return Delete(g_flags, Arg(c, 0)) ? 0 : SceError(kESRCH);
 }
 
 ORBIS_HLE("libkernel", sceKernelSetEventFlag, 2) {
   recomp::GuestSyncPoint sync;
-  EventFlag* f = Get(g_flags, Arg(c, 0));
+  const std::shared_ptr<EventFlag> f = Get(g_flags, Arg(c, 0));
   if (!f) return SceError(kESRCH);
   std::lock_guard<std::mutex> l(f->mu);
   f->bits |= Arg(c, 1);
@@ -203,7 +226,7 @@ ORBIS_HLE("libkernel", sceKernelSetEventFlag, 2) {
 // Keeps the bits set in the pattern.
 ORBIS_HLE("libkernel", sceKernelClearEventFlag, 2) {
   recomp::GuestSyncPoint sync;
-  EventFlag* f = Get(g_flags, Arg(c, 0));
+  const std::shared_ptr<EventFlag> f = Get(g_flags, Arg(c, 0));
   if (!f) return SceError(kESRCH);
   std::lock_guard<std::mutex> l(f->mu);
   f->bits &= Arg(c, 1);
@@ -214,7 +237,7 @@ ORBIS_HLE("libkernel", sceKernelClearEventFlag, 2) {
 // uint32_t mode, uint64_t* result, SceKernelUseconds* timeout)
 ORBIS_HLE("libkernel", sceKernelWaitEventFlag, 5) {
   recomp::GuestSyncPoint sync;
-  EventFlag* f = Get(g_flags, Arg(c, 0));
+  const std::shared_ptr<EventFlag> f = Get(g_flags, Arg(c, 0));
   const uint64_t pattern = Arg(c, 1);
   const uint32_t mode = uint32_t(Arg(c, 2));
   if (!f) return SceError(kESRCH);
@@ -225,9 +248,10 @@ ORBIS_HLE("libkernel", sceKernelWaitEventFlag, 5) {
   const uint64_t gen = f->cancel_gen;
   f->waiters++;
   const bool ok = WaitFor(f->cv, l, Arg(c, 4), [&] {
-    return f->cancel_gen != gen || Satisfied(f->bits, pattern, mode);
+    return f->deleted || f->cancel_gen != gen || Satisfied(f->bits, pattern, mode);
   });
   f->waiters--;
+  if (f->deleted) return SceError(kESRCH);
   if (Arg(c, 3)) recomp::Wr64(Arg(c, 3), f->bits);
   if (f->cancel_gen != gen) return SceError(kECANCELED);
   if (!ok) return SceError(kETIMEDOUT);
@@ -240,7 +264,7 @@ ORBIS_HLE("libkernel", sceKernelWaitEventFlag, 5) {
 
 ORBIS_HLE("libkernel", sceKernelPollEventFlag, 4) {
   recomp::GuestSyncPoint sync;
-  EventFlag* f = Get(g_flags, Arg(c, 0));
+  const std::shared_ptr<EventFlag> f = Get(g_flags, Arg(c, 0));
   const uint64_t pattern = Arg(c, 1);
   const uint32_t mode = uint32_t(Arg(c, 2));
   if (!f) return SceError(kESRCH);
@@ -259,7 +283,7 @@ ORBIS_HLE("libkernel", sceKernelPollEventFlag, 4) {
 // int* waiters): every waiter returns ECANCELED; the bits become pattern.
 ORBIS_HLE("libkernel", sceKernelCancelEventFlag, 3) {
   recomp::GuestSyncPoint sync;
-  EventFlag* f = Get(g_flags, Arg(c, 0));
+  const std::shared_ptr<EventFlag> f = Get(g_flags, Arg(c, 0));
   if (!f) return SceError(kESRCH);
   std::lock_guard<std::mutex> l(f->mu);
   if (Arg(c, 2)) recomp::Wr32(Arg(c, 2), uint32_t(f->waiters));
