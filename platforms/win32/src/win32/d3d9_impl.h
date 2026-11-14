@@ -197,6 +197,10 @@ Device* DeviceOf(uint32_t self);
 // -1 if neither.
 int SamplerIndex(uint32_t s);
 
+// The object holding `obj`'s reference count: a texture level's is its
+// texture's, anything else's its own.
+uint32_t RefTarget(uint32_t obj);
+
 // Replaces a bound object: references the new one, releases the old.
 void Bind(uint32_t* slot, uint32_t obj);
 

@@ -410,8 +410,8 @@ int SamplerIndex(uint32_t s) {
 }
 
 void Bind(uint32_t* slot, uint32_t obj) {
-  if (obj) com::AddRef(obj);
-  if (*slot) com::Release(*slot);
+  if (obj) com::AddRef(RefTarget(obj));
+  if (*slot) com::Release(RefTarget(*slot));
   *slot = obj;
 }
 
@@ -737,7 +737,7 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetRenderTarget", D3DDev9_GetRenderTarg
     Wr32(Arg(c, 2), 0);
     return i < 4 ? D3DERR_NOTFOUND : D3DERR_INVALIDCALL;
   }
-  com::AddRef(d->render_targets[i]);
+  com::AddRef(RefTarget(d->render_targets[i]));
   Wr32(Arg(c, 2), d->render_targets[i]);
   return D3D_OK;
 }
@@ -748,7 +748,7 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetDepthStencilSurface", D3DDev9_GetDep
     Wr32(Arg(c, 1), 0);
     return D3DERR_NOTFOUND;
   }
-  com::AddRef(d->depth_stencil);
+  com::AddRef(RefTarget(d->depth_stencil));
   Wr32(Arg(c, 1), d->depth_stencil);
   return D3D_OK;
 }
