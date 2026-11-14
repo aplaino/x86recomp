@@ -367,10 +367,10 @@ uint32_t CreateSurfaceImpl(uint32_t desc_va, uint32_t* out) {
   if (caps & DDSCAPS_TEXTURE) {
     int levels = 1;
     if (caps & DDSCAPS_MIPMAP) {
+      for (int m = std::max(w, h); m > 1; m >>= 1) levels++;  // the full chain
       if (d.dwFlags & DDSD_MIPMAPCOUNT) {
+        if (!d.dwMipMapCount || d.dwMipMapCount > uint32_t(levels)) return DDERR_INVALIDPARAMS;
         levels = int(d.dwMipMapCount);
-      } else {
-        for (int m = std::max(w, h); m > 1; m >>= 1) levels++;
       }
     }
     uint32_t tcaps = caps | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM;
