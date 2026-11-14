@@ -534,6 +534,8 @@ HLE_NAMED("ddraw.dll", "IDirect3DDevice7::SetTextureStageState", D3DD7_SetTextur
   uint32_t st = Arg(c, 1), type = Arg(c, 2), v = Arg(c, 3);
   if (st >= 8 || type >= 33) return D3D_OK;
   d->ff.tss[st][type] = v;
+  // D3DTSS_ADDRESS sets the addressing of both u and v.
+  if (type == 12) d->ff.tss[st][13] = d->ff.tss[st][14] = v;
   return D3D_OK;
 }
 
