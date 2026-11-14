@@ -25,9 +25,6 @@ Prot SectionProt(uint32_t ch) {
   return (ch & kScnMemWrite) ? Prot::RW : Prot::R;
 }
 
-std::string CStr(const GuestMemory& mem, gaddr va) {
-  return std::string(mem.ptr<const char>(va));
-}
 
 }  // namespace
 
@@ -55,7 +52,11 @@ bool PeImage::Load(const std::string& path, GuestMemory& mem,
   x64 = machine == 0x8664;
   uint16_t nsec = Rd<uint16_t>(d, pe + 6);
   uint16_t opt_size = Rd<uint16_t>(d, pe + 20);
-  size_t oh = pe + 24;
+  const size_t oh = size_t(pe) + 24, sh = oh + opt_size;
+  if (sh + size_t(nsec) * 40 > d.size()) {
+    *err = "section table runs past end of file";
+    return false;
+  }
   if (Rd<uint16_t>(d, oh) != (x64 ? 0x20B : 0x10B)) {
     *err = x64 ? "optional header is not PE32+" : "optional header is not PE32";
     return false;
@@ -69,11 +70,34 @@ bool PeImage::Load(const std::string& path, GuestMemory& mem,
   image_size = Rd<uint32_t>(d, oh + 56);
   uint32_t headers_size = Rd<uint32_t>(d, oh + 60);
   stack_reserve = x64 ? Rd<uint64_t>(d, oh + 72) : Rd<uint32_t>(d, oh + 72);
+  if (!image_size || headers_size > image_size) {
+    *err = "headers do not fit in the image";
+    return false;
+  }
   if (entry) entry += image_base;  // DLLs may have no entry point
+  // The data directories: NumberOfRvaAndSizes of them, inside the optional
+  // header; any other is empty.
   const size_t dirs = oh + (x64 ? 112 : 96);
-  auto dir = [&](int i) {
+  const uint32_t ndirs = Rd<uint32_t>(d, oh + (x64 ? 108 : 92));
+  auto dir = [&](uint32_t i) {
+    if (i >= ndirs || dirs + 8 * (i + 1) > sh) return std::pair<uint32_t, uint32_t>{0, 0};
     return std::pair<uint32_t, uint32_t>{Rd<uint32_t>(d, dirs + i * 8),
                                          Rd<uint32_t>(d, dirs + 4 + i * 8)};
+  };
+  // Everything the tables below point at must lie inside the image.
+  auto inside = [&](uint64_t rva, uint64_t n) { return rva <= image_size && n <= image_size - rva; };
+  auto bad = [&](const char* what) {
+    *err = std::string(what) + " lies outside the image";
+    return false;
+  };
+  // A NUL-terminated string at rva, ending inside the image.
+  auto str = [&](uint64_t rva, std::string* out) {
+    if (rva >= image_size) return false;
+    const char* p = mem.ptr<const char>(image_base + rva);
+    const size_t n = strnlen(p, size_t(image_size - rva));
+    if (n == image_size - rva) return false;
+    out->assign(p, n);
+    return true;
   };
   const uint32_t ptr_size = x64 ? 8 : 4;
   auto rd_ptr = [&](gaddr va) -> uint64_t {
@@ -102,7 +126,6 @@ bool PeImage::Load(const std::string& path, GuestMemory& mem,
   std::memcpy(mem.ptr(image_base), d.data(),
               std::min<size_t>(headers_size, d.size()));
 
-  size_t sh = oh + opt_size;
   for (uint16_t i = 0; i < nsec; i++) {
     size_t o = sh + i * 40;
     char name[9] = {};
@@ -113,8 +136,12 @@ bool PeImage::Load(const std::string& path, GuestMemory& mem,
     uint32_t rptr = Rd<uint32_t>(d, o + 20);
     uint32_t ch = Rd<uint32_t>(d, o + 36);
     uint32_t n = std::min(vsize ? vsize : rsize, rsize);
-    if (rptr + n > d.size()) {
+    if (uint64_t(rptr) + n > d.size()) {
       *err = std::string("section ") + name + " runs past end of file";
+      return false;
+    }
+    if (!inside(va, std::max(vsize, n))) {
+      *err = std::string("section ") + name + " lies outside the image";
       return false;
     }
     std::memcpy(mem.ptr(image_base + va), d.data() + rptr, n);
@@ -129,20 +156,26 @@ bool PeImage::Load(const std::string& path, GuestMemory& mem,
       *err = "image has no relocations and cannot move from its preferred base";
       return false;
     }
+    if (!inside(rel_rva, rel_size)) return bad("relocation directory");
     const uint64_t delta = image_base - preferred_base;
-    for (gaddr blk = image_base + rel_rva; blk < image_base + rel_rva + rel_size;) {
+    const gaddr rel_end = image_base + rel_rva + rel_size;
+    for (gaddr blk = image_base + rel_rva; blk + 8 <= rel_end;) {
       uint32_t page = mem.read<uint32_t>(blk), size = mem.read<uint32_t>(blk + 4);
       if (size < 8) break;
+      if (size > rel_end - blk) return bad("relocation block");
       for (uint32_t i = 8; i + 2 <= size; i += 2) {
         uint16_t e = mem.read<uint16_t>(blk + i);
-        gaddr at = image_base + page + (e & 0xFFF);
+        const uint64_t rva = uint64_t(page) + (e & 0xFFF);
+        gaddr at = image_base + rva;
         switch (e >> 12) {
           case 0:  // IMAGE_REL_BASED_ABSOLUTE: padding
             break;
           case 3:  // IMAGE_REL_BASED_HIGHLOW
+            if (!inside(rva, 4)) return bad("relocation");
             mem.write<uint32_t>(at, uint32_t(mem.read<uint32_t>(at) + delta));
             break;
           case 10:  // IMAGE_REL_BASED_DIR64
+            if (!inside(rva, 8)) return bad("relocation");
             mem.write<uint64_t>(at, mem.read<uint64_t>(at) + delta);
             break;
           default:
@@ -161,20 +194,28 @@ bool PeImage::Load(const std::string& path, GuestMemory& mem,
     return false;
   }
   auto [imp_rva, imp_size] = dir(1);
-  for (gaddr desc = image_base + imp_rva; imp_size; desc += 20) {
+  for (uint64_t desc_rva = imp_rva; imp_size; desc_rva += 20) {
+    if (!inside(desc_rva, 20)) return bad("import descriptor");
+    const gaddr desc = image_base + desc_rva;
     uint32_t ilt = mem.read<uint32_t>(desc);
     uint32_t name_rva = mem.read<uint32_t>(desc + 12);
     uint32_t iat = mem.read<uint32_t>(desc + 16);
     if (!name_rva) break;
-    std::string dll = CStr(mem, image_base + name_rva);
-    gaddr lookup = image_base + (ilt ? ilt : iat);
-    for (gaddr slot = image_base + iat;; slot += ptr_size, lookup += ptr_size) {
-      uint64_t v = rd_ptr(lookup);
+    std::string dll;
+    if (!str(name_rva, &dll)) return bad("import DLL name");
+    uint64_t lookup_rva = ilt ? ilt : iat;
+    for (uint64_t slot_rva = iat;; slot_rva += ptr_size, lookup_rva += ptr_size) {
+      if (!inside(lookup_rva, ptr_size) || !inside(slot_rva, ptr_size))
+        return bad("import lookup table");
+      const gaddr slot = image_base + slot_rva;
+      uint64_t v = rd_ptr(image_base + lookup_rva);
       if (!v) break;
       const uint64_t by_ordinal = x64 ? 1ull << 63 : 1ull << 31;
-      std::string sym = (v & by_ordinal)
-                            ? "#" + std::to_string(v & 0xFFFF)
-                            : CStr(mem, image_base + uint32_t(v) + 2);
+      std::string sym;
+      if (v & by_ordinal)
+        sym = "#" + std::to_string(v & 0xFFFF);
+      else if (!str(uint64_t(uint32_t(v)) + 2, &sym))
+        return bad("import name");
       gaddr thunk = bind ? bind(dll, sym)
                          : thunk_base + uint32_t(imports.size()) * kThunkStride;
       if (!bind && thunk >= thunk_base + kThunkRegionSize) {
@@ -191,17 +232,22 @@ bool PeImage::Load(const std::string& path, GuestMemory& mem,
 
   auto [exp_rva, exp_size] = dir(0);
   if (exp_size) {
+    if (!inside(exp_rva, 40)) return bad("export directory");
     gaddr e = image_base + exp_rva;
     uint32_t ord_base = mem.read<uint32_t>(e + 16);
     uint32_t nfuncs = mem.read<uint32_t>(e + 20), nnames = mem.read<uint32_t>(e + 24);
-    gaddr funcs = image_base + mem.read<uint32_t>(e + 28);
-    gaddr names = image_base + mem.read<uint32_t>(e + 32);
-    gaddr ords = image_base + mem.read<uint32_t>(e + 36);
+    uint32_t funcs_rva = mem.read<uint32_t>(e + 28), names_rva = mem.read<uint32_t>(e + 32),
+             ords_rva = mem.read<uint32_t>(e + 36);
+    if (!inside(funcs_rva, 4ull * nfuncs) || !inside(names_rva, 4ull * nnames) ||
+        !inside(ords_rva, 2ull * nnames))
+      return bad("export table");
+    gaddr funcs = image_base + funcs_rva, names = image_base + names_rva,
+          ords = image_base + ords_rva;
     std::vector<std::string> by_index(nfuncs);
     for (uint32_t i = 0; i < nnames; i++) {
       uint16_t idx = mem.read<uint16_t>(ords + 2 * i);
-      if (idx < nfuncs)
-        by_index[idx] = CStr(mem, image_base + mem.read<uint32_t>(names + 4 * i));
+      if (idx < nfuncs && !str(mem.read<uint32_t>(names + 4 * i), &by_index[idx]))
+        return bad("export name");
     }
     for (uint32_t i = 0; i < nfuncs; i++) {
       uint32_t rva = mem.read<uint32_t>(funcs + 4 * i);
@@ -214,12 +260,20 @@ bool PeImage::Load(const std::string& path, GuestMemory& mem,
   auto [tls_rva, tls_size] = dir(9);
   if (tls_size) {
     // IMAGE_TLS_DIRECTORY: four VAs, then SizeOfZeroFill.
+    if (!inside(tls_rva, 4 * ptr_size + 4)) return bad("TLS directory");
     gaddr t = image_base + tls_rva;
     tls.raw_start = rd_ptr(t);
     tls.raw_end = rd_ptr(t + ptr_size);
     tls.index_va = rd_ptr(t + 2 * ptr_size);
     tls.callbacks = rd_ptr(t + 3 * ptr_size);
     tls.zero_fill = mem.read<uint32_t>(t + 4 * ptr_size);
+    // The VAs are relocated already: they are inside the image as mapped.
+    auto in_image = [&](gaddr va, uint64_t n) {
+      return va >= image_base && inside(va - image_base, n);
+    };
+    if (tls.raw_end < tls.raw_start || !in_image(tls.raw_start, tls.raw_end - tls.raw_start) ||
+        !in_image(tls.index_va, 4) || (tls.callbacks && !in_image(tls.callbacks, ptr_size)))
+      return bad("TLS template, index or callbacks");
     has_tls = true;
   }
 
@@ -227,12 +281,14 @@ bool PeImage::Load(const std::string& path, GuestMemory& mem,
   // An unwind RVA with bit 0 set points at the parent's RUNTIME_FUNCTION
   // (a chain in short form).
   auto [exc_rva, exc_size] = dir(3);
+  if (x64 && exc_size && !inside(exc_rva, exc_size)) return bad("exception directory");
   if (x64)
     for (uint32_t o = 0; o + 12 <= exc_size; o += 12) {
       gaddr e = image_base + exc_rva + o;
       uint32_t b = mem.read<uint32_t>(e), en = mem.read<uint32_t>(e + 4);
       uint32_t u = mem.read<uint32_t>(e + 8);
       if (!b) continue;
+      if (!inside(u & ~1u, (u & 1) ? 12 : 4)) return bad("unwind information");
       uint8_t fl = (u & 1) ? 4 : mem.read<uint8_t>(image_base + u) >> 3;
       functions.push_back({e, image_base + b, image_base + en, image_base + (u & ~1u), fl});
     }

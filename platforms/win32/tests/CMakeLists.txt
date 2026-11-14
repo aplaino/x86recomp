@@ -6,3 +6,8 @@ add_executable(win32_text_test win32_text_test.cpp)
 target_include_directories(win32_text_test PRIVATE ${RECOMP_ROOT}/src ../src)
 target_compile_features(win32_text_test PRIVATE cxx_std_20)
 add_test(NAME win32_text COMMAND win32_text_test)
+
+# pe_test: the PE loader's bounds checks (recomp_pe); portable.
+add_executable(pe_test pe_test.cpp)
+target_link_libraries(pe_test PRIVATE recomp_pe)
+add_test(NAME pe COMMAND pe_test)
