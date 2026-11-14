@@ -1278,6 +1278,50 @@ int main() {
           "an indirect draw starts at its first vertex through the shader's register");
   }
 
+  // A CMASK fast clear from a dispatch: a draw into an R8G8B8A8 target
+  // with FAST_CLEAR (its CMASK cleared in memory), a dispatch storing
+  // zeros over the whole CMASK, then a draw that covers no pixel: the
+  // target holds the clear colour (CB_COLOR0_CLEAR_WORD0).
+  {
+    constexpr gaddr kCmTarget = 0x1D5000, kCmask = 0x1D6000, kZeroAt = kCode + 0x1F00;
+    static const uint32_t kZero[] = {
+        0x34040082,              // v_lshlrev_b32 v2, 2, v0
+        0x7E020280,              // v_mov_b32 v1, 0
+        0xE0701000, 0x80000102,  // buffer_store_dword v1, v2, s[0:3], 0 offen
+        0xBF810000,              // s_endpgm
+    };
+    std::memcpy(GPtr(kZeroAt), kZero, sizeof kZero);
+    std::memset(GPtr(kCmask), 0, 128);
+    auto cmask_draw = [&](bool covers) {
+      for (int i = 0; i < 3; i++) {
+        const float v[4] = {covers && i == 1 ? 1.0f : -1.0f, covers && i == 2 ? 1.0f : -1.0f, 0.5f, 1.0f};
+        std::memcpy(GPtr(kVerts + 16 * i), v, sizeof v);
+      }
+      Regs r;
+      DrawRegs(r, 0x11, kCmTarget, kVsAt);
+      uint32_t* cb = r.context + 0x318;
+      cb[4] = 10u << 2 | 1u << 13;          // 8_8_8_8 UNORM, FAST_CLEAR
+      cb[7] = uint32_t(kCmask >> 8);        // CB_COLOR0_CMASK
+      cb[8] = 0;                            // one 128x128 block
+      cb[11] = 0x80402010;                  // CB_COLOR0_CLEAR_WORD0
+      Draw(r, {3, 1, 0, 2});
+      Settle(true);
+    };
+    cmask_draw(true);
+    const uint32_t user[4] = {uint32_t(kCmask), 0, 128, 0xFACu | 4u << 15};
+    Run(kZeroAt, user, 4, 32, 1);
+    cmask_draw(false);
+    uint8_t px[8 * 8 * 4] = {};
+    gfx::TextureId tex = 0;
+    Exclusive([&] { tex = TargetAt(kCmTarget, 8, 8); });
+    if (tex) dev->ReadImage(tex, 0, 0, {0, 0, 8, 8}, px, 8 * 4);
+    bool ok = tex;
+    for (int i = 0; ok && i < 64; i++)
+      ok = px[4 * i] == 0x10 && px[4 * i + 1] == 0x20 && px[4 * i + 2] == 0x40 && px[4 * i + 3] == 0x80;
+    if (!ok) std::printf("  pixel 0: %02X %02X %02X %02X\n", px[0], px[1], px[2], px[3]);
+    Check(ok, "a dispatch's CMASK clear fills the target with the clear colour");
+  }
+
   SetDevice(nullptr);
   dev.reset();
   SDL_DestroyWindow(w);

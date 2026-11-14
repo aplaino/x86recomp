@@ -604,10 +604,10 @@ void HtileClear(State& s, DepthTarget& d, float z) {
 }
 
 // Fills a colour target with a clear colour (CB_COLORn_CLEAR_WORD0-1: the
-// target's format's bits), where MetaTest found its CMASK cleared
-// (indirect) or at once. The program unpacks the words in the target's
-// format: four halves, or four UNORM bytes.
-void ColorClear(State& s, const Target& t, const uint32_t words[2], bool indirect) {
+// target's format's bits), where MetaTest finds the CMASK `indirect` (a
+// dispatch's write of it) cleared, or at once (null). The program unpacks
+// the words in the target's format: four halves, or four UNORM bytes.
+void ColorClear(State& s, const Target& t, const uint32_t words[2], const Meta* indirect) {
   uint32_t kind;
   if (t.fmt == Format::A16B16G16R16F) kind = 0;
   else if (t.fmt == Format::R8G8B8A8) kind = 1;
@@ -626,7 +626,7 @@ void ColorClear(State& s, const Target& t, const uint32_t words[2], bool indirec
     pd.fs.uniform_bytes = 16;
     s.color_clear = s.dev->CreateProgram(pd);
   }
-  if (!s.color_clear) return;
+  if (!s.color_clear || (indirect && !MetaTest(s, *indirect))) return;
   const uint32_t u[4] = {words[0], words[1], kind, 0};
   gfx::ProgramDraw c;
   c.program = s.color_clear;
@@ -664,7 +664,7 @@ void CmaskDraw(State& s, gfx::TextureId tex, const uint32_t* cb, bool eliminate)
   MetaCheck(c.meta);
   const uint32_t words[2] = {cb[11], cb[12]};
   if (c.meta.gpu || c.meta.clear) {
-    ColorClear(s, *t, words, c.meta.gpu);
+    ColorClear(s, *t, words, c.meta.gpu ? &c.meta : nullptr);
     c.meta.gpu = c.meta.clear = false;
     c.words[0] = words[0];
     c.words[1] = words[1];
