@@ -799,6 +799,10 @@ bool IsTerminator(const Insn& i) {
   }
 }
 
+bool IsGetPc(const Insn& i) {
+  return (i.op == Op::kB || i.op == Op::kBc) && i.lk && uint64_t(i.imm) == i.va + 4;
+}
+
 std::string Name(const Insn& i) {
   switch (i.op) {
     case Op::kInvalid: return "(invalid)";

@@ -48,6 +48,11 @@ class Reader {
   // One instruction of the prologue (or of a register save routine it
   // calls, `in_routine`). False if it is one the reader does not follow.
   bool Step(const Insn& i, bool in_routine) {
+    // A get-PC leaves its own address in LR (CTR is not followed).
+    if (ppc::IsGetPc(i)) {
+      lr_ = {Val::kConst, int64_t(i.va + 4)};
+      return true;
+    }
     switch (i.op) {
       case Op::kMfspr:
         if (i.spr == kLr) {

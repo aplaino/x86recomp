@@ -155,6 +155,11 @@ uint32_t VmxEncoding(const Insn& i);
 // True for instructions after which execution does not fall through.
 bool IsTerminator(const Insn& i);
 
+// A branch and link to the next instruction (`bl .+4`, `bcl 20,31,.+4`):
+// position-independent code reading its own address, which sets LR and
+// falls through, not a call.
+bool IsGetPc(const Insn& i);
+
 // Short mnemonic for comments and messages (not a disassembler).
 std::string Name(const Insn& i);
 

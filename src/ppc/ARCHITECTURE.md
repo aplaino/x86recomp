@@ -178,7 +178,9 @@ mask bit 4, an unused immediate).
   added to a base); constants from `lis`/`li` with `addi`/`ori`, and the
   `ori r, r, 0` padding skipped. Other `bcctr` are indirect jumps
   (dispatched).
-- Calls: `bl` and `bcl` call the target's function, `blr` returns,
+- Calls: `bl` and `bcl` call the target's function, except to the next
+  instruction (`bl .+4`, `bcl 20,31,.+4`: position-independent code
+  reading its own address), which sets LR and falls through; `blr` returns,
   `bctrl` and `blrl` dispatch; registers are spilled to the context
   around anything that can observe them. A `blr` whose straight-line code
   above it last set r1 with a load from memory other than the stack

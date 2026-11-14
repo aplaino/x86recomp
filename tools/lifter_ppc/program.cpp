@@ -37,7 +37,7 @@ bool WritesReg(const Insn& i, int r) {
     case Op::kLmw:
       return r >= i.rd;
     case Op::kB: case Op::kBc: case Op::kBclr: case Op::kBcctr:
-      return i.lk;  // the callee may change anything
+      return i.lk && !ppc::IsGetPc(i);  // the callee may change anything
     case Op::kSc: case Op::kTw: case Op::kTwi: case Op::kTd: case Op::kTdi:
       return true;  // so may the platform
     default:
@@ -227,7 +227,8 @@ bool Program::JumpTable(const Function& f, uint64_t bcctr_va, std::vector<uint64
            i.ra != r && i.rd == r;
   };
   auto slot_hazard = [](const Insn& i, const Slot& w) {
-    bool call = (i.op == Op::kB || i.op == Op::kBc || i.op == Op::kBclr || i.op == Op::kBcctr) && i.lk;
+    bool call = (i.op == Op::kB || i.op == Op::kBc || i.op == Op::kBclr || i.op == Op::kBcctr) && i.lk &&
+                !ppc::IsGetPc(i);
     bool store = i.op == Op::kStore || i.op == Op::kFpStore || i.op == Op::kStmw;
     bool aliases = w.base == 1 ? i.ra == 1 && (i.indexed || i.imm == w.disp) : true;
     return (store && aliases) || WritesReg(i, w.base) || call;
@@ -330,6 +331,7 @@ Function Program::Build(uint64_t start, uint64_t end, std::set<uint64_t>& found)
     const Insn& i = f.insns[va] = ppc::Decode(va, Word(va), img_.cpu);
     switch (i.op) {
       case Op::kB:
+        if (ppc::IsGetPc(i)) break;
         if (i.lk) {
           found.insert(uint64_t(i.imm));
           break;
@@ -337,6 +339,7 @@ Function Program::Build(uint64_t start, uint64_t end, std::set<uint64_t>& found)
         branch(uint64_t(i.imm));
         continue;
       case Op::kBc:
+        if (ppc::IsGetPc(i)) break;
         if (i.lk) found.insert(uint64_t(i.imm));
         else branch(uint64_t(i.imm));
         if (ppc::IsTerminator(i)) continue;
@@ -390,8 +393,9 @@ bool Program::SavesContext(const Function& f) const {
       if (int(i.rd) == lr_reg) ret = true;
     }
     if (sp && ret) return true;
-    if (WritesReg(i, 3) && !(i.op == Op::kB && i.lk)) return false;
-    if (i.op == Op::kB && i.lk) return false;
+    bool call = i.op == Op::kB && i.lk && !ppc::IsGetPc(i);
+    if (WritesReg(i, 3) && !call) return false;
+    if (call) return false;
   }
   return false;
 }

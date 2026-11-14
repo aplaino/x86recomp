@@ -81,7 +81,10 @@ int table_back(unsigned v);
 int call_thunk(unsigned v);
 extern int (*const ptr_table[1])(unsigned v);
 
-// fixture/flow.S: a loop crossing function starts.
+// fixture/flow.S: get-PC, and a loop crossing function starts.
+int pic_bl(unsigned v);
+int pic_bcl(unsigned v);
+int pic_beql(unsigned v);
 unsigned cross_loop(unsigned n);
 unsigned cross_mid(unsigned n);
 
@@ -181,7 +184,10 @@ int main(void) {
   for (u32 k = 0; k < 16; k++) pt = pt * 9 + (u64)(i64)ptr_table[0](k) + (u64)(i64)call_thunk(k % 6);
   hex("pointers", pt);
 
-  u64 fl = cross_loop(1000000);
+  u64 fl = 0;
+  for (u32 k = 0; k < 8; k++)
+    fl = fl * 17 + (u64)(i64)pic_bl(k) + (u64)(i64)pic_bcl(k) * 3 + (u64)(i64)pic_beql(k) * 5;
+  fl = fl * 19 + cross_loop(1000000);
   fl = fl * 23 + cross_mid(500000);
   hex("flow", fl);
 

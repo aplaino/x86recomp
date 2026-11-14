@@ -52,7 +52,7 @@ struct Uses {
 
 bool IsCall(const Insn& i) {
   switch (i.op) {
-    case Op::kB: case Op::kBc: case Op::kBclr: case Op::kBcctr: return i.lk;
+    case Op::kB: case Op::kBc: case Op::kBclr: case Op::kBcctr: return i.lk && !ppc::IsGetPc(i);
     default: return false;
   }
 }
@@ -366,10 +366,13 @@ std::string Emitter::Body(const Insn& i) {
     }
 
     case Op::kB:
+      if (ppc::IsGetPc(i)) return "lr = " + Hex(i.va + 4) + ";";
       if (i.lk) return "lr = " + Hex(i.va + 4) + "; " + Call(i.va, uint64_t(i.imm));
       return Branch(i.va, uint64_t(i.imm));
     case Op::kBc: {
       std::string dec, cond = BranchCondition(i, dec);
+      // Taken or not, it goes on at the next instruction.
+      if (ppc::IsGetPc(i)) return dec + "lr = " + Hex(i.va + 4) + ";";
       if (i.lk) return dec + "lr = " + Hex(i.va + 4) + "; if (" + cond + ") { " + Call(i.va, uint64_t(i.imm)) + "}";
       return dec + "if (" + cond + ") " + Branch(i.va, uint64_t(i.imm));
     }
