@@ -653,13 +653,17 @@ HLE64("kernel32.dll", VirtualAlloc, 4) {
   // MEM_COMMIT with no address reserves and commits, like MEM_RESERVE|COMMIT.
   if (!addr && (type & kMemCommit)) type |= kMemReserve;
   if (type & kMemReserve) {
-    gaddr base = vm.Reserve(addr, size + (addr & 0xFFFF), type & kMemTopDown);
+    // A reservation starts at the address rounded down to 64 KiB and covers
+    // every page of [addr, addr + size); MEM_COMMIT commits all of it, and
+    // the result is the reservation's base.
+    const uint64_t span = size + (addr & 0xFFFF);
+    gaddr base = vm.Reserve(addr, span, type & kMemTopDown);
     if (!base) {
       SetLastError(kErrorNotEnoughMemory);
       return 0;
     }
-    if (type & kMemCommit) vm.Commit(base, size, ProtFromWin(prot));
-    return addr ? addr & ~gaddr(0xFFF) : base;
+    if (type & kMemCommit) vm.Commit(base, span, ProtFromWin(prot));
+    return base;
   }
   if (type & kMemCommit) {
     if (!vm.Commit(addr, size, ProtFromWin(prot))) {
