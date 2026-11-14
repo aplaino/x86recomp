@@ -5,6 +5,7 @@
 #ifdef LIB_TEST
 int test_check(int id, long got, long want) { return 0; }
 int test_double(int id, double d, long n) { return 0; }
+long test_threads(void) { return 0; }
 int test_value;
 #endif
 
@@ -30,6 +31,8 @@ STUB(sceKernelAddUserEventEdge) STUB(sceKernelTriggerUserEvent) STUB(sceKernelDe
 STUB(sceKernelGetEventId) STUB(sceKernelGetEventFilter) STUB(sceKernelGetEventData)
 STUB(sceKernelGetEventUserData) STUB(sceKernelDeleteSema) STUB(sceKernelDeleteEventFlag)
 STUB(scePthreadCondDestroy) STUB(scePthreadMutexTimedlock) STUB(scePthreadCondTimedwait)
+STUB(scePthreadDetach) STUB(scePthreadAttrInit) STUB(scePthreadAttrSetdetachstate)
+STUB(scePthreadAttrGet) STUB(scePthreadAttrDestroy)
 #endif
 
 #ifdef LIB_FIBER

@@ -77,6 +77,12 @@ void ThreadInit(Thread* t) {
   t->ctx.fs_base = tp;
 }
 
+// Process::thread_free: the TLS area ThreadInit reserved.
+void ThreadFree(Thread* t) {
+  GuestAllocator::Region r;
+  if (g_proc->vm.Find(t->ctx.fs_base, &r)) g_proc->vm.Release(r.base);
+}
+
 // Dev aid: <ID>_NID_NAMES names a file of symbol names (one per line)
 // that imports without a handler are named by (else by NID) in traces
 // and errors.
@@ -187,6 +193,7 @@ int RunProcess(const GameConfig& game, const std::string& game_dir, const Config
   p.sysv = true;
   p.fpu_control = 0x037F;  // FreeBSD's for new threads
   p.thread_init = ThreadInit;
+  p.thread_free = ThreadFree;
   p.vm.Init(&p.mem, kUserLo64, p.mem.size());
   p.vm.MarkReserved(kThunkZone, kThunkZoneSize);
 

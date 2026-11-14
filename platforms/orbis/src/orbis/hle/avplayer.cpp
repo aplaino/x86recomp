@@ -560,6 +560,7 @@ ORBIS_HLE("libSceAvPlayer", sceAvPlayerClose, 1) {
     p->cv.notify_all();
     if (p->thread) p->cv.wait(l, [&] { return p->done; });
   }
+  if (p->thread) recomp::ReleaseThread(p->thread);
   const InitData in = p->init;  // p goes with g_players' entry
   for (gaddr t : p->textures) recomp::CallGuest(c, in.deallocate_texture, {in.mem_obj, t});
   for (gaddr b : p->audio_buffers) recomp::CallGuest(c, in.deallocate, {in.mem_obj, b});

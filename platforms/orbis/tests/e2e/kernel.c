@@ -5,6 +5,7 @@
 // test's HLE (test_check).
 
 int test_check(int id, long got, long want);
+long test_threads(void);  // the runtime's guest threads not yet freed
 
 typedef void* Handle;  // ScePthread, ScePthreadMutex, SceKernelSema, ...
 typedef struct {
@@ -22,6 +23,11 @@ typedef struct {
 int scePthreadCreate(Handle* t, const Handle* attr, void* (*entry)(void*), void* arg,
                      const char* name);
 int scePthreadJoin(Handle t, void** ret);
+int scePthreadDetach(Handle t);
+int scePthreadAttrInit(Handle* a);
+int scePthreadAttrSetdetachstate(Handle* a, int detached);
+int scePthreadAttrGet(Handle t, Handle* a);
+int scePthreadAttrDestroy(Handle* a);
 int scePthreadMutexattrInit(Handle* a);
 int scePthreadMutexattrSettype(Handle* a, int type);
 int scePthreadMutexattrDestroy(Handle* a);
@@ -188,6 +194,22 @@ static void* wait_doomed_flag(void* arg) {
 static void* timed_lock(void* arg) {
   (void)arg;
   return (void*)(long)(unsigned)scePthreadMutexTimedlock(&counter_mu, 0xFFFFFFFF00000000ul | 1000);
+}
+
+static int finished;
+static void* finish(void* arg) {
+  (void)arg;
+  __atomic_fetch_add(&finished, 1, __ATOMIC_SEQ_CST);
+  return 0;
+}
+static void wait_finished(int n) {
+  while (__atomic_load_n(&finished, __ATOMIC_SEQ_CST) < n) sceKernelUsleep(200);
+}
+// Whether the runtime's thread count comes back to n (a finished
+// thread's host thread lets go of it just after it ends).
+static int threads_settle(long n) {
+  for (int i = 0; i < 2000 && test_threads() != n; i++) sceKernelUsleep(500);
+  return test_threads() == n;
 }
 
 int kernel_checks(void) {
@@ -423,6 +445,38 @@ int kernel_checks(void) {
   r = sceKernelMapDirectMemory(&aligned, 0x10000, 0x33, 0, off, 0x200000);
   failed += test_check(472, r == 0 && ((unsigned long)aligned & 0x1FFFFF) == 0, 1);
   sceKernelReleaseDirectMemory(off, 0x10000);
+
+  // 486-491: a thread is freed once no one can join it: joined, created
+  // detached, or detached after it finished; a finished thread waiting
+  // to be joined is kept, and its handle still describes it.
+  Handle many[8], tattr, dattr;
+  sceKernelUsleep(50000);  // the threads joined above are let go of
+  const long base = test_threads();
+  finished = 0;
+  for (int i = 0; i < 8; i++) scePthreadCreate(&many[i], 0, finish, 0, "finish");
+  wait_finished(8);
+  sceKernelUsleep(5000);
+  failed += test_check(486, test_threads() - base, 8);
+  scePthreadAttrInit(&tattr);
+  failed += test_check(487, scePthreadAttrGet(many[0], &tattr), 0);
+  for (int i = 0; i < 8; i++) scePthreadJoin(many[i], 0);
+  failed += test_check(488, threads_settle(base), 1);
+  failed += test_check(489, (unsigned)scePthreadJoin(many[0], 0) * 10ul +
+                                (unsigned)scePthreadAttrGet(many[1], &tattr),
+                       (unsigned long)SCE_ESRCH * 11);
+  scePthreadAttrDestroy(&tattr);
+  finished = 0;
+  scePthreadAttrInit(&dattr);
+  scePthreadAttrSetdetachstate(&dattr, 1);
+  for (int i = 0; i < 8; i++) scePthreadCreate(&many[i], &dattr, finish, 0, "detached");
+  scePthreadAttrDestroy(&dattr);
+  wait_finished(8);
+  failed += test_check(490, threads_settle(base), 1);
+  finished = 0;
+  for (int i = 0; i < 8; i++) scePthreadCreate(&many[i], 0, finish, 0, "finish");
+  wait_finished(8);
+  for (int i = 0; i < 8; i++) scePthreadDetach(many[i]);
+  failed += test_check(491, threads_settle(base), 1);
 
   // 60-61: clocks.
   long a[2], b[2];

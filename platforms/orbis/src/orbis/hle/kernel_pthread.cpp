@@ -78,7 +78,15 @@ struct ThreadAttr {
 
 struct PThread {
   gaddr handle = 0;
+  uint32_t tid = 0;
+  uint64_t stack = 0;  // its guest stack's size
+  // A thread of Create's holds its Thread (CreateGuestThread's reference)
+  // until it is forgotten (Forget) and no call holds it any more; other
+  // threads (the main thread, the HLE's own) have none here.
   Thread* t = nullptr;
+  ~PThread() {
+    if (t) ReleaseThread(t);
+  }
   std::string name;
   std::mutex mu;
   std::condition_variable cv;
@@ -105,8 +113,9 @@ Objects<Cond>& g_conds = *new Objects<Cond>;
 Objects<RwLock>& g_rwlocks = *new Objects<RwLock>;
 Objects<ThreadAttr>& g_thread_attrs = *new Objects<ThreadAttr>;
 Objects<PThread>& g_threads = *new Objects<PThread>;  // by handle
-std::map<Thread*, std::shared_ptr<PThread>>& g_by_thread =
-    *new std::map<Thread*, std::shared_ptr<PThread>>;
+// By tid, which is never reused (a freed Thread's address may be).
+std::map<uint32_t, std::shared_ptr<PThread>>& g_by_thread =
+    *new std::map<uint32_t, std::shared_ptr<PThread>>;
 std::map<uint32_t, gaddr> g_key_destructors;  // key -> destructor (0: none)
 uint32_t g_next_key = 1;
 
@@ -360,15 +369,16 @@ int RwInit(gaddr slot) {
 // The calling thread's PThread (the main thread's made on first use).
 std::shared_ptr<PThread> Self() {
   std::lock_guard<std::mutex> l(g_mu);
-  Thread* t = CurrentThread();
-  auto it = g_by_thread.find(t);
+  const Thread* t = CurrentThread();
+  auto it = g_by_thread.find(t->tid);
   if (it != g_by_thread.end()) return it->second;
   auto pt = std::make_shared<PThread>();
-  pt->t = t;
+  pt->tid = t->tid;
+  pt->stack = t->stack_hi - t->stack_lo;
   pt->handle = NewHandle();
   pt->name = "main";
   g_threads[pt->handle] = pt;
-  g_by_thread[t] = pt;
+  g_by_thread[t->tid] = pt;
   return pt;
 }
 
@@ -398,6 +408,20 @@ void RunKeyDestructors(Ctx& c, PThread& pt) {
   }
 }
 
+// A finished thread no one can join any more (joined, or detached): its
+// handle goes, and with the PThread (once no call holds it) the Thread
+// and its stack.
+void Forget(const PThread& pt) {
+  std::shared_ptr<PThread> last;  // dropped after g_mu
+  std::lock_guard<std::mutex> l(g_mu);
+  auto it = g_threads.find(pt.handle);
+  if (it == g_threads.end() || it->second.get() != &pt) return;  // forgotten already
+  last = std::move(it->second);
+  g_threads.erase(it);
+  g_by_thread.erase(pt.tid);
+  FreeHandle(pt.handle);
+}
+
 int Create(gaddr out, gaddr attr_slot, gaddr entry, uint64_t arg, gaddr name) {
   ThreadAttr attr;
   if (attr_slot) {
@@ -409,6 +433,8 @@ int Create(gaddr out, gaddr attr_slot, gaddr entry, uint64_t arg, gaddr name) {
   Thread* t = CreateGuestThread(attr.stack);
   auto pt = std::make_shared<PThread>();
   pt->t = t;
+  pt->tid = t->tid;
+  pt->stack = t->stack_hi - t->stack_lo;
   pt->detached = attr.detached;
   pt->prio = attr.prio;
   pt->affinity = attr.affinity;
@@ -417,7 +443,7 @@ int Create(gaddr out, gaddr attr_slot, gaddr entry, uint64_t arg, gaddr name) {
     std::lock_guard<std::mutex> l(g_mu);
     pt->handle = NewHandle();
     g_threads[pt->handle] = pt;
-    g_by_thread[t] = pt;
+    g_by_thread[t->tid] = pt;
   }
   Wr64(out, pt->handle);
   GuestSyncFence();
@@ -430,10 +456,15 @@ int Create(gaddr out, gaddr attr_slot, gaddr entry, uint64_t arg, gaddr name) {
       r = pt->ret;  // scePthreadExit set it
     }
     RunKeyDestructors(c, *pt);
-    std::lock_guard<std::mutex> l(pt->mu);
-    pt->ret = r;
-    pt->done = true;
-    pt->cv.notify_all();
+    bool detached;
+    {
+      std::lock_guard<std::mutex> l(pt->mu);
+      pt->ret = r;
+      pt->done = true;
+      detached = pt->detached;
+      pt->cv.notify_all();
+    }
+    if (detached) Forget(*pt);
   });
   return 0;
 }
@@ -441,7 +472,7 @@ int Create(gaddr out, gaddr attr_slot, gaddr entry, uint64_t arg, gaddr name) {
 int Join(gaddr h, gaddr ret_out) {
   std::shared_ptr<PThread> pt = ThreadOf(h);
   if (!pt) return kESRCH;
-  if (pt->t == CurrentThread()) return kEDEADLK;
+  if (pt->tid == Tid()) return kEDEADLK;
   {
     std::unique_lock<std::mutex> l(pt->mu);
     if (pt->detached) return kEINVAL;
@@ -449,6 +480,20 @@ int Join(gaddr h, gaddr ret_out) {
   }
   GuestSyncFence();
   if (ret_out) Wr64(ret_out, pt->ret);
+  Forget(*pt);
+  return 0;
+}
+
+int Detach(gaddr h) {
+  std::shared_ptr<PThread> pt = ThreadOf(h);
+  if (!pt) return kESRCH;
+  bool done;
+  {
+    std::lock_guard<std::mutex> l(pt->mu);
+    pt->detached = true;
+    done = pt->done;
+  }
+  if (done) Forget(*pt);
   return 0;
 }
 
@@ -560,13 +605,7 @@ ORBIS_HLE("libkernel", scePthreadCreate, 5) {
   return Sce(Create(Arg(c, 0), Arg(c, 1), Arg(c, 2), Arg(c, 3), Arg(c, 4)));
 }
 ORBIS_HLE("libkernel", scePthreadJoin, 2) { return Sce(Join(Arg(c, 0), Arg(c, 1))); }
-ORBIS_HLE("libkernel", scePthreadDetach, 1) {
-  std::shared_ptr<PThread> pt = ThreadOf(Arg(c, 0));
-  if (!pt) return SceError(kESRCH);
-  std::lock_guard<std::mutex> l(pt->mu);
-  pt->detached = true;
-  return 0;
-}
+ORBIS_HLE("libkernel", scePthreadDetach, 1) { return Sce(Detach(Arg(c, 0))); }
 ORBIS_HLE("libkernel", scePthreadExit, 1) {
   std::shared_ptr<PThread> pt = Self();
   pt->ret = Arg(c, 0);
@@ -658,7 +697,7 @@ ORBIS_HLE("libkernel", scePthreadAttrGet, 2) {
   std::shared_ptr<PThread> pt = ThreadOf(Arg(c, 0));
   const std::shared_ptr<ThreadAttr> a = AttrAt(Arg(c, 1));
   if (!pt || !a) return SceError(pt ? kEINVAL : kESRCH);
-  a->stack = pt->t->stack_hi - pt->t->stack_lo;
+  a->stack = pt->stack;
   a->detached = pt->detached;
   a->prio = pt->prio;
   a->affinity = pt->affinity;

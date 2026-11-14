@@ -56,6 +56,13 @@ ORBIS_HLE("libTest", test_double, 3) {
 
 ORBIS_DATA("libTest", "test_value", test_value, 4, InitTestValue);
 
+namespace recomp {
+size_t GuestThreadCount();
+}  // namespace recomp
+
+// long test_threads(void): the core's guest threads not yet freed.
+ORBIS_HLE("libTest", test_threads, 0) { return ::recomp::GuestThreadCount(); }
+
 int main(int argc, char** argv) {
   if (argc != 4) {
     std::printf("usage: orbis_process_test eboot.elf prx.elf libTestLoad.prx\n");
@@ -93,7 +100,7 @@ int main(int argc, char** argv) {
   const int r = recomp::orbis::RunProcess(game, dir.string(), config);
   std::filesystem::remove_all(dir);
   std::filesystem::remove(pad);
-  constexpr int kChecks = 33 + 37 + 20 + 6 + 24 + 27 + 18 + 7 + 6 + 7 + 38 + 3 + 24 + 47 + 22 + 16 + 9 + 16 + 1 + 8 + 5 + 2 + 1 + 1 + 2 + 2 + 1 + 1 + 2 + 2;
+  constexpr int kChecks = 33 + 37 + 20 + 6 + 24 + 27 + 18 + 7 + 6 + 7 + 38 + 3 + 24 + 47 + 22 + 16 + 9 + 16 + 1 + 8 + 5 + 2 + 1 + 1 + 2 + 2 + 1 + 1 + 2 + 2 + 6;
   std::printf("%d checks, %d failed, _start returned %d\n", g_checks, g_failed, r);
   const bool ok = r == 0 && g_failed == 0 && g_checks == kChecks;
   std::printf("%s\n", ok ? "orbis_process: ok" : "orbis_process: FAILED");
