@@ -422,12 +422,18 @@ class InsnEmitter {
   }
 
   // x64: RIP-relative operands are absolute at lift time; gs is the TEB.
-  // With an address-size prefix the sum wraps at 32 bits.
+  // With an address-size prefix the sum wraps at 32 bits (RIP-relative:
+  // EIP plus the displacement).
   std::string AddrExpr64(int i, bool segment) const {
     const auto& m = Op(i).mem;
-    if (m.base == ZYDIS_REGISTER_RIP)
-      return Hex(in_.next() + uint64_t(m.disp.value));
     std::string s;
+    if (m.base == ZYDIS_REGISTER_RIP) {
+      const uint64_t a = in_.next() + uint64_t(m.disp.value);
+      s = Hex(d_.address_width == 32 ? uint32_t(a) : a);
+      if (segment && m.segment == ZYDIS_REGISTER_GS) s = "GS + " + s;
+      if (segment && m.segment == ZYDIS_REGISTER_FS) s = "FS + " + s;
+      return s;
+    }
     auto add = [&](const std::string& t) {
       if (!s.empty()) s += " + ";
       s += t;
@@ -463,6 +469,9 @@ class InsnEmitter {
              m.segment == ZYDIS_REGISTER_CS || m.segment == ZYDIS_REGISTER_GS ||
              m.segment == ZYDIS_REGISTER_FS;
     }
+    // 16-bit addressing (an address-size prefix) is not modelled: its sum
+    // wraps at 16 bits, and a bare displacement is 16 bits unsigned.
+    if (d_.address_width == 16) return false;
     if (m.base != ZYDIS_REGISTER_NONE && !Gpr32Name(m.base)) return false;
     if (m.index != ZYDIS_REGISTER_NONE && !Gpr32Name(m.index)) return false;
     return m.segment == ZYDIS_REGISTER_NONE || m.segment == ZYDIS_REGISTER_DS ||
@@ -619,7 +628,7 @@ class InsnEmitter {
   void EmitShift();
   enum StringKind { Movs, Stos, Lods, Scas, Cmps };
   void EmitString();
-  void EmitString64(int n, StringKind kind);
+  void EmitString64(int n, StringKind kind, ZydisRegister seg);
   void EmitX87();
   void EmitSse();
   void EmitAvx();
@@ -754,33 +763,53 @@ void InsnEmitter::EmitString() {
     default: break;
   }
   if (!n) return Unimpl();
-  if (X64()) return EmitString64(n, kind);
+  // The source (DS:esi) takes a segment override; the destination (ES:edi)
+  // never does.
+  ZydisRegister seg = ZYDIS_REGISTER_NONE;
+  for (int i = 0; i < d_.operand_count; i++)
+    if (IsMem(i) && (Op(i).mem.base == ZYDIS_REGISTER_SI || Op(i).mem.base == ZYDIS_REGISTER_ESI ||
+                     Op(i).mem.base == ZYDIS_REGISTER_RSI))
+      seg = Op(i).mem.segment;
+  if (X64()) return EmitString64(n, kind, seg);
+  if (seg == ZYDIS_REGISTER_GS) return Unimpl();  // as for any gs: operand (AddrOk)
+  // With an address-size prefix the instruction uses si, di and cx, and
+  // their updates wrap at 16 bits.
+  const bool a16 = d_.address_width == 16;
+  const std::string si = (seg == ZYDIS_REGISTER_FS ? "FS + " : "") +
+                         std::string(a16 ? "(esi & 0xFFFFu)" : "esi");
+  const char* di = a16 ? "(edi & 0xFFFFu)" : "edi";
+  auto next = [&](const char* r) {
+    return a16 ? Fmt("%s = (%s & 0xFFFF0000u) | ((%s + d) & 0xFFFFu);", r, r, r)
+               : Fmt("%s += d;", r);
+  };
+  const std::string esi = next("esi"), edi = next("edi");
+  const char* cx = a16 ? "(ecx & 0xFFFFu)" : "ecx";
+  const char* dec = a16 ? "ecx = (ecx & 0xFFFF0000u) | ((ecx - 1u) & 0xFFFFu);" : "ecx--;";
   const char* t = MemType(n);
   std::string acc = ReadReg(Acc(n));
   std::string step = Fmt("const uint32_t d = F.df ? uint32_t(-%d) : %du;", n, n);
   std::string body;
-  // esi is DS:esi, edi is ES:edi; both flat. An fs: override on the source
-  // (never seen in this binary) is not supported.
   switch (kind) {
     case Movs:
-      body = Fmt("::recomp::lift::Wr<%s>(B, edi, ::recomp::lift::Rd<%s>(B, esi)); "
-                 "esi += d; edi += d;", t, t);
+      body = Fmt("::recomp::lift::Wr<%s>(B, %s, ::recomp::lift::Rd<%s>(B, %s)); %s %s", t, di,
+                 t, si.c_str(), esi.c_str(), edi.c_str());
       break;
     case Stos:
-      body = Fmt("::recomp::lift::Wr<%s>(B, edi, %s(%s)); edi += d;", t, t,
-                 acc.c_str());
+      body = Fmt("::recomp::lift::Wr<%s>(B, %s, %s(%s)); %s", t, di, t, acc.c_str(),
+                 edi.c_str());
       break;
     case Lods:
-      body = Fmt("{ const uint32_t v = ::recomp::lift::Rd<%s>(B, esi); %s } "
-                 "esi += d;", t, WriteReg(Acc(n), "v").c_str());
+      body = Fmt("{ const uint32_t v = ::recomp::lift::Rd<%s>(B, %s); %s } %s", t, si.c_str(),
+                 WriteReg(Acc(n), "v").c_str(), esi.c_str());
       break;
     case Scas:
-      body = Fmt("(void)::recomp::lift::Sub<%d>(F, %s, ::recomp::lift::Rd<%s>(B, edi)); "
-                 "edi += d;", n, acc.c_str(), t);
+      body = Fmt("(void)::recomp::lift::Sub<%d>(F, %s, ::recomp::lift::Rd<%s>(B, %s)); %s", n,
+                 acc.c_str(), t, di, edi.c_str());
       break;
     case Cmps:
-      body = Fmt("(void)::recomp::lift::Sub<%d>(F, ::recomp::lift::Rd<%s>(B, esi), "
-                 "::recomp::lift::Rd<%s>(B, edi)); esi += d; edi += d;", n, t, t);
+      body = Fmt("(void)::recomp::lift::Sub<%d>(F, ::recomp::lift::Rd<%s>(B, %s), "
+                 "::recomp::lift::Rd<%s>(B, %s)); %s %s", n, t, si.c_str(), t, di,
+                 esi.c_str(), edi.c_str());
       break;
   }
 
@@ -790,44 +819,58 @@ void InsnEmitter::EmitString() {
   L(step);
   if (kind == Scas || kind == Cmps) {
     if (repe)
-      L("while (ecx) { " + body + " ecx--; if (!F.zf) break; }");
+      L(std::string("while (") + cx + ") { " + body + " " + dec + " if (!F.zf) break; }");
     else if (repne)
-      L("while (ecx) { " + body + " ecx--; if (F.zf) break; }");
+      L(std::string("while (") + cx + ") { " + body + " " + dec + " if (F.zf) break; }");
     else
       L(body);
   } else if (rep || repe || repne) {
-    L("while (ecx) { " + body + " ecx--; }");
+    L(std::string("while (") + cx + ") { " + body + " " + dec + " }");
   } else {
     L(body);
   }
 }
 
-// x64 string instructions: rsi, rdi and rcx (64-bit addressing; the
-// 32-bit form with an address-size prefix is not supported).
-void InsnEmitter::EmitString64(int n, StringKind kind) {
-  if (d_.address_width != 64) return Unimpl();
+// x64 string instructions: rsi, rdi and rcx; with an address-size prefix
+// esi, edi and ecx, whose updates zero-extend as any 32-bit register
+// write. fs: and gs: overrides on the source add their base.
+void InsnEmitter::EmitString64(int n, StringKind kind, ZydisRegister seg) {
+  const bool a32 = d_.address_width == 32;
+  const std::string si = (seg == ZYDIS_REGISTER_FS   ? "FS + "
+                          : seg == ZYDIS_REGISTER_GS ? "GS + "
+                                                     : "") +
+                         std::string(a32 ? "uint64_t(uint32_t(rsi))" : "rsi");
+  const char* di = a32 ? "uint64_t(uint32_t(rdi))" : "rdi";
+  auto next = [&](const char* r) {
+    return a32 ? Fmt("%s = uint64_t(uint32_t(%s + d));", r, r) : Fmt("%s += d;", r);
+  };
+  const std::string rsi = next("rsi"), rdi = next("rdi");
+  const char* cx = a32 ? "uint32_t(rcx)" : "rcx";
+  const char* dec = a32 ? "rcx = uint64_t(uint32_t(rcx - 1u));" : "rcx--;";
   const char* t = MemType(n);
   std::string acc = ReadReg(Acc(n));
   std::string body;
   switch (kind) {
     case Movs:
-      body = Fmt("::recomp::lift::Wr<%s>(B, rdi, ::recomp::lift::Rd<%s>(B, rsi)); "
-                 "rsi += d; rdi += d;", t, t);
+      body = Fmt("::recomp::lift::Wr<%s>(B, %s, ::recomp::lift::Rd<%s>(B, %s)); %s %s", t, di,
+                 t, si.c_str(), rsi.c_str(), rdi.c_str());
       break;
     case Stos:
-      body = Fmt("::recomp::lift::Wr<%s>(B, rdi, %s(%s)); rdi += d;", t, t, acc.c_str());
+      body = Fmt("::recomp::lift::Wr<%s>(B, %s, %s(%s)); %s", t, di, t, acc.c_str(),
+                 rdi.c_str());
       break;
     case Lods:
-      body = Fmt("{ const %s v = ::recomp::lift::Rd<%s>(B, rsi); %s } rsi += d;", VT(n), t,
-                 WriteReg(Acc(n), "v").c_str());
+      body = Fmt("{ const %s v = ::recomp::lift::Rd<%s>(B, %s); %s } %s", VT(n), t, si.c_str(),
+                 WriteReg(Acc(n), "v").c_str(), rsi.c_str());
       break;
     case Scas:
-      body = Fmt("(void)::recomp::lift::Sub<%d>(F, %s, ::recomp::lift::Rd<%s>(B, rdi)); "
-                 "rdi += d;", n, acc.c_str(), t);
+      body = Fmt("(void)::recomp::lift::Sub<%d>(F, %s, ::recomp::lift::Rd<%s>(B, %s)); %s", n,
+                 acc.c_str(), t, di, rdi.c_str());
       break;
     case Cmps:
-      body = Fmt("(void)::recomp::lift::Sub<%d>(F, ::recomp::lift::Rd<%s>(B, rsi), "
-                 "::recomp::lift::Rd<%s>(B, rdi)); rsi += d; rdi += d;", n, t, t);
+      body = Fmt("(void)::recomp::lift::Sub<%d>(F, ::recomp::lift::Rd<%s>(B, %s), "
+                 "::recomp::lift::Rd<%s>(B, %s)); %s %s", n, t, si.c_str(), t, di,
+                 rsi.c_str(), rdi.c_str());
       break;
   }
   bool rep = d_.attributes & ZYDIS_ATTRIB_HAS_REP;
@@ -836,13 +879,13 @@ void InsnEmitter::EmitString64(int n, StringKind kind) {
   L(Fmt("const uint64_t d = F.df ? uint64_t(-%d) : %du;", n, n));
   if (kind == Scas || kind == Cmps) {
     if (repe)
-      L("while (rcx) { " + body + " rcx--; if (!F.zf) break; }");
+      L(std::string("while (") + cx + ") { " + body + " " + dec + " if (!F.zf) break; }");
     else if (repne)
-      L("while (rcx) { " + body + " rcx--; if (F.zf) break; }");
+      L(std::string("while (") + cx + ") { " + body + " " + dec + " if (F.zf) break; }");
     else
       L(body);
   } else if (rep || repe || repne) {
-    L("while (rcx) { " + body + " rcx--; }");
+    L(std::string("while (") + cx + ") { " + body + " " + dec + " }");
   } else {
     L(body);
   }
@@ -3101,10 +3144,16 @@ void InsnEmitter::Emit64() {
       L(Write(1, "a"));
       L(Write(0, "r"));
       return;
-    case ZYDIS_MNEMONIC_XLAT:
-      L(WriteReg(ZYDIS_REGISTER_AL,
-                 "::recomp::lift::Rd<uint8_t>(B, rbx + (rax & 0xFFu))"));
+    case ZYDIS_MNEMONIC_XLAT: {
+      // [rbx + al] (ebx + al, zero-extended, with an address-size prefix)
+      // in the segment of its hidden memory operand.
+      std::string a = d_.address_width == 32 ? "uint64_t(uint32_t(rbx + (rax & 0xFFu)))"
+                                              : "rbx + (rax & 0xFFu)";
+      if (Op(0).mem.segment == ZYDIS_REGISTER_GS) a = "GS + " + a;
+      if (Op(0).mem.segment == ZYDIS_REGISTER_FS) a = "FS + " + a;
+      L(WriteReg(ZYDIS_REGISTER_AL, "::recomp::lift::Rd<uint8_t>(B, " + a + ")"));
       return;
+    }
     case ZYDIS_MNEMONIC_CPUID:
       L("LIFT_SPILL; ::recomp::Cpuid(c); LIFT_RELOAD;");
       return;
@@ -3254,16 +3303,15 @@ void InsnEmitter::Emit() {
       L(Fmt("if ((ecx & 0xFFFFu) == 0) %s", GotoOrTail(RelTarget(in_)).c_str()));
       return;
     case ZYDIS_MNEMONIC_LOOP:
-      L(Fmt("ecx -= 1; if (ecx != 0) %s", GotoOrTail(RelTarget(in_)).c_str()));
-      return;
     case ZYDIS_MNEMONIC_LOOPE:
-      L(Fmt("ecx -= 1; if (ecx != 0 && F.zf) %s",
-            GotoOrTail(RelTarget(in_)).c_str()));
+    case ZYDIS_MNEMONIC_LOOPNE: {
+      if (d_.address_width != 32) return Unimpl();  // cx as the counter
+      const char* cond = m == ZYDIS_MNEMONIC_LOOPE    ? " && F.zf"
+                         : m == ZYDIS_MNEMONIC_LOOPNE ? " && !F.zf"
+                                                      : "";
+      L(Fmt("ecx -= 1; if (ecx != 0%s) %s", cond, GotoOrTail(RelTarget(in_)).c_str()));
       return;
-    case ZYDIS_MNEMONIC_LOOPNE:
-      L(Fmt("ecx -= 1; if (ecx != 0 && !F.zf) %s",
-            GotoOrTail(RelTarget(in_)).c_str()));
-      return;
+    }
     case ZYDIS_MNEMONIC_INT3:
     case ZYDIS_MNEMONIC_INT:
     case ZYDIS_MNEMONIC_INT1:
@@ -3530,9 +3578,16 @@ void InsnEmitter::Emit() {
       L(Write(1, "a"));
       L(Write(0, "r"));
       return;
-    case ZYDIS_MNEMONIC_XLAT:
-      L("eax = ::recomp::lift::SetLo8(eax, ::recomp::lift::Rd<uint8_t>(B, ebx + (eax & 0xFFu)));");
+    case ZYDIS_MNEMONIC_XLAT: {
+      // [ebx + al] ([bx + al], wrapping at 16 bits, with an address-size
+      // prefix) in the segment of its hidden memory operand.
+      std::string a = d_.address_width == 16 ? "((ebx + (eax & 0xFFu)) & 0xFFFFu)"
+                                              : "ebx + (eax & 0xFFu)";
+      if (Op(0).mem.segment == ZYDIS_REGISTER_GS) return Unimpl();  // as AddrOk
+      if (Op(0).mem.segment == ZYDIS_REGISTER_FS) a = "FS + " + a;
+      L("eax = ::recomp::lift::SetLo8(eax, ::recomp::lift::Rd<uint8_t>(B, " + a + "));");
       return;
+    }
     case ZYDIS_MNEMONIC_CPUID:
       L("LIFT_SPILL; ::recomp::Cpuid(c); LIFT_RELOAD;");
       return;
