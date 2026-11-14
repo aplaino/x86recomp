@@ -42,7 +42,7 @@ library.
   that system modules games ship import (a game's own libc is lifted).
 - recomp_orbis_system: libSceSystemService (fixed settings: English (US),
   YYYY/MM/DD, 24-hour, UTC, no DST, parental control off, cross to
-  confirm), libSceUserService (one user, id 1, "Player"),
+  confirm), libSceUserService (one user, id 0x10000000, "Player"),
   libSceSysmodule (system modules are HLE: loading one records it),
   libSceScreenShot (the system takes none). The system's events: one
   pending at the start, type 0x10000003 without data (measured on 11.00;
@@ -82,8 +82,10 @@ library.
   between vblanks (measured on a base console with 11.00: mode 2's flips
   20-140 us after the submission's end of pipe, anywhere in the frame, up
   to three per vblank; mode 2 at a flip rate other than 0 is not
-  measured and fatal). The flip event's ident is 6 << 48 | handle << 40
-  and its data the flip argument << 16 | 1 << 12 (one flip reported). Linear
+  measured and fatal). The flip event's ident is 6 << 48 (11.00's
+  library puts the driver's port number, 0 for the main port, in bits
+  40-47; measured: no bits there) and its data the flip argument << 16 |
+  1 << 12 (one flip reported). Linear
   A8R8G8B8 and A8B8G8R8 buffers are shown; tiled ones are the GPU's
   colour target at that address (black before it has drawn one). A flip
   submitted from the CPU waits until the GPU has finished what was
