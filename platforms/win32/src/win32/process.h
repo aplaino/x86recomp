@@ -57,6 +57,18 @@ struct GameConfig : recomp::GameConfig {
   // from it; a game's best profile may need more than the default.
   uint32_t video_memory_mb = 64;
 
+  // The display adapter DirectDraw identifies (GetDeviceIdentifier).
+  // Games that pick a detail profile by the adapter's identity may need
+  // a particular one; the default names no real hardware.
+  struct Adapter {
+    std::string driver = "recomp_ddraw.dll";
+    std::string description = "SwARc DirectDraw";
+    uint32_t vendor_id = 0, device_id = 0;
+    // a.b.c.d as a << 48 | b << 32 | c << 16 | d.
+    uint64_t driver_version = 0x0006000E000A0000;  // 6.14.10.0
+  };
+  Adapter adapter;
+
   // DLLs the game loads itself (LoadLibrary) whose code is lifted with
   // the EXE (recomp_lift --module), e.g. a game logic DLL. They
   // are read from guest_dir (the host game directory) by file name.
