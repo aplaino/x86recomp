@@ -1,5 +1,6 @@
-# Dev-only tests of the x86 core; nothing here ships. The EXE-derived
-# oracle tests are added by the game project (recomp_add_lift_tests).
+# Dev-only tests of the x86 core; nothing here ships. The lifting oracle
+# tests run on the fixture below; the game projects add them on their EXEs
+# too (recomp_add_lift_tests).
 
 # x87_test runs the host CPU's own x87 (inline asm) next to the model from
 # the same state and compares the results, so it can only exist on x86-64.
@@ -112,4 +113,55 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$" AND TARGET recomp_lif
     add_test(NAME lift_isa64_${_kind} COMMAND lift_isa64_${_kind}_test)
     set_tests_properties(lift_isa64_${_kind} PROPERTIES TIMEOUT 1800)
   endforeach()
+endif()
+
+# lift_fixture_int, lift_fixture_sse, lift_fixture_x87: lift_int_test.cpp,
+# lift_sse_test.cpp and lift_x87_test.cpp on the forms of fixture/forms.s,
+# assembled by clang for i686 and linked by LLD to flat code, which
+# recomp_lift --code takes its forms from. Without those tools
+# x86_prerequisites fails, naming them, unless
+# RECOMP_ALLOW_MISSING_TEST_TOOLS says this host cannot run these tests.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$" AND TARGET recomp_lift)
+  option(RECOMP_ALLOW_MISSING_TEST_TOOLS "Leave out the tests whose tools are missing instead of failing" OFF)
+  find_program(RECOMP_LD_LLD ld.lld)
+  set(_missing)
+  if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+    list(APPEND _missing "clang as the C compiler")
+  endif()
+  if(NOT RECOMP_LD_LLD)
+    list(APPEND _missing ld.lld)
+  endif()
+  if(_missing)
+    string(JOIN ", " _missing ${_missing})
+    message(STATUS "x86: missing ${_missing}; the lifter fixture's tests are left out")
+    if(NOT RECOMP_ALLOW_MISSING_TEST_TOOLS)
+      add_test(NAME x86_prerequisites COMMAND "${CMAKE_COMMAND}" -E echo
+               "missing ${_missing} (RECOMP_ALLOW_MISSING_TEST_TOOLS=ON leaves their tests out)")
+      set_tests_properties(x86_prerequisites PROPERTIES FAIL_REGULAR_EXPRESSION .)
+    endif()
+  else()
+    set(_fix "${CMAKE_CURRENT_BINARY_DIR}/fixture")
+    add_custom_command(OUTPUT "${_fix}/forms.bin"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${_fix}"
+      COMMAND "${CMAKE_C_COMPILER}" --target=i686-unknown-linux-gnu -c
+              "${CMAKE_CURRENT_SOURCE_DIR}/fixture/forms.s" -o "${_fix}/forms.o"
+      COMMAND "${RECOMP_LD_LLD}" --oformat=binary -o "${_fix}/forms.bin" "${_fix}/forms.o"
+      DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/fixture/forms.s"
+      COMMENT "Assembling the x86 lifter fixture")
+    foreach(_kind x87 int sse)
+      set(_forms "${_fix}/lift_${_kind}_forms.cpp")
+      add_custom_command(OUTPUT "${_forms}"
+        COMMAND recomp_lift --code "${_fix}/forms.bin" --${_kind}-test "${_forms}"
+        DEPENDS recomp_lift "${_fix}/forms.bin"
+        COMMENT "Lifting the fixture's ${_kind} instruction forms for lift_fixture_${_kind}_test")
+      add_executable(lift_fixture_${_kind}_test lift_${_kind}_test.cpp "${_forms}")
+      target_include_directories(lift_fixture_${_kind}_test PRIVATE ${RECOMP_ROOT}/src
+                                 ${CMAKE_CURRENT_SOURCE_DIR})
+      target_link_libraries(lift_fixture_${_kind}_test PRIVATE recomp_x87 recomp_base)
+      target_compile_options(lift_fixture_${_kind}_test PRIVATE -O1 -fno-strict-aliasing
+                             ${RECOMP_X87_FP_FLAGS})
+      add_test(NAME lift_fixture_${_kind} COMMAND lift_fixture_${_kind}_test)
+      set_tests_properties(lift_fixture_${_kind} PROPERTIES TIMEOUT 900)
+    endforeach()
+  endif()
 endif()

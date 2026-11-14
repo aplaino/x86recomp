@@ -1,16 +1,21 @@
 // End-to-end oracle test for SSE/SSE2 lifting: every distinct SSE form in
-// the game EXE (recomp_lift --sse-test) runs lifted (x86/sse.h) and
-// natively on this CPU from the same random general registers, flags, XMM
-// registers, MXCSR (any rounding mode, random sticky flags; all exceptions
-// masked, FTZ/DAZ off) and memory. XMM lanes and memory are drawn from
-// float and double special values (zeros, infinities, QNaN/SNaN payloads,
-// denormals, extremes, values near the int32 range) as well as random
-// bits. Registers (except esp), flags, XMM registers, MXCSR and memory
-// must match bit for bit. x86-64 hosts only; dev-time.
+// the game EXE or the fixture (recomp_lift --sse-test) runs lifted
+// (x86/sse.h) and natively on this CPU from the same random general
+// registers, flags, XMM registers, MXCSR (any rounding mode, random sticky
+// flags, FTZ and DAZ each in a quarter of the trials; all exceptions
+// masked) and memory (aimed at as in lift_form_mem.h). XMM lanes and
+// memory are drawn from float and double special values (zeros,
+// infinities, QNaN/SNaN payloads, denormals, extremes, values near the
+// int32 range) as well as random bits. Registers (except esp), flags, XMM
+// registers, MXCSR and memory must match bit for bit, and every form must
+// run often enough. x86-64 hosts only; dev-time.
 
+#include <asm/prctl.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 #include <cstdarg>
 #include <cstddef>
@@ -49,7 +54,7 @@ void FatalF(const char* fmt, ...) {
 
 namespace {
 
-constexpr uint32_t kBuf = 0x00200000, kBufSize = 0x4000;
+constexpr uint32_t kBufSize = 0x4000;  // from kFormTarget - 0x1000
 constexpr uint32_t kStackVa = 0x00300000;
 
 struct Regs {
@@ -200,6 +205,13 @@ std::string Hex16(const uint8_t* b) {
 int main(int argc, char** argv) {
   int trials = argc > 1 ? std::atoi(argv[1]) : 2000;
   const char* only = argc > 2 ? argv[2] : nullptr;
+  const uint32_t kBuf = uint32_t(kFormTarget - 0x1000);
+  const uint32_t seg_base = uint32_t(kFormTarget - kFormSegOffset);
+  // fs: operands run natively as gs: (fs is the C library's).
+  if (syscall(SYS_arch_prctl, ARCH_SET_GS, uintptr_t(seg_base))) {
+    std::printf("cannot set the gs base\n");
+    return 1;
+  }
   recomp::GuestMemory mem;
   if (!mem.Reserve()) return 1;
   recomp::g_guest_base = mem.base();
@@ -235,14 +247,16 @@ int main(int argc, char** argv) {
     auto native = reinterpret_cast<NativeFn>(page);
     const uint32_t defined = 0x8D5;  // cf pf af zf sf of
     int fails = 0;
+    long form_checks = 0;
     for (int t = 0; t < trials; t++) {
       Regs in{};
       for (int r = 0; r < 8; r++) in.r[r] = RandomGpr(g);
       in.r[4] = 0;
-      if (f.base >= 0) in.r[f.base] = kBuf + 0x1000;
+      if (f.m.mem) AimForm(f.m, in.r, g() % 8);
       in.flags = 0x2 | (g() & 0x8D5);
       in.mxcsr = 0x1F80 | uint32_t(g() % 4) << 13 | (g() % 4 == 0 ? uint32_t(g()) & 0x3F : 0);
       if (g() % 4 == 0) in.mxcsr |= 0x8000;  // FTZ
+      if (g() % 4 == 0) in.mxcsr |= 0x0040;  // DAZ
       for (int i = 0; i < 8; i++) Fill16(g, in.xmm[i]);
       for (uint32_t o = 0; o < kBufSize; o += 16) Fill16(g, &init[o]);
 
@@ -267,8 +281,10 @@ int main(int argc, char** argv) {
       c.eflags = uint32_t(in.flags);
       std::memcpy(c.xmm, in.xmm, sizeof in.xmm);
       c.mxcsr = in.mxcsr;
+      c.fs_base = seg_base;
       f.fn(c);
       checks++;
+      form_checks++;
 
       uint32_t got[8] = {c.eax, c.ecx, c.edx, c.ebx, 0, c.ebp, c.esi, c.edi};
       static const char* names[8] = {"eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"};
@@ -292,9 +308,15 @@ int main(int argc, char** argv) {
           if (std::memcmp(c.xmm[i].b, hw.xmm[i], 16) || std::memcmp(in.xmm[i], hw.xmm[i], 16))
             std::printf("   xmm%d in %s hw %s lift %s\n", i, Hex16(in.xmm[i]).c_str(),
                         Hex16(hw.xmm[i]).c_str(), Hex16(c.xmm[i].b).c_str());
-        if (f.base >= 0)
+        if (f.m.mem)
           std::printf("   mem  in %s\n", Hex16(&init[0x1000]).c_str());
       }
+    }
+    // A form that faults natively in most trials is barely tested.
+    if (form_checks < trials / 4) {
+      std::printf("FAIL %-40s (e.g. %08llX): %ld of %d trials ran\n", f.text,
+                  (unsigned long long)f.example_va, form_checks, trials);
+      fails++;
     }
     if (fails) {
       failed_forms++;

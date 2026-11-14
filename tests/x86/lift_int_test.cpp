@@ -1,22 +1,30 @@
 // End-to-end oracle test for integer lifting: every distinct integer
-// instruction form in the game EXE (recomp_lift --int-test) runs lifted
-// and natively on this CPU from the same random registers, flags and
-// memory. Registers (except esp), the memory buffer and every flag the
-// instruction defines must match bit for bit. x86-64 hosts only; dev-time.
+// instruction form in the game EXE or the fixture (recomp_lift --int-test)
+// runs lifted and natively on this CPU from the same random registers,
+// flags and memory. Registers (except esp), the memory buffer and every
+// flag the instruction defines must match bit for bit, and every form
+// must run often enough (trials that fault natively are skipped). x86-64
+// hosts only; dev-time.
 //
 // The memory operand is at a buffer mapped at the same low address in this
-// process and in the guest arena, so register values (pointers included)
-// are identical in both runs.
+// process and in the guest arena (lift_form_mem.h), so register values
+// (pointers included) are identical in both runs. The stack is in that
+// buffer too: the native run switches to it for the instruction, so push
+// and pop move the same memory and esp.
 
+#include <asm/prctl.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <map>
 #include <random>
+#include <regex>
 #include <string>
 #include <vector>
 
@@ -43,12 +51,13 @@ void RaiseDivideError(Ctx&, uint32_t va) {
 
 namespace {
 
-constexpr uint32_t kBuf = 0x00200000, kBufSize = 0x4000;
-constexpr uint32_t kStackVa = 0x00300000;
+constexpr uint32_t kBufSize = 0x4000;  // from kFormTarget - 0x1000
+constexpr uint32_t kStack = 0x3800;     // esp's offset in the buffer
 
 struct Regs {
-  uint64_t r[8];  // eax ecx edx ebx (esp) ebp esi edi
-  uint64_t flags;
+  uint64_t r[8];      // 0x00 eax ecx edx ebx esp ebp esi edi
+  uint64_t flags;     // 0x40
+  uint64_t host_rsp;  // 0x48
 };
 
 using NativeFn = void (*)(Regs*);
@@ -60,8 +69,10 @@ void Stub(uint8_t* p, const IntForm& f) {
       0x49, 0x8B, 0x47, 0x00, 0x49, 0x8B, 0x4F, 0x08, 0x49, 0x8B, 0x57, 0x10,
       0x49, 0x8B, 0x5F, 0x18, 0x49, 0x8B, 0x6F, 0x28, 0x49, 0x8B, 0x77, 0x30,
       0x49, 0x8B, 0x7F, 0x38,                                      // load regs
-      0x41, 0xFF, 0x77, 0x40, 0x9D};                               // flags
+      0x41, 0xFF, 0x77, 0x40, 0x9D,                                // flags
+      0x49, 0x89, 0x67, 0x48, 0x49, 0x8B, 0x67, 0x20};             // to esp
   static const uint8_t post[] = {
+      0x49, 0x89, 0x67, 0x20, 0x49, 0x8B, 0x67, 0x48,              // back
       0x9C, 0x41, 0x8F, 0x47, 0x40,                                // flags out
       0x49, 0x89, 0x47, 0x00, 0x49, 0x89, 0x4F, 0x08, 0x49, 0x89, 0x57, 0x10,
       0x49, 0x89, 0x5F, 0x18, 0x49, 0x89, 0x6F, 0x28, 0x49, 0x89, 0x77, 0x30,
@@ -78,6 +89,7 @@ void Stub(uint8_t* p, const IntForm& f) {
 sigjmp_buf g_jmp;
 volatile int g_phase = 0;  // 1 native, 2 lifted
 const char* volatile g_form = "";
+// Runs on a stack of its own: a native fault may leave rsp in the buffer.
 void OnFault(int sig) {
   if (g_phase == 1) siglongjmp(g_jmp, 1);
   std::printf("signal %d in the lifted run of %s\n", sig, g_form);
@@ -102,11 +114,17 @@ uint32_t RandomValue(std::mt19937_64& g) {
 int main(int argc, char** argv) {
   int trials = argc > 1 ? std::atoi(argv[1]) : 200;
   const char* only = argc > 2 ? argv[2] : nullptr;
+  const uint32_t kBuf = uint32_t(kFormTarget - 0x1000);
+  const uint32_t seg_base = uint32_t(kFormTarget - kFormSegOffset);
+  // fs: operands run natively as gs: (fs is the C library's).
+  if (syscall(SYS_arch_prctl, ARCH_SET_GS, uintptr_t(seg_base))) {
+    std::printf("cannot set the gs base\n");
+    return 1;
+  }
   recomp::GuestMemory mem;
   if (!mem.Reserve()) return 1;
   recomp::g_guest_base = mem.base();
   mem.Commit(kBuf, kBufSize, recomp::Prot::RW);
-  mem.Commit(kStackVa - 0x1000, 0x2000, recomp::Prot::RW);
   auto* native_buf = static_cast<uint8_t*>(
       mmap(reinterpret_cast<void*>(uintptr_t(kBuf)), kBufSize, PROT_READ | PROT_WRITE,
            MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0));
@@ -118,7 +136,12 @@ int main(int argc, char** argv) {
                                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
   struct sigaction sa{};
   sa.sa_handler = OnFault;
-  sa.sa_flags = SA_NODEFER;
+  sa.sa_flags = SA_NODEFER | SA_ONSTACK;
+  static std::vector<uint8_t> alt(1 << 16);
+  stack_t ss{};
+  ss.ss_sp = alt.data();
+  ss.ss_size = alt.size();
+  sigaltstack(&ss, nullptr);
   sigaction(SIGFPE, &sa, nullptr);
   sigaction(SIGSEGV, &sa, nullptr);
   sigaction(SIGBUS, &sa, nullptr);
@@ -142,18 +165,33 @@ int main(int argc, char** argv) {
                      text.find("scas") != std::string::npos ||
                      text.find("cmps") != std::string::npos;
     is_string = is_string && text.find("movsx") == std::string::npos;
-    bool is_bt = text.rfind("bt", 0) == 0 && f.base >= 0;
+    bool is_xlat = text.rfind("xlat", 0) == 0;
+    bool is_bt = text.rfind("bt", 0) == 0 && f.m.mem;
+    // Every other trial divides a small dividend (high half zero), so
+    // divisions run without the quotient overflowing (#DE natively).
+    bool is_div = text.rfind("div", 0) == 0 || text.rfind("idiv", 0) == 0;
+    // A 16-bit double shift by a count (cl & 31) above 16 leaves its result
+    // undefined: its trials keep the count below 16.
+    bool is_dshift16 = (text.rfind("shld", 0) == 0 || text.rfind("shrd", 0) == 0) &&
+                       std::regex_search(text, std::regex(", [a-d]x, cl$|, [sd]i, cl$|, bp, cl$"));
     uint32_t defined = (0x1u | 0x4u | 0x10u | 0x40u | 0x80u | 0x400u | 0x800u) & ~f.undef;
     int fails = 0;
+    long form_checks = 0;
     for (int t = 0; t < trials; t++) {
       Regs in{};
       for (int r = 0; r < 8; r++) in.r[r] = RandomValue(g);
-      in.r[4] = 0;
       if (is_bt)
         for (int r = 0; r < 8; r++) in.r[r] &= 0x7F;
-      if (f.base >= 0) in.r[f.base] = kBuf + 0x1000;
+      if (is_div && t % 2) {
+        in.r[0] &= 0x7F;
+        in.r[2] = 0;
+      }
+      if (is_dshift16) in.r[1] &= ~0x10ull;
+      if (f.m.mem) AimForm(f.m, in.r, g() % 8);
+      in.r[4] = kBuf + kStack;
+      if (is_xlat) in.r[3] = f.m.seg ? kFormSegOffset : kFormTarget;  // ebx
       if (is_string) {
-        in.r[6] = kBuf + 0x1000;      // esi
+        in.r[6] = f.m.seg ? kFormSegOffset : kFormTarget;  // esi
         in.r[7] = kBuf + 0x2000;      // edi
         in.r[1] = g() % 9;            // ecx
       }
@@ -180,16 +218,20 @@ int main(int argc, char** argv) {
       c.eax = uint32_t(in.r[0]); c.ecx = uint32_t(in.r[1]); c.edx = uint32_t(in.r[2]);
       c.ebx = uint32_t(in.r[3]); c.ebp = uint32_t(in.r[5]); c.esi = uint32_t(in.r[6]);
       c.edi = uint32_t(in.r[7]);
-      c.esp = kStackVa;
+      c.esp = uint32_t(in.r[4]);
       c.eflags = uint32_t(in.flags);
+      c.fs_base = seg_base;
       f.fn(c);
       checks++;
+      form_checks++;
 
-      uint32_t got[8] = {c.eax, c.ecx, c.edx, c.ebx, 0, c.ebp, c.esi, c.edi};
+      // The snippet's ret popped 4 bytes (it reads the buffer, writes
+      // nothing).
+      uint32_t got[8] = {c.eax, c.ecx, c.edx, c.ebx, c.esp - 4, c.ebp, c.esi, c.edi};
       static const char* names[8] = {"eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"};
       std::string why;
       for (int r = 0; r < 8; r++)
-        if (r != 4 && got[r] != uint32_t(hw.r[r])) why += std::string(" ") + names[r];
+        if (got[r] != uint32_t(hw.r[r])) why += std::string(" ") + names[r];
       uint32_t lf = c.eflags;
       if ((lf ^ uint32_t(hw.flags)) & defined) {
         char b[48];
@@ -200,17 +242,22 @@ int main(int argc, char** argv) {
       if (std::memcmp(native_buf, mem.ptr(kBuf), kBufSize)) why += " mem";
       if (why.empty()) continue;
       if (++fails <= 2) {
-        std::printf("FAIL %-36s (e.g. %08llX, base %d):%s\n", f.text,
-                    (unsigned long long)f.example_va, f.base,
-                    why.c_str());
+        std::printf("FAIL %-36s (e.g. %08llX, base %d, index %d):%s\n", f.text,
+                    (unsigned long long)f.example_va, f.m.base, f.m.index, why.c_str());
         std::printf("   in  ");
-        for (int r = 0; r < 8; r++) if (r != 4) std::printf(" %s=%08X", names[r], uint32_t(in.r[r]));
+        for (int r = 0; r < 8; r++) std::printf(" %s=%08X", names[r], uint32_t(in.r[r]));
         std::printf(" fl=%03X\n   hw  ", uint32_t(in.flags));
-        for (int r = 0; r < 8; r++) if (r != 4) std::printf(" %s=%08X", names[r], uint32_t(hw.r[r]));
+        for (int r = 0; r < 8; r++) std::printf(" %s=%08X", names[r], uint32_t(hw.r[r]));
         std::printf(" fl=%03X\n   lift", uint32_t(hw.flags) & 0xFD5);
-        for (int r = 0; r < 8; r++) if (r != 4) std::printf(" %s=%08X", names[r], got[r]);
+        for (int r = 0; r < 8; r++) std::printf(" %s=%08X", names[r], got[r]);
         std::printf(" fl=%03X\n", lf & 0xFD5);
       }
+    }
+    // A form that faults natively in most trials is barely tested.
+    if (form_checks < trials / 4) {
+      std::printf("FAIL %-36s (e.g. %08llX): %ld of %d trials ran\n", f.text,
+                  (unsigned long long)f.example_va, form_checks, trials);
+      fails++;
     }
     if (fails) {
       failed_forms++;

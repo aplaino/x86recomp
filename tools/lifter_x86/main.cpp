@@ -8,7 +8,8 @@
 //            [--module <game.dll> --symbols DIR [--manifest FILE]
 //             [--base HEX]]...
 //            [--only VA[,VA...]]   (just these functions and their callees)
-//   recomp_lift --forms LIST [--x64] (--int-test | --sse-test) OUT.cpp
+//   recomp_lift (--forms LIST | --code BIN) [--x64]
+//               (--x87-test | --int-test | --sse-test) OUT.cpp
 //
 // Each --module adds a DLL the game loads itself, lifted into the same
 // output; --symbols/--manifest/--base after it apply to that DLL. DLLs
@@ -22,8 +23,8 @@
 // for those, --symbols "" lifts without Ghidra's symbols.
 //
 // --forms takes the instruction forms from LIST (hex encodings, see
-// WriteFormListTest) instead of an image; --x64 decodes them as 64-bit
-// code.
+// WriteFormListTest) instead of an image, --code from flat machine code;
+// --x64 decodes them as 64-bit code.
 //
 // --only lifts the given functions and whatever they call or tail-call
 // directly, nothing else (no Ghidra entries, exports or pointer
@@ -105,7 +106,7 @@ int main(int argc, char** argv) {
   std::string outdir = "generated";
   uint64_t per_file = 12000;
   uint64_t dump = 0;
-  std::string x87_test, int_test, sse_test, forms;
+  std::string x87_test, int_test, sse_test, forms, code;
   bool forms_x64 = false;
   std::set<uint64_t> only;
   for (int i = 1; i < argc; i++) {
@@ -123,6 +124,7 @@ int main(int argc, char** argv) {
     else if (a == "--int-test") int_test = val();
     else if (a == "--sse-test") sse_test = val();
     else if (a == "--forms") forms = val();
+    else if (a == "--code") code = val();
     else if (a == "--x64") forms_x64 = true;
     else if (a == "--only") {
       std::string list = val();
@@ -138,16 +140,20 @@ int main(int argc, char** argv) {
       return 2;
     }
   }
-  if (!forms.empty()) {
-    if (int_test.empty() == sse_test.empty()) {
-      std::fprintf(stderr, "--forms needs one of --int-test, --sse-test\n");
+  if (!forms.empty() || !code.empty()) {
+    if (forms.empty() == code.empty() ||
+        !x87_test.empty() + !int_test.empty() + !sse_test.empty() != 1) {
+      std::fprintf(stderr, "--forms or --code needs one of --x87-test, --int-test, --sse-test\n");
       return 2;
     }
     lifter::Decoder dec(forms_x64);
     std::string prologue = kFilePrologue;
     if (forms_x64) prologue.insert(prologue.find("#include"), "#define RECOMP_LIFT_X64 1\n");
-    return lifter::WriteFormListTest(forms, forms_x64, dec, sse_test.empty() ? int_test : sse_test,
-                                     prologue.c_str(), !sse_test.empty());
+    const lifter::FormKind kind = !x87_test.empty()   ? lifter::FormKind::X87
+                                  : !int_test.empty() ? lifter::FormKind::Int
+                                                      : lifter::FormKind::Sse;
+    return lifter::WriteFormListTest(code.empty() ? forms : code, !code.empty(), forms_x64, dec,
+                                     x87_test + int_test + sse_test, prologue.c_str(), kind);
   }
   if (mods[0].path.empty()) {
     std::fprintf(stderr, "usage: recomp_lift --exe game.exe "

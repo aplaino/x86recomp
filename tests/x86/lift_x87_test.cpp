@@ -1,17 +1,26 @@
 // End-to-end oracle test for x87 lifting: every distinct x87 instruction
-// form in the game EXE (lifted by `recomp_lift --x87-test`) is run as
-// lifted C++ on the x87 model and natively on this machine's FPU, from the
-// same random state (control word, stack, memory operand). Results must
-// match bit for bit: control/status/tag words, all registers, memory, and
-// for fcomi/fnstsw the integer side effects. x86-64 hosts only; dev-time.
+// form in the game EXE or the fixture (lifted by `recomp_lift --x87-test`)
+// is run as lifted C++ on the x87 model and natively on this machine's
+// FPU, from the same random state (control word, stack, memory operand,
+// aimed at as in lift_form_mem.h). Results must match bit for bit:
+// control/status/tag words, all registers, memory, and for fcomi/fnstsw
+// the integer side effects. Built with LIFT_X87_X64 it runs the forms of
+// x64 code (with FXSAVE and FXRSTOR, which the lifter has only there).
+// x86-64 hosts only; dev-time.
 //
 // Transcendentals (fsin, fptan, ...) are known to differ from hardware in
-// the last bit for some inputs; for them a 1-ulp register difference is
-// counted separately and does not fail the test (nor does C1, which
-// reports the rounding direction of that last bit).
+// the last bit for some inputs (the model rounds once, the hardware is
+// within 1 ulp; tests/x86/x87_test.cpp): for them a 1-ulp register
+// difference in a result the model rounded is counted separately and does
+// not fail the test, nor does C1, which reports the direction of the
+// hardware's own rounding. Exact results must match.
 
+#include <asm/prctl.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -20,39 +29,65 @@
 #include <string>
 
 #include "lift_x87_forms.h"
+#ifdef LIFT_X87_X64
+#define RECOMP_LIFT_X64 1
+#endif
 #include "runtime/guest_memory.h"
 #include "x86/lifted.h"
 #include "x86/x87.h"
 
 namespace recomp {
 uint8_t* g_guest_base = nullptr;
+#ifdef LIFT_X87_X64
+using GuestVa = uint64_t;
+#else
+using GuestVa = uint32_t;
+#endif
 // Referenced by lifted code that never runs here.
-void Unimplemented(Ctx&, uint32_t va, const char* what) {
-  std::printf("unimplemented %08X %s\n", va, what);
+void Unimplemented(Ctx&, GuestVa va, const char* what) {
+  std::printf("unimplemented %08llX %s\n", (unsigned long long)va, what);
   std::abort();
 }
-void BadJump(Ctx&, uint32_t from, uint32_t to) {
-  std::printf("bad jump %08X -> %08X\n", from, to);
+void BadJump(Ctx&, GuestVa from, GuestVa to) {
+  std::printf("bad jump %08llX -> %08llX\n", (unsigned long long)from,
+              (unsigned long long)to);
   std::abort();
 }
 }  // namespace recomp
 
 namespace {
 
-constexpr uint32_t kMemVa = 0x00200000;    // operand at [eax]
-constexpr uint32_t kStackVa = 0x00300000;  // guest stack (ret pops 4)
+constexpr uint32_t kStackVa = 0x00300000;  // guest stack (ret pops 4 or 8)
 
 using recomp::x87::F80;
-using NativeFn = void (*)(void* mem, const void* in, void* out, uint64_t* flags,
-                          uint64_t* rax);
 
-// mov r9,rcx; mov r10,r8; mov r11,rdx; mov rax,rdi; frstor [rsi];
-// <insn>; pushfq; pop rcx; mov [r9],rcx; mov [r10],rax; fnsave [r11]; ret
+// What the native stub reads and writes.
+struct Regs {
+  uint64_t r[8];       // 0x00 eax ecx edx ebx (esp) ebp esi edi
+  uint64_t flags;      // 0x40: out
+  const uint8_t* in;   // 0x48: frstor image
+  uint8_t* out;        // 0x50: fnsave image
+};
+using NativeFn = void (*)(Regs*);
+
+// push rbx, rbp, r12-r15; mov r15, rdi; mov r14, [r15+0x48]; frstor [r14];
+// load regs; <insn>; pushfq; pop [r15+0x40]; store regs;
+// mov r14, [r15+0x50]; fnsave [r14]; pop ...; ret
 NativeFn MakeNative(uint8_t* page, const X87Form& f) {
-  static const uint8_t pre[] = {0x49, 0x89, 0xC9, 0x4D, 0x89, 0xC2, 0x49, 0x89,
-                                0xD3, 0x48, 0x89, 0xF8, 0xDD, 0x26};
-  static const uint8_t post[] = {0x9C, 0x59, 0x49, 0x89, 0x09, 0x49, 0x89,
-                                 0x02, 0x41, 0xDD, 0x33, 0xC3};
+  static const uint8_t pre[] = {
+      0x53, 0x55, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57,  // push
+      0x49, 0x89, 0xFF,                                            // mov r15,rdi
+      0x4D, 0x8B, 0x77, 0x48, 0x41, 0xDD, 0x26,                    // frstor
+      0x49, 0x8B, 0x47, 0x00, 0x49, 0x8B, 0x4F, 0x08, 0x49, 0x8B, 0x57, 0x10,
+      0x49, 0x8B, 0x5F, 0x18, 0x49, 0x8B, 0x6F, 0x28, 0x49, 0x8B, 0x77, 0x30,
+      0x49, 0x8B, 0x7F, 0x38};                                     // load regs
+  static const uint8_t post[] = {
+      0x9C, 0x41, 0x8F, 0x47, 0x40,                                // flags out
+      0x49, 0x89, 0x47, 0x00, 0x49, 0x89, 0x4F, 0x08, 0x49, 0x89, 0x57, 0x10,
+      0x49, 0x89, 0x5F, 0x18, 0x49, 0x89, 0x6F, 0x28, 0x49, 0x89, 0x77, 0x30,
+      0x49, 0x89, 0x7F, 0x38,                                      // regs out
+      0x4D, 0x8B, 0x77, 0x50, 0x41, 0xDD, 0x36,                    // fnsave
+      0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5D, 0x5B, 0xC3};
   uint8_t* p = page;
   std::memcpy(p, pre, sizeof pre);
   p += sizeof pre;
@@ -159,6 +194,31 @@ void RandomMem(std::mt19937_64& g, int bytes, uint8_t* m) {
   }
 }
 
+// An FXSAVE image of a random state for FXRSTOR (FXSAVE overwrites it):
+// the x87 part as the model saves it, MXCSR the default, XMM registers
+// zero (as the lifted run's).
+void FxImage(std::mt19937_64& g, uint8_t m[512]) {
+  uint8_t img[108];
+  RandomState(g, img);
+  recomp::x87::State s{};
+  recomp::x87::Restore(s, img);
+  std::memset(m, 0, 512);
+  recomp::x87::FxSave(s, m);
+  const uint32_t mxcsr = 0x1F80, mask = 0xFFFF;
+  std::memcpy(m + 24, &mxcsr, 4);
+  std::memcpy(m + 28, &mask, 4);
+}
+
+// Memory after the run: an FXSAVE image (512 bytes) compared in its x87
+// part but for the last instruction's opcode and pointers (CPUs store them
+// differently), and in the bytes it leaves alone; its MXCSR and XMM
+// registers are the host's natively.
+bool SameMem(const uint8_t* a, const uint8_t* b, int span) {
+  if (span < 512) return std::memcmp(a, b, span) == 0;
+  return std::memcmp(a, b, 6) == 0 && std::memcmp(a + 32, b + 32, 128) == 0 &&
+         std::memcmp(a + 416, b + 416, 96) == 0;
+}
+
 bool IsTranscendental(const std::string& t) {
   for (const char* n : {"fsin", "fcos", "fptan", "fpatan", "f2xm1", "fyl2x"})
     if (t.rfind(n, 0) == 0) return true;
@@ -193,11 +253,33 @@ uint64_t Ulps(const uint8_t* a, const uint8_t* b) {
 
 int main(int argc, char** argv) {
   int trials = argc > 1 ? std::atoi(argv[1]) : 20000;
+  // The operand's 16 bytes at kFormTarget, in a buffer mapped at the same
+  // address natively; fs: operands run natively as gs: (fs is the C
+  // library's).
+  const uint32_t kBuf = uint32_t(kFormTarget - 0x1000), kBufSize = 0x2000;
+  const uint32_t seg_base = uint32_t(kFormTarget - kFormSegOffset);
+  if (syscall(SYS_arch_prctl, ARCH_SET_GS, uintptr_t(seg_base))) {
+    std::printf("cannot set the gs base\n");
+    return 1;
+  }
   recomp::GuestMemory mem;
+#ifdef LIFT_X87_X64
+  if (!mem.Reserve(36)) return 1;
+#else
   if (!mem.Reserve()) return 1;
+#endif
   recomp::g_guest_base = mem.base();
-  mem.Commit(kMemVa, 0x1000, recomp::Prot::RW);
+  mem.Commit(kBuf, kBufSize, recomp::Prot::RW);
   mem.Commit(kStackVa - 0x1000, 0x2000, recomp::Prot::RW);
+  auto* native_buf = static_cast<uint8_t*>(
+      mmap(reinterpret_cast<void*>(uintptr_t(kBuf)), kBufSize, PROT_READ | PROT_WRITE,
+           MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0));
+  if (native_buf != reinterpret_cast<uint8_t*>(uintptr_t(kBuf))) {
+    std::printf("cannot map the native buffer at %08X\n", kBuf);
+    return 1;
+  }
+  uint8_t* const hm = native_buf + (kFormTarget - kBuf);
+  uint8_t* const lm = mem.ptr(uint32_t(kFormTarget));
   auto* page = static_cast<uint8_t*>(mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
                                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
   if (page == MAP_FAILED) return 1;
@@ -212,45 +294,77 @@ int main(int argc, char** argv) {
     bool transc = IsTranscendental(text);
     bool flags = text.find("comi") != std::string::npos;
     bool ax = text.find("fnstsw ax") != std::string::npos;
+    // Memory compared: the operand's 16 bytes and 16 past them (zero), or
+    // an FXSAVE image.
+    const int span = f.mem_bytes == 512 ? 512 : 32;
     int fails = 0;
     for (int t = 0; t < trials; t++) {
-      uint8_t in[108], hw[108], lf[108], m0[16];
+      uint8_t in[108], hw[108], lf[108], m0[512] = {};
       RandomState(g, in);
       RandomMem(g, f.mem_bytes, m0);
+      if (f.mem_bytes == 512) FxImage(g, m0);
+      Regs rg{};
+      for (int r = 0; r < 8; r++) rg.r[r] = r == 4 ? 0 : uint32_t(g());
+      if (f.m.mem) AimForm(f.m, rg.r, g() % 8);
       // Native.
-      alignas(16) uint8_t hm[32] = {};
-      std::memcpy(hm, m0, 16);
-      uint64_t hflags = 0, hrax = 0;
-      native(hm, in, hw, &hflags, &hrax);
+      std::memcpy(hm, m0, span);
+      Regs hr = rg;
+      hr.in = in;
+      hr.out = hw;
+      native(&hr);
+      uint64_t hflags = hr.flags, hrax = hr.r[0];
       // Lifted.
-      std::memcpy(mem.ptr(kMemVa), m0, 16);
-      std::memset(mem.ptr(kMemVa) + 16, 0, 16);
-      recomp::Ctx c{};
-      recomp::x87::Restore(c.fpu, in);
-      c.eax = kMemVa;
-      c.esp = kStackVa;
-      f.fn(c);
-      recomp::x87::Save(c.fpu, lf);
+      std::memcpy(lm, m0, span);
+      auto lifted = [&](const uint8_t* img, uint8_t* out) {
+        recomp::Ctx c{};
+        recomp::x87::Restore(c.fpu, img);
+        // The registers' values are below 4 GiB: 32-bit code sees the same
+        // in the low halves.
+        c.rax = rg.r[0]; c.rcx = rg.r[1]; c.rdx = rg.r[2]; c.rbx = rg.r[3];
+        c.rbp = rg.r[5]; c.rsi = rg.r[6]; c.rdi = rg.r[7];
+        c.esp = kStackVa;
+        c.mxcsr = 0x1F80;
+        c.fs_base = c.gs_base = seg_base;
+        f.fn(c);
+        recomp::x87::Save(c.fpu, out);
+        return c;
+      };
+      recomp::Ctx c = lifted(in, lf);
       checks++;
+      const bool regs_same = std::memcmp(hw + 28, lf + 28, 80) == 0;
       // Compare: CW, SW, TW, registers; memory; flags/ax where relevant.
       std::string why;
       if (std::memcmp(hw, lf, 2)) why += " cw";
       {
-        // C1 reports the rounding direction; for transcendentals it moves
-        // with the last-bit difference.
+        // C1 reports the rounding direction; for transcendentals the
+        // hardware's own (tests/x86/x87_test.cpp).
         uint16_t hs, ls;
         std::memcpy(&hs, hw + 4, 2);
         std::memcpy(&ls, lf + 4, 2);
         if (transc) hs &= ~0x0200, ls &= ~0x0200;
+        // Intel documents the FCOMI family as clearing C1, AMD CPUs keep
+        // it; the model follows Intel (as tests/x86/x87_test.cpp says).
+        if (flags) hs &= ~0x0200, ls &= ~0x0200;
         if (hs != ls) why += " sw";
       }
       if (std::memcmp(hw + 8, lf + 8, 2)) why += " tw";
+      if (!SameMem(hm, lm, span)) why += " mem";
+      // Whether the model rounded: PE from the same run with PE clear on
+      // entry (memory is compared already; the rerun writes it again).
+      bool rounded = false;
+      if (transc && !regs_same) {
+        uint8_t pin[108], pout[108];
+        std::memcpy(pin, in, 108);
+        pin[4] &= ~0x20;
+        std::memcpy(lm, m0, span);
+        lifted(pin, pout);
+        rounded = pout[4] & 0x20;
+      }
       for (int r = 0; r < 8; r++) {
         if (std::memcmp(hw + 28 + r * 10, lf + 28 + r * 10, 10) == 0) continue;
-        if (transc && Ulps(hw + 28 + r * 10, lf + 28 + r * 10) <= 1) continue;
+        if (rounded && Ulps(hw + 28 + r * 10, lf + 28 + r * 10) <= 1) continue;
         why += " st" + std::to_string(r);
       }
-      if (std::memcmp(hm, mem.ptr(kMemVa), 32)) why += " mem";
       if (flags) {
         uint32_t hf = uint32_t(hflags) & 0x45;  // CF PF ZF
         uint32_t lfl = c.eflags & 0x45;
@@ -258,7 +372,7 @@ int main(int argc, char** argv) {
       }
       if (ax && uint16_t(hrax) != uint16_t(c.eax)) why += " ax";
       if (why.empty()) {
-        if (transc && std::memcmp(hw + 28, lf + 28, 80)) approx++;
+        if (!regs_same) approx++;
         continue;
       }
       if (++fails <= 3) {
@@ -284,11 +398,11 @@ int main(int argc, char** argv) {
         dump("lift", lf);
         if (f.mem_bytes) {
           std::printf("   mem in ");
-          for (int i = 0; i < f.mem_bytes; i++) std::printf("%02X", m0[i]);
+          for (int i = 0; i < std::min(f.mem_bytes, 16); i++) std::printf("%02X", m0[i]);
           std::printf(" hw ");
-          for (int i = 0; i < f.mem_bytes; i++) std::printf("%02X", hm[i]);
+          for (int i = 0; i < std::min(f.mem_bytes, 16); i++) std::printf("%02X", hm[i]);
           std::printf(" lift ");
-          for (int i = 0; i < f.mem_bytes; i++) std::printf("%02X", mem.ptr(kMemVa)[i]);
+          for (int i = 0; i < std::min(f.mem_bytes, 16); i++) std::printf("%02X", lm[i]);
           std::printf("\n");
         }
       }
