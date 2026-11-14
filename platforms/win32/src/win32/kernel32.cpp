@@ -681,8 +681,17 @@ HLE64("kernel32.dll", VirtualFree, 3) {
   gaddr addr = Arg(c, 0);
   uint64_t size = Arg(c, 1);
   uint32_t type = uint32_t(Arg(c, 2));
-  if (type & kMemRelease) return g_proc->vm.Release(addr) ? 1 : 0;
-  if (type & kMemDecommit) return g_proc->vm.Decommit(addr, size) ? 1 : 0;
+  // MEM_RELEASE takes a size of 0 and frees the whole reservation;
+  // MEM_DECOMMIT fails for a range past its reservation (VirtualFree).
+  if (type == kMemRelease && size == 0) {
+    if (g_proc->vm.Release(addr)) return 1;
+  } else if (type == kMemDecommit) {
+    if (g_proc->vm.Decommit(addr, size)) return 1;
+  } else {
+    SetLastError(kErrorInvalidParameter);
+    return 0;
+  }
+  SetLastError(kErrorInvalidAddress);
   return 0;
 }
 
