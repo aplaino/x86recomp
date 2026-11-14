@@ -260,7 +260,9 @@ int main(int argc, char** argv) {
   // --stack-flow: protectors put decoy prologues in front of functions, and
   // a decoy's last instruction covers the real entry. A relocated pointer
   // in .rdata (a vtable slot) is an address the image really uses, so its
-  // target is kept even inside another function's instruction.
+  // target is kept even inside another function's instruction; so is that
+  // of a pointer the protector keeps in code padding and reads with an
+  // absolute memory operand.
   std::set<uint64_t> table_ptrs;
   if (p.stack_flow)
     for (const auto& m : p.modules)
@@ -359,6 +361,13 @@ int main(int argc, char** argv) {
             if (o.type == ZYDIS_OPERAND_TYPE_IMMEDIATE && !o.imm.is_relative)
               candidate(fm, p.x64 ? o.imm.value.u : static_cast<uint32_t>(o.imm.value.u),
                         &from_code_ptrs);
+            if (p.stack_flow && o.type == ZYDIS_OPERAND_TYPE_MEMORY &&
+                o.mem.base == ZYDIS_REGISTER_NONE && o.mem.index == ZYDIS_REGISTER_NONE &&
+                p.InText(uint32_t(o.mem.disp.value))) {
+              const uint64_t t = p.mem.read<uint32_t>(uint32_t(o.mem.disp.value));
+              table_ptrs.insert(t);
+              candidate(fm, t, &from_code_ptrs);
+            }
             // x64 code takes a function's address with a RIP-relative lea.
             if (o.type == ZYDIS_OPERAND_TYPE_MEMORY && o.mem.base == ZYDIS_REGISTER_RIP &&
                 in.d.mnemonic == ZYDIS_MNEMONIC_LEA)
