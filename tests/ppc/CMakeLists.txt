@@ -8,7 +8,6 @@
 # (qemu-system-ppc64, RECOMP_PYTHON) need: each one missing fails
 # ppc_prerequisites, which names it, unless RECOMP_ALLOW_MISSING_TEST_TOOLS
 # says this host cannot run those tests.
-option(RECOMP_ALLOW_MISSING_TEST_TOOLS "Leave out the tests whose tools are missing instead of failing" OFF)
 find_program(RECOMP_LD_LLD ld.lld)
 find_program(RECOMP_QEMU_PPC64 qemu-system-ppc64)
 set(RECOMP_PYTHON "${RECOMP_ROOT}/.venv/bin/python" CACHE FILEPATH

@@ -9,7 +9,6 @@
 # What the fixture's build (clang, ld.lld) and the oracle (RECOMP_PYTHON)
 # need: each one missing fails a64_prerequisites, which names it, unless
 # RECOMP_ALLOW_MISSING_TEST_TOOLS says this host cannot run those tests.
-option(RECOMP_ALLOW_MISSING_TEST_TOOLS "Leave out the tests whose tools are missing instead of failing" OFF)
 find_program(RECOMP_LD_LLD ld.lld)
 set(RECOMP_PYTHON "${RECOMP_ROOT}/.venv/bin/python" CACHE FILEPATH
     "Python with unicorn for the AArch64 oracle tests")

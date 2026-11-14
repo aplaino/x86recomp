@@ -92,6 +92,10 @@ option(RECOMP_HOST "Host layer: SDL3, ffmpeg, FreeType, LLVM demangling, gfx::De
 if(RECOMP_X86 AND NOT RECOMP_HOST)
   message(FATAL_ERROR "RECOMP_X86 needs RECOMP_HOST")
 endif()
+# Tests whose tools (compilers, emulators, the oracles' Python) are
+# missing fail a <name>_prerequisites test that names them; On leaves
+# them out instead, for a host that cannot run them.
+option(RECOMP_ALLOW_MISSING_TEST_TOOLS "Leave out the tests whose tools are missing instead of failing" OFF)
 # Pictures the runtime draws itself over a game's frames (runtime/ui: a
 # console's system dialogs), with text in the host's font through
 # fontconfig: part of the host layer, built only for the platforms that

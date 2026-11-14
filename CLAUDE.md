@@ -45,8 +45,10 @@ OS or middleware API goes here, even when a game is where it came up.
   too).
 - The oracle tests of the PowerPC and AArch64 cores need a Python with
   their packages: pass -DRECOMP_PYTHON=<venv>/bin/python (the venv's own
-  path, not its resolved symlink) when the tree has no `.venv/`, or they
-  are skipped.
+  path, not its resolved symlink) when the tree has no `.venv/`
+  (tools/land.py passes the main checkout's). A missing tool fails
+  `<core>_prerequisites`; -DRECOMP_ALLOW_MISSING_TEST_TOOLS=ON leaves
+  those tests out instead.
 
 ## Branches and landing
 - One long-lived branch, main. Every core and platform module lives on

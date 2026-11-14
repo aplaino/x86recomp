@@ -166,7 +166,6 @@ set_tests_properties(orbis_gpu PROPERTIES SKIP_RETURN_CODE 77
 # Needs clang, ld.lld and Python 3: each one missing fails
 # orbis_prerequisites, which names it, unless
 # RECOMP_ALLOW_MISSING_TEST_TOOLS says this host cannot run those tests.
-option(RECOMP_ALLOW_MISSING_TEST_TOOLS "Leave out the tests whose tools are missing instead of failing" OFF)
 find_program(RECOMP_LD_LLD ld.lld HINTS "${RECOMP_LLVM_ROOT}/bin")
 find_package(Python3 COMPONENTS Interpreter)
 set(_missing)
