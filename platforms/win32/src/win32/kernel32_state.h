@@ -61,7 +61,7 @@ GuestHeap* FindHeap(gaddr handle);
 
 // Kernel object handles. Values are small multiples of 4, as on Windows.
 struct KObject {
-  enum class Type { File, Event, Mutex, Semaphore, Thread, Mapping, Find, StdIo, Socket };
+  enum class Type { File, Event, Mutex, Semaphore, Thread, Process, Mapping, Find, StdIo, Socket };
   explicit KObject(Type t) : type(t) {}
   virtual ~KObject() = default;
   Type type;
@@ -69,7 +69,12 @@ struct KObject {
 
 uint32_t NewHandle(std::shared_ptr<KObject> obj);
 int FileFd(KObject* o);  // host fd of a File/StdIo object, or -1
+// The object behind a handle; GetCurrentProcess()'s and
+// GetCurrentThread()'s pseudo handles (0xFFFFFFFF, 0xFFFFFFFE) stand for
+// the process and the calling thread wherever a handle is taken.
 std::shared_ptr<KObject> GetHandle(uint32_t h);
+// The object behind a pseudo handle, else null (GetHandle's first step).
+std::shared_ptr<KObject> PseudoHandle(uint32_t h);
 bool CloseHandleValue(uint32_t h);
 
 // Guest path (absolute, e.g. below GameConfig::guest_dir, or relative to
@@ -95,7 +100,11 @@ std::string NarrowPath(const std::u16string& path);
 std::vector<std::string> HostDirs(const std::string& guest_dir);
 std::string GuestCurrentDir();
 
-// A guest thread finished (Process::thread_exit): its handle is signalled.
+// The process's main thread gets the thread object CreateThread gives the
+// others (GetCurrentThread, DuplicateHandle, waits).
+void RegisterMainThread(Thread* t);
+// A guest thread finished (Process::thread_exit): its handle is signalled
+// and the mutexes it still owns are abandoned.
 void OnGuestThreadFinished(uint32_t tid, uint32_t exit_code);
 
 // SetEvent (or PulseEvent) on an event handle from host code (WinMM

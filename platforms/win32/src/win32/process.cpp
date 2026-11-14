@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstring>
 #include <mutex>
+#include <set>
 
 #include "runtime/log.h"
 #include "win32/hle.h"
@@ -26,8 +27,12 @@ namespace {
 
 constexpr uint32_t kTlsArraySlots = 64;
 
+// TEBs: a finished thread's is taken back and handed out again before a
+// new one is cut below the others.
 std::mutex g_teb_mu;
-gaddr g_next_teb = 0;  // the next TEB is below it (kTebTop, kTebTop64)
+gaddr g_next_teb = 0;  // the next new TEB is below it (kTebTop, kTebTop64)
+std::vector<gaddr> g_free_tebs;
+std::set<gaddr> g_live_tebs;
 
 // The image's .text, where its lifted functions are.
 std::pair<gaddr, uint64_t> TextOf(const PeImage& img) {
@@ -45,12 +50,21 @@ void InitTeb(Thread* t) {
   gaddr teb;
   {
     std::lock_guard<std::mutex> l(g_teb_mu);
-    if (!g_next_teb) g_next_teb = p.x64 ? kTebTop64 : kTebTop;
-    g_next_teb -= stride;
-    if (p.x64 && g_next_teb < kTebLo64) FatalF("too many guest threads");
-    teb = g_next_teb;
+    if (!g_free_tebs.empty()) {
+      teb = g_free_tebs.back();
+      g_free_tebs.pop_back();
+    } else {
+      const gaddr lo = p.x64 ? kTebLo64 : kTebLo;
+      if (!g_next_teb) g_next_teb = p.x64 ? kTebTop64 : kTebTop;
+      if (g_next_teb - lo < stride)
+        FatalF("too many guest threads at once: %llu TEBs in use",
+               (unsigned long long)g_live_tebs.size());
+      g_next_teb -= stride;
+      teb = g_next_teb;
+    }
+    p.mem.Commit(teb, stride, Prot::RW);
+    g_live_tebs.insert(teb);
   }
-  p.mem.Commit(teb, stride, Prot::RW);
   if (p.x64)
     t->ctx.gs_base = teb;
   else
@@ -92,6 +106,29 @@ void InitTeb(Thread* t) {
     if (m.tls_index >= 0) block(m.img, m.tls_index);
 }
 
+// Process::thread_exit: whoever waits for the thread may go on, then what
+// it had goes back (its guest code has finished): the static TLS blocks
+// and their array, and the TEB. The core releases the stack itself after
+// this hook.
+void FinishThread(Thread* t, uint32_t code) {
+  OnGuestThreadFinished(t->tid, code);
+  Process& p = *g_proc;
+  const Win32Process& w = *g_win32;
+  const gaddr teb = Teb(t);
+  const uint32_t ptr = p.x64 ? 8 : 4;
+  const gaddr tls_array = RdPtr(teb + (p.x64 ? 0x58 : 0x2C));
+  if (w.img.has_tls) HeapFreeProcess(RdPtr(tls_array));
+  for (const Module& m : w.modules)
+    if (m.tls_index >= 0) HeapFreeProcess(RdPtr(tls_array + ptr * uint32_t(m.tls_index)));
+  HeapFreeProcess(tls_array);
+  {
+    std::lock_guard<std::mutex> l(g_teb_mu);
+    g_live_tebs.erase(teb);
+    p.mem.Decommit(teb, p.x64 ? kTebStride64 : kTebStride);
+    g_free_tebs.push_back(teb);
+  }
+}
+
 // Static TLS callbacks are not run (no supported module has any).
 void CheckNoTlsCallbacks(const PeImage& img, const std::string& name) {
   if (img.has_tls && img.tls.callbacks && RdPtr(img.tls.callbacks))
@@ -99,6 +136,11 @@ void CheckNoTlsCallbacks(const PeImage& img, const std::string& name) {
 }
 
 }  // namespace
+
+void ForEachTeb(const std::function<void(gaddr teb)>& f) {
+  std::lock_guard<std::mutex> l(g_teb_mu);
+  for (gaddr teb : g_live_tebs) f(teb);
+}
 
 const PeImage* ImageAt(gaddr va) {
   const Win32Process& w = *g_win32;
@@ -139,7 +181,7 @@ int RunProcess(const win32::GameConfig& game, const std::string& exe_path,
   w.game = game;
   Process& p = StartProcess(game, game_dir, PeImage::IsX64File(exe_path));
   p.thread_init = InitTeb;
-  p.thread_exit = [](Thread* t, uint32_t code) { OnGuestThreadFinished(t->tid, code); };
+  p.thread_exit = FinishThread;
   p.guest_fault = [](Ctx& c, bool write, gaddr addr) {
     return hle::RaiseAccessViolation(c, write, uint32_t(addr));
   };
@@ -207,6 +249,7 @@ int RunProcess(const win32::GameConfig& game, const std::string& exe_path,
   InitKernel32State();
 
   Thread* main = CreateGuestThread(w.img.stack_reserve);
+  RegisterMainThread(main);
   return int(RunMainThread(main, [&](Ctx& c) { return CallGuest(c, w.img.entry, {}); }));
 }
 

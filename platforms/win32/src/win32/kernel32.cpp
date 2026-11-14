@@ -396,7 +396,8 @@ HLE64("kernel32.dll", ExitProcess, 1) {
 }
 
 HLE64("kernel32.dll", TerminateProcess, 2) {
-  if (uint32_t(Arg(c, 0)) == 0xFFFFFFFF) {
+  auto p = GetHandle(uint32_t(Arg(c, 0)));
+  if (p && p->type == KObject::Type::Process) {
     std::fprintf(stderr, "TerminateProcess(self, %u)\n", uint32_t(Arg(c, 1)));
     std::_Exit(int(Arg(c, 1)));
   }
@@ -786,9 +787,8 @@ HLE("kernel32.dll", IsBadCodePtr, 1) {
 std::mutex g_tls_mu;
 uint64_t g_tls_used = 0;
 
-gaddr TlsSlot(uint32_t i) {
-  return g_proc->x64 ? Teb(CurrentThread()) + 0x1480 + 8 * i
-                     : Teb(CurrentThread()) + 0xE10 + 4 * i;
+gaddr TlsSlot(gaddr teb, uint32_t i) {
+  return g_proc->x64 ? teb + 0x1480 + 8 * i : teb + 0xE10 + 4 * i;
 }
 
 HLE64("kernel32.dll", TlsAlloc, 0) {
@@ -802,10 +802,18 @@ HLE64("kernel32.dll", TlsAlloc, 0) {
   return 0xFFFFFFFF;
 }
 
+// Clears the slot in every thread, as Windows does, so that a TlsAlloc
+// handing the index out again finds it null everywhere.
 HLE64("kernel32.dll", TlsFree, 1) {
   GuestSyncPoint sync;
+  const uint32_t i = uint32_t(Arg(c, 0));
   std::lock_guard<std::mutex> l(g_tls_mu);
-  g_tls_used &= ~(1ull << (Arg(c, 0) & 63));
+  if (i >= 64 || !(g_tls_used & (1ull << i))) {
+    SetLastError(kErrorInvalidParameter);
+    return 0;
+  }
+  g_tls_used &= ~(1ull << i);
+  ForEachTeb([&](gaddr teb) { WrPtr(TlsSlot(teb, i), 0); });
   return 1;
 }
 
@@ -813,13 +821,13 @@ HLE64("kernel32.dll", TlsGetValue, 1) {
   uint32_t i = uint32_t(Arg(c, 0));
   if (i >= 64) return 0;
   SetLastError(0);
-  return RdPtr(TlsSlot(i));
+  return RdPtr(TlsSlot(Teb(CurrentThread()), i));
 }
 
 HLE64("kernel32.dll", TlsSetValue, 2) {
   uint32_t i = uint32_t(Arg(c, 0));
   if (i >= 64) return 0;
-  WrPtr(TlsSlot(i), Arg(c, 1));
+  WrPtr(TlsSlot(Teb(CurrentThread()), i), Arg(c, 1));
   return 1;
 }
 

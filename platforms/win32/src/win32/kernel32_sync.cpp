@@ -41,8 +41,11 @@ struct Waitable : KObject {
   // Under g_wait_mu: is the object signalled for thread `tid`?
   virtual bool Signalled(uint32_t tid) const = 0;
   // Under g_wait_mu: a wait on it was satisfied; consume (auto-reset,
-  // mutex ownership, semaphore count).
-  virtual void Acquire(uint32_t tid) { (void)tid; }
+  // mutex ownership, semaphore count). True if it was an abandoned mutex.
+  virtual bool Acquire(uint32_t tid) {
+    (void)tid;
+    return false;
+  }
   // Under g_wait_mu: thread `tid` starts (on) or stops waiting on it.
   virtual void Waiting(uint32_t tid, bool on) { (void)tid, (void)on; }
 };
@@ -51,9 +54,9 @@ struct EventObject : Waitable {
   EventObject(bool manual, bool initial)
       : Waitable(Type::Event), manual_reset(manual), signalled(initial) {}
   bool Signalled(uint32_t tid) const override { return signalled || pulsed.count(tid); }
-  void Acquire(uint32_t tid) override {
-    if (pulsed.erase(tid)) return;
-    if (!manual_reset) signalled = false;
+  bool Acquire(uint32_t tid) override {
+    if (!pulsed.erase(tid) && !manual_reset) signalled = false;
+    return false;
   }
   void Waiting(uint32_t tid, bool on) override {
     if (on) {
@@ -77,24 +80,34 @@ struct EventObject : Waitable {
   std::set<uint32_t> waiters, pulsed;  // threads waiting; those a pulse released
 };
 
+// A mutex whose owner exits without releasing it is abandoned, as in NT:
+// it is released, and the wait that takes it next returns WAIT_ABANDONED
+// (the abandonment is reported once).
 struct MutexObject : Waitable {
   MutexObject() : Waitable(Type::Mutex) {}
   bool Signalled(uint32_t tid) const override {
     return owner == 0 || owner == tid;
   }
-  void Acquire(uint32_t tid) override {
+  bool Acquire(uint32_t tid) override {
     owner = tid;
     count++;
+    const bool was = abandoned;
+    abandoned = false;
+    return was;
   }
   uint32_t owner = 0;
   uint32_t count = 0;
+  bool abandoned = false;
 };
 
 struct SemaphoreObject : Waitable {
   SemaphoreObject(int32_t initial, int32_t maximum)
       : Waitable(Type::Semaphore), count(initial), max(maximum) {}
   bool Signalled(uint32_t) const override { return count > 0; }
-  void Acquire(uint32_t) override { count--; }
+  bool Acquire(uint32_t) override {
+    count--;
+    return false;
+  }
   int32_t count, max;
 };
 
@@ -109,23 +122,29 @@ struct ThreadObject : Waitable {
   uint32_t exit_code = 0;  // once finished
 };
 
-std::map<std::string, std::shared_ptr<KObject>> g_named;  // under g_wait_mu
-std::map<uint32_t, std::shared_ptr<ThreadObject>> g_thread_objs;  // by tid
+// The process, as its handles see it: signalled once it has exited, which
+// no thread here lives to see.
+struct ProcessObject : Waitable {
+  ProcessObject() : Waitable(Type::Process) {}
+  bool Signalled(uint32_t) const override { return false; }
+};
 
-constexpr uint32_t kWaitObject0 = 0, kWaitTimeout = 0x102,
+std::map<std::string, std::shared_ptr<KObject>> g_named;  // under g_wait_mu
+// Threads that have not finished, by tid (under g_wait_mu).
+std::map<uint32_t, std::shared_ptr<ThreadObject>> g_thread_objs;
+// Every mutex, to abandon those a finishing thread owns (under g_wait_mu).
+std::vector<std::weak_ptr<MutexObject>> g_mutexes;
+
+constexpr uint32_t kWaitObject0 = 0, kWaitAbandoned0 = 0x80, kWaitTimeout = 0x102,
                    kWaitFailed = 0xFFFFFFFF, kInfinite = 0xFFFFFFFF;
 
 std::shared_ptr<Waitable> AsWaitable(uint32_t h) {
-  if (h == 0xFFFFFFFE) {  // GetCurrentThread() pseudo handle
-    std::lock_guard<std::mutex> l(g_wait_mu);
-    auto it = g_thread_objs.find(CurrentThread()->tid);
-    return it == g_thread_objs.end() ? nullptr : it->second;
-  }
   return std::dynamic_pointer_cast<Waitable>(GetHandle(h));
 }
 
-// Waits for one (wait_all=false) or all of `objs`. Returns WAIT_OBJECT_0+i
-// or WAIT_TIMEOUT.
+// Waits for one (wait_all=false) or all of `objs`. Returns WAIT_OBJECT_0+i,
+// WAIT_ABANDONED_0+i when the object taken is an abandoned mutex (wait-all:
+// WAIT_ABANDONED_0 when any is, as NT reports it), or WAIT_TIMEOUT.
 uint32_t WaitObjects(const std::vector<std::shared_ptr<Waitable>>& objs,
                      bool wait_all, uint32_t timeout_ms) {
   uint32_t tid = CurrentThread()->tid;
@@ -146,15 +165,14 @@ uint32_t WaitObjects(const std::vector<std::shared_ptr<Waitable>>& objs,
       bool all = true;
       for (const auto& o : objs) all = all && o->Signalled(tid);
       if (all) {
-        for (const auto& o : objs) o->Acquire(tid);
-        return kWaitObject0;
+        bool abandoned = false;
+        for (const auto& o : objs) abandoned |= o->Acquire(tid);
+        return abandoned ? kWaitAbandoned0 : kWaitObject0;
       }
     } else {
       for (size_t i = 0; i < objs.size(); i++)
-        if (objs[i]->Signalled(tid)) {
-          objs[i]->Acquire(tid);
-          return kWaitObject0 + uint32_t(i);
-        }
+        if (objs[i]->Signalled(tid))
+          return (objs[i]->Acquire(tid) ? kWaitAbandoned0 : kWaitObject0) + uint32_t(i);
     }
     if (timeout_ms == 0) return kWaitTimeout;
     if (timeout_ms == kInfinite) {
@@ -168,6 +186,19 @@ uint32_t WaitObjects(const std::vector<std::shared_ptr<Waitable>>& objs,
 void SignalChanged() { g_wait_cv.notify_all(); }
 
 }  // namespace
+
+std::shared_ptr<KObject> PseudoHandle(uint32_t h) {
+  if (h == 0xFFFFFFFF) {
+    static const auto process = std::make_shared<ProcessObject>();
+    return process;
+  }
+  if (h == 0xFFFFFFFE && CurrentThread()) {
+    std::lock_guard<std::mutex> l(g_wait_mu);
+    auto it = g_thread_objs.find(CurrentThread()->tid);
+    if (it != g_thread_objs.end()) return it->second;
+  }
+  return nullptr;
+}
 
 bool SignalEventHandle(uint32_t h, bool pulse) {
   auto e = std::dynamic_pointer_cast<EventObject>(GetHandle(h));
@@ -257,7 +288,9 @@ HLE("kernel32.dll", CreateMutexA, 3) {
   bool own = Arg(c, 1);
   uint32_t tid = CurrentThread()->tid;
   uint32_t h = CreateNamed(NameOf(Arg(c, 2)), [] {
-    return std::make_shared<MutexObject>();
+    auto m = std::make_shared<MutexObject>();
+    g_mutexes.push_back(m);
+    return m;
   });
   if (own) {
     auto m = std::dynamic_pointer_cast<MutexObject>(GetHandle(h));
@@ -748,6 +781,14 @@ HLE("kernel32.dll", UnmapViewOfFile, 1) {
 }  // namespace
 }  // namespace hle
 
+void RegisterMainThread(Thread* t) {
+  auto to = std::make_shared<ThreadObject>();
+  to->thread = t;
+  to->started = true;
+  std::lock_guard<std::mutex> l(g_wait_mu);
+  g_thread_objs[t->tid] = to;
+}
+
 void OnGuestThreadFinished(uint32_t tid, uint32_t exit_code) {
   GuestSyncPoint sync;
   {
@@ -756,6 +797,20 @@ void OnGuestThreadFinished(uint32_t tid, uint32_t exit_code) {
     if (it != g_thread_objs.end()) {
       it->second->exit_code = exit_code;
       it->second->finished = true;
+      g_thread_objs.erase(it);  // its handles keep the object
+    }
+    for (auto m = g_mutexes.begin(); m != g_mutexes.end();) {
+      auto mutex = m->lock();
+      if (!mutex) {
+        m = g_mutexes.erase(m);
+        continue;
+      }
+      if (mutex->owner == tid) {
+        mutex->owner = 0;
+        mutex->count = 0;
+        mutex->abandoned = true;
+      }
+      ++m;
     }
   }
   SignalChanged();

@@ -228,6 +228,7 @@ uint32_t NewHandle(std::shared_ptr<KObject> obj) {
 }
 
 std::shared_ptr<KObject> GetHandle(uint32_t h) {
+  if (auto o = PseudoHandle(h)) return o;
   std::lock_guard<std::mutex> l(g_handles_mu);
   auto it = g_handles.find(h);
   return it == g_handles.end() ? nullptr : it->second;
@@ -292,7 +293,7 @@ HLE("kernel32.dll", SetStdHandle, 2) { return 1; }
 
 HLE("kernel32.dll", GetFileType, 1) {
   auto o = GetHandle(Arg(c, 0));
-  if (!o) {
+  if (!o || (o->type != KObject::Type::File && o->type != KObject::Type::StdIo)) {
     SetLastError(kErrorInvalidHandle);
     return 0;  // FILE_TYPE_UNKNOWN
   }
@@ -300,16 +301,33 @@ HLE("kernel32.dll", GetFileType, 1) {
 }
 
 HLE64("kernel32.dll", CloseHandle, 1) {
-  if (!CloseHandleValue(Arg(c, 0))) {
+  // Closing a pseudo handle does nothing and succeeds (NtClose).
+  const uint32_t h = uint32_t(Arg(c, 0));
+  if (h == 0xFFFFFFFF || h == 0xFFFFFFFE) return 1;
+  if (!CloseHandleValue(h)) {
     SetLastError(kErrorInvalidHandle);
     return 0;
   }
   return 1;
 }
 
+// DuplicateHandle(source process, source, target process, &target,
+// access, inherit, options). Both processes are this one; a pseudo handle
+// as the source gives a real handle to the process or thread.
+// DUPLICATE_CLOSE_SOURCE closes the source whatever the outcome.
 HLE("kernel32.dll", DuplicateHandle, 7) {
-  auto o = GetHandle(Arg(c, 1));
-  if (!o) {
+  auto is_process = [](uint32_t h) {
+    auto p = GetHandle(h);
+    return p && p->type == KObject::Type::Process;
+  };
+  const uint32_t src = Arg(c, 1);
+  if (!is_process(Arg(c, 0))) {
+    SetLastError(kErrorInvalidHandle);
+    return 0;
+  }
+  auto o = GetHandle(src);
+  if (Arg(c, 6) & 1) CloseHandleValue(src);
+  if (!o || !is_process(Arg(c, 2))) {
     SetLastError(kErrorInvalidHandle);
     return 0;
   }

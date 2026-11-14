@@ -4,6 +4,7 @@
 // and what kernel32 keeps for the whole process.
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -68,10 +69,12 @@ struct GameConfig : recomp::GameConfig {
 
 }  // namespace win32
 
-// Fixed guest layout (see ARCHITECTURE.md). TEBs grow down from kTebTop.
+// Fixed guest layout (see ARCHITECTURE.md). TEBs grow down from kTebTop
+// to the thunk region's end (room for 3806 threads at a time).
 inline constexpr uint32_t kPebVa = 0x7FFDF000;
 inline constexpr uint32_t kTebTop = 0x7FFDE000;
 inline constexpr uint32_t kTebStride = 0x1000;
+inline constexpr uint32_t kTebLo = kThunkBase + kThunkRegionSize;
 
 // x64 guests (ARCHITECTURE.md, "64-bit guests"): a 64 GiB arena with
 // nothing below 4 GiB. From the top: the thunks (x86/layout.h), the
@@ -116,6 +119,10 @@ const win32::GameConfig& Game();
 inline gaddr Teb(const Thread* t) {
   return g_proc->x64 ? t->ctx.gs_base : t->ctx.fs_base;
 }
+
+// Runs f on the TEB of every guest thread that has one and has not
+// finished, holding the lock that hands TEBs out and takes them back.
+void ForEachTeb(const std::function<void(gaddr teb)>& f);
 
 // The EXE's or a lifted DLL's image containing va, or null.
 const PeImage* ImageAt(gaddr va);
