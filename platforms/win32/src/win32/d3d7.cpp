@@ -312,13 +312,17 @@ HLE_NAMED("ddraw.dll", "IDirect3DDevice7::AddRef", D3DD7_AddRef, 1) { return com
 
 HLE_NAMED("ddraw.dll", "IDirect3DDevice7::Release", D3DD7_Release, 1) {
   uint32_t self = Arg(c, 0);
-  uint32_t surf = 0, d3d = 0;
+  uint32_t surf = 0, d3d = 0, textures[8] = {};
   if (auto* d = com::As<Device>(self)) {
     surf = d->target_guest;
     d3d = d->d3d;
+    std::memcpy(textures, d->textures, sizeof textures);
   }
   uint32_t left = com::Release(self);
   if (!left) {
+    // The last reference: what the device held goes with it.
+    for (uint32_t t : textures)
+      if (t) com::Release(t);
     if (surf) com::Release(surf);
     if (d3d) com::Release(d3d);
   }
