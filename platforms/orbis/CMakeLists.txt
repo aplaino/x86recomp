@@ -223,14 +223,15 @@ else()
   # orbis_app on the same programs laid out as an app0: the PRXs found by
   # their module names, the one the eboot needs at the first PRX base, the
   # one it loads itself next; the imports bound to the first, the
-  # test-only library's left missing, libkernel's handled.
+  # test-only library's left missing (imports exits 1 on a missing one),
+  # libkernel's handled.
   add_custom_target(orbis_e2e_app0 ALL DEPENDS "${_e2e}/app0/eboot.bin"
                     "${_e2e}/app0/sce_module/libTestPrx.prx"
                     "${_e2e}/app0/sce_module/libTestLoad.prx")
-  add_test(NAME orbis_app_modules COMMAND orbis_app modules "${_e2e}/app0")
-  set_tests_properties(orbis_app_modules PROPERTIES PASS_REGULAR_EXPRESSION
-    "^0\teboot\t[^\n]*/eboot.bin\tstart\n800000000\tlibTestPrx\t[^\n]*/libTestPrx.prx\tstart\n810000000\tlibTestLoad\t[^\n]*/libTestLoad.prx\tload\n$")
-  add_test(NAME orbis_app_imports COMMAND orbis_app imports "${_e2e}/app0")
-  set_tests_properties(orbis_app_imports PROPERTIES PASS_REGULAR_EXPRESSION
-    "\nlibTest +[0-9]+ +0 +0 +[1-9][0-9]*\nlibTestPrx +[0-9]+ +[1-9][0-9]* +0 +0\n(.*\n)?libkernel +[0-9]+ +0 +[1-9][0-9]* +0\n")
+  add_test(NAME orbis_app_modules COMMAND "${CMAKE_COMMAND}" -DEXIT=0
+    "-DOUTPUT=^0\teboot\t[^\n]*/eboot.bin\tstart\n800000000\tlibTestPrx\t[^\n]*/libTestPrx.prx\tstart\n810000000\tlibTestLoad\t[^\n]*/libTestLoad.prx\tload\n$"
+    "-DCMD=$<TARGET_FILE:orbis_app>|modules|${_e2e}/app0" -P "${RECOMP_ROOT}/tests/expect_exit.cmake")
+  add_test(NAME orbis_app_imports COMMAND "${CMAKE_COMMAND}" -DEXIT=1
+    "-DOUTPUT=\nlibTest +[0-9]+ +0 +0 +[1-9][0-9]*\nlibTestPrx +[0-9]+ +[1-9][0-9]* +0 +0\n(.*\n)?libkernel +[0-9]+ +0 +[1-9][0-9]* +0\n"
+    "-DCMD=$<TARGET_FILE:orbis_app>|imports|${_e2e}/app0" -P "${RECOMP_ROOT}/tests/expect_exit.cmake")
 endif()
