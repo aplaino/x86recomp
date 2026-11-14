@@ -54,6 +54,17 @@ target_compile_features(lazy_mem_test PRIVATE cxx_std_20)
 target_link_libraries(lazy_mem_test PRIVATE Threads::Threads)
 add_test(NAME lazy_mem COMMAND lazy_mem_test)
 
+# guest_alloc_test: reservations, decommits and heap sizes at their
+# edges; portable.
+add_executable(guest_alloc_test guest_alloc_test.cpp
+               ${PROJECT_SOURCE_DIR}/src/runtime/guest_alloc.cpp
+               ${PROJECT_SOURCE_DIR}/src/runtime/guest_memory.cpp
+               ${PROJECT_SOURCE_DIR}/src/runtime/write_watch.cpp)
+target_include_directories(guest_alloc_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_features(guest_alloc_test PRIVATE cxx_std_20)
+target_link_libraries(guest_alloc_test PRIVATE Threads::Threads)
+add_test(NAME guest_alloc COMMAND guest_alloc_test)
+
 # write_watch_test: write watches through real page faults; portable.
 add_executable(write_watch_test write_watch_test.cpp
                ${PROJECT_SOURCE_DIR}/src/runtime/write_watch.cpp

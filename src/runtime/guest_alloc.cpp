@@ -48,7 +48,7 @@ void GuestAllocator::FreeGap(uint64_t va, uint64_t* base, uint64_t* size) const 
 
 uint64_t GuestAllocator::Reserve(uint64_t va, uint64_t size, bool top_down) {
   std::lock_guard<std::recursive_mutex> l(mu_);
-  if (!size) return 0;
+  if (!size || size > hi_) return 0;  // and RoundUp cannot wrap
   size = RoundUp(size, kPage);
   auto fits = [&](uint64_t base) {
     if (base < lo_ || uint64_t(base) + size > hi_) return false;
@@ -78,25 +78,26 @@ uint64_t GuestAllocator::Reserve(uint64_t va, uint64_t size, bool top_down) {
     regions_[cand] = size;
     return cand;
   }
+  // Each gap [low, top) from the top: the highest 64 KiB-aligned base
+  // whose range ends by top must not start below low.
   uint64_t top = hi_;
-  for (auto it = regions_.rbegin(); it != regions_.rend(); ++it) {
-    uint64_t end = it->first + it->second;
-    if (end > top) {
-      top = std::min(top, it->first);
-      continue;
+  for (auto it = regions_.rbegin();; ++it) {
+    const uint64_t low = it == regions_.rend() ? lo_ : it->first + it->second;
+    if (top >= size) {
+      const uint64_t cand = (top - size) & ~(kGranularity - 1);
+      if (cand >= RoundUp(low, kGranularity) && fits(cand)) {
+        regions_[cand] = size;
+        return cand;
+      }
     }
-    if (top - end >= size) break;
-    top = it->first;
+    if (it == regions_.rend()) return 0;
+    top = std::min(top, it->first);
   }
-  if (top < size) return 0;
-  uint64_t cand = (top - size) & ~(kGranularity - 1);
-  if (!fits(cand)) return 0;
-  regions_[cand] = size;
-  return cand;
 }
 
 bool GuestAllocator::ReserveAt(uint64_t va, uint64_t size) {
   std::lock_guard<std::recursive_mutex> l(mu_);
+  if (size > hi_) return false;
   size = RoundUp(size, kPage);
   if (!size || va & (kPage - 1) || va < lo_ || va + size > hi_) return false;
   auto it = regions_.lower_bound(va);
@@ -109,8 +110,7 @@ bool GuestAllocator::ReserveAt(uint64_t va, uint64_t size) {
 bool GuestAllocator::Commit(uint64_t va, uint64_t size, Prot prot) {
   std::lock_guard<std::recursive_mutex> l(mu_);
   Region r;
-  if (!FindLocked(va, &r) || uint64_t(va) + size > uint64_t(r.base) + r.size)
-    return false;
+  if (!FindLocked(va, &r) || size > r.base + r.size - va) return false;
   // Commit only pages not already committed, so existing data survives
   // (MEM_COMMIT on committed pages is a no-op apart from protection).
   uint64_t s = va & ~(kPage - 1), e = RoundUp(va + size, kPage);
@@ -127,6 +127,13 @@ bool GuestAllocator::Decommit(uint64_t va, uint64_t size) {
   std::lock_guard<std::recursive_mutex> l(mu_);
   Region r;
   if (!FindLocked(va, &r)) return false;
+  // Size 0 at a reservation's base is the whole reservation (VirtualFree);
+  // anywhere else, or a range running past the reservation, fails.
+  if (!size) {
+    if (va != r.base) return false;
+    size = r.size;
+  }
+  if (size > r.base + r.size - va) return false;
   mem_->Decommit(va, size);
   return true;
 }
@@ -210,6 +217,7 @@ void GuestHeap::EraseFree(uint64_t addr) {
 uint64_t GuestHeap::Alloc(uint64_t size, bool zero) {
   std::lock_guard<std::mutex> l(mu_);
   uint64_t req = size;
+  if (size > UINT64_MAX - (kAlign - 1)) return 0;  // would round to 0
   size = RoundUp(std::max<uint64_t>(size, 1), kAlign);
   auto it = free_by_size_.lower_bound(size);
   if (it == free_by_size_.end()) {
@@ -264,6 +272,7 @@ uint64_t GuestHeap::ReAlloc(uint64_t p, uint64_t size, bool zero,
     if (it == used_.end()) return 0;
     old_req = it->second.requested;
     old_size = it->second.size;
+    if (size > UINT64_MAX - (kAlign - 1)) return 0;  // would round to 0
     uint64_t want = RoundUp(std::max<uint64_t>(size, 1), kAlign);
     if (want <= old_size) {  // shrink (keep the block) or same
       it->second.requested = size;
