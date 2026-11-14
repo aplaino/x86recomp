@@ -3269,7 +3269,23 @@ void r_color0(inout vec4 c) {
       std::memset(&u, 0, sizeof u);
       for (int s = 0; s < 8; s++) {
         const auto& t = st.tss[s];
+        const bool bound = textures_.count(st.textures[s]) != 0;
         u.color[s][0] = int(t[1]);
+        // A stage with no texture whose colour operation takes TEXTURE as
+        // an argument it uses ends the cascade, as DISABLE does (alpha
+        // arguments and implicit reads see zeros instead, ff.frag).
+        if (!bound) {
+          uint32_t used = 6;  // the arguments it uses: bit 0 ARG0, 1 ARG1, 2 ARG2
+          switch (t[1]) {
+            case 1: case 22: case 23: used = 0; break;  // DISABLE, BUMPENVMAP(LUMINANCE)
+            case 2: case 17: used = 2; break;           // SELECTARG1, PREMODULATE
+            case 3: used = 4; break;                    // SELECTARG2
+            case 25: case 26: used = 7; break;          // MULTIPLYADD, LERP
+          }
+          if (((used & 1) && (t[26] & 0xF) == 2) || ((used & 2) && (t[2] & 0xF) == 2) ||
+              ((used & 4) && (t[3] & 0xF) == 2))
+            u.color[s][0] = 1;
+        }
         u.color[s][1] = int(t[2]);
         u.color[s][2] = int(t[3]);
         u.color[s][3] = int(t[26]);
@@ -3278,7 +3294,7 @@ void r_color0(inout vec4 c) {
         u.alpha[s][2] = int(t[6]);
         u.alpha[s][3] = int(t[27]);
         u.stage[s][0] = int(t[28]);
-        u.stage[s][1] = textures_.count(st.textures[s]) ? 1 : 0;
+        u.stage[s][1] = bound ? 1 : 0;
         uint32_t ttf = t[24], count = ttf & 0xFF;
         u.stage[s][2] = (ttf & 256) && count >= 2 ? int(count) - 1 : -1;
       }

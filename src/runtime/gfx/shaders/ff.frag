@@ -111,7 +111,7 @@ void main() {
     vec4 tc = i_t[s];
     int proj = u.stage[s].z;
     vec2 uv = proj >= 0 ? tc.xy / tc[proj] : tc.xy;
-    vec4 tex = vec4(0.0, 0.0, 0.0, 1.0);
+    vec4 tex = vec4(0.0);  // no texture: what D3D's alpha arguments read
     if (u.stage[s].y != 0) {
       switch (s) {
         case 0: tex = texture(tx0, uv); break;

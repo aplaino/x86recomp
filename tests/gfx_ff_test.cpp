@@ -4,8 +4,10 @@
 // pixels as the same vertices in records with an attribute off a word
 // boundary, which it interleaves first; so do interleaved vertices
 // (D3DCOLORs, 16-bit indices) and a stream off a word boundary; an absent
-// stream reads as zeros; a locked stream is taken once per lock. Needs a
-// Vulkan device (lavapipe will do); exits 77 (skipped) without one.
+// stream reads as zeros; a locked stream is taken once per lock; a stage
+// whose colour takes an unbound texture is disabled, and an alpha taken
+// from one reads zero. Needs a Vulkan device (lavapipe will do); exits 77
+// (skipped) without one.
 
 #include <SDL3/SDL.h>
 
@@ -295,6 +297,32 @@ int main() {
   Check(both != first_only, "the moved positions draw elsewhere");
   Check(twice(7, 7) == first_only, "the same lock keeps its stream");
   Check(twice(8, 9) == both, "another lock takes the stream again");
+
+  // ---- 9. No texture on stage 0. Its colour MODULATEs TEXTURE: the
+  // stage is disabled, so the draw is the diffuse colour and alpha. Only
+  // its alpha taking TEXTURE: that alpha is zero, which the alpha test
+  // (GREATER 0x30) discards.
+  FfState no_tex = st;
+  no_tex.textures[0] = 0;
+  FfState disabled = no_tex;
+  disabled.tss[0][1] = 1;
+  Clear(*dev);
+  dev->DrawFf(disabled, fd);
+  const std::vector<uint32_t> want_diffuse = Read(*dev);
+  Clear(*dev);
+  dev->DrawFf(no_tex, fd);
+  Check(want_diffuse != want && Read(*dev) == want_diffuse,
+        "a colour taking an unbound texture disables the stage");
+  FfState alpha_only = no_tex;
+  alpha_only.tss[0][1] = 2;  // COLOROP SELECTARG1
+  alpha_only.tss[0][2] = 0;  // DIFFUSE
+  alpha_only.tss[0][4] = 2;  // ALPHAOP SELECTARG1
+  alpha_only.tss[0][5] = 2;  // TEXTURE
+  Clear(*dev);
+  dev->DrawFf(alpha_only, fd);
+  int kept = 0;
+  for (uint32_t p : Read(*dev)) kept += p != 0xFF102030;
+  Check(kept == 0, "an alpha taken from an unbound texture is zero");
 
   dev->DestroyTexture(tex2);
   dev->DestroyTexture(tex);
