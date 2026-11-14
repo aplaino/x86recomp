@@ -326,7 +326,8 @@ endfunction()
 
 # recomp_add_lift_tests(EXE <exe> SYMBOLS <dir> MANIFEST <file> [X64]):
 # oracle tests that run every x87, integer and SSE instruction form found
-# in the EXE lifted and natively (x86-64 hosts only). X64: the EXE is an
+# in the EXE lifted and natively (x86-64 hosts only; tests/x86 runs the
+# same tests on a fixture of its own). X64: the EXE is an
 # x64 image; its integer and SSE/AVX forms go to tests/x86/lift_x64_test.cpp
 # (lift_int64, lift_sse64; the latter needs an AVX host).
 function(recomp_add_lift_tests)
@@ -336,13 +337,17 @@ function(recomp_add_lift_tests)
     return()
   endif()
   set(_tests "${RECOMP_ROOT}/tests/x86")
+  # The forms come from the EXE, its manifest and the functions, exports
+  # and jump tables in the symbols directory: re-lift when any changes.
+  file(GLOB _symbols CONFIGURE_DEPENDS "${A_SYMBOLS}/*.tsv")
+  set(_inputs recomp_lift "${A_EXE}" "${A_MANIFEST}" ${_symbols})
   if(A_X64)
     foreach(_kind int sse)
       set(_forms "${CMAKE_CURRENT_BINARY_DIR}/lift_${_kind}64_forms.cpp")
       add_custom_command(OUTPUT "${_forms}"
         COMMAND recomp_lift --exe "${A_EXE}" --symbols "${A_SYMBOLS}"
                 --manifest "${A_MANIFEST}" --${_kind}-test "${_forms}"
-        DEPENDS recomp_lift "${A_MANIFEST}"
+        DEPENDS ${_inputs}
         COMMENT "Lifting the EXE's ${_kind} instruction forms for lift_${_kind}64_test")
       add_executable(lift_${_kind}64_test "${_tests}/lift_x64_test.cpp" "${_forms}")
       target_include_directories(lift_${_kind}64_test PRIVATE "${RECOMP_ROOT}/src" "${_tests}")
@@ -362,7 +367,7 @@ function(recomp_add_lift_tests)
     add_custom_command(OUTPUT "${_forms}"
       COMMAND recomp_lift --exe "${A_EXE}" --symbols "${A_SYMBOLS}"
               --manifest "${A_MANIFEST}" --${_kind}-test "${_forms}"
-      DEPENDS recomp_lift "${A_MANIFEST}"
+      DEPENDS ${_inputs}
       COMMENT "Lifting the EXE's ${_kind} instruction forms for lift_${_kind}_test")
     add_executable(lift_${_kind}_test "${_tests}/lift_${_kind}_test.cpp" "${_forms}")
     target_include_directories(lift_${_kind}_test PRIVATE "${RECOMP_ROOT}/src" "${_tests}")
