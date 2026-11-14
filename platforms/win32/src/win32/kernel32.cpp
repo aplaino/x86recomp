@@ -404,7 +404,7 @@ HLE64("kernel32.dll", TerminateProcess, 2) {
 }
 
 HLE64("kernel32.dll", GetLastError, 0) {
-  return Rd32(Teb(CurrentThread()) + 0x34);
+  return Rd32(Teb(CurrentThread()) + (g_proc->x64 ? 0x68 : 0x34));
 }
 HLE64("kernel32.dll", SetLastError, 1) {
   SetLastError(Arg(c, 0));
