@@ -19,7 +19,8 @@ Run from the topic's worktree: tools/land.py [--dry-run]
 It does not run the game projects; it prints which ones the change calls
 for. RECOMP_PYTHON (the oracle tests' venv Python, unresolved) and
 DXVK_NATIVE_DIR are passed to every configure when set in the
-environment.
+environment; without RECOMP_PYTHON, a worktree with no .venv of its own
+uses the main checkout's.
 """
 import argparse
 import bisect
@@ -280,6 +281,11 @@ def main():
     print("land: presets:", ", ".join(presets) or "none (docs and comments only)")
     if args.dry_run:
         return
+    checkout = main_checkout()
+    venv = checkout and os.path.join(checkout, ".venv", "bin", "python")
+    if (venv and os.path.exists(venv) and not os.environ.get("RECOMP_PYTHON")
+            and not os.path.exists(os.path.join(root, ".venv"))):
+        os.environ["RECOMP_PYTHON"] = venv
     for preset in presets:
         print(f"land: {preset}", flush=True)
         if not run_preset(preset, root):
@@ -293,7 +299,6 @@ def main():
         sys.exit("land: push failed (main moved, or the remote could not be "
                  "reached; see git's message); rerun to rebase and retest")
 
-    checkout = main_checkout()
     if checkout:
         if git("-C", checkout, "status", "--porcelain"):
             print(f"land: {checkout} has uncommitted changes; main there "
