@@ -25,6 +25,7 @@
 
 #include "orbis/gpu/cp.h"
 #include "orbis/gpu/renderer.h"
+#include "orbis/gpu/shader.h"
 #include "orbis/gpu/tiling.h"
 #include "runtime/gfx/device.h"
 #include "x86/runtime.h"
@@ -1326,6 +1327,31 @@ int main() {
       std::printf("  loads %08X %08X, store %08X %08X %08X\n", Rd32(kUOut), Rd32(kUOut + 4), Rd32(kW),
                   Rd32(kW + 4), Rd32(kW + 8));
     Check(loads && store, "dword buffer accesses at unaligned V# bases take the dword holding the address");
+  }
+
+  // The MRTZ export writes depth only when EN and SPI_SHADER_Z_FORMAT
+  // have it; a stencil export the format carries is not translated.
+  {
+    constexpr gaddr kMrtzAt = kCode + 0x1E00;
+    struct MrtzCase {
+      uint32_t en, z_format;
+      bool depth, error;
+    } cases[] = {{0xF, 1, true, false}, {0xF, 0, false, false}, {0x2, 1, false, false},
+                 {0x1, 9, true, false}, {0xF, 2, false, true}};
+    for (const MrtzCase& mc : cases) {
+      const uint32_t code[] = {0x7E0002F0, 0xF8001880u | mc.en, 0, 0xBF810000};  // v_mov v0, 0.5; exp mrtz
+      std::memcpy(GPtr(kMrtzAt), code, sizeof code);
+      StageState st;
+      st.stage = Stage::Pixel;
+      st.code = kMrtzAt;
+      st.z_format = mc.z_format;
+      const Resolved rs = Resolve(st);
+      const Translated tr = Translate(st, rs);
+      const bool ok = rs.error.empty() && tr.error.empty() != mc.error && (mc.error || tr.writes_depth == mc.depth);
+      if (!ok) std::printf("  mrtz en %X z format %u: depth %d, error '%s'\n", mc.en, mc.z_format,
+                           tr.writes_depth, tr.error.c_str());
+      Check(ok, "the MRTZ export follows its enable mask and the Z format");
+    }
   }
 
   // DB_RENDER_CONTROL clears: a draw writing depth 0.5, then a

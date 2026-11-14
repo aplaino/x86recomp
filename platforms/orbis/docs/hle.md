@@ -183,7 +183,9 @@ library.
   DB_RENDER_CONTROL's depth or stencil clear writes the clear value over
   the slices it draws (all of each), the other one kept; its colour
   targets are drawn as its tests of what it clears allow, comparing the
-  clear value with itself. Buffer accesses of a
+  clear value with itself. A pixel shader's MRTZ export writes depth when
+  EN and SPI_SHADER_Z_FORMAT have it; its stencil and sample mask are
+  fatal, its alpha (alpha to mask) is not modelled. Buffer accesses of a
   dword or more ignore their address's two low bits, whatever the V#'s
   base (Sea Islands ISA, "Alignment"). Buffer loads at a 64-bit address (ADDR64, a V# of base
   0 and no range) whose address is a lane's offset added to a known

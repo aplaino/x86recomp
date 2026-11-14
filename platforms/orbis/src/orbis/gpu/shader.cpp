@@ -1813,8 +1813,24 @@ struct Translator {
               Line("r_color" + std::to_string(target) + "[" + std::to_string(i) + "] = " + c[from[i]] + ";");
         }
       } else if (target == 8) {
-        depth = true;
-        Line("gl_FragDepth = " + c[0] + ";");
+        // MRTZ: depth, stencil, sample mask and alpha, those that the
+        // export enables (EN: one bit a VGPR; packed, en[0] for the first
+        // two and en[2] for the others) and SPI_SHADER_Z_FORMAT carries
+        // (32_R depth, 32_GR stencil too, 32_AR alpha too, the ABGR
+        // formats all four). Alpha only feeds alpha to mask, which draws do
+        // not model.
+        const uint32_t zf = st.z_format & 0xF;
+        const uint32_t carried = zf == 0 ? 0 : zf == 1 ? 1 : zf == 2 ? 3 : zf == 3 ? 9 : 0xF;
+        uint32_t out = 0;
+        for (int i = 0; i < 4; i++)
+          if (en & (1u << (compr ? i & 2 : i))) out |= 1u << i;
+        out &= carried;
+        if (out & 6) {
+          Fail(pc, "a pixel shader's stencil or sample mask export not translated yet");
+        } else if (out & 1) {
+          depth = true;
+          Line("gl_FragDepth = " + c[0] + ";");
+        }
       } else if (target != 9) {
         Fail(pc, "a pixel export target not translated yet");
       }
