@@ -3783,8 +3783,16 @@ std::set<uint64_t> Emitter::FindPollLoops(const Function& f) const {
 }
 
 // Non-x87 instructions that may sit inside an x87 run: anything straight-
-// line that does not call out (the run's state is only in locals).
+// line that does not call out (the run's state is only in locals) and does
+// not save or load the x87 state in Ctx (FXSAVE/FXRSTOR, category SSE).
 static bool RunNeutral(const Insn& in) {
+  switch (in.d.mnemonic) {
+    case ZYDIS_MNEMONIC_FXSAVE: case ZYDIS_MNEMONIC_FXSAVE64:
+    case ZYDIS_MNEMONIC_FXRSTOR: case ZYDIS_MNEMONIC_FXRSTOR64:
+      return false;
+    default:
+      break;
+  }
   switch (in.d.meta.category) {
     case ZYDIS_CATEGORY_CALL: case ZYDIS_CATEGORY_RET:
     case ZYDIS_CATEGORY_COND_BR: case ZYDIS_CATEGORY_UNCOND_BR:
