@@ -105,14 +105,32 @@ int Run(Canvas* c, int x, int y, int size, const std::string& s, uint32_t argb, 
     const int adv = int(g->advance.x >> 6);
     if (pen + adv > max_w) break;
     if (c) {
+      // Outlines render as 8-bit coverage; a font's bitmap strikes can
+      // come as 1, 2 or 4 bits a pixel (or colour, whose alpha covers),
+      // and a bitmap may be stored bottom row first (negative pitch).
       const FT_Bitmap& b = g->bitmap;
+      const unsigned char mode = b.pixel_mode;
+      if (mode != FT_PIXEL_MODE_GRAY && mode != FT_PIXEL_MODE_MONO && mode != FT_PIXEL_MODE_GRAY2 &&
+          mode != FT_PIXEL_MODE_GRAY4 && mode != FT_PIXEL_MODE_BGRA)
+        FatalF("ui: glyph U+%04X in pixel mode %u", unsigned(ch), unsigned(mode));
+      const unsigned grays = mode == FT_PIXEL_MODE_GRAY && b.num_grays > 1 ? b.num_grays : 256;
       for (unsigned r = 0; r < b.rows; r++) {
         const int py = y - g->bitmap_top + int(r);
         if (py < 0 || py >= c->h) continue;
+        const unsigned char* row =
+            b.pitch >= 0 ? b.buffer + size_t(r) * unsigned(b.pitch)
+                         : b.buffer + size_t(b.rows - 1 - r) * unsigned(-b.pitch);
         for (unsigned col = 0; col < b.width; col++) {
           const int px = x + pen + g->bitmap_left + int(col);
           if (px < 0 || px >= c->w) continue;
-          const uint8_t cover = b.buffer[r * unsigned(b.pitch) + col];
+          uint8_t cover;
+          switch (mode) {
+            case FT_PIXEL_MODE_MONO: cover = (row[col / 8] >> (7 - col % 8)) & 1 ? 255 : 0; break;
+            case FT_PIXEL_MODE_GRAY2: cover = uint8_t(((row[col / 4] >> (6 - 2 * (col % 4))) & 3) * 85); break;
+            case FT_PIXEL_MODE_GRAY4: cover = uint8_t(((row[col / 2] >> (4 - 4 * (col % 2))) & 15) * 17); break;
+            case FT_PIXEL_MODE_BGRA: cover = row[col * 4 + 3]; break;
+            default: cover = uint8_t(row[col] * 255u / (grays - 1)); break;
+          }
           uint32_t& d = c->px[size_t(py) * c->w + px];
           d = Over(d, argb, cover);
         }
