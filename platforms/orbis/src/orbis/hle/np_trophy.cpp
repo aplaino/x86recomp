@@ -55,9 +55,12 @@ std::vector<uint8_t> ReadAll(const std::string& path) {
   return {std::istreambuf_iterator<char>(f), {}};
 }
 
-uint64_t Be(const std::vector<uint8_t>& b, size_t at, int n) {
+// n big-endian bytes at `at` of the file at path.
+uint64_t Be(const std::vector<uint8_t>& b, size_t at, int n, const std::string& path) {
+  if (at > b.size() || size_t(n) > b.size() - at)
+    recomp::FatalF("libSceNpTrophy: %s is cut short", path.c_str());
   uint64_t v = 0;
-  for (int i = 0; i < n; i++) v = v << 8 | b.at(at + i);
+  for (int i = 0; i < n; i++) v = v << 8 | b[at + i];
   return v;
 }
 
@@ -72,16 +75,22 @@ uint64_t Be(const std::vector<uint8_t>& b, size_t at, int n) {
 // each starting with its 32-byte name.
 int32_t TrophyCount(uint32_t label) {
   const std::string sys = recomp::g_proc->game_dir + "/sce_sys/";
-  const std::vector<uint8_t> bind = ReadAll(sys + "npbind.dat");
-  if (bind.size() < 0x80 || Be(bind, 0, 4) != 0xD294A018)
-    recomp::FatalF("libSceNpTrophy: %snpbind.dat is not an npbind file", sys.c_str());
-  const uint64_t esize = Be(bind, 0x10, 8), n = Be(bind, 0x18, 8);
+  const std::string bind_path = sys + "npbind.dat";
+  const std::vector<uint8_t> bind = ReadAll(bind_path);
+  if (bind.size() < 0x80 || Be(bind, 0, 4, bind_path) != 0xD294A018)
+    recomp::FatalF("libSceNpTrophy: %s is not an npbind file", bind_path.c_str());
+  const uint64_t esize = Be(bind, 0x10, 8, bind_path), n = Be(bind, 0x18, 8, bind_path);
+  if (esize && n > (bind.size() - 0x80) / esize)
+    recomp::FatalF("libSceNpTrophy: %s is cut short", bind_path.c_str());
   int index = -1;
   for (uint64_t i = 0; i < n && index < 0; i++) {
     const size_t e = 0x80 + i * esize;
     for (size_t t = e; t + 4 <= e + esize;) {
-      const uint32_t type = uint32_t(Be(bind, t, 2)), size = uint32_t(Be(bind, t + 2, 2));
+      const uint32_t type = uint32_t(Be(bind, t, 2, bind_path));
+      const uint32_t size = uint32_t(Be(bind, t + 2, 2, bind_path));
       if (!type) break;
+      if (t + 4 + size > e + esize)
+        recomp::FatalF("libSceNpTrophy: %s has a tag past its entry", bind_path.c_str());
       if (type == 0x11 &&
           std::strtoul(std::string(bind.begin() + t + 4, bind.begin() + t + 4 + size).c_str(),
                        nullptr, 10) == label)
@@ -92,13 +101,15 @@ int32_t TrophyCount(uint32_t label) {
   if (index < 0) recomp::FatalF("libSceNpTrophy: npbind.dat has no service label %u", label);
   char name[32];
   std::snprintf(name, sizeof name, "trophy/trophy%02d.trp", index);
-  const std::vector<uint8_t> trp = ReadAll(sys + name);
-  if (trp.size() < 0x60 || Be(trp, 0, 4) != 0xDCA24D00)
-    recomp::FatalF("libSceNpTrophy: %s%s is not a trophy pack", sys.c_str(), name);
-  if (Be(trp, 4, 4) != 3)
+  const std::string trp_path = sys + name;
+  const std::vector<uint8_t> trp = ReadAll(trp_path);
+  if (trp.size() < 0x60 || Be(trp, 0, 4, trp_path) != 0xDCA24D00)
+    recomp::FatalF("libSceNpTrophy: %s is not a trophy pack", trp_path.c_str());
+  if (Be(trp, 4, 4, trp_path) != 3)
     recomp::FatalF("libSceNpTrophy: trophy pack version %u not implemented yet",
-                   unsigned(Be(trp, 4, 4)));
-  const uint32_t entries = uint32_t(Be(trp, 0x10, 4)), entry_size = uint32_t(Be(trp, 0x14, 4));
+                   unsigned(Be(trp, 4, 4, trp_path)));
+  const uint32_t entries = uint32_t(Be(trp, 0x10, 4, trp_path));
+  const uint32_t entry_size = uint32_t(Be(trp, 0x14, 4, trp_path));
   int32_t count = 0;
   for (uint32_t i = 0; i < entries; i++) {
     const size_t e = 0x60 + size_t(i) * entry_size;
@@ -129,7 +140,12 @@ ORBIS_HLE("libSceNpTrophy", sceNpTrophyCreateContext, 4) {
   ctx.user = int32_t(Arg(c, 1));
   ctx.label = uint32_t(Arg(c, 2));
   std::ifstream f(File(ctx.label));
-  for (int32_t t; f >> t;) ctx.unlocked.insert(t);
+  for (int32_t t; f >> t;) {
+    // UnlockTrophy writes only ids 0-127 (the flag array's bits).
+    if (uint32_t(t) > 0x7F)
+      recomp::FatalF("libSceNpTrophy: %s holds trophy id %d", File(ctx.label).c_str(), t);
+    ctx.unlocked.insert(t);
+  }
   recomp::Wr32(out, uint32_t(id));
   return 0;
 }
