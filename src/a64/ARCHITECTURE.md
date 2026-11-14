@@ -50,13 +50,20 @@ not a required input.
   gives the emitter the operand model it needs. Capstone is a build-time
   cross-check in the tools and tests only.
 - One `void f_<va>(Ctx&)` per guest function. General registers, SP and
-  NZCV are cached in locals and spilled around calls, HLE and anything
-  that can observe them; `v0`-`v31` live in `Ctx` and are operated on in
-  place through the FP/SIMD model, like the x86 core's SSE registers.
-- `BL`/`B` to a known function: direct call (a `B` tail call is a call
-  followed by return). `BLR`/`BR`: `Dispatch(c, target, va)`, a hash
-  table from guest VA to lifted function; thunk-range targets go to the
-  HLE registry. `RET`: return. Compiler jump tables (`adr`/`adrp`;
+  NZCV are cached in locals and spilled around calls, supervisor calls
+  and anything that can observe them. Planned, not implemented yet:
+  `v0`-`v31` in `Ctx`, operated on in place through the FP/SIMD model
+  (below), like the x86 core's SSE registers; `Ctx` has no vector
+  registers today and the decoder rejects every FP/SIMD encoding, so
+  code using them is `Unimplemented` with its VA.
+- `BL`/`B` to a known function: direct call (a `B` out of the function,
+  or falling through into the next start, is a guaranteed tail call,
+  `LIFT_MUSTTAIL`, so a loop whose back edge crosses a function start
+  does not grow the host stack). `BLR`/`BR`: `Dispatch(c, target, va)`,
+  a hash table from guest VA to lifted function. Planned: targets in a
+  platform's thunk range going to its HLE registry; today `Dispatch`
+  knows only lifted functions and anything else is `BadJump`. `RET`:
+  return. Compiler jump tables (`adr`/`adrp`;
   scaled `ldrb/ldrh/ldr/ldrsw`; `add`; `br`, bounded by the `cmp` +
   `b.hi`/`b.hs` or `and` mask above them) are recognised by pattern:
   the `br` becomes a switch on the target the code computed, with one
@@ -69,8 +76,10 @@ not a required input.
   was); `dmb/dsb` become fences. Lifted code is thread-safe by
   construction because it uses the same atomics the guest did.
 - `svc` calls the platform's `Svc` with its immediate; `brk`/`udf` are fatal
-  with the VA. `mrs` of `tpidr_el0`, the counter and CPU id registers
-  read `Ctx` or the runtime's clock.
+  with the VA. `mrs`/`msr` of `nzcv` and `tpidr_el0` read and write the
+  flags and `Ctx`. Planned: `mrs` of the counter (`cntvct_el0`,
+  `cntfrq_el0`) and CPU id registers from the runtime's clock and a fixed
+  CPU; the decoder rejects every other system register today.
 - Exactness is tested the way the x86 lifter is, on a fixture built from
   checked-in assembly and C (`tests/a64/fixture`), a static-PIE ELF the
   lifter reads itself, whose two supervisor calls (exit, write) are the
@@ -99,6 +108,11 @@ not a required input.
   a platform's `generated/` when touching the lifter.
 
 ## FP/SIMD: exact by model, fast by proof
+Not implemented yet: this section is the design the FP/SIMD model will
+follow. Today there are no vector registers in `Ctx`, the decoder
+rejects FP/SIMD encodings (data processing, loads and stores of
+`b`/`h`/`s`/`d`/`q` registers) and there is no FPCR or FPSR.
+
 AArch64 floating point is IEEE binary32/64 under FPCR control:
 rounding mode, flush-to-zero (`FZ`, inputs and outputs), default NaN
 (`DN`), and ARM's NaN propagation order; `FPSR` accumulates the
