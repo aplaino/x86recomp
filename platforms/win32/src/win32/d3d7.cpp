@@ -148,9 +148,11 @@ Device* Dev(Ctx& c) {
 
 void BindTarget(Device& d) {
   Surface* t = d.target;
-  gfx::DepthId z = t && t->zbuffer ? t->zbuffer->depth : 0;
+  State& s = St();
   // Back buffer / primary: gfx render target 0.
-  Gfx()->SetRenderTarget(t && t->kind == Surface::Kind::Texture ? t->tex : 0, z);
+  s.target = t && t->kind == Surface::Kind::Texture ? t->tex : 0;
+  s.target_depth = t && t->zbuffer ? t->zbuffer->depth : 0;
+  Gfx()->SetRenderTarget(s.target, s.target_depth);
 }
 
 }  // namespace

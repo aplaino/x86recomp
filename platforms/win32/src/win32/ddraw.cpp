@@ -204,6 +204,7 @@ Surface::~Surface() {
     HeapFreeProcess(mem);
   }
   if (s.backbuffer == this) s.backbuffer = nullptr;
+  if (depth && s.target_depth == depth) s.target_depth = 0;
 }
 
 void UploadLevel(Surface& s) {
@@ -504,8 +505,7 @@ uint32_t BltImpl(Surface& dst, const guest::RECT& dr, Surface* src,
     gfx::Device* g = Gfx();
     g->SetRenderTarget(0, dst.depth);
     g->Clear(0, nullptr, 2 /* ZBUFFER */, 0, z, 0);
-    if (g_state.backbuffer)
-      g->SetRenderTarget(0, g_state.backbuffer->zbuffer ? g_state.backbuffer->zbuffer->depth : 0);
+    g->SetRenderTarget(g_state.target, g_state.target_depth);
     return DD_OK;
   }
   if (fill && dst.kind == Surface::Kind::Primary) {

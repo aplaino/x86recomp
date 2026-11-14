@@ -74,6 +74,10 @@ struct State {
   int mode_w = 0, mode_h = 0, mode_bpp = 0;
   std::unique_ptr<gfx::Device> gfx;
   Surface* backbuffer = nullptr;  // first back buffer (render target)
+  // The gfx targets the Direct3D device draws into (0: the back buffer;
+  // its Z buffer's), which a depth-fill Blt binds back after its clear.
+  gfx::TextureId target = 0;
+  gfx::DepthId target_depth = 0;
   bool vsync = false;
 };
 State& St();
