@@ -157,8 +157,8 @@ void MapGuestMemory() {
   if (host_page != long(kPhysical4kOffset))
     Fatal(nullptr,
           "this host's pages are %ld bytes: the 0xE0000000 physical view, which starts one 4 KiB "
-          "page into physical memory, can only be aliased with 4 KiB host pages for now "
-          "(platforms/xbox360/ARCHITECTURE.md, \"Runtime: memory\")",
+          "page into physical memory, can only be aliased with 4 KiB host pages "
+          "(platforms/xbox360/ARCHITECTURE.md, \"Runtime: memory\", says what larger ones need)",
           host_page);
   void* p = mmap(nullptr, 1ull << 32, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);

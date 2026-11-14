@@ -143,12 +143,26 @@ so that a commit always hands out zeros.
 
 The 0xE0000000 view starts one 4 KiB page into physical memory (Xenia's
 measurement; titles get physical addresses from MmGetPhysicalAddress and
-hand them to the GPU). mmap can alias that only with 4 KiB host pages:
-on hosts with larger ones (macOS on Apple Silicon) the runtime refuses to
-start for now. The way there is the one Xenia's x64 back end takes on
-Windows, whose mappings are 64 KiB grained: lifted code adds 0x1000 to
-addresses at and above 0xE0000000, which needs the address computation
-of lifted.h to know about it.
+hand them to the GPU). mmap maps a file only at offsets that are
+multiples of the host's page, and the view's host page at
+0xE0000000 + 16 KiB * k would hold physical
+[16 KiB * k + 4 KiB, 16 KiB * (k + 1) + 4 KiB): only 4 KiB host pages
+can alias it. Laying the physical memory
+object out differently does not help, as the 0xA0000000 view needs each
+16 KiB-aligned physical run at a page-aligned offset and the 0xE0000000
+view each run 4 KiB later, so the bytes the two runs share would need
+two offsets 4 KiB apart. On hosts with larger pages (macOS on Apple
+Silicon, 16 KiB) the runtime therefore refuses to start. Running there
+needs the guest address of the 0xE0000000 view translated, as Xenia's
+x64 back end does on Windows, whose mappings are 64 KiB grained: the
+view mapped at 0xE0000000 from physical address 0, and every access at
+or above 0xE0000000 made at mem + a + 0x1000. That is a change of the
+PowerPC core: the loads and stores of ppc/lifted.h and ppc/vmx.h (Ld,
+St, LdRev, StRev, Dcbz, Larx, Stcx and the vector forms) taking the
+platform's translation, at the cost of a compare and an add on every
+access, and of this module: every host access to guest memory (hle.h's
+Rd and Wr, and the Mem() + va accesses) through the same translation,
+with a range that crosses 0xE0000000 split there.
 
 ### HLE
 Handlers are registered by module and ordinal with
