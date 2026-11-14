@@ -638,6 +638,10 @@ inline T* AtomicPtr(uint8_t* b, uint64_t a) {
 }  // namespace lift
 }  // namespace recomp
 
+// The lifter's --optnone-x87-over: a function clang's optimiser would take
+// far too long over.
+#define LIFT_OPTNONE __attribute__((optnone))
+
 // Register/flag caching. Lifted functions keep guest registers in locals
 // (which nothing can alias) and write them back before anything that may
 // observe or change them. MU: whether MXCSR is as usual, for the SSE fast

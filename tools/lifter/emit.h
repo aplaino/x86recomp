@@ -14,6 +14,7 @@ namespace lifter {
 
 struct EmitStats {
   uint64_t insns = 0;
+  uint64_t optnone = 0;  // functions compiled without optimisation (--optnone-x87-over)
   std::map<std::string, uint64_t> unimplemented;  // mnemonic -> count
 };
 
