@@ -422,14 +422,15 @@ class InsnEmitter {
   }
 
   // x64: RIP-relative operands are absolute at lift time; gs is the TEB.
-  // With an address-size prefix the sum wraps at 32 bits (RIP-relative:
-  // EIP plus the displacement).
+  // With an address-size prefix the sum wraps at 32 bits (Zydis' base
+  // EIP: the next instruction's address plus the displacement, truncated,
+  // then the segment base).
   std::string AddrExpr64(int i, bool segment) const {
     const auto& m = Op(i).mem;
     std::string s;
-    if (m.base == ZYDIS_REGISTER_RIP) {
+    if (m.base == ZYDIS_REGISTER_RIP || m.base == ZYDIS_REGISTER_EIP) {
       const uint64_t a = in_.next() + uint64_t(m.disp.value);
-      s = Hex(d_.address_width == 32 ? uint32_t(a) : a);
+      s = Hex(m.base == ZYDIS_REGISTER_EIP ? uint32_t(a) : a);
       if (segment && m.segment == ZYDIS_REGISTER_GS) s = "GS + " + s;
       if (segment && m.segment == ZYDIS_REGISTER_FS) s = "FS + " + s;
       return s;
@@ -462,7 +463,8 @@ class InsnEmitter {
         return r == ZYDIS_REGISTER_NONE ||
                Gpr64Name(ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LONG_64, r));
       };
-      if (m.base != ZYDIS_REGISTER_RIP && !gpr(m.base)) return false;
+      if (m.base != ZYDIS_REGISTER_RIP && m.base != ZYDIS_REGISTER_EIP && !gpr(m.base))
+        return false;
       if (!gpr(m.index)) return false;
       return m.segment == ZYDIS_REGISTER_NONE || m.segment == ZYDIS_REGISTER_DS ||
              m.segment == ZYDIS_REGISTER_ES || m.segment == ZYDIS_REGISTER_SS ||
