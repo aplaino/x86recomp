@@ -39,15 +39,23 @@ std::chrono::system_clock::time_point XtimeAt(gaddr xt) {
 }
 
 // Host state behind a guest object, keyed by its address (in-situ objects
-// are guest memory; their contents stay MSVC's).
+// are guest memory; their contents stay MSVC's). The object's destroy
+// drops it (destroy=true). Callers hold a reference while they use it: a
+// thread may still be leaving a wait when another destroys the object
+// (the standard allows destroying a condition variable once every waiter
+// has been notified).
 template <typename T>
-T& StateAt(gaddr va) {
+std::shared_ptr<T> StateAt(gaddr va, bool destroy = false) {
   static std::mutex mu;
-  static std::map<gaddr, std::unique_ptr<T>> objs;
+  static std::map<gaddr, std::shared_ptr<T>> objs;
   std::lock_guard<std::mutex> l(mu);
+  if (destroy) {
+    objs.erase(va);
+    return nullptr;
+  }
   auto& o = objs[va];
-  if (!o) o = std::make_unique<T>();
-  return *o;
+  if (!o) o = std::make_shared<T>();
+  return o;
 }
 
 // ---- mutexes -----------------------------------------------------------------
@@ -73,7 +81,8 @@ void Publish(gaddr mtx, const Mtx& s) {
 // Takes the mutex `count` times (a condition variable's wait restores the
 // count it released).
 void Lock(gaddr mtx, int count = 1) {
-  Mtx& s = StateAt<Mtx>(mtx);
+  const auto state = StateAt<Mtx>(mtx);
+  Mtx& s = *state;
   uint32_t tid = CurrentThread()->tid;
   std::unique_lock<std::mutex> l(s.m);
   if (s.owner == tid) {
@@ -91,7 +100,8 @@ void Lock(gaddr mtx, int count = 1) {
 
 // Releases it entirely; returns the count it had.
 int UnlockAll(gaddr mtx) {
-  Mtx& s = StateAt<Mtx>(mtx);
+  const auto state = StateAt<Mtx>(mtx);
+  Mtx& s = *state;
   int n;
   {
     std::lock_guard<std::mutex> l(s.m);
@@ -113,7 +123,10 @@ HLE64(kDll, _Mtx_init_in_situ, kCdecl) {
   Wr32(mtx + 0x48, 0xFFFFFFFF);
   return 0;
 }
-HLE64(kDll, _Mtx_destroy_in_situ, kCdecl) { return 0; }
+HLE64(kDll, _Mtx_destroy_in_situ, kCdecl) {
+  StateAt<Mtx>(Arg(c, 0), true);
+  return 0;
+}
 
 HLE64(kDll, _Mtx_lock, kCdecl) {
   GuestSyncPoint sync;
@@ -124,7 +137,8 @@ HLE64(kDll, _Mtx_lock, kCdecl) {
 HLE64(kDll, _Mtx_trylock, kCdecl) {
   GuestSyncPoint sync;
   gaddr mtx = Arg(c, 0);
-  Mtx& s = StateAt<Mtx>(mtx);
+  const auto state = StateAt<Mtx>(mtx);
+  Mtx& s = *state;
   uint32_t tid = CurrentThread()->tid;
   std::lock_guard<std::mutex> l(s.m);
   if (s.owner && !(s.owner == tid && (Rd32(mtx) & kMtxRecursive))) return kBusy;
@@ -137,7 +151,8 @@ HLE64(kDll, _Mtx_trylock, kCdecl) {
 HLE64(kDll, _Mtx_unlock, kCdecl) {
   GuestSyncPoint sync;
   gaddr mtx = Arg(c, 0);
-  Mtx& s = StateAt<Mtx>(mtx);
+  const auto state = StateAt<Mtx>(mtx);
+  Mtx& s = *state;
   bool freed;
   {
     std::lock_guard<std::mutex> l(s.m);
@@ -153,7 +168,8 @@ HLE64(kDll, _Mtx_unlock, kCdecl) {
 }
 
 HLE64(kDll, _Mtx_current_owns, kCdecl) {
-  Mtx& s = StateAt<Mtx>(Arg(c, 0));
+  const auto state = StateAt<Mtx>(Arg(c, 0));
+  Mtx& s = *state;
   std::lock_guard<std::mutex> l(s.m);
   return s.count > 0 && s.owner == CurrentThread()->tid;
 }
@@ -173,7 +189,8 @@ struct Cnd {
 
 // Returns false on timeout.
 bool CndWait(gaddr cnd, gaddr mtx, const std::chrono::system_clock::time_point* until) {
-  Cnd& v = StateAt<Cnd>(cnd);
+  const auto state = StateAt<Cnd>(cnd);
+  Cnd& v = *state;
   int count;
   bool woken = true;
   {
@@ -197,7 +214,10 @@ HLE64(kDll, _Cnd_init_in_situ, kCdecl) {
   std::memset(GPtr(Arg(c, 0)), 0, 72);
   return 0;
 }
-HLE64(kDll, _Cnd_destroy_in_situ, kCdecl) { return 0; }
+HLE64(kDll, _Cnd_destroy_in_situ, kCdecl) {
+  StateAt<Cnd>(Arg(c, 0), true);
+  return 0;
+}
 
 HLE64(kDll, _Cnd_wait, kCdecl) {
   GuestSyncPoint sync;
@@ -213,7 +233,8 @@ HLE64(kDll, _Cnd_timedwait, kCdecl) {
 
 HLE64(kDll, _Cnd_signal, kCdecl) {
   GuestSyncPoint sync;
-  Cnd& v = StateAt<Cnd>(Arg(c, 0));
+  const auto state = StateAt<Cnd>(Arg(c, 0));
+  Cnd& v = *state;
   {
     std::lock_guard<std::mutex> l(v.m);
     if (v.released < v.waiting) v.released++;
@@ -224,7 +245,8 @@ HLE64(kDll, _Cnd_signal, kCdecl) {
 
 HLE64(kDll, _Cnd_broadcast, kCdecl) {
   GuestSyncPoint sync;
-  Cnd& v = StateAt<Cnd>(Arg(c, 0));
+  const auto state = StateAt<Cnd>(Arg(c, 0));
+  Cnd& v = *state;
   {
     std::lock_guard<std::mutex> l(v.m);
     v.released = v.waiting;
