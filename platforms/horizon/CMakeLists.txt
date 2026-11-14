@@ -19,4 +19,10 @@ target_link_libraries(recomp_lift_a64 PRIVATE recomp_horizon_image)
 # horizon_elf2nro: builds the test fixture's NRO from its ELF link.
 add_executable(horizon_elf2nro tools/elf2nro.cpp)
 
+# horizon_nro_test: the NRO reader refuses headers that do not describe an
+# image (tests/nro_test.cpp); it needs no fixture or oracle.
+add_executable(horizon_nro_test tests/nro_test.cpp)
+target_link_libraries(horizon_nro_test PRIVATE recomp_horizon_image)
+add_test(NAME horizon_nro_test COMMAND horizon_nro_test "${CMAKE_CURRENT_BINARY_DIR}/nro_test.nro")
+
 add_subdirectory(tests)

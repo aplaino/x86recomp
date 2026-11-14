@@ -40,22 +40,26 @@ bool LoadNro(const std::string& path, a64::Module& m, std::string& err) {
   }
   m = a64::Module{};
   m.path = path;
+  // Text, read-only data and data in order without overlapping, so the
+  // image (sized from data and .bss) holds them all.
   a64::Segment* segs[3] = {&m.text, &m.ro, &m.data};
   for (int i = 0; i < 3; i++) {
     segs[i]->off = Get<uint32_t>(file, 0x20 + i * 8);
     segs[i]->size = Get<uint32_t>(file, 0x24 + i * 8);
-    if (uint64_t(segs[i]->off) + segs[i]->size > file.size() || segs[i]->off % kPage) {
-      err = path + ": segment " + std::to_string(i) + " is outside the file or unaligned";
+    if (uint64_t(segs[i]->off) + segs[i]->size > file.size() || segs[i]->off % kPage ||
+        (i && segs[i]->off < uint64_t(segs[i - 1]->off) + segs[i - 1]->size)) {
+      err = path + ": segment " + std::to_string(i) +
+            " is outside the file, unaligned or overlaps the one before";
       return false;
     }
   }
   m.bss.off = m.data.off + m.data.size;
   m.bss.size = Get<uint32_t>(file, 0x38);
-  m.image.assign(PageUp(uint64_t(m.bss.off) + m.bss.size), 0);
+  m.image.assign(PageUp(uint64_t(m.data.off) + m.data.size + m.bss.size), 0);
   for (a64::Segment* s : segs) std::memcpy(m.image.data() + s->off, file.data() + s->off, s->size);
 
   const uint32_t mod0 = Get<uint32_t>(file, 0x04);
-  if (mod0 + 0x1C > m.image.size() || std::memcmp(m.image.data() + mod0, "MOD0", 4)) {
+  if (uint64_t(mod0) + 0x1C > m.image.size() || std::memcmp(m.image.data() + mod0, "MOD0", 4)) {
     err = path + ": no MOD0 header at " + Hex(mod0);
     return false;
   }
