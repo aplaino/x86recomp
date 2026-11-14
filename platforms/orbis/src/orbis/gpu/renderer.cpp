@@ -201,6 +201,7 @@ struct Target {
   gfx::TextureId tex;
   bool storage;  // also a compute stage's storage image
   uint32_t swap;  // CB_COLORn_INFO's COMP_SWAP (the image is in the shader's order)
+  uint64_t drawn = 0;  // the submission it was last drawn in (RetireOverdrawn)
 };
 // A copy of a target's top-left corner at the size a T# samples it with
 // (targets are as large as their pitch and slice, or DB_DEPTH_SIZE, which
@@ -223,6 +224,7 @@ struct DepthTarget {
   // DB_HTILE_DATA_BASE; its clears are modelled while it tracks depth
   // alone (ZMASK, bits 0-3).
   Meta htile;
+  uint64_t drawn = 0;  // as Target's
 };
 // Guest memory a GPU copy is made from, compared once a round (Changed).
 struct Compared {
@@ -392,8 +394,10 @@ gfx::TextureId ColorTarget(State& s, gaddr addr, uint32_t w, uint32_t h, Format 
                            uint32_t swap, bool storage = false) {
   for (Target& t : s.targets)
     if (t.addr == addr && t.w == w && t.h == h && t.fmt == fmt && t.swap == swap &&
-        (t.storage || !storage))
+        (t.storage || !storage)) {
+      t.drawn = s.submission;
       return t.tex;
+    }
   // A different target at that address (or one compute cannot write)
   // replaces the old one.
   s.targets.erase(std::remove_if(s.targets.begin(), s.targets.end(),
@@ -418,7 +422,7 @@ gfx::TextureId ColorTarget(State& s, gaddr addr, uint32_t w, uint32_t h, Format 
   d.storage = storage;
   const gfx::TextureId tex = s.dev->CreateImage(d);
   if (tex) s.dev->ClearImage(tex, 0, {0, 0, 0, 0});
-  s.targets.push_back({addr, w, h, fmt, tex, storage, swap});
+  s.targets.push_back({addr, w, h, fmt, tex, storage, swap, s.submission});
   return tex;
 }
 
@@ -459,6 +463,7 @@ DepthTarget* DepthTargetAt(State& s, gaddr addr, uint32_t w, uint32_t h, Format 
   for (DepthTarget& d : s.depths)
     if (d.addr == addr && d.w == w && d.h == h && d.fmt == fmt) {
       d.stencil = stencil;
+      d.drawn = s.submission;
       EnsureLayers(s, d, layers);
       return &d;
     }
@@ -475,7 +480,55 @@ DepthTarget* DepthTargetAt(State& s, gaddr addr, uint32_t w, uint32_t h, Format 
   for (uint32_t i = 0; id && i < std::max(layers, 1u); i++)
     s.dev->ClearDepth(id, 1.0f, fmt == Format::D32FS8 ? 0 : -1, int(i));
   s.depths.push_back({addr, w, h, fmt, id, stencil, layers});
+  s.depths.back().drawn = s.submission;
   return &s.depths.back();
+}
+
+// The colour or depth targets a target drawn in a later submission has
+// been drawn over (their memory was reused, as allocators that hand out
+// a frame's targets from a ring do): gone, with their views. Targets of
+// the same submission are kept, its draws may still bind them.
+void RetireOverdrawn(State& s) {
+  const auto overlap = [](gaddr a, uint64_t n, gaddr b, uint64_t m) { return a < b + m && b < a + n; };
+  const auto color_bytes = [](const Target& t) {
+    return uint64_t(t.w) * t.h * gfx::BitsPerPixel(t.fmt) / 8;
+  };
+  const auto depth_bytes = [](const DepthTarget& d) {
+    return uint64_t(d.w) * d.h * (d.fmt == Format::D16 ? 2 : 4) * std::max(d.layers, 1u);
+  };
+  std::vector<gaddr> colors, depths;
+  for (const Target& t : s.targets)
+    for (const Target& o : s.targets)
+      if (o.drawn > t.drawn && overlap(t.addr, color_bytes(t), o.addr, color_bytes(o))) {
+        colors.push_back(t.addr);
+        break;
+      }
+  for (const DepthTarget& d : s.depths)
+    for (const DepthTarget& o : s.depths)
+      if (o.drawn > d.drawn && overlap(d.addr, depth_bytes(d), o.addr, depth_bytes(o))) {
+        depths.push_back(d.addr);
+        break;
+      }
+  const auto in = [](const std::vector<gaddr>& v, gaddr a) {
+    return std::find(v.begin(), v.end(), a) != v.end();
+  };
+  std::erase_if(s.targets, [&](const Target& t) {
+    if (!in(colors, t.addr)) return false;
+    s.dev->DestroyTexture(t.tex);
+    return true;
+  });
+  std::erase_if(s.views, [&](const TargetView& v) {
+    if (v.tex && in(colors, v.addr)) s.dev->DestroyTexture(v.tex);
+    else if (v.depth && in(depths, v.addr)) s.dev->DestroyDepth(v.depth);
+    else return false;
+    return true;
+  });
+  std::erase_if(s.depths, [&](const DepthTarget& d) {
+    if (!in(depths, d.addr)) return false;
+    s.dev->DestroyDepth(d.depth);
+    if (d.htile.buf) s.dev->DestroyBuffer(d.htile.buf);
+    return true;
+  });
 }
 
 // Every target's metadata (Meta).
@@ -2108,6 +2161,7 @@ void MemoryWritten(gaddr base, uint64_t size) {
 void NextSubmission() {
   std::lock_guard<std::mutex> l(G().mu);
   State& s = G();
+  if (s.dev) RetireOverdrawn(s);
   s.submission++;
   s.round++;
   if (!s.dev) return;
