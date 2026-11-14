@@ -27,6 +27,12 @@ target_compile_options(sse_host_test PRIVATE -O2 ${RECOMP_X87_FP_FLAGS})
 add_test(NAME sse_host COMMAND sse_host_test)
 set_tests_properties(sse_host PROPERTIES TIMEOUT 300)
 
+# sse_ftz_daz_test: flush-to-zero and denormals-are-zero in the SSE model,
+# on cases worked out from the SDM; portable.
+add_executable(sse_ftz_daz_test sse_ftz_daz_test.cpp)
+target_link_libraries(sse_ftz_daz_test PRIVATE recomp_x87)
+add_test(NAME sse_ftz_daz COMMAND sse_ftz_daz_test)
+
 # sse_rsqrt_test: RSQRTPS is the correctly rounded 1/sqrt(x), checked
 # exhaustively with exact arithmetic (the host oracle cannot: CPUs differ);
 # portable.
