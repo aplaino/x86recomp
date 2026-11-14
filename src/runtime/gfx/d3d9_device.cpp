@@ -8,6 +8,8 @@
 //   - WORLD transforms are 256+ in D3D9;
 //   - D3D7's integer ZBIAS becomes D3D9's float DEPTHBIAS;
 //   - render states D3D9 dropped are ignored (logged once).
+// Every entry takes mu_, as GpuDevice's do: front ends call from more
+// than one thread, and the maps and applied_ are this backend's own.
 
 #include <windows.h>
 #include <d3d9.h>
@@ -18,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
@@ -99,6 +102,7 @@ class D3D9Device final : public Device {
   // Always X8R8G8B8; 16-bit modes convert on blit. The swap chain has
   // the window's size; PresentFront fits the w x h front buffer into it.
   void ResetSwapChain(int w, int h, bool vsync) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     bb_w_ = w;
     bb_h_ = h;
     vsync_ = vsync;
@@ -165,18 +169,18 @@ class D3D9Device final : public Device {
             "CreateRenderTarget");
       dev_->ColorFill(*t, nullptr, D3DCOLOR_XRGB(0, 0, 0));
     }
-    dev_->SetRenderTarget(0, backbuffer_);
     if (reset) {
-      // Reset also unbinds the targets.
-      SetRenderTarget(current_color_, current_depth_);
-      // and returns the device's state to its defaults.
+      // Reset returns the device's state to its defaults.
       applied_ = DefaultFfState();
       applied_lights_ = 0;
     }
+    // Reset (or creation) leaves the swap chain's buffer bound.
+    SetRenderTarget(current_color_, current_depth_);
   }
 
   TextureId CreateTexture(int w, int h, int levels, Format fmt,
                           bool rt) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     IDirect3DTexture9* t = nullptr;
     HRESULT hr = dev_->CreateTexture(UINT(w), UINT(h), UINT(levels),
                                      rt ? D3DUSAGE_RENDERTARGET : 0,
@@ -195,6 +199,7 @@ class D3D9Device final : public Device {
   }
 
   void DestroyTexture(TextureId id) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     auto cube = cubes_.find(id);
     if (cube != cubes_.end()) {
       cube->second->Release();
@@ -209,6 +214,7 @@ class D3D9Device final : public Device {
   }
 
   TextureId CreateCubeTexture(int size, int levels, Format fmt) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     IDirect3DCubeTexture9* t = nullptr;
     HRESULT hr = dev_->CreateCubeTexture(UINT(size), UINT(levels), 0, ToD3D(fmt),
                                          D3DPOOL_MANAGED, &t, nullptr);
@@ -224,6 +230,7 @@ class D3D9Device final : public Device {
 
   void UpdateCubeTexture(TextureId id, int face, int level, const Rect& r, const void* src,
                          uint32_t pitch) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     auto it = cubes_.find(id);
     if (it == cubes_.end()) return;
     D3DSURFACE_DESC desc;
@@ -242,6 +249,7 @@ class D3D9Device final : public Device {
   }
 
   void FillTexture(TextureId id, const Rect& r, uint32_t argb) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     auto it = textures_.find(id);
     if (it == textures_.end()) return;
     IDirect3DSurface9* s = nullptr;
@@ -253,6 +261,7 @@ class D3D9Device final : public Device {
 
   void UpdateTexture(TextureId id, int level, const Rect& r, const void* src,
                      uint32_t pitch) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     auto it = textures_.find(id);
     if (it == textures_.end()) return;
     D3DSURFACE_DESC desc;
@@ -271,6 +280,7 @@ class D3D9Device final : public Device {
   }
 
   DepthId CreateDepth(int w, int h, Format fmt) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     Depth d{nullptr, w, h, fmt};
     if (FAILED(dev_->CreateDepthStencilSurface(UINT(w), UINT(h), ToD3D(fmt),
                                                D3DMULTISAMPLE_NONE, 0, FALSE,
@@ -284,6 +294,7 @@ class D3D9Device final : public Device {
   }
 
   void DestroyDepth(DepthId id) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     auto it = depths_.find(id);
     if (it == depths_.end()) return;
     if (current_depth_ == id) {
@@ -297,6 +308,7 @@ class D3D9Device final : public Device {
   // The programmable pipeline runs GLSL translated from HLSL, which this
   // backend cannot: it stays the reference for fixed-function games.
   void SetRenderTargets(const ColorTarget color[4], DepthId depth) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     if (color[1].tex) FatalF("gfx: multiple render targets need the SDL_GPU backend (<ID>_GFX=gpu)");
     if (color[0].level) FatalF("gfx: rendering to a mip level needs the SDL_GPU backend (<ID>_GFX=gpu)");
     SetRenderTarget(color[0].tex, depth);
@@ -313,6 +325,7 @@ class D3D9Device final : public Device {
   }
 
   void SetRenderTarget(TextureId color, DepthId depth) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     current_color_ = color;
     if (color) {
       auto it = textures_.find(color);
@@ -328,31 +341,38 @@ class D3D9Device final : public Device {
     auto d = depths_.find(depth);
     dev_->SetDepthStencilSurface(d == depths_.end() ? nullptr : d->second.surf);
     current_depth_ = depth;
+    // D3D9 sets the viewport and scissor to the whole new target: back to
+    // the ones applied_ says the device has.
+    SetViewport(applied_.viewport);
+    SetScissor(applied_.scissor);
   }
 
   void Blit(const void* src, uint32_t pitch, Format fmt, const Rect& sr,
             const Rect& dr, bool colorkey, uint32_t key) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     DrawImage(src, pitch, fmt, sr, dr, colorkey, key);
   }
 
   void BlitFront(const void* src, uint32_t pitch, Format fmt, const Rect& sr,
                  const Rect& dr) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     IDirect3DSurface9 *rt = nullptr, *ds = nullptr;
-    D3DVIEWPORT9 vp;
     dev_->GetRenderTarget(0, &rt);
     dev_->GetDepthStencilSurface(&ds);
-    dev_->GetViewport(&vp);
     dev_->SetRenderTarget(0, front_);
     dev_->SetDepthStencilSurface(nullptr);
     DrawImage(src, pitch, fmt, sr, dr, false, 0);
     dev_->SetRenderTarget(0, rt);
     dev_->SetDepthStencilSurface(ds);
-    dev_->SetViewport(&vp);
+    // Setting the target reset the viewport and scissor.
+    SetViewport(applied_.viewport);
+    SetScissor(applied_.scissor);
     if (rt) rt->Release();
     if (ds) ds->Release();
   }
 
   void ReadBackFront(const Rect& r, void* dst, uint32_t pitch, Format fmt) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     ReadSurface(front_, r, dst, pitch, fmt);
   }
 
@@ -361,6 +381,7 @@ class D3D9Device final : public Device {
   // follows it, which costs a device Reset: the front and back buffers
   // start black again and that frame is lost.
   void PresentFront() override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     if (in_scene_) EndScene();
     int ww, wh;
     WindowPixels(&ww, &wh);
@@ -376,10 +397,12 @@ class D3D9Device final : public Device {
   }
 
   void BlitBlend(const void* src, uint32_t pitch, const Rect& sr, const Rect& dr) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     DrawImage(src, pitch, Format::A8R8G8B8, sr, dr, false, 0, true);
   }
 
   void ReadBack(const Rect& r, void* dst, uint32_t pitch, Format fmt) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     IDirect3DSurface9* rt = nullptr;
     dev_->GetRenderTarget(0, &rt);
     ReadSurface(rt, r, dst, pitch, fmt);
@@ -389,6 +412,7 @@ class D3D9Device final : public Device {
   // Reads at once (GetRenderTargetData waits anyway) and keeps the
   // pixels for FinishReadBack.
   uint32_t StartReadBack(const Rect& r) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     uint32_t t = next_read_++;
     if (!t) t = next_read_++;
     Read& rd = reads_[t];
@@ -396,21 +420,28 @@ class D3D9Device final : public Device {
     int w = r.right - r.left, h = r.bottom - r.top;
     if (w > 0 && h > 0) {
       rd.px.resize(size_t(w) * h);
-      ReadBack(r, rd.px.data(), uint32_t(w) * 4, Format::A8R8G8B8);
+      IDirect3DSurface9* rt = nullptr;
+      dev_->GetRenderTarget(0, &rt);
+      rd.c = ReadSurface(rt, r, rd.px.data(), uint32_t(w) * 4, Format::A8R8G8B8);
+      rt->Release();
     }
     return t;
   }
 
   void FinishReadBack(uint32_t ticket, void* dst, uint32_t pitch, Format fmt) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     auto it = reads_.find(ticket);
     if (it == reads_.end()) return;
     const Read& rd = it->second;
-    int w = rd.r.right - rd.r.left, h = rd.r.bottom - rd.r.top;
-    if (dst && !rd.px.empty()) {
+    // Only what was inside the target (ReadSurface's rule).
+    const int w = rd.c.right - rd.c.left, h = rd.c.bottom - rd.c.top;
+    const int ox = rd.c.left - rd.r.left, oy = rd.c.top - rd.r.top;
+    const size_t rw = size_t(rd.r.right - rd.r.left);
+    if (dst && w > 0 && h > 0) {
       uint32_t bpp = BitsPerPixel(fmt) / 8;
       for (int y = 0; y < h; y++) {
-        const uint32_t* s = rd.px.data() + size_t(y) * w;
-        uint8_t* out = static_cast<uint8_t*>(dst) + size_t(y) * pitch;
+        const uint32_t* s = rd.px.data() + size_t(y + oy) * rw + size_t(ox);
+        uint8_t* out = static_cast<uint8_t*>(dst) + size_t(y + oy) * pitch + size_t(ox) * bpp;
         if (fmt == Format::X8R8G8B8 || fmt == Format::A8R8G8B8)
           std::memcpy(out, s, size_t(w) * 4);
         else
@@ -514,6 +545,7 @@ class D3D9Device final : public Device {
 
   void Clear(uint32_t count, const Rect* rects, uint32_t flags, uint32_t color,
              float z, uint32_t stencil) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     static_assert(sizeof(Rect) == sizeof(D3DRECT));
     if (!current_depth_) flags &= ~(D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL);
     // D3D9 clips clears to the viewport and the scissor: the whole target
@@ -535,10 +567,12 @@ class D3D9Device final : public Device {
   }
 
   void BeginScene() override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     if (!in_scene_) dev_->BeginScene();
     in_scene_ = true;
   }
   void EndScene() override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     if (in_scene_) dev_->EndScene();
     in_scene_ = false;
   }
@@ -547,6 +581,7 @@ class D3D9Device final : public Device {
   // setters; lights straight to the device (the state's are 0..
   // light_count - 1).
   void DrawFf(const FfState& s, const FfDraw& d) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     uint32_t stride = FvfStride(d.fvf);
     if (!d.vertex_count || !stride) return;
     Apply(applied_, s);
@@ -576,6 +611,7 @@ class D3D9Device final : public Device {
   }
 
   void Present() override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     if (in_scene_) EndScene();
     dev_->StretchRect(backbuffer_, nullptr, front_, nullptr, D3DTEXF_POINT);
     PresentFront();
@@ -662,10 +698,24 @@ class D3D9Device final : public Device {
     }
   }
 
-  void ReadSurface(IDirect3DSurface9* rt, const Rect& r, void* dst, uint32_t pitch,
-                   Format fmt) {
+  // Reads `r` of `rt` into dst (r's top left at dst), converted to fmt;
+  // rows and columns of r outside the target stay as they were. Returns
+  // the part read. A target DecodePixel reads (32-bit RGB among them)
+  // converts to any format EncodePixel writes; others are read only into
+  // their own format.
+  Rect ReadSurface(IDirect3DSurface9* rt, const Rect& r, void* dst, uint32_t pitch, Format fmt) {
     D3DSURFACE_DESC d;
     rt->GetDesc(&d);
+    const Rect c{std::max(r.left, 0), std::max(r.top, 0), std::min(r.right, int32_t(d.Width)),
+                 std::min(r.bottom, int32_t(d.Height))};
+    if (c.right <= c.left || c.bottom <= c.top) return {};
+    const Format src_fmt = FromD3D(d.Format);
+    const bool rgb32 = d.Format == D3DFMT_X8R8G8B8 || d.Format == D3DFMT_A8R8G8B8;
+    const bool decodable =
+        rgb32 || (src_fmt != Format::Unknown && !IsRaw(src_fmt) && !IsCompressed(src_fmt));
+    if (src_fmt != fmt && !(decodable && !IsRaw(fmt) && !IsCompressed(fmt)))
+      FatalF("d3d9: reading back a target of format %u as format %u", unsigned(d.Format),
+             unsigned(fmt));
     if (readback_) {
       D3DSURFACE_DESC rd;
       readback_->GetDesc(&rd);
@@ -679,18 +729,26 @@ class D3D9Device final : public Device {
                                                  D3DPOOL_SYSTEMMEM, &readback_,
                                                  nullptr))) {
       readback_ = nullptr;
-      return;
+      return {};
     }
     dev_->GetRenderTargetData(rt, readback_);
     D3DLOCKED_RECT lr;
     if (SUCCEEDED(readback_->LockRect(&lr, nullptr, D3DLOCK_READONLY))) {
-      uint32_t bpp = BitsPerPixel(fmt) / 8;
-      int w = r.right - r.left;
-      for (int y = r.top; y < r.bottom; y++) {
-        const uint32_t* src = reinterpret_cast<const uint32_t*>(
-            static_cast<const uint8_t*>(lr.pBits) + size_t(y) * uint32_t(lr.Pitch)) + r.left;
-        uint8_t* out = static_cast<uint8_t*>(dst) + size_t(y - r.top) * pitch;
-        if (fmt == Format::X8R8G8B8 || fmt == Format::A8R8G8B8) {
+      uint32_t bpp = BitsPerPixel(fmt) / 8, src_bpp = BitsPerPixel(src_fmt) / 8;
+      int w = c.right - c.left;
+      for (int y = c.top; y < c.bottom; y++) {
+        const uint8_t* row = static_cast<const uint8_t*>(lr.pBits) + size_t(y) * uint32_t(lr.Pitch);
+        const uint32_t* src = reinterpret_cast<const uint32_t*>(row) + c.left;
+        uint8_t* out = static_cast<uint8_t*>(dst) + size_t(y - r.top) * pitch +
+                       size_t(c.left - r.left) * bpp;
+        if (!rgb32) {
+          const uint8_t* p = row + size_t(c.left) * src_bpp;
+          if (src_fmt == fmt)
+            std::memcpy(out, p, size_t(w) * bpp);
+          else
+            for (int x = 0; x < w; x++)
+              EncodePixel(out + size_t(x) * bpp, fmt, DecodePixel(p + size_t(x) * src_bpp, src_fmt));
+        } else if (fmt == Format::X8R8G8B8 || fmt == Format::A8R8G8B8) {
           // The render target is X8R8G8B8 too: copy, opaque alpha.
           uint32_t* o = reinterpret_cast<uint32_t*>(out);
           for (int x = 0; x < w; x++) o[x] = src[x] | 0xFF000000u;
@@ -707,6 +765,7 @@ class D3D9Device final : public Device {
       }
       readback_->UnlockRect();
     }
+    return c;
   }
 
   struct Depth {
@@ -760,6 +819,7 @@ class D3D9Device final : public Device {
           "CreateTexture(staging)");
   }
 
+  std::recursive_mutex mu_;
   SDL_Window* window_;
   IDirect3D9* d3d_ = nullptr;
   IDirect3DDevice9* dev_ = nullptr;
@@ -772,8 +832,8 @@ class D3D9Device final : public Device {
   IDirect3DTexture9* staging_ = nullptr;
   IDirect3DSurface9* readback_ = nullptr;  // system-memory copy of the RT
   struct Read {
-    Rect r{};
-    std::vector<uint32_t> px;  // A8R8G8B8
+    Rect r{}, c{};             // asked, and the part inside the target
+    std::vector<uint32_t> px;  // A8R8G8B8, r's size
   };
   std::map<uint32_t, Read> reads_;  // StartReadBack tickets
   uint32_t next_read_ = 1;
