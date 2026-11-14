@@ -44,6 +44,8 @@ struct Function {
   std::set<uint64_t> tail_calls;        // jmp/fallthrough to other entries
   std::set<uint64_t> setjmp_returns;    // return addresses of setjmp calls:
                                         // entries longjmp resumes at
+  std::set<uint64_t> code_consts;       // --stack-flow: immediates that
+                                        // are addresses in this function
   std::vector<std::string> warnings;
 };
 

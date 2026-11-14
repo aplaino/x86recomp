@@ -483,6 +483,23 @@ void BuildFunction(const Program& p, const Decoder& dec, uint64_t entry,
         break;
     }
   }
+
+  // --stack-flow: immediates that are addresses of this function's own
+  // instructions, where a ret may go (push X; ret, or X moved into a
+  // register for a cmov).
+  if (p.stack_flow)
+    for (const auto& [va, in] : f.insns) {
+      if (!in.ok) continue;
+      for (int i = 0; i < in.d.operand_count_visible; i++) {
+        const auto& op = in.ops[i];
+        if (op.type != ZYDIS_OPERAND_TYPE_IMMEDIATE) continue;
+        const uint64_t v = uint32_t(op.imm.value.u);
+        if (f.insns.count(v)) {
+          f.code_consts.insert(v);
+          f.labels.insert(v);
+        }
+      }
+    }
 }
 
 }  // namespace lifter

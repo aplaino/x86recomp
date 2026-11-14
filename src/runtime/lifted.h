@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <utility>
 
 #include "runtime/ctx.h"
 #include "runtime/mmx.h"
@@ -58,6 +59,10 @@ void Resume(Ctx& c, GuestResume r);
 void Trap(Ctx& c, uint32_t va);                // int3 / int n
 void RaiseDivideError(Ctx& c, uint32_t va);    // #DE from div/idiv
 void Probe(Ctx& c, uint32_t va, const char* name);  // manifest probes
+// recomp_lift --stack-flow: guest execution goes on at t inside the
+// activation that returns to `ret` (a ret to another address, an indirect
+// tail jump); returns once the guest returns to `ret`.
+void Flow(Ctx& c, uint32_t t, uint32_t ret, uint32_t va);
 // recomp_lift --flags-check: the instruction at va read flags `missing`
 // that the optimised build would not have spilled for it (logged once per
 // site and flags; execution goes on with the right values).

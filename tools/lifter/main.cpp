@@ -10,6 +10,8 @@
 //             [--base HEX]]...
 //            [--only VA[,VA...]]   (just these functions and their callees)
 //            [--all-flags]   (spill every flag at calls and returns)
+//            [--stack-flow]  (returns and tail jumps that are not what they
+//                             seem, as protectors write them; see program.h)
 //            [--flags-check] (spill every flag, report reads the analysis
 //                             would not have spilled; see lifted.h)
 //            [--flags-table] (each mnemonic's flag reads and writes as the
@@ -106,6 +108,7 @@ int main(int argc, char** argv) {
   std::string outdir = "generated";
   uint64_t per_file = 12000;
   uint64_t optnone_x87_over = 0;
+  bool stack_flow = false;
   uint64_t dump = 0;
   std::string x87_test, int_test, sse_test, flags_test;
   std::set<uint64_t> only;
@@ -125,6 +128,7 @@ int main(int argc, char** argv) {
     else if (a == "--dump") dump = std::stoull(val(), nullptr, 16);
     else if (a == "--all-flags") all_flags = true;
     else if (a == "--flags-check") flags_check = true;
+    else if (a == "--stack-flow") stack_flow = true;
     else if (a == "--flags-table") flags_table = true;
     else if (a == "--flags-dump") {
       std::string list = val();
@@ -167,6 +171,7 @@ int main(int argc, char** argv) {
 
   lifter::Program p;
   p.optnone_x87_over = optnone_x87_over;
+  p.stack_flow = stack_flow;
   std::string err;
   for (const ModuleArgs& m : mods) {
     if (m.symdir.empty()) {
@@ -252,6 +257,19 @@ int main(int argc, char** argv) {
   // dropped and discovery runs again from the start, so nothing found only
   // through their decoding remains.
   std::set<uint64_t> bogus;
+  // --stack-flow: protectors put decoy prologues in front of functions, and
+  // a decoy's last instruction covers the real entry. A relocated pointer
+  // in .rdata (a vtable slot) is an address the image really uses, so its
+  // target is kept even inside another function's instruction.
+  std::set<uint64_t> table_ptrs;
+  if (p.stack_flow)
+    for (const auto& m : p.modules)
+      for (uint64_t at : m.img.fixups) {
+        const auto sec = std::find_if(m.img.sections.begin(), m.img.sections.end(),
+                                      [&](const auto& s) { return at - s.va < s.vsize; });
+        if (sec != m.img.sections.end() && sec->name == ".rdata")
+          table_ptrs.insert(p.mem.read<uint32_t>(at));
+      }
   const std::set<uint64_t> entries0 = p.entries, weak0 = p.weak;
   const auto tables0 = p.jumptables;
   for (;;) {
@@ -381,7 +399,8 @@ int main(int argc, char** argv) {
     const size_t known = bogus.size();
     for (uint64_t t : p.weak) {
       auto it = std::upper_bound(code.begin(), code.end(), std::make_pair(t, ~uint64_t(0)));
-      if (it != code.begin() && std::prev(it)->first < t && t < std::prev(it)->second)
+      if (it != code.begin() && std::prev(it)->first < t && t < std::prev(it)->second &&
+          !table_ptrs.count(t))
         bogus.insert(t);
     }
     if (bogus.size() == known) break;
@@ -425,7 +444,11 @@ int main(int argc, char** argv) {
   // Flags live across calls and returns, over the final CFGs (flags.h).
   lifter::FlagLiveness flags;
   std::string flags_report;
-  if (!p.x64 && !all_flags) {
+  if (p.stack_flow && p.x64) {
+    std::fprintf(stderr, "--stack-flow: 32-bit guests only\n");
+    return 2;
+  }
+  if (!p.x64 && !all_flags && !p.stack_flow) {
     flags.Run(p, dec, &flags_report, flags_dump);
     for (uint64_t f : flags_dump)
       std::printf("flags of %08llX:\n%s", (unsigned long long)f, flags.Dump(f).c_str());
