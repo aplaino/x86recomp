@@ -49,8 +49,6 @@ struct Device : com::Object {
   Surface* target = nullptr;
   uint32_t target_guest = 0;
   bool tnl = true;
-  uint32_t rs[256] = {};
-  uint32_t tss[8][32] = {};
   uint32_t textures[8] = {};  // guest surface pointers (GetTexture)
   std::map<uint32_t, guest::D3DMATRIX> transforms;
   guest::D3DVIEWPORT7 viewport{};
@@ -58,8 +56,9 @@ struct Device : com::Object {
   std::map<uint32_t, guest::D3DLIGHT7> lights;
   std::map<uint32_t, bool> light_on;
   float clip_planes[32][4] = {};
-  // What draws are made with: the state set so far over the gfx device's
-  // defaults (DrawFf).
+  // The render and texture stage states, transforms, lights, ... set so
+  // far over Direct3D's defaults: what draws are made with (DrawFf) and
+  // what the Get* methods return.
   gfx::FfState ff = gfx::DefaultFfState();
 };
 
@@ -154,38 +153,6 @@ void BindTarget(Device& d) {
   Gfx()->SetRenderTarget(t && t->kind == Surface::Kind::Texture ? t->tex : 0, z);
 }
 
-// Default D3D7 render states that differ from zero.
-void InitDefaults(Device& d) {
-  d.rs[7] = 1;       // ZENABLE (true when a Z buffer is attached)
-  d.rs[8] = 3;       // FILLMODE solid
-  d.rs[9] = 2;       // SHADEMODE gouraud
-  d.rs[14] = 1;      // ZWRITEENABLE
-  d.rs[16] = 1;      // LASTPIXEL
-  d.rs[19] = 2;      // SRCBLEND one
-  d.rs[20] = 1;      // DESTBLEND zero
-  d.rs[22] = 3;      // CULLMODE ccw
-  d.rs[23] = 4;      // ZFUNC lessequal
-  d.rs[25] = 8;      // ALPHAFUNC always
-  d.rs[136] = 1;     // CLIPPING
-  d.rs[137] = 1;     // LIGHTING
-  d.rs[141] = 1;     // COLORVERTEX
-  d.rs[142] = 1;     // LOCALVIEWER
-  d.rs[145] = 1;     // DIFFUSEMATERIALSOURCE color1
-  d.rs[146] = 2;     // SPECULARMATERIALSOURCE color2
-  for (int s = 0; s < 8; s++) {
-    d.tss[s][1] = s == 0 ? 4 : 1;  // COLOROP modulate / disable
-    d.tss[s][2] = 2;               // COLORARG1 texture
-    d.tss[s][3] = 1;               // COLORARG2 current
-    d.tss[s][4] = s == 0 ? 2 : 1;  // ALPHAOP selectarg1 / disable
-    d.tss[s][5] = 2;
-    d.tss[s][6] = 1;
-    d.tss[s][11] = uint32_t(s);    // TEXCOORDINDEX
-    d.tss[s][13] = d.tss[s][14] = 1;  // ADDRESSU/V wrap
-    d.tss[s][16] = d.tss[s][17] = 1;  // MAG/MINFILTER point
-    d.tss[s][18] = 1;                 // MIPFILTER none
-  }
-}
-
 }  // namespace
 
 uint32_t D3D7For(uint32_t dd) {
@@ -277,8 +244,7 @@ HLE_NAMED("ddraw.dll", "IDirect3D7::CreateDevice", D3D7_CreateDevice, 4) {
   d->target_guest = surf;
   com::AddRef(surf);
   com::AddRef(d->d3d);
-  InitDefaults(*d);
-  d->rs[7] = t->zbuffer ? 1 : 0;
+  d->ff.rs[7] = t->zbuffer ? 1 : 0;  // ZENABLE: on if the target has a Z buffer
   d->viewport = {0, 0, uint32_t(t->width), uint32_t(t->height), 0.0f, 1.0f};
   BindTarget(*d);
   d->ff.viewport = {0, 0, uint32_t(t->width), uint32_t(t->height), 0.0f, 1.0f};
@@ -552,7 +518,6 @@ HLE_NAMED("ddraw.dll", "IDirect3DDevice7::SetRenderState", D3DD7_SetRenderState,
   Device* d = Dev(c);
   uint32_t s = Arg(c, 1), v = Arg(c, 2);
   if (s >= 256) return D3D_OK;
-  d->rs[s] = v;
   d->ff.rs[s] = v;
   return D3D_OK;
 }
@@ -560,22 +525,22 @@ HLE_NAMED("ddraw.dll", "IDirect3DDevice7::SetRenderState", D3DD7_SetRenderState,
 HLE_NAMED("ddraw.dll", "IDirect3DDevice7::GetRenderState", D3DD7_GetRenderState, 3) {
   Device* d = Dev(c);
   uint32_t s = Arg(c, 1);
-  Wr32(Arg(c, 2), s < 256 ? d->rs[s] : 0);
+  Wr32(Arg(c, 2), s < 256 ? d->ff.rs[s] : 0);
   return D3D_OK;
 }
 
 HLE_NAMED("ddraw.dll", "IDirect3DDevice7::SetTextureStageState", D3DD7_SetTextureStageState, 4) {
   Device* d = Dev(c);
   uint32_t st = Arg(c, 1), type = Arg(c, 2), v = Arg(c, 3);
-  if (st < 8 && type < 32) d->tss[st][type] = v;
-  if (st < 8 && type < 33) d->ff.tss[st][type] = v;
+  if (st >= 8 || type >= 33) return D3D_OK;
+  d->ff.tss[st][type] = v;
   return D3D_OK;
 }
 
 HLE_NAMED("ddraw.dll", "IDirect3DDevice7::GetTextureStageState", D3DD7_GetTextureStageState, 4) {
   Device* d = Dev(c);
   uint32_t st = Arg(c, 1), type = Arg(c, 2);
-  Wr32(Arg(c, 3), st < 8 && type < 32 ? d->tss[st][type] : 0);
+  Wr32(Arg(c, 3), st < 8 && type < 33 ? d->ff.tss[st][type] : 0);
   return D3D_OK;
 }
 
