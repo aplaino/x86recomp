@@ -104,7 +104,7 @@ add_test(NAME write_watch COMMAND write_watch_test)
 # HLSL translator: each shader in hlsl/ through recomp_hlslc, then
 # glslangValidator (the GLSL must compile for Vulkan), with the reflection
 # (constant table, inputs, varyings, samplers) compared with its
-# <name>.reflect; error.hlsl must fail.
+# <name>.reflect; error.hlsl must fail with its error.
 function(recomp_hlsl_test name src stage)  # ARGN: recomp_hlslc arguments
   string(REPLACE ";" "|" _args "${ARGN}")
   add_test(NAME hlsl_${name} COMMAND "${CMAKE_COMMAND}"
@@ -120,9 +120,9 @@ recomp_hlsl_test(ps_features ps_features frag -T ps_3_0 -E main)
 recomp_hlsl_test(preprocess preprocess frag -T ps_2_0 -E main -D FROM_COMMAND_LINE=0.5)
 recomp_hlsl_test(sm2_vs sm2 vert -T vs_2_0 -E vs)
 recomp_hlsl_test(sm2_ps sm2 frag -T ps_2_0 -E ps)
-add_test(NAME hlsl_error COMMAND recomp_hlslc ${CMAKE_CURRENT_SOURCE_DIR}/hlsl/error.hlsl
-         -T ps_3_0 -E main)
-set_tests_properties(hlsl_error PROPERTIES WILL_FAIL TRUE)
+add_test(NAME hlsl_error COMMAND "${CMAKE_COMMAND}" -DEXIT=1 "-DOUTPUT=undeclared identifier 'undeclared'"
+         "-DCMD=$<TARGET_FILE:recomp_hlslc>|${CMAKE_CURRENT_SOURCE_DIR}/hlsl/error.hlsl|-T|ps_3_0|-E|main"
+         -P ${CMAKE_CURRENT_SOURCE_DIR}/expect_exit.cmake)
 
 # The front end on sources it must translate or refuse (without a crash).
 add_executable(hlsl_frontend_test hlsl_frontend_test.cpp)
