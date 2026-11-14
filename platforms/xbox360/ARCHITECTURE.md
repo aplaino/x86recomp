@@ -191,8 +191,12 @@ returns.
 - Dispatcher objects (events, semaphores, mutants, threads) live in guest
   memory and their headers are their state: guest code initialises
   events itself. Every signal and every check of a wait is made under one
-  dispatcher lock, and any change wakes every waiter to look again.
-  Timers are signalled by a host thread at their due time and period.
+  dispatcher lock. A blocked wait has a wait block on each of its
+  objects, and a signal satisfies the waits it completes there and then,
+  in the order they began (NT's wait test): what a set gave a waiter a
+  reset that follows cannot take back. A thread's end abandons the
+  mutants it owns. Timers are signalled by a host thread at their due
+  time and period.
   APCs queue per thread under the same lock and run inside the thread's
   waits (a host thread cannot be interrupted), called below the frame of
   the code that waits; queues (KQUEUE) are not there yet.
@@ -202,9 +206,20 @@ returns.
   spin locks hold their owner's KPCR; IRQL is the KPCR's byte, and no
   interrupt or DPC ever runs.
 - The title ends when its entry point returns (with what it returned),
-  when its last thread ends, or at HalReturnToFirmware. A thread that is
-  running cannot be suspended (fatal; a host thread cannot be stopped
-  where it is), one created suspended can.
+  when its last thread ends, or at HalReturnToFirmware.
+- Suspension: a host thread cannot be stopped at any point of lifted
+  code, only where it meets the kernel, which is where NT's suspension
+  (an APC) takes effect too, on the way back to user mode or in a wait.
+  A thread stops on its way into a handler and back out of it, in a wait
+  (which it leaves, so that it takes no signal while suspended), and
+  before its start routine. NtSuspendThread on a thread running lifted
+  code returns once it has stopped, at its next meeting with the kernel;
+  on one in the kernel at once, as it cannot run lifted code again
+  before it stops. Lifted code that
+  meets the kernel nowhere (a loop with no import and no wait) cannot be
+  stopped, and its suspender waits until it does; stopping it anywhere
+  would take a check the lifter emits on loop back edges (the PowerPC
+  core).
 - The kernel's own threads (the GPU's command processor and vertical
   blank) are host loops with guest structures, which call guest code (the
   graphics interrupt callback) as DPCs: at DISPATCH_LEVEL, the KPCR's DPC

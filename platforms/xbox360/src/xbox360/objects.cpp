@@ -7,7 +7,6 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
-#include <set>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -41,12 +40,22 @@ struct ApcQueues {
 };
 std::unordered_map<uint32_t, ApcQueues> g_apcs;
 
-// The threads waiting on each object, in the order they began, and the
-// pulses (PulseEvent) that let a waiter through, by thread and object:
-// a pulse leaves the event's state unsignalled. Under the dispatcher
-// lock.
-std::unordered_map<uint32_t, std::vector<uint32_t>> g_waiters;
-std::set<std::pair<uint32_t, uint32_t>> g_pulses;
+// A thread's wait while it blocks (NT's wait blocks): its objects, and
+// whether a signal has satisfied it, with what status. The waits on each
+// object, in the order they began. Under the dispatcher lock.
+struct WaitBlock {
+  const uint32_t* objs;
+  uint32_t count;
+  bool wait_all;
+  Thread* thread;
+  uint32_t kthread;
+  bool satisfied = false;
+  uint32_t status = 0;
+};
+std::unordered_map<uint32_t, std::vector<WaitBlock*>> g_waiters;
+// The mutants each thread owns, by KTHREAD, under the dispatcher lock
+// (NT's mutant list of a KTHREAD), so that its end abandons them.
+std::unordered_map<uint32_t, std::vector<uint32_t>> g_mutants;
 
 // Whether a wait of the current thread has an APC to run: a kernel one
 // outside a critical region, a user one in an alertable wait.
@@ -72,6 +81,7 @@ bool Acquire(uint32_t o, uint32_t kthread) {
     case kSynchronizationTimer: SetState(o, 0); break;
     case kSemaphoreObject: SetState(o, State(o) - 1); break;
     case kMutantObject:
+      if (State(o) == 1) g_mutants[kthread].push_back(o);
       SetState(o, State(o) - 1);
       Wr32(o + 0x18, kthread);
       if (Rd8(o + 0x1C)) {
@@ -98,6 +108,38 @@ Clock::time_point Deadline(int64_t timeout) {
 }
 
 const Clock::time_point g_start = Clock::now();
+
+// Satisfies w if its objects allow it now: every one signalled for a
+// wait-all, the first signalled for a wait-any, each taken.
+bool Satisfy(WaitBlock& w) {
+  if (w.wait_all) {
+    for (uint32_t i = 0; i < w.count; i++)
+      if (!Signaled(w.objs[i], w.kthread)) return false;
+    bool abandoned = false;
+    for (uint32_t i = 0; i < w.count; i++) abandoned |= Acquire(w.objs[i], w.kthread);
+    w.status = abandoned ? kStatusAbandoned : kStatusSuccess;
+  } else {
+    uint32_t i = 0;
+    while (i < w.count && !Signaled(w.objs[i], w.kthread)) i++;
+    if (i == w.count) return false;
+    w.status = (Acquire(w.objs[i], w.kthread) ? kStatusAbandoned : 0) + i;
+  }
+  w.satisfied = true;
+  return true;
+}
+
+// NT's wait test, after obj may have become signalled: the waits on it
+// that it completes, in the order they began, are satisfied here, so
+// that what the signal gave them a reset or another thread's wait cannot
+// take back. A suspended thread is not waiting.
+void WaitTest(uint32_t obj) {
+  auto it = g_waiters.find(obj);
+  if (it == g_waiters.end()) return;
+  bool woke = false;
+  for (WaitBlock* w : it->second)
+    if (!w->satisfied && !Suspended(w->thread) && Signaled(obj, w->kthread)) woke |= Satisfy(*w);
+  if (woke) g_wake.notify_all();
+}
 
 }  // namespace
 
@@ -127,23 +169,23 @@ int32_t SetSignal(uint32_t obj, int32_t state) {
   std::lock_guard<std::mutex> g(g_dispatch);
   int32_t old = State(obj);
   SetState(obj, state);
-  if (state > 0) g_wake.notify_all();
+  if (state > 0) {
+    WaitTest(obj);
+    g_wake.notify_all();
+  }
   return old;
 }
 
-// NT's: every thread waiting on a notification event goes through, the
-// first waiting on a synchronization event; the event is left unsignalled.
+// NT's: the event signalled, the wait test, the event reset: every thread
+// waiting on a notification event goes through, the first waiting on a
+// synchronization event (a thread in a wait-all the pulse does not
+// complete misses it).
 int32_t PulseEvent(uint32_t obj) {
   std::lock_guard<std::mutex> g(g_dispatch);
   int32_t old = State(obj);
+  SetState(obj, 1);
+  WaitTest(obj);
   SetState(obj, 0);
-  if (auto it = g_waiters.find(obj); it != g_waiters.end()) {
-    for (uint32_t kthread : it->second) {
-      g_pulses.insert({kthread, obj});
-      if (Rd8(obj) == kSynchronizationEvent) break;
-    }
-    g_wake.notify_all();
-  }
   return old;
 }
 
@@ -153,9 +195,29 @@ bool ReleaseSemaphore(uint32_t sem, int32_t count, int32_t& previous) {
   int32_t limit = int32_t(Rd32(sem + 0x10));
   if (count <= 0 || int64_t(previous) + count > limit) return false;
   SetState(sem, previous + count);
+  WaitTest(sem);
   g_wake.notify_all();
   return true;
 }
+
+void InitMutant(uint32_t mutant, bool owned) {
+  InitObject(mutant, kMutantObject, 1);
+  Wr32(mutant + 0x18, 0);
+  Wr8(mutant + 0x1C, 0);
+  if (!owned) return;
+  std::lock_guard<std::mutex> g(g_dispatch);
+  Acquire(mutant, KThread(CurrentThread()));
+}
+
+namespace {
+// Takes a mutant off its owner's list.
+void Disown(uint32_t mutant) {
+  auto it = g_mutants.find(Rd32(mutant + 0x18));
+  if (it == g_mutants.end()) return;
+  std::erase(it->second, mutant);
+  if (it->second.empty()) g_mutants.erase(it);
+}
+}  // namespace
 
 uint32_t ReleaseMutant(uint32_t mutant, int32_t& previous) {
   uint32_t me = KThread(CurrentThread());
@@ -164,48 +226,65 @@ uint32_t ReleaseMutant(uint32_t mutant, int32_t& previous) {
   if (Rd32(mutant + 0x18) != me || previous > 0) return kStatusMutantNotOwned;
   SetState(mutant, previous + 1);
   if (previous + 1 == 1) {
+    Disown(mutant);
     Wr32(mutant + 0x18, 0);
+    WaitTest(mutant);
     g_wake.notify_all();
   }
   return kStatusSuccess;
 }
 
+void DeleteMutant(uint32_t mutant) {
+  std::lock_guard<std::mutex> g(g_dispatch);
+  if (State(mutant) <= 0) Disown(mutant);
+}
+
+void AbandonMutants() {
+  std::lock_guard<std::mutex> g(g_dispatch);
+  auto it = g_mutants.find(KThread(CurrentThread()));
+  if (it == g_mutants.end()) return;
+  std::vector<uint32_t> owned = std::move(it->second);
+  g_mutants.erase(it);
+  for (uint32_t m : owned) {
+    SetState(m, 1);
+    Wr32(m + 0x18, 0);
+    Wr8(m + 0x1C, 1);
+    WaitTest(m);
+  }
+  g_wake.notify_all();
+}
+
+void WakeWaits() {
+  std::lock_guard<std::mutex> g(g_dispatch);
+  g_wake.notify_all();
+}
+
 namespace {
-// What WaitObjects returns when the wait has an APC to run first.
-constexpr uint32_t kApcDue = 0xFFFFFFFF;
+// What WaitObjects returns when the wait has something to do first: an
+// APC to run, or its thread's suspension.
+constexpr uint32_t kInterrupted = 0xFFFFFFFF;
 
 uint32_t WaitObjects(const uint32_t* objs, uint32_t count, bool wait_all, Clock::time_point deadline,
                      bool alertable) {
-  uint32_t me = KThread(CurrentThread());
+  Thread* me = CurrentThread();
+  WaitBlock w{objs, count, wait_all, me, KThread(me)};
   std::unique_lock<std::mutex> l(g_dispatch);
-  for (uint32_t i = 0; i < count; i++) g_waiters[objs[i]].push_back(me);
-  // A pulse the check below does not take is gone, as on NT, where it
-  // satisfies a wait only when it happens.
-  auto ready = [&](uint32_t o) { return Signaled(o, me) || g_pulses.count({me, o}); };
+  for (uint32_t i = 0; i < count; i++) g_waiters[objs[i]].push_back(&w);
   auto done = [&](uint32_t status) {
     for (uint32_t i = 0; i < count; i++) {
-      auto& w = g_waiters[objs[i]];
-      w.erase(std::find(w.begin(), w.end(), me));
-      if (w.empty()) g_waiters.erase(objs[i]);
-      g_pulses.erase({me, objs[i]});
+      auto it = g_waiters.find(objs[i]);
+      if (it == g_waiters.end()) continue;  // an object named twice
+      std::erase(it->second, &w);
+      if (it->second.empty()) g_waiters.erase(it);
     }
     return status;
   };
+  // A signal satisfies the wait (WaitTest), or the wait finds its objects
+  // signalled itself: when it begins, and when a change it was not
+  // waiting for (it was suspended) wakes it.
   for (bool last = false;; last = Clock::now() >= deadline) {
-    if (wait_all) {
-      bool all = true;
-      for (uint32_t i = 0; i < count && all; i++) all = ready(objs[i]);
-      if (all) {
-        bool abandoned = false;
-        for (uint32_t i = 0; i < count; i++) abandoned |= Acquire(objs[i], me);
-        return done(abandoned ? kStatusAbandoned : kStatusSuccess);
-      }
-    } else {
-      for (uint32_t i = 0; i < count; i++)
-        if (ready(objs[i])) return done((Acquire(objs[i], me) ? kStatusAbandoned : 0) + i);
-    }
-    for (uint32_t i = 0; i < count; i++) g_pulses.erase({me, objs[i]});
-    if (ApcDue(me, alertable)) return done(kApcDue);
+    if (w.satisfied || (!Suspended(me) && Satisfy(w))) return done(w.status);
+    if (Suspended(me) || ApcDue(w.kthread, alertable)) return done(kInterrupted);
     if (last) return done(kStatusTimeout);
     if (deadline == Clock::time_point::max()) g_wake.wait(l);
     else g_wake.wait_until(l, deadline);
@@ -249,11 +328,13 @@ uint32_t WaitWithApcs(const uint32_t* objs, uint32_t count, bool wait_all, Clock
                       bool alertable) {
   HoldIfSuspended();
   uint32_t status;
-  while ((status = WaitObjects(objs, count, wait_all, deadline, alertable)) == kApcDue)
+  while ((status = WaitObjects(objs, count, wait_all, deadline, alertable)) == kInterrupted) {
+    HoldIfSuspended();
     if (RunApcs(alertable)) {
       status = kStatusUserApc;
       break;
     }
+  }
   HoldIfSuspended();
   return status;
 }

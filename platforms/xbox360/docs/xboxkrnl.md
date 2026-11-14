@@ -54,12 +54,16 @@ here; on the console a KPCR belongs to a hardware thread.
   the KTHREAD, not a handle (Xenia's; a title hands it straight to
   KeSetBasePriorityThread), referenced for the caller as a handle would
   be (chosen). Console check.
-- NtSuspendThread: a host thread cannot be stopped where it runs. A
-  thread suspending itself (titles' workers do, to sleep until another
-  thread resumes them) stops in the call until its count is 0 again;
-  another running thread stops at its next wait or delay, before or after
-  it blocks (chosen; on the console at once); one not yet started stops
-  before its start routine. Console check.
+- NtSuspendThread: a host thread cannot be stopped at any point of lifted
+  code (ARCHITECTURE.md, "Threads and objects"). A thread suspending
+  itself (titles' workers do, to sleep until another thread resumes them)
+  stops on its way out of the call until its count is 0 again; another
+  thread running lifted code stops at its next call into the kernel, and
+  the call returns once it has; one in the kernel stops in its wait or
+  before it returns to lifted code, and a waiting thread takes no signal
+  while suspended (NT's: the suspend APC takes it out of its wait); one
+  not yet started stops before its start routine. On the console a
+  thread running user code stops at once. Console check.
 - A stack size of 0 takes the title's (the XEX's default stack size
   header); without one 1 MiB, as Xenia chose. At least 16 KiB, in whole
   4 KiB pages. Console check.
@@ -99,7 +103,17 @@ here; on the console a KPCR belongs to a hardware thread.
   event, 2 mutant, 3 process, 4 queue, 5 semaphore, 6 thread,
   8 notification timer, 9 synchronization timer.
 - KSEMAPHORE: the limit at 0x10. KMUTANT: owner thread at 0x18, abandoned
-  at 0x1C; signal state 1 when free, one less per acquisition.
+  at 0x1C; signal state 1 when free, one less per acquisition. A thread's
+  end abandons the mutants it owns (NT's): each is free, and the wait
+  that takes it next returns STATUS_ABANDONED (0x80, plus the object's
+  index for a wait-any) and clears the flag. Which mutants a thread owns
+  the kernel keeps itself; the KMUTANT's list links (0x10, NT's) are left
+  alone.
+- Waits: a signal satisfies the waits it completes when it happens, in
+  the order they began (NT's wait test), so a set of a notification
+  event releases every thread waiting then, even if a reset follows, and
+  each set of a synchronization event (or each count a semaphore is
+  released by) exactly one.
 - RTL_CRITICAL_SECTION: a synchronization event's header, lock count at
   0x10 (-1 free), recursion count at 0x14, owning KTHREAD at 0x18.
 - SLIST_HEADER: the first entry (be32), depth (be16), sequence (be16).

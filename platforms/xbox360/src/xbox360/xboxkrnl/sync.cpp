@@ -69,10 +69,15 @@ uint32_t Publish(ppc::Ctx& c, uint32_t handle, uint32_t attributes, uint32_t obj
   return status;
 }
 
-// A timer goes with its last reference, stopped first.
+// A timer goes with its last reference, stopped first; a mutant off its
+// owner's list first.
 void DestroyTimer(uint32_t timer) {
   DeleteTimer(timer);
   SystemFree(timer);
+}
+void DestroyMutant(uint32_t mutant) {
+  DeleteMutant(mutant);
+  SystemFree(mutant);
 }
 
 // Guest 32-bit words updated atomically (the lock words of critical
@@ -181,8 +186,9 @@ HLE(kKrnl, 136, KeReleaseSemaphore) {
 
 // NtCreateMutant(*handle, attributes, initial owner).
 HLE(kKrnl, 212, NtCreateMutant) {
-  uint32_t obj = NewObject(kMutantSize, kMutantObject, Arg(c, 2) ? 0 : 1);
-  if (Arg(c, 2)) Wr32(obj + 0x18, KThread(CurrentThread()));
+  uint32_t obj = SystemAlloc(kMutantSize);
+  InitMutant(obj, Arg(c, 2) != 0);
+  Own(obj, DestroyMutant);
   return Publish(c, Arg(c, 0), Arg(c, 1), obj);
 }
 

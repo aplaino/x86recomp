@@ -62,19 +62,29 @@ constexpr uint32_t kDispatcherHeaderSize = 0x10, kSemaphoreSize = 0x14, kMutantS
 
 // The header of a new object: type, signal state, empty wait list.
 void InitObject(uint32_t obj, ObjectType type, int32_t signal_state);
-// Changes an object's signal state and wakes its waiters, under the
-// dispatcher lock: SetSignal returns the previous state (KeSetEvent,
-// KeResetEvent), PulseEvent lets the threads waiting on it through (all
-// of them, or the first for a synchronization event) and leaves it
-// unsignalled.
+// Changes an object's signal state under the dispatcher lock and, as NT's
+// wait test does, satisfies there and then the waits a signal completes,
+// in the order they began, while it stays signalled: a set releases every
+// thread waiting on a notification event, one per set on a
+// synchronization event, whatever follows. SetSignal returns the previous
+// state (KeSetEvent, KeResetEvent), PulseEvent lets the threads waiting
+// on it through (all of them, or the first for a synchronization event)
+// and leaves it unsignalled.
 int32_t SetSignal(uint32_t obj, int32_t state);
 int32_t PulseEvent(uint32_t obj);
 // KeReleaseSemaphore: false (and no change) if the count would exceed the
 // limit.
 bool ReleaseSemaphore(uint32_t sem, int32_t count, int32_t& previous);
+// KeInitializeMutant: free, or owned by the current thread.
+void InitMutant(uint32_t mutant, bool owned);
 // KeReleaseMutant on behalf of the current thread: kStatusMutantNotOwned
 // if it does not own it.
 uint32_t ReleaseMutant(uint32_t mutant, int32_t& previous);
+// A mutant's end: it leaves its owner's list, before the mutant goes.
+void DeleteMutant(uint32_t mutant);
+// The current thread's end: the mutants it owns are abandoned, free again,
+// and the wait that takes each next returns kStatusAbandoned (NT's).
+void AbandonMutants();
 
 // RTL_CRITICAL_SECTION (0x1C bytes): a synchronization event's header (its
 // byte 1 the spin count / 256), the lock count at 0x10 (-1 free), the
@@ -94,6 +104,9 @@ uint32_t Wait(const uint32_t* objs, uint32_t count, bool wait_all, const int64_t
               bool alertable);
 // KeDelayExecutionThread: a wait on nothing; kStatusSuccess at its end.
 uint32_t Delay(int64_t timeout, bool alertable);
+// Makes every wait look again: a thread suspended meanwhile leaves its
+// wait, as NT's suspend APC takes it out of one, until it is resumed.
+void WakeWaits();
 
 // ---- APCs ---------------------------------------------------------------
 // KAPC (0x28 bytes): type (byte 0, 18), mode (2: 0 kernel, 1 user),
@@ -199,12 +212,26 @@ uint32_t TlsSlots(const Thread* t);
 void ZeroTlsSlot(uint32_t slot);
 // Its processor (KPCR and KTHREAD), 0-5.
 void SetProcessor(Thread* t, uint32_t cpu);
-// Suspend counts (KeSuspendThread, KeResumeThread): the previous count.
+// Suspend counts (NtSuspendThread, KeResumeThread): the previous count.
+// A suspended thread stops where it meets the kernel, as on NT, where the
+// suspension is an APC that runs on the way back to user mode or in a
+// wait: lifted code stops on its way into or out of the kernel (an import
+// or a call through an export's address) or in a wait. A thread suspended
+// while it runs lifted code is stopped when SuspendThread returns; one in
+// the kernel (in a handler or a wait) stops there or before it returns to
+// lifted code. Lifted code that never meets the kernel cannot be stopped
+// (ARCHITECTURE.md, "Threads and objects"), and its suspender waits until
+// it does.
 uint32_t SuspendThread(Thread* t);
 uint32_t ResumeThread(Thread* t);
-// Where a running thread that another suspended stops: Wait and Delay call
-// it, before and after they block.
+bool Suspended(const Thread* t);
+// The current thread in the kernel, on its way in from lifted code (a
+// handler's call) or in a wait (before and after it blocks): it stops
+// here while it is suspended.
 void HoldIfSuspended();
+// The current thread on its way back to lifted code (a handler's return,
+// a guest call from a handler): it stops first while it is suspended.
+void LeaveKernel();
 // Ends the current thread (ExTerminateThread, or its start routine
 // returning) with `status`. The process ends with its last thread.
 [[noreturn]] void ExitThread(uint32_t status);

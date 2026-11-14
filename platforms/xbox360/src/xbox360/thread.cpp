@@ -12,6 +12,7 @@
 #include <pthread.h>
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <condition_variable>
 #include <cstdio>
@@ -35,9 +36,13 @@ struct Thread {
   uint32_t kthread = 0, pcr = 0, tls = 0;
   uint32_t stack_alloc = 0, stack_base = 0;
   uint32_t id = 0;
+  // The suspend count, and whether the thread runs lifted code (false
+  // in the kernel: in a handler, a wait, before its start routine);
+  // `resumed` signals a change of either, under `lock`.
   std::mutex lock;
   std::condition_variable resumed;
-  uint32_t suspend = 0;
+  std::atomic<uint32_t> suspend = 0;
+  std::atomic<bool> user = false;
 };
 
 namespace {
@@ -97,10 +102,11 @@ void Destroy(uint32_t kthread) {
   delete t;
 }
 
-// The thread's end: its exit status, its KTHREAD signalled, the process's
-// end with its last thread.
+// The thread's end: its exit status, its mutants abandoned, its KTHREAD
+// signalled, the process's end with its last thread.
 void Finish(Thread* t, uint32_t status) {
   RundownApcs();
+  AbandonMutants();
   Wr32(t->kthread + kKtExitStatus, status);
   SetSignal(t->kthread, 1);
   bool last;
@@ -119,10 +125,6 @@ void* Run(void* arg) {
     t->system_body(t->system_arg);
     return nullptr;
   }
-  {
-    std::unique_lock<std::mutex> l(t->lock);
-    t->resumed.wait(l, [t] { return t->suspend == 0; });
-  }
   uint32_t status;
   try {
     ppc::Ctx& c = t->c;
@@ -134,7 +136,9 @@ void* Run(void* arg) {
     } else {
       c.r[3] = t->p.context;
     }
+    LeaveKernel();
     ppc::Dispatch(c, target, 0);
+    HoldIfSuspended();
     status = uint32_t(c.r[3]);
     if (t->p.main) ExitProcess(int(status));
   } catch (const Exit& e) {
@@ -143,6 +147,7 @@ void* Run(void* arg) {
     Fatal(&t->c, "an unwind to %x in frame %x found no lifted activation to continue in", g.target,
           g.frame);
   }
+  HoldIfSuspended();
   Finish(t, status);
   return nullptr;
 }
@@ -247,7 +252,9 @@ uint32_t CallGuestNested(uint32_t fn, std::initializer_list<uint32_t> args) {
   c.r[1] = (uint32_t(c.r[1]) - kNestedFrame) & ~0xFu;
   uint32_t reg = 3;
   for (uint32_t a : args) c.r[reg++] = a;
+  LeaveKernel();
   ppc::Dispatch(c, fn, 0);
+  HoldIfSuspended();
   uint32_t r = uint32_t(c.r[3]);
   c = saved;
   c.resv_valid = false;
@@ -292,21 +299,40 @@ void SetProcessor(Thread* t, uint32_t cpu) {
   Wr8(t->pcr + kPcrCpu, uint8_t(cpu));
 }
 
-// A running host thread cannot be stopped where it is: a thread suspending
-// itself stops here, another running thread at its next wait or delay
-// (HoldIfSuspended), one that has not started before its start routine.
+// A host thread cannot be stopped at any point of lifted code, only where
+// it meets the kernel (kernel.h). The count and `user` are sequentially
+// consistent: a suspender that reads `user` set after counting is seen by
+// the thread's next read of the count, which it makes after clearing
+// `user` (into the kernel) or setting it (out of it).
 uint32_t SuspendThread(Thread* t) {
-  std::unique_lock<std::mutex> l(t->lock);
-  uint32_t old = t->suspend++;
-  if (t == t_current) t->resumed.wait(l, [t] { return t->suspend == 0; });
+  uint32_t old;
+  {
+    std::unique_lock<std::mutex> l(t->lock);
+    old = t->suspend++;
+    t->resumed.wait(l, [t] { return !t->user || t->suspend == 0; });
+  }
+  // A thread waiting leaves its wait to stop.
+  WakeWaits();
   return old;
 }
 
 void HoldIfSuspended() {
   Thread* t = t_current;
   if (!t || t->system_body) return;
+  t->user = false;
+  if (!t->suspend) return;
   std::unique_lock<std::mutex> l(t->lock);
+  t->resumed.notify_all();  // its suspender, waiting for it to get here
   t->resumed.wait(l, [t] { return t->suspend == 0; });
+}
+
+void LeaveKernel() {
+  Thread* t = t_current;
+  if (!t || t->system_body) return;
+  do {
+    HoldIfSuspended();
+    t->user = true;
+  } while (t->suspend);
 }
 
 uint32_t ResumeThread(Thread* t) {
@@ -315,6 +341,8 @@ uint32_t ResumeThread(Thread* t) {
   if (t->suspend && --t->suspend == 0) t->resumed.notify_all();
   return old;
 }
+
+bool Suspended(const Thread* t) { return t && !t->system_body && t->suspend; }
 
 void ExitThread(uint32_t status) { throw Exit{status}; }
 

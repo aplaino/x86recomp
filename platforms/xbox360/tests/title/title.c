@@ -481,6 +481,26 @@ static u32 Ticker(void* arg) {
   return 0;
 }
 
+// Runs lifted code, calling into the kernel (an import) on each round.
+static u32 Spinner(void* arg) {
+  (void)arg;
+  while (!*(volatile u32*)&shared.stop) {
+    shared.ticks++;
+    KeGetCurrentProcessType();
+  }
+  return 0;
+}
+
+// Waits on a KEVENT for up to a second and counts its result: satisfied
+// in handed[0], anything else in handed[1].
+static volatile u32 handed[2];
+static u32 EventWaiter(void* event) {
+  int64_t second = -10000000;
+  u32 status = KeWaitForSingleObject(event, 3, 1, 0, &second);
+  __sync_fetch_and_add(&handed[status == 0 ? 0 : 1], 1);
+  return status;
+}
+
 static u32 Setter(void* arg) {
   int64_t ms = -200000;
   KeDelayExecutionThread(1, 0, &ms);
@@ -556,17 +576,35 @@ static void Threads(void) {
   CHECK(ObReferenceObjectByHandle(h, __imp_ExThreadObjectType, &obj) == 0 && *At(obj + 0x140) == 5);
   ObDereferenceObject(obj);
   NtClose(h);
-  // Another running thread, suspended, stops by its next delay.
-  CHECK(ExCreateThread(&h, 0, 0, (void*)thread_startup, (void*)Ticker, 0, 0) == 0);
+  // Another thread running lifted code has stopped when NtSuspendThread
+  // returns (at its next call into the kernel); one in a delay stops in it.
+  for (int k = 0; k < 2; k++) {
+    shared.stop = shared.ticks = 0;
+    CHECK(ExCreateThread(&h, 0, 0, (void*)thread_startup, k ? (void*)Ticker : (void*)Spinner, 0, 0) == 0);
+    KeDelayExecutionThread(1, 0, &ten_ms);
+    CHECK(NtSuspendThread(h, &previous) == 0 && previous == 0);
+    u32 held = shared.ticks;
+    for (int j = 0; j < 3; j++) KeDelayExecutionThread(1, 0, &ten_ms);
+    CHECK(held != 0 && shared.ticks == held);
+    shared.stop = 1;
+    CHECK(NtResumeThread(h, &previous) == 0 && previous == 1);
+    CHECK(NtWaitForSingleObjectEx(h, 1, 0, 0) == 0);
+    NtClose(h);
+  }
+  // A suspended thread is out of its wait: a set meanwhile goes to another
+  // waiter; resumed, it waits again.
+  u32 sync[4] = {1 << 24, 0, (u32)(uintptr_t)&sync[2], (u32)(uintptr_t)&sync[2]};
+  handed[0] = handed[1] = 0;
+  CHECK(ExCreateThread(&h, 0, 0, (void*)thread_startup, (void*)EventWaiter, sync, 0) == 0);
   KeDelayExecutionThread(1, 0, &ten_ms);
   CHECK(NtSuspendThread(h, &previous) == 0 && previous == 0);
-  KeDelayExecutionThread(1, 0, &ten_ms);
-  u32 held = shared.ticks;
-  for (int k = 0; k < 3; k++) KeDelayExecutionThread(1, 0, &ten_ms);
-  CHECK(held != 0 && shared.ticks == held);
-  shared.stop = 1;
+  KeSetEvent(sync, 1, 0);
+  CHECK(KeWaitForSingleObject(sync, 3, 1, 0, &zero) == 0);
   CHECK(NtResumeThread(h, &previous) == 0 && previous == 1);
-  CHECK(NtWaitForSingleObjectEx(h, 1, 0, 0) == 0);
+  KeDelayExecutionThread(1, 0, &ten_ms);
+  CHECK(handed[0] == 0 && handed[1] == 0);
+  KeSetEvent(sync, 1, 0);
+  CHECK(NtWaitForSingleObjectEx(h, 1, 0, 0) == 0 && handed[0] == 1 && sync[1] == 0);
   NtClose(h);
 
   // A relative timeout of 0x8000000000000000 (XAPI's INFINITE) waits
@@ -1172,6 +1210,63 @@ static u32 PulseWaiter(void* arg) {
   NtWaitForSingleObjectEx((u32)(uintptr_t)arg, 1, 0, 0);
   __sync_fetch_and_add(&pulsed, 1);
   return 0;
+}
+
+// A set satisfies the waits it completes when it happens: every thread
+// waiting on a notification event, though a reset follows at once; one
+// per set of a synchronization event.
+static void Handoff(void) {
+  int64_t fifty_ms = -500000;
+  for (u32 type = 0; type < 2; type++) {
+    u32 ev[4] = {type << 24, 0, 0, 0}, threads[2], id;
+    ev[2] = ev[3] = (u32)(uintptr_t)&ev[2];
+    handed[0] = handed[1] = 0;
+    for (u32 k = 0; k < 2; k++)
+      CHECK(ExCreateThread(&threads[k], 0, &id, (void*)thread_startup, (void*)EventWaiter, ev, 0) == 0);
+    KeDelayExecutionThread(1, 0, &fifty_ms);
+    KeSetEvent(ev, 1, 0);
+    if (type) KeSetEvent(ev, 1, 0);
+    else KeResetEvent(ev);
+    for (u32 k = 0; k < 2; k++) {
+      NtWaitForSingleObjectEx(threads[k], 1, 0, 0);
+      NtClose(threads[k]);
+    }
+    CHECK(handed[0] == 2 && handed[1] == 0 && ev[1] == 0);
+  }
+}
+
+// A thread that ends owning a mutant abandons it.
+static u32 mutant;
+static u32 MutantOwner(void* arg) {
+  (void)arg;
+  int64_t zero = 0, fifty_ms = -500000;
+  u32 status = NtWaitForSingleObjectEx(mutant, 1, 0, &zero);
+  KeDelayExecutionThread(1, 0, &fifty_ms);
+  return status;
+}
+
+static void Owners(void) {
+  int64_t zero = 0, ten_ms = -100000, second = -10000000;
+  u32 h = 0, e = 0, previous = 9;
+  // The next wait to take an abandoned mutant gets STATUS_ABANDONED (plus
+  // its index) and clears the flag: a waiter blocked on it, and one after.
+  CHECK(NtCreateMutant(&mutant, 0, 0) == 0 && NtCreateEvent(&e, 0, 0, 0) == 0);
+  CHECK(ExCreateThread(&h, 0, 0, (void*)thread_startup, (void*)MutantOwner, 0, 0) == 0);
+  KeDelayExecutionThread(1, 0, &ten_ms);
+  u32 both[2] = {e, mutant};
+  CHECK(NtWaitForMultipleObjectsEx(2, both, 1, 1, 0, &second) == 0x81);
+  CHECK(NtWaitForSingleObjectEx(h, 1, 0, 0) == 0);
+  NtClose(h);
+  CHECK(NtReleaseMutant(mutant, &previous) == 0 && previous == 0);
+  CHECK(ExCreateThread(&h, 0, 0, (void*)thread_startup, (void*)MutantOwner, 0, 0) == 0);
+  CHECK(NtWaitForSingleObjectEx(h, 1, 0, 0) == 0);
+  NtClose(h);
+  CHECK(NtWaitForSingleObjectEx(mutant, 1, 0, &zero) == 0x80);
+  CHECK(NtReleaseMutant(mutant, &previous) == 0 && previous == 0);
+  CHECK(NtWaitForSingleObjectEx(mutant, 1, 0, &zero) == 0);
+  CHECK(NtReleaseMutant(mutant, &previous) == 0);
+  NtClose(mutant);
+  NtClose(e);
 }
 
 // PulseEvent lets the threads waiting through, all of them for a
@@ -2366,6 +2461,8 @@ int main(void) {
   Threads();
   Objects();
   Pulses();
+  Handoff();
+  Owners();
   Strings();
   Variables();
   Files();

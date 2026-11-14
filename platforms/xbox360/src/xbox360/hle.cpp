@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "ppc/fatal.h"
+#include "xbox360/kernel.h"
 #include "xbox360/xex.h"
 
 namespace recomp::xbox360 {
@@ -155,6 +156,17 @@ void BindImports(const XexModule& m) {
           missing.c_str());
 }
 
+void CallHandler(ppc::Ctx& c, HleFn fn) {
+  HoldIfSuspended();
+  try {
+    c.r[3] = fn(c);
+  } catch (...) {
+    LeaveKernel();  // an unwind into lifted code, or the thread's end
+    throw;
+  }
+  LeaveKernel();
+}
+
 std::string ReadString(uint32_t va) {
   std::string s;
   for (uint8_t b; (b = Rd8(va)) != 0; va++) s.push_back(char(b));
@@ -189,7 +201,7 @@ void Import(Ctx& c, const char* module, uint32_t ordinal, uint64_t va) {
     fn = f->fn;
     xbox360::t_thunks.emplace(uint32_t(va), fn);
   }
-  c.r[3] = fn(c);
+  xbox360::CallHandler(c, fn);
 }
 
 }  // namespace recomp::ppc

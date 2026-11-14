@@ -44,6 +44,10 @@ void BindImports(const XexModule& m);
 uint32_t VariableAddress(const char* module, uint32_t ordinal);
 // "module!Name" or "module!ordinal" for diagnostics.
 std::string ExportName(const char* module, uint32_t ordinal);
+// Runs a handler for lifted code (an import's or an export's call), its
+// result in r3, with the thread in the kernel meanwhile: a suspended
+// thread stops on its way in and on its way back (kernel.h).
+void CallHandler(ppc::Ctx& c, HleFn fn);
 
 // The system modules' exports at guest addresses, which XexGetProcedureAddress
 // hands out: ordinal n is word n of its module's area (a trap instruction,
@@ -91,7 +95,7 @@ inline uint32_t Arg(const ppc::Ctx& c, int i) { return uint32_t(Arg64(c, i)); }
 #define HLE(module, ordinal, name)                                                     \
   static uint64_t RECOMP_XHLE_CAT(hle_, name)(::recomp::ppc::Ctx & c);                 \
   static void RECOMP_XHLE_CAT(call_, name)(::recomp::ppc::Ctx & c) {                   \
-    c.r[3] = RECOMP_XHLE_CAT(hle_, name)(c);                                           \
+    ::recomp::xbox360::CallHandler(c, &RECOMP_XHLE_CAT(hle_, name));                   \
   }                                                                                    \
   static const ::recomp::xbox360::Registrar RECOMP_XHLE_CAT(reg_, name){              \
       module, ordinal, #name, &RECOMP_XHLE_CAT(hle_, name), &RECOMP_XHLE_CAT(call_, name)}; \
