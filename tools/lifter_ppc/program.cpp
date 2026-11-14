@@ -207,7 +207,7 @@ bool Program::JumpTable(const Function& f, uint64_t bcctr_va, std::vector<uint64
   uint64_t from = ld.va;
   if (ld.size > 1) {
     Insn sc;
-    if (!def(ld.va, idx, sc) || (1 << slwi(sc)) != ld.size) return false;
+    if (!def(ld.va, idx, sc) || slwi(sc) < 0 || (1 << slwi(sc)) != ld.size) return false;
     x = sc.rd;
     from = sc.va;
   }
