@@ -1767,7 +1767,8 @@ HLE_NAMED("mss32.dll", "_AIL_digital_CPU_percent@4", AIL_digital_CPU_percent, 1)
 // ---- format conversion ---------------------------------------------------------------
 
 // AILMIXINFO starts with the source's AILSOUNDINFO; the rest is Miles'
-// own decoder state.
+// own decoder state. False for a format DecodeRaw does not take (the
+// frame counts below divide by its channels, bits and block size).
 bool ReadSoundInfo(uint32_t info, audio::RawFormat* f, uint32_t* data, uint32_t* len) {
   uint32_t format = Rd32(info);
   if (format != 1 && format != 0x11) return false;
@@ -1778,7 +1779,9 @@ bool ReadSoundInfo(uint32_t info, audio::RawFormat* f, uint32_t* data, uint32_t*
   f->bits = int(Rd32(info + 16));
   f->channels = int(Rd32(info + 20));
   f->block_size = Rd32(info + 28);
-  return f->rate > 0;
+  if (f->rate <= 0 || f->channels < 1 || f->channels > 2) return false;
+  return f->adpcm ? f->block_size >= 4u * uint32_t(f->channels)
+                  : f->bits == 8 || f->bits == 16;
 }
 
 // Frames out of a source of `in_frames` frames at `in_rate`, at `out_rate`.
