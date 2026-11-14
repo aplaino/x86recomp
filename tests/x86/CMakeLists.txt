@@ -118,7 +118,10 @@ endif()
 # lift_fixture_int, lift_fixture_sse, lift_fixture_x87: lift_int_test.cpp,
 # lift_sse_test.cpp and lift_x87_test.cpp on the forms of fixture/forms.s,
 # assembled by clang for i686 and linked by LLD to flat code, which
-# recomp_lift --code takes its forms from. Without those tools
+# recomp_lift --code takes its forms from; lift_fixture_int64,
+# lift_fixture_sse64 and lift_fixture_x87_64: lift_x64_test.cpp and
+# lift_x87_test.cpp on those of fixture/forms64.s (x86-64; the SSE test
+# needs an AVX host, as lift_isa64_sse). Without those tools
 # x86_prerequisites fails, naming them, unless
 # RECOMP_ALLOW_MISSING_TEST_TOOLS says this host cannot run these tests.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$" AND TARGET recomp_lift)
@@ -141,13 +144,18 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$" AND TARGET recomp_lif
     endif()
   else()
     set(_fix "${CMAKE_CURRENT_BINARY_DIR}/fixture")
-    add_custom_command(OUTPUT "${_fix}/forms.bin"
-      COMMAND "${CMAKE_COMMAND}" -E make_directory "${_fix}"
-      COMMAND "${CMAKE_C_COMPILER}" --target=i686-unknown-linux-gnu -c
-              "${CMAKE_CURRENT_SOURCE_DIR}/fixture/forms.s" -o "${_fix}/forms.o"
-      COMMAND "${RECOMP_LD_LLD}" --oformat=binary -o "${_fix}/forms.bin" "${_fix}/forms.o"
-      DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/fixture/forms.s"
-      COMMENT "Assembling the x86 lifter fixture")
+    foreach(_f forms:i686 forms64:x86_64)
+      string(REPLACE ":" ";" _f ${_f})
+      list(GET _f 0 _name)
+      list(GET _f 1 _arch)
+      add_custom_command(OUTPUT "${_fix}/${_name}.bin"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${_fix}"
+        COMMAND "${CMAKE_C_COMPILER}" --target=${_arch}-unknown-linux-gnu -c
+                "${CMAKE_CURRENT_SOURCE_DIR}/fixture/${_name}.s" -o "${_fix}/${_name}.o"
+        COMMAND "${RECOMP_LD_LLD}" --oformat=binary -o "${_fix}/${_name}.bin" "${_fix}/${_name}.o"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/fixture/${_name}.s"
+        COMMENT "Assembling the x86 lifter fixture ${_name}.s")
+    endforeach()
     foreach(_kind x87 int sse)
       set(_forms "${_fix}/lift_${_kind}_forms.cpp")
       add_custom_command(OUTPUT "${_forms}"
@@ -163,5 +171,37 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$" AND TARGET recomp_lif
       add_test(NAME lift_fixture_${_kind} COMMAND lift_fixture_${_kind}_test)
       set_tests_properties(lift_fixture_${_kind} PROPERTIES TIMEOUT 900)
     endforeach()
+    foreach(_kind int sse)
+      set(_forms "${_fix}/lift_${_kind}64_forms.cpp")
+      add_custom_command(OUTPUT "${_forms}"
+        COMMAND recomp_lift --code "${_fix}/forms64.bin" --x64 --${_kind}-test "${_forms}"
+        DEPENDS recomp_lift "${_fix}/forms64.bin"
+        COMMENT "Lifting the fixture's x64 ${_kind} instruction forms for lift_fixture_${_kind}64_test")
+      add_executable(lift_fixture_${_kind}64_test lift_x64_test.cpp "${_forms}")
+      target_include_directories(lift_fixture_${_kind}64_test PRIVATE ${RECOMP_ROOT}/src
+                                 ${CMAKE_CURRENT_SOURCE_DIR})
+      target_link_libraries(lift_fixture_${_kind}64_test PRIVATE recomp_x87 recomp_base)
+      target_compile_options(lift_fixture_${_kind}64_test PRIVATE -O1 -fno-strict-aliasing
+                             ${RECOMP_X87_FP_FLAGS})
+      if(_kind STREQUAL "sse")
+        target_compile_definitions(lift_fixture_${_kind}64_test PRIVATE LIFT_X64_SSE)
+      endif()
+      add_test(NAME lift_fixture_${_kind}64 COMMAND lift_fixture_${_kind}64_test)
+      set_tests_properties(lift_fixture_${_kind}64 PROPERTIES TIMEOUT 900)
+    endforeach()
+    set(_forms "${_fix}/lift_x87_64_forms.cpp")
+    add_custom_command(OUTPUT "${_forms}"
+      COMMAND recomp_lift --code "${_fix}/forms64.bin" --x64 --x87-test "${_forms}"
+      DEPENDS recomp_lift "${_fix}/forms64.bin"
+      COMMENT "Lifting the fixture's x64 x87 instruction forms for lift_fixture_x87_64_test")
+    add_executable(lift_fixture_x87_64_test lift_x87_test.cpp "${_forms}")
+    target_include_directories(lift_fixture_x87_64_test PRIVATE ${RECOMP_ROOT}/src
+                               ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(lift_fixture_x87_64_test PRIVATE recomp_x87 recomp_base)
+    target_compile_options(lift_fixture_x87_64_test PRIVATE -O1 -fno-strict-aliasing
+                           ${RECOMP_X87_FP_FLAGS})
+    target_compile_definitions(lift_fixture_x87_64_test PRIVATE LIFT_X87_X64)
+    add_test(NAME lift_fixture_x87_64 COMMAND lift_fixture_x87_64_test)
+    set_tests_properties(lift_fixture_x87_64 PROPERTIES TIMEOUT 900)
   endif()
 endif()

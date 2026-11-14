@@ -235,6 +235,32 @@
   repne scasb
   repe scasd
   repne cmpsd
+  # The source's segment override (fs: runs natively as gs:), and 16-bit
+  # addressing where a segment base makes it reachable.
+  movsb byte ptr es:[edi], byte ptr fs:[esi]
+  rep movsd dword ptr es:[edi], dword ptr fs:[esi]
+  lodsw ax, word ptr fs:[esi]
+  cmpsb byte ptr fs:[esi], byte ptr es:[edi]
+  lodsb al, byte ptr fs:[si]
+  xlatb
+  # xlat fs:[ebx + al] and, 16-bit, fs:[bx + al] (the assembler takes no
+  # override on xlat).
+  .byte 0x64, 0xD7
+  .byte 0x67, 0x64, 0xD7
+
+  # 16-bit push and pop (the 32-bit ones move 8 bytes in 64-bit mode).
+  push ax
+  push si
+  pop dx
+  pop bx
+  push word ptr [ebx]
+  push word ptr [esi + edi*2 + 6]
+  pop word ptr [edi]
+  pop word ptr [ebx + 0x10]
+.att_syntax
+  pushw $0x1234
+  pushw $-3
+.intel_syntax noprefix
 
 # ---- SSE and SSE2 ------------------------------------------------------
 
