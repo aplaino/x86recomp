@@ -6,7 +6,8 @@
 // FPSCR, the 512-byte window
 // its memory operands are in and the CRC of the whole 64 KiB buffer. Only
 // what the ISA leaves undefined is not compared (Undefined below); the
-// lifter's choice there waits for the Xenon itself.
+// lifter's choice there waits for the Xenon itself. Every form with a
+// native stub must have been run.
 //   ppc_lift_forms_test <records.bin>
 
 #include <cstddef>
@@ -246,10 +247,20 @@ int main(int argc, char** argv) {
     for (const auto& [bits, k] : cr_diff[form]) std::printf(" cr^%08x x%d", bits, k);
     std::printf("\n");
   }
-  int without = 0;
-  for (int k = 0; k < kFormCount; k++)
-    if (!runs.count(k)) without++;
-  std::printf("%zu records over %zu forms; %zu forms failed; %d forms have no oracle run\n", n,
-              runs.size(), failures.size(), without);
-  return failures.empty() ? 0 : 1;
+  // A form with a native stub and no run was never compared; one without a
+  // stub is not run on the oracle by design (recomp_lift_ppc's Native).
+  int untested = 0, unrunnable = 0;
+  for (int k = 0; k < kFormCount; k++) {
+    if (runs.count(k)) continue;
+    if (!kForms[k].native) {
+      unrunnable++;
+      continue;
+    }
+    untested++;
+    std::printf("no oracle run for form %d %08x %s at %llx\n", k, kForms[k].raw, kForms[k].name,
+                (unsigned long long)kForms[k].va);
+  }
+  std::printf("%zu records over %zu forms; %zu forms failed; %d untested; %d without a stub\n", n,
+              runs.size(), failures.size(), untested, unrunnable);
+  return failures.empty() && !untested ? 0 : 1;
 }

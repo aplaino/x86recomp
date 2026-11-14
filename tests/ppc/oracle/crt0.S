@@ -1,7 +1,8 @@
 // Entry point of the bare-metal test programs (the fixture and the form
 // oracle): 32-bit mode with FP and VMX on and interrupt vectors at 0, a
-// stack, the TOC, main(), then `sc` with main's result in r3, which ends
-// the run (oracle/vectors.S under QEMU, the test's Sc() when lifted).
+// stack, the TOC, main(), then `sc` with main's result in r3 (0 when it
+// succeeded), which ends the run (oracle/vectors.S under QEMU, the test's
+// Sc() when lifted).
   .text
   .globl _start
   .type _start, @function

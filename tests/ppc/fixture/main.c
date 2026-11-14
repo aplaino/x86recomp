@@ -230,5 +230,5 @@ int main(void) {
   struct OracleDone* done = (struct OracleDone*)(uintptr_t)ORACLE_DONE;
   done->data = ORACLE_OUTPUT;
   done->length = out_len;
-  return (int)(sum & 0x7F);
+  return 0;
 }

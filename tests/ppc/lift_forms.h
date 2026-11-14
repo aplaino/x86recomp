@@ -9,6 +9,7 @@ struct Form {
   uint64_t va;  // where the example instruction is in the fixture
   uint32_t raw;
   const char* name;
+  bool native;  // the original instruction has a stub, run on the oracle
 };
 extern const Form kForms[];
 extern const int kFormCount;

@@ -181,5 +181,5 @@ int main(void) {
   struct OracleDone* done = (struct OracleDone*)(uintptr_t)ORACLE_DONE;
   done->data = ORACLE_RECORDS;
   done->length = n * (uint32_t)sizeof(struct Record);
-  return (int)n;
+  return 0;
 }

@@ -25,10 +25,11 @@ void Sc(Ctx& c, uint64_t) {
   uint32_t data = be(done->data), length = be(done->length);
   std::fwrite(c.mem + data, 1, length, stdout);
   bool same = length == g_expected.size() && !std::memcmp(c.mem + data, g_expected.data(), length);
+  uint32_t code = uint32_t(c.r[3]);
   std::printf("%s (exit code %u)\n", same ? "same output as the oracle" : "DIFFERENT output from the oracle",
-              unsigned(uint32_t(c.r[3])));
+              unsigned(code));
   std::fflush(stdout);
-  std::exit(same ? 0 : 1);
+  std::exit(same && !code ? 0 : 1);
 }
 void Trap(Ctx& c, uint32_t raw, uint64_t va) { Fatal(&c, "trap %08x at %llx", raw, (unsigned long long)va); }
 uint64_t TimeBase(Ctx&) { return 0; }

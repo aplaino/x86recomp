@@ -259,8 +259,9 @@ bool WriteForms(const lifter::ppc::Program& p, const std::string& dir) {
     std::string name = "form_" + std::to_string(n);
     cpp += lifter::ppc::EmitForm(p, i, name) + "\n";
     char b[256];
-    std::snprintf(b, sizeof b, "  {recomp::ppc::%s, 0x%llXull, 0x%08Xu, \"%s\"},\n", name.c_str(),
-                  static_cast<unsigned long long>(i.va), i.raw, lifter::ppc::Name(i).c_str());
+    std::snprintf(b, sizeof b, "  {recomp::ppc::%s, 0x%llXull, 0x%08Xu, \"%s\", %s},\n", name.c_str(),
+                  static_cast<unsigned long long>(i.va), i.raw, lifter::ppc::Name(i).c_str(),
+                  Native(i) ? "true" : "false");
     table += b;
     std::string stub = "0";
     if (Native(i)) {

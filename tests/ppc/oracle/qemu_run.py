@@ -6,8 +6,9 @@ title (the programs clear MSR[SF] in oracle/crt0.S).
   qemu_run.py --qemu qemu-system-ppc64 --vectors vectors.elf --program prog.elf --out file
 
 The program ends with `sc` (oracle/vectors.S writes the done area, oracle.h);
-then [data, data + length) of the done area is written to --out. Any other
-interrupt, or no end within --timeout seconds, is a failure. Standard
+then [data, data + length) of the done area is written to --out. A non-zero
+code (main's result), any other interrupt, or no end within --timeout
+seconds is a failure. Standard
 library only."""
 import argparse
 import json
@@ -101,6 +102,8 @@ def main():
                 p.kill()
             p.wait()
     print('qemu_run: %s ended with code %d, %d bytes of output' % (os.path.basename(a.program), code, length))
+    if code:
+        sys.exit('qemu_run: %s failed (code %d)' % (os.path.basename(a.program), code))
 
 
 if __name__ == '__main__':

@@ -287,6 +287,10 @@ left in memory; any other interrupt fails the run.
   change), FI and FPRF's C bit on compares (the ISA alters only FPCC),
   FRES's FPRF and its estimate of 1/±0 (QEMU: ±0.5), and VSCR's reserved
   bits (QEMU keeps what MTVSCR wrote).
+- The form test fails on a form that has a native stub but no run on the
+  oracle; forms without one (the Xenon's own, absolute addresses, r31)
+  are counted. `qemu_run.py` fails on a program whose `main` returned
+  non-zero.
 - VMX128 runs on the oracle as VMX: the form writer re-encodes each
   VMX128 form as the VMX instruction with the same operation and
   operands, or for VMULFP128, VRLIMI128 and VPERMWI128 as a short VMX
