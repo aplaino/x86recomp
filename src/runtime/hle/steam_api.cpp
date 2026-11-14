@@ -74,6 +74,14 @@ HLE(kDll, SteamAPI_UnregisterCallback, kCdecl) {
 HLE(kDll, SteamAPI_RegisterCallResult, kCdecl) { return 0; }
 HLE(kDll, SteamAPI_UnregisterCallResult, kCdecl) { return 0; }
 
+// ISteamClient [21] SetWarningMessageHook(SteamAPIWarningMessageHook_t)
+// (ISteamClient012 and later): nothing ever warns.
+HLE_NAMED(kDll, "ISteamClient::#21", SteamClientSetWarningMessageHook, 1) { return 0; }
+
+// ISteamUtils [10] SetOverlayNotificationPosition(ENotificationPosition)
+// (ISteamUtils005 and later): there is no overlay.
+HLE_NAMED(kDll, "ISteamUtils::#10", SteamUtilsSetOverlayNotificationPosition, 1) { return 0; }
+
 #define RECOMP_STEAM_ACCESSOR(fn, iface) \
   HLE(kDll, fn, kCdecl) { return Interface(#iface); }
 RECOMP_STEAM_ACCESSOR(SteamClient, ISteamClient)
