@@ -2865,9 +2865,11 @@ void InsnEmitter::Emit64() {
     case ZYDIS_MNEMONIC_LEA:
       L(Write(0, AddrExpr(1, false)));
       return;
+    // The operand size (16 bits with a 0x66 prefix, else 64) is how far
+    // rsp moves, for immediates too (66 6A ib, 66 68 iw push two bytes).
     case ZYDIS_MNEMONIC_PUSH:
-      if (n == 2 && !IsImm(0)) {
-        L("const uint32_t v = " + Read(0) + ";");
+      if (d_.operand_width == 16) {
+        L("const uint32_t v = " + Read(0, 2) + ";");
         L("rsp -= 2; ::recomp::lift::Wr<uint16_t>(B, rsp, uint16_t(v));");
       } else {
         L("const uint64_t v = " + Read(0, 8) + ";");
@@ -2875,8 +2877,15 @@ void InsnEmitter::Emit64() {
       }
       return;
     case ZYDIS_MNEMONIC_POP:
-      if (n == 2) return Unimpl();
       // A memory destination's address uses RSP after the increment.
+      if (d_.operand_width == 16) {
+        L("const uint32_t v = ::recomp::lift::Rd<uint16_t>(B, rsp); rsp += 2;");
+        if (IsMem(0))
+          L(Fmt("::recomp::lift::Wr<uint16_t>(B, %s, uint16_t(v));", AddrExpr(0).c_str()));
+        else
+          L(Write(0, "v"));
+        return;
+      }
       L("const uint64_t v = ::recomp::lift::Rd<uint64_t>(B, rsp); rsp += 8;");
       if (IsMem(0))
         L(Fmt("::recomp::lift::Wr<uint64_t>(B, %s, v);", AddrExpr(0).c_str()));
@@ -3303,11 +3312,16 @@ void InsnEmitter::Emit() {
     case ZYDIS_MNEMONIC_LEA:
       L(Write(0, AddrExpr(1, false)));
       return;
+    // The operand size (a 0x66 prefix: 16 bits) is how far esp moves, for
+    // immediates too (66 6A ib, 66 68 iw push two bytes) and segment
+    // registers (push es moves it by 4; the selector is stored
+    // zero-extended, one of the two behaviours the SDM allows).
     case ZYDIS_MNEMONIC_PUSH: {
-      L("const uint32_t v = " + Read(0, 4) + ";");
-      if (Bytes(0) == 2 && !IsImm(0)) {
+      if (d_.operand_width == 16) {
+        L("const uint32_t v = " + Read(0, 2) + ";");
         L("esp -= 2; ::recomp::lift::Wr<uint16_t>(B, esp, uint16_t(v));");
       } else {
+        L("const uint32_t v = " + Read(0, 4) + ";");
         Push32("v");
       }
       return;
@@ -3315,9 +3329,11 @@ void InsnEmitter::Emit() {
     case ZYDIS_MNEMONIC_POP: {
       // A memory destination's address uses ESP after the increment, so
       // recompute it here instead of using the pre-computed m0.
-      L("const uint32_t v = ::recomp::lift::Rd<uint32_t>(B, esp); esp += 4;");
+      const int w = d_.operand_width == 16 ? 2 : 4;
+      L(Fmt("const uint32_t v = ::recomp::lift::Rd<%s>(B, esp); esp += %d;", MemType(w), w));
       if (IsMem(0))
-        L(Fmt("::recomp::lift::Wr<uint32_t>(B, %s, v);", AddrExpr(0).c_str()));
+        L(Fmt("::recomp::lift::Wr<%s>(B, %s, %s);", MemType(w), AddrExpr(0).c_str(),
+              w == 2 ? "uint16_t(v)" : "v"));
       else
         L(Write(0, "v"));
       return;
