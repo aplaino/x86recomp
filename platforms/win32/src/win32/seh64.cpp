@@ -171,12 +171,14 @@ void Raise(Ctx& c, uint32_t code, uint32_t flags, const uint64_t* params, uint32
 }
 
 unwind::Regs UnwindBelow(Ctx& c, gaddr record, gaddr target_frame) {
-  const Dispatching* d = Current();
-  if (!d) FatalF("unwind with no exception being dispatched");
+  if (!Current()) FatalF("unwind with no exception being dispatched");
+  // A copy: a handler's own exception pushes onto t_dispatching, which may
+  // move its elements.
+  const Dispatching d = *Current();
   Wr32(record + 0x04, Rd32(record + 0x04) | kUnwinding);
   Scratch s(c, 0x800);
   const gaddr work = s.base, dc = s.base + 0x500;
-  unwind::Regs r = d->at;
+  unwind::Regs r = d.at;
   const PeImage* img;
   gaddr fn;
   while (FunctionAt(r, &img, &fn)) {
@@ -189,7 +191,7 @@ unwind::Regs UnwindBelow(Ctx& c, gaddr record, gaddr target_frame) {
     if (h) {
       WriteContext(work, r, c);
       WriteDc(dc, inside.rip, *img, fn, frame, 0, work, h, data);
-      CallGuest(c, h, {record, frame, d->context, dc});
+      CallGuest(c, h, {record, frame, d.context, dc});
     }
   }
   FatalF("unwind: target frame %08llX not found on the stack", (unsigned long long)target_frame);
