@@ -35,7 +35,7 @@ constexpr uint32_t kErrInvalidArg = 0x80920001, kErrInvalidHandle = 0x80920003,
                    kErrAlreadyOpened = 0x80920004, kErrNotInitialized = 0x80920005;
 constexpr int32_t kHandle = 1;  // the user's standard controller
 constexpr int32_t kUser = 0x10000000;  // the one user (libSceUserService)
-constexpr size_t kDataSize = 0x80;
+constexpr size_t kDataSize = 0x78;  // sizeof(ScePadData)
 
 std::mutex g_mu;
 bool g_init = false, g_open = false;

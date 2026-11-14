@@ -545,7 +545,8 @@ static int audio_checks(void) {
 
 static int pad_checks(void) {
   int failed = 0;
-  unsigned char data[2][0x80];
+  unsigned char data[2][0x78];  // ScePadData
+  for (int i = 0; i < (int)sizeof data; i++) data[0][i] = 0xAA;
   failed += test_check(140, scePadInit(), 0);
   const int h = scePadOpen(USER, 0, 0, 0);
   failed += test_check(141, h, 1);
@@ -556,6 +557,7 @@ static int pad_checks(void) {
                                 data[0][5] == 0x80 && data[0][6] == 0x80 && data[0][7] == 0xFF &&
                                 data[0][0x4C] == 1,
                        1);  // connected
+  failed += test_check(146, data[1][0], 0xAA);  // one state: the next left alone
   return failed;
 }
 
