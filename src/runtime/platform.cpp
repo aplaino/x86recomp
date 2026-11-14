@@ -12,6 +12,7 @@
 
 #include <errno.h>
 #include <stdlib.h>
+#include <string.h>
 #include <signal.h>
 #include <time.h>
 #include <ucontext.h>
@@ -102,15 +103,40 @@ FaultContext ReadFaultContext(const void* uc) {
   f.write = (es.__esr >> 6) & 1;
   f.pc = uintptr_t(ss.__pc);
   f.caller = uintptr_t(ss.__lr);
-#elif defined(__APPLE__) && defined(__x86_64__)
-  const auto& es = u->uc_mcontext->__es;
-  const auto& ss = u->uc_mcontext->__ss;
-  f.write_known = true;
-  f.write = (es.__err & 2) != 0;
-  f.pc = uintptr_t(ss.__rip);
-  f.caller = *reinterpret_cast<const uintptr_t*>(ss.__rsp);
+#elif defined(__linux__) && defined(__aarch64__)
+  const mcontext_t& m = u->uc_mcontext;
+  f.pc = uintptr_t(m.pc);
+  f.caller = uintptr_t(m.regs[30]);
+  // The kernel adds the fault's ESR as a record (esr_context, magic
+  // ESR_MAGIC) to the list in __reserved, which ends with a zero magic.
+  // A data abort's (EC 0x24 lower EL, 0x25 same EL) ISS bit 6 is WnR.
+  constexpr uint32_t kEsrMagic = 0x45535201;
+  for (size_t at = 0; at + 8 <= sizeof m.__reserved;) {
+    uint32_t magic, size;
+    memcpy(&magic, m.__reserved + at, 4);
+    memcpy(&size, m.__reserved + at + 4, 4);
+    if (!magic || size < 8) break;
+    if (magic == kEsrMagic && size >= 16 && at + 16 <= sizeof m.__reserved) {
+      uint64_t esr;
+      memcpy(&esr, m.__reserved + at + 8, 8);
+      const uint64_t ec = esr >> 26;
+      if (ec == 0x24 || ec == 0x25) {
+        f.write_known = true;
+        f.write = (esr >> 6) & 1;
+      }
+      break;
+    }
+    at += size;
+  }
 #else
-  (void)u;
+// The x86 core needs the fault's kind and where it was (guest exception
+// dispatch), and where the unwinder cannot leave a signal frame (macOS) a
+// way to resume (RedirectToCall): without them guest faults would read as
+// reads at pc 0, or a guest handler catching one would end the process.
+// macOS x86-64 has the context but no RedirectToCall: a call pushed at the
+// fault would land in the faulting function's red zone and need not leave
+// the stack aligned.
+#error "guest faults are not supported on this host (Linux x86-64 and arm64, macOS arm64 are)"
 #endif
   return f;
 }

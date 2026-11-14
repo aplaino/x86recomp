@@ -50,6 +50,14 @@ target_compile_features(pacing_test PRIVATE cxx_std_20)
 add_test(NAME pacing COMMAND pacing_test)
 set_tests_properties(pacing PROPERTIES RUN_SERIAL TRUE)
 
+# platform_fault_test: the platform layer's fault contexts on real faults;
+# portable.
+add_executable(platform_fault_test platform_fault_test.cpp
+               ${PROJECT_SOURCE_DIR}/src/runtime/platform.cpp)
+target_include_directories(platform_fault_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_features(platform_fault_test PRIVATE cxx_std_20)
+add_test(NAME platform_fault COMMAND platform_fault_test)
+
 # lazy_mem_test: lazily read-back images (DirectDraw Lock of GPU
 # surfaces) through real page faults; portable.
 add_executable(lazy_mem_test lazy_mem_test.cpp
