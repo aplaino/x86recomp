@@ -7,7 +7,8 @@
 // and its output must hash to the value below: a hash of our own output,
 // recorded when the oracle run found it identical to the original's.
 // Portable: this is what catches a host whose float arithmetic differs
-// (contraction into FMA, flush-to-zero).
+// (contraction into FMA, flush-to-zero). Predelays past the ring (where
+// the original reads outside it) must give the ring's longest delay.
 //
 // DIGITAL_REVERB_ORACLE (built by recomp_add_digital_reverb_test from the
 // user's installed mss32.dll, Miles 6.5e; nothing from it is in the
@@ -529,12 +530,42 @@ int main(int argc, char** argv) {
 
 #else
 
+// The frame at which an impulse first comes out with this predelay, at
+// 22050 Hz in 256-frame fragments with the default 500 ms ring (11264
+// frames); -1 if it never does.
+long FirstOut(float predelay) {
+  constexpr int kFragment = 256;
+  DigitalReverb r;
+  r.Open(22050, kFragment);
+  r.SetLevels(1.0f, 1.0f, 0);
+  r.SetReverb(1.0f, predelay, 1.0f, 0);
+  std::vector<int32_t> send(kFragment), out(kFragment);
+  for (int f = 0; f < 60; f++) {
+    std::fill(send.begin(), send.end(), 0);
+    if (f == 0) send[0] = 32767 * 2048;
+    std::fill(out.begin(), out.end(), 0);
+    uint32_t ms = uint32_t(f * kFragment * 1000 / 22050);
+    if (!r.Begin(ms)) return -1;
+    r.Render(send.data(), kFragment, out.data(), false);
+    for (int i = 0; i < kFragment; i++)
+      if (out[size_t(i)]) return long(f) * kFragment + i;
+  }
+  return -1;
+}
+
 int main() {
   Native native;
   uint64_t h = RunScenarios(native, [](const Scenario&, int, bool,
                                        const std::vector<int32_t>&) {});
   std::printf("hash %016" PRIX64 ", expected %016" PRIX64 "\n", h, kGolden);
-  return h == kGolden ? 0 : 1;
+  // Past the ring a predelay is its oldest fragment (11008 frames), a
+  // negative one none; within it, as asked.
+  const long base = FirstOut(0.0f);
+  const long longest = FirstOut(2.0f) - base, none = FirstOut(-0.1f) - base,
+             tenth = FirstOut(0.1f) - base;
+  std::printf("predelay 2 s: %ld frames, -0.1 s: %ld, 0.1 s: %ld\n", longest, none, tenth);
+  const bool predelay_ok = base >= 0 && longest == 11008 && none == 0 && tenth == 2205;
+  return h == kGolden && predelay_ok ? 0 : 1;
 }
 
 #endif

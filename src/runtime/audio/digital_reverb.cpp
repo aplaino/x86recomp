@@ -80,6 +80,7 @@ const DigitalReverb::Room DigitalReverb::kRoomTable[kRooms] = {
 void DigitalReverb::Open(int rate, int fragment, int max_predelay_ms) {
   *this = DigitalReverb();
   rate_ = rate;
+  fragment_ = uint32_t(fragment);
   const double r = rate;
   // The predelay ring, in bytes as the original sizes it (the product is
   // taken negated, as it is there), rounded up to whole fragments.
@@ -125,10 +126,13 @@ void DigitalReverb::SetReverb(float time, float predelay, float damping, uint32_
   if (wet_ > kOff && time > kOff) {
     Arm(now_ms);
     // The read position trails the write position by the predelay. The
-    // original reads outside its ring past the maximum predelay; here it
-    // is clamped to the ring.
+    // original reads outside its ring past the maximum predelay; here such
+    // a predelay is the longest the ring holds, its oldest fragment (the
+    // whole ring would read the fragment just written). A negative one is
+    // none.
     const uint32_t size = uint32_t(ring_.size());
-    const uint32_t lag = std::min(uint32_t(ToInt(double(rate_) * double(predelay))), size);
+    const int32_t want = ToInt(double(rate_) * double(predelay));
+    const uint32_t lag = want < 0 ? 0 : uint32_t(want) > size ? size - fragment_ : uint32_t(want);
     read_ = write_ < lag ? size - lag + write_ : write_ - lag;
   }
   Design(time_, damping_);

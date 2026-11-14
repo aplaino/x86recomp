@@ -101,8 +101,8 @@ class DigitalReverb {
   int32_t tail_ms_ = 0;  // time + predelay
   bool active_ = false;
   uint32_t timeout_ = 0;
-  std::vector<int32_t> ring_;
-  uint32_t write_ = 0, read_ = 0;
+  std::vector<int32_t> ring_;  // whole fragments of fragment_ frames
+  uint32_t fragment_ = 0, write_ = 0, read_ = 0;
   Line comb_[4], allpass_[2];
   // Low-pass history: a0 x of the last two inputs, last two outputs
   // (+1e-10), as floats.
