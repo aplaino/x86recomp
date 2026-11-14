@@ -54,6 +54,7 @@ constexpr uint32_t DDERR_NOTLOCKED = 0x887601E6;
 constexpr uint32_t DDERR_NOCOLORKEY = 0x887600D7;
 constexpr uint32_t DDERR_INVALIDPIXELFORMAT = 0x88760091;
 constexpr uint32_t DDERR_CANNOTDETACHSURFACE = 0x88760014;
+constexpr uint32_t DDERR_INVALIDRECT = 0x88760096;
 
 template <typename T>
 T* G(uint32_t va) {

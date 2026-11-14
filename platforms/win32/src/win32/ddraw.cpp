@@ -434,6 +434,14 @@ guest::RECT ReadRect(uint32_t va, const Surface& s) {
   return va ? *G<guest::RECT>(va) : FullRect(s);
 }
 
+// Whether `r` lies inside the surface and is not inverted. Blits are not
+// clipped (there are no clippers): DirectDraw fails others with
+// DDERR_INVALIDRECT.
+bool InSurface(const guest::RECT& r, const Surface& s) {
+  return r.left >= 0 && r.top >= 0 && r.left <= r.right && r.top <= r.bottom &&
+         r.right <= s.width && r.bottom <= s.height;
+}
+
 // Memory-to-memory blit with optional stretch (nearest) and source key.
 void BlitMem(Surface& dst, const guest::RECT& dr, Surface& src,
              const guest::RECT& sr, bool key, uint32_t keyval) {
@@ -552,11 +560,15 @@ uint32_t BltImpl(Surface& dst, const guest::RECT& dr, Surface* src,
   }
   if (!dst.mem) return DDERR_UNSUPPORTED;
   if (gfx::IsCompressed(dst.fmt) || gfx::IsCompressed(src->fmt)) {
-    if (dst.fmt != src->fmt || sr.left || sr.top || dr.left || dr.top ||
-        sr.right != src->width || dr.right != dst.width)
+    // Only whole rows of blocks from the top, unstretched, between
+    // surfaces of one width (so one pitch).
+    int rows = sr.bottom;
+    if (dst.fmt != src->fmt || src->width != dst.width || sr.left || sr.top ||
+        dr.left || dr.top || sr.right != src->width || dr.right != dst.width ||
+        dr.bottom != rows || (rows % 4 && (rows != src->height || rows != dst.height)))
       return DDERR_UNSUPPORTED;
     std::memcpy(GPtr(dst.mem), GPtr(src->mem),
-                dst.pitch * gfx::RowCount(dst.fmt, uint32_t(dst.height)));
+                size_t(dst.pitch) * gfx::RowCount(dst.fmt, uint32_t(rows)));
   } else {
     BlitMem(dst, dr, *src, sr, key, keyval);
   }
@@ -950,8 +962,10 @@ HLE_NAMED("ddraw.dll", "IDirectDrawSurface7::Blt", DDS7_Blt, 6) {
   bool fill = flags & 0x400;          // DDBLT_COLORFILL
   bool zfill = flags & 0x2000000;     // DDBLT_DEPTHFILL
   uint32_t fillv = fx ? G<guest::DDBLTFX>(fx)->dwFillColor : 0;
+  guest::RECT dr = ReadRect(drect, *dst);
   guest::RECT sr = src ? ReadRect(srect, *src) : guest::RECT{};
-  return BltImpl(*dst, ReadRect(drect, *dst), src, sr, key, keyval, fill, zfill, fillv);
+  if (!InSurface(dr, *dst) || (src && !InSurface(sr, *src))) return DDERR_INVALIDRECT;
+  return BltImpl(*dst, dr, src, sr, key, keyval, fill, zfill, fillv);
 }
 
 HLE_NAMED("ddraw.dll", "IDirectDrawSurface7::BltFast", DDS7_BltFast, 6) {
@@ -961,7 +975,9 @@ HLE_NAMED("ddraw.dll", "IDirectDrawSurface7::BltFast", DDS7_BltFast, 6) {
   uint32_t srect = Arg(c, 4), flags = Arg(c, 5);
   if (!src) return DDERR_INVALIDPARAMS;
   guest::RECT sr = ReadRect(srect, *src);
+  if (!InSurface(sr, *src) || x > dst->width || y > dst->height) return DDERR_INVALIDRECT;
   guest::RECT dr{x, y, x + (sr.right - sr.left), y + (sr.bottom - sr.top)};
+  if (!InSurface(dr, *dst)) return DDERR_INVALIDRECT;
   bool key = (flags & 1) && src->has_ck_src;  // DDBLTFAST_SRCCOLORKEY
   return BltImpl(*dst, dr, src, sr, key, src->ck_src.dwColorSpaceLowValue,
                  false, false, 0);
