@@ -13,24 +13,33 @@ library.
   - Memory: flexible memory and anonymous mmap from the guest allocator;
     direct memory as offsets into a pool, each mapped to fresh guest
     memory (one range mapped twice at once, aliasing, is fatal; a range
-    unmapped and mapped again keeps its contents). munmap frees every
-    mapping in its range as FreeBSD's does, parts of mappings included,
-    so a fixed mapping (16 KiB pages, without overwriting too) fits
-    there afterwards. File-backed mmap is fatal. The mappings these make are recorded for
+    unmapped and mapped again keeps its contents). As FreeBSD 9's
+    vm_map_find, vm_map_fixed and sys_munmap do: mmap without MAP_FIXED
+    takes the first free range at or above its hint; MAP_FIXED frees
+    what its range holds first, across reservations too; munmap frees
+    every mapping in its range, parts of mappings included, so a fixed
+    mapping (16 KiB pages, without overwriting too) fits there
+    afterwards, and returns 0 for a range nothing maps. Direct memory's
+    mappings honour their alignment. File-backed mmap is fatal. The mappings these make are recorded for
     sceKernelVirtualQuery (an mprotect or a range name splits a record,
     as FreeBSD's map entries split); not measured on hardware: whether
     the kernel merges neighbouring entries, the memory type of flexible
     memory (0 here) and the name of an unnamed mapping (empty here).
     Memory the process maps itself (images, stacks), FIND_NEXT and an
     address no mapping holds are fatal.
-  - pthreads: FreeBSD semantics (error-checking mutexes by default,
-    static initialisers 0, 1 recursive, 2 adaptive); a normal mutex
+  - pthreads: FreeBSD semantics (error-checking mutexes by default;
+    FreeBSD 9.0 libthr's static initialisers: 0 the default, 1 an
+    adaptive mutex; destroying an object leaves FreeBSD's marker, 2 for
+    a mutex and 1 for a condition variable or rwlock, and later calls on
+    it return EINVAL); a normal mutex
     locked twice by its owner is fatal (a self-deadlock) instead of
     hanging. Every object is a 64-byte guest block (a handle) with the
     host state kept beside it. Priorities and affinity are stored for the
     getters only.
   - Semaphores and event flags: first come, first served, whatever the
-    FIFO/priority attribute; timeouts are in/out microseconds.
+    FIFO/priority attribute; timeouts are in/out microseconds. Waiters on
+    one that is deleted under them return ESRCH (not measured on
+    hardware).
   - Files: /app0 and /hostapp are the game directory (read-only: EROFS);
     /temp0, /download0 and /savedataN are below the per-user data
     directory. Descriptors are the host's, limited to those the guest
