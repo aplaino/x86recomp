@@ -22,6 +22,7 @@ DXVK_NATIVE_DIR are passed to every configure when set in the
 environment.
 """
 import argparse
+import bisect
 import os
 import re
 import subprocess
@@ -89,28 +90,113 @@ def match(path, rules):
 
 
 C_FAMILY = (".c", ".cc", ".cpp", ".h", ".hpp", ".inl")
-# A string or character literal (raw strings included), a comment, or a
-# run of anything else; comments are dropped, literals kept whole.
-TOKEN = re.compile(r"""R"([^(\s]*)\(.*?\)\1"|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'"""
-                   r"""|(//[^\n]*|/\*.*?\*/)|[^\s"'/]+|/""", re.S)
+# Translation phase 2: a backslash ending a line (clang allows blanks
+# after it) joins the next one to it, in comments and directives too.
+SPLICE = re.compile(r"\\[ \t]*\r?\n")
+# Phase 3's tokens, as far as telling code from comments needs: a raw
+# string (from any token start, with its encoding prefix), a header name
+# (in which // and /* are not comments), a string or character literal,
+# a comment, a newline, other whitespace, then code: a pp-number (digit
+# separators included), an identifier, a run of punctuation or any other
+# single character.
+_RAW = r'(?P<raw>(?:u8|[uUL])?R"(?P<delim>[^()\\\s]{0,16})\(.*?\)(?P=delim)")|'
+_BLANK = r"(?:[ \t]|/\*.*?\*/)*"
+_REST = (r"(?P<header>(?:#|%:)" + _BLANK + r"(?:include|include_next|import)" + _BLANK
+         + r"<[^>\n]*>|__has_include(?:_next)?\s*\(\s*<[^>\n]*>)"
+         r"""|(?P<literal>"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')"""
+         r"|(?P<comment>//[^\n]*|/\*.*?\*/)|(?P<newline>\n)|(?P<space>[^\S\n]+)"
+         r"""|(?P<code>\.?\d(?:[eEpP][+-]|'\w|[\w.])*|[\w$]+|[^\w$\s"'/]+|.)""")
+# C has no raw strings and a header can be either, so both readings.
+TOKENS = {True: re.compile(_RAW + _REST, re.S), False: re.compile(_REST, re.S)}
 
 
-def code_tokens(text):
-    return [m.group(0) for m in TOKEN.finditer(text) if not m.group(2)]
+def code_tokens(text, raw):
+    """The code tokens of text, in order: comments dropped, whitespace
+    (comments included) kept as one " " where it separates two tokens
+    (stringizing and macro definitions see it), and the end of each
+    preprocessing directive kept as a newline."""
+    starts, originals, parts, at = [0], [0], [], 0
+    for m in SPLICE.finditer(text):
+        parts.append(text[at:m.start()])
+        at = m.end()
+        starts.append(starts[-1] + len(parts[-1]))
+        originals.append(at)
+    parts.append(text[at:])
+
+    def original(i):  # i's offset in text, before the lines were joined
+        k = bisect.bisect_right(starts, i) - 1
+        return originals[k] + i - starts[k]
+
+    tokens, space, line_start, directive = [], False, True, False
+    for m in TOKENS[raw].finditer("".join(parts)):
+        kind = m.lastgroup
+        if kind == "newline" and directive:
+            tokens.append("\n")
+            space = directive = False
+        elif kind in ("newline", "space", "comment"):
+            space = bool(tokens) and tokens[-1] != "\n"
+        else:
+            token = m.group()
+            if kind == "raw":  # phase 2 does not apply inside raw strings
+                token = text[original(m.start()):original(m.end() - 1) + 1]
+            if line_start:
+                directive = token.startswith(("#", "%:"))
+            tokens += [" ", token] if space else [token]
+            space = False
+        line_start = kind == "newline" or line_start and kind in ("space", "comment")
+    return tokens
 
 
-def comment_only(path):
+def same_code(old, new):
+    return all(code_tokens(old, raw) == code_tokens(new, raw) for raw in (False, True))
+
+
+def comment_only(path, head):
     """A C/C++ file whose change since origin/main is only to comments
     and whitespace (the code tokens are the same)."""
     if not path.endswith(C_FAMILY):
         return False
     old = subprocess.run(["git", "show", f"origin/main:{path}"], text=True,
                          capture_output=True)
-    new = subprocess.run(["git", "show", f"HEAD:{path}"], text=True,
+    new = subprocess.run(["git", "show", f"{head}:{path}"], text=True,
                          capture_output=True)
     if old.returncode != 0 or new.returncode != 0:
         return False
-    return code_tokens(old.stdout) == code_tokens(new.stdout)
+    return same_code(old.stdout, new.stdout)
+
+
+# (old, new, whether the change is to comments and whitespace only).
+SELF_TEST = [
+    ("int a; // one\n", "int a; // two\n", True),
+    ("a();\nb();\n", "a();\n// why\nb();\n", True),
+    ("/* a\n b */\nint x;\n", "/* c */\nint x;\n", True),
+    ("#define X 1 /* one */\n", "#define X 1 /* two */\n", True),
+    ("x = 1'000; // it's\n", "x = 1'000; // it is\n", True),
+    ('f(R"(a)"); // x\n', 'f(R"(a)"); // y\n', True),
+    # Raw strings wherever a token starts, with every prefix.
+    *((f'{lead}{prefix}R"(" /* a */ ")";\n', f'{lead}{prefix}R"(" /* b */ ")";\n', False)
+      for lead in ("f(", "s=", "s = ") for prefix in ("", "u8", "L", "u", "U")),
+    ('s = R"d(")" // a\n)d";\n', 's = R"d(")" // b\n)d";\n', False),
+    ('s = R"(a\\\nb)";\n', 's = R"(ab)";\n', False),
+    # Newlines end directives; spliced lines do not end them.
+    ("#define X a\nb;\n", "#define X a b;\n", False),
+    ("#define X a \\\n b\nc;\n", "#define X a \\\n b c;\n", False),
+    ("// note\nint x;\n", "// note \\\nint x;\n", False),
+    ("/* a *\\\n/ int x; /* b */\n", "/* a *\\\n/ int y; /* b */\n", False),
+    # Whitespace that separates tokens.
+    ("#define F(x) x\n", "#define F (x) x\n", False),
+    ("S(a+b);\n", "S(a + b);\n", False),
+    # Header names.
+    ("#include <a//b.h>\n", "#include <a//c.h>\n", False),
+    ("#if __has_include(<a/*b.h>)\n", "#if __has_include(<a/*c.h>)\n", False),
+]
+
+
+def self_test():
+    failed = [(old, new) for old, new, want in SELF_TEST if same_code(old, new) != want]
+    for old, new in failed:
+        print(f"land: self-test: {old!r} -> {new!r} classified wrongly")
+    return not failed
 
 
 def presets_for(paths):
@@ -153,7 +239,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--dry-run", action="store_true",
                     help="rebase and pick presets, build nothing, push nothing")
+    ap.add_argument("--self-test", action="store_true",
+                    help="check the comments-only classifier on known cases, then stop")
     args = ap.parse_args()
+    if not self_test():
+        sys.exit("land: the comments-only classifier fails its self-test")
+    if args.self_test:
+        print(f"land: self-test: {len(SELF_TEST)} cases pass")
+        return
 
     root = git("rev-parse", "--show-toplevel")
     topic = git("symbolic-ref", "--short", "HEAD")
@@ -176,7 +269,7 @@ def main():
     paths = git("diff", "--name-only", f"origin/main...{head}").splitlines()
     if not paths:
         sys.exit("land: nothing to land")
-    comments = [p for p in paths if comment_only(p)]
+    comments = [p for p in paths if comment_only(p, head)]
     if comments:
         print("land: comments only, nothing to build:", ", ".join(comments))
     paths = [p for p in paths if p not in comments]
