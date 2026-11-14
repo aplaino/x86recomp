@@ -47,8 +47,7 @@ std::string LiftSnippets(const Decoder& dec, const char* prologue,
   for (const auto& [bytes, slot] : code) size += slot;
   q.mem.Commit(base, size, recomp::Prot::RWX);
   Module& m = q.modules.emplace_back();
-  m.text_lo = base;
-  m.text_hi = base + size;
+  m.text = {{base, base + size}};
   uint64_t va = base;
   for (const auto& [bytes, slot] : code) {
     for (size_t i = 0; i < bytes->size(); i++) q.mem.write<uint8_t>(va + i, (*bytes)[i]);

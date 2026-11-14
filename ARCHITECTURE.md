@@ -199,7 +199,15 @@ lifter is tractable (rexglue-style: one C++ function per guest function).
 - Decoder: Zydis (fetched via CMake FetchContent), build-time only.
 - Function list: Ghidra functions.tsv + exports + a per-game line-based
   manifest (lifter.manifest) for overrides: extra entries, names, entry
-  probes, resume sites (SEH, longjmp), setjmp functions.
+  probes, resume sites (SEH, longjmp), setjmp functions, and `code`
+  ranges.
+- Code is every executable section, not only `.text`: a protected image
+  adds the protector's own section. `code <va> <end>` in the manifest
+  adds a range of a section not marked executable that still holds code
+  (protectors put some in the ends of .rdata, .reloc and .idata and make
+  those sections executable when they start). The runtime gives every
+  executable section, and any other section holding a lifted function,
+  a dispatch table of its own.
 - Output is plain C++20: no x86 intrinsics, no inline asm, no
   `long double`, no reliance on host FPU state other than the default
   environment (x87 runs on host doubles).
