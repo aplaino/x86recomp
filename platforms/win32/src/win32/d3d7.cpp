@@ -431,8 +431,8 @@ HLE_NAMED("ddraw.dll", "IDirect3DDevice7::MultiplyTransform", D3DD7_MultiplyTran
   const guest::D3DMATRIX& b = *G<guest::D3DMATRIX>(Arg(c, 2));
   // The new state is the given matrix times the current one (row-major
   // D3DMATRIX): "the multiplication order is pMatrix times State". The
-  // reverse order misplaced every object the game positions this way
-  // (animated models snapping, the waterwheel flying off).
+  // reverse order misplaces every object positioned through a chain of
+  // MultiplyTransform calls.
   guest::D3DMATRIX r{};
   for (int i = 0; i < 4; i++)
     for (int j = 0; j < 4; j++)

@@ -2,24 +2,25 @@
 // IDirectDrawSurface7, IDirectDrawGammaControl, IDirectDrawClipper.
 //
 // Surfaces:
-//   - Back buffer: the gfx render target. The game presents with
-//     Blt(primary <- back buffer) (or Flip). Its guest memory mirrors it
+//   - Back buffer: the gfx render target. Games present with
+//     Blt(primary <- back buffer) or Flip. Its guest memory mirrors it
 //     lazily (lazy_mem.h): Lock reads back only the rows the game
 //     touches, Unlock writes back the rows it changed.
-//   - Primary: the gfx front buffer (the last presented frame), which the
-//     game's cursor thread draws on between frames.
+//   - Primary: the gfx front buffer (the last presented frame), which a
+//     game may draw on between frames (a software cursor, say).
 //   - Z buffers: gfx depth surfaces, attached to the back buffer.
 //   - Textures (incl. mip chains): a gfx texture plus guest memory for each
 //     level; Lock hands out the guest memory, Unlock uploads it.
 //   - Offscreen plain / system memory: guest memory only; Blt to the back
 //     buffer goes through gfx::Device::Blit.
-// The adapter is reported as a GeForce3 with 64 MB, the best-supported
-// profile in the game's system_detail.gas (trilinear filtering,
-// render-target shadows).
+// The adapter identity and video memory reported are the game's
+// (GameConfig::adapter, video_memory_mb): games choose detail profiles by
+// them.
 
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -327,7 +328,7 @@ uint32_t CreateSurfaceImpl(uint32_t desc_va, uint32_t* out) {
       if (backs > 1)
         WarnF("ddraw: %u back buffers requested; presenting through one\n", backs);
     } else {
-      g_state.backbuffer = prim.get();  // the game always asks for one
+      g_state.backbuffer = prim.get();  // no back buffer: draws go to the primary
     }
     *out = prim->guest;
     return DD_OK;
@@ -372,7 +373,7 @@ uint32_t CreateSurfaceImpl(uint32_t desc_va, uint32_t* out) {
     uint32_t tcaps = caps | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM;
     if (caps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE))
       tcaps &= ~(DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM);
-    // DDSCAPS_3DDEVICE: the game renders into it (shadow textures).
+    // DDSCAPS_3DDEVICE: rendered into as well as sampled.
     gfx::TextureId tex =
         Gfx()->CreateTexture(w, h, levels, fmt, (caps & DDSCAPS_3DDEVICE) != 0);
     if (!tex) return DDERR_OUTOFVIDEOMEMORY;
@@ -521,8 +522,8 @@ uint32_t BltImpl(Surface& dst, const guest::RECT& dr, Surface* src,
     return DD_OK;
   }
   if (!src) return DDERR_INVALIDPARAMS;
-  // Back buffer -> primary is how the game presents (instead of Flip):
-  // that is a swap-chain present, not a pixel copy.
+  // Back buffer -> primary presents (as Flip does): that is a swap-chain
+  // present, not a pixel copy.
   if (dst.kind == Surface::Kind::Primary && src->kind == Surface::Kind::BackBuffer) {
     PresentPrimary();
     return DD_OK;
@@ -760,13 +761,14 @@ HLE_NAMED("ddraw.dll", "IDirectDraw7::GetFourCCCodes", DD7_GetFourCCCodes, 3) {
 }
 
 HLE_NAMED("ddraw.dll", "IDirectDraw7::GetDeviceIdentifier", DD7_GetDeviceIdentifier, 3) {
+  const win32::GameConfig::Adapter& a = Game().adapter;
   guest::DDDEVICEIDENTIFIER2 id{};
-  std::strcpy(id.szDriver, "nv4_disp.dll");
-  std::strcpy(id.szDescription, "NVIDIA GeForce3");
-  id.liDriverVersionHigh = 0x00060000 | 14;  // 6.14.10.xxxx style
-  id.liDriverVersionLow = 0x000A0000 | 2960;
-  id.dwVendorId = 0x10DE;
-  id.dwDeviceId = 0x0200;
+  std::snprintf(id.szDriver, sizeof id.szDriver, "%s", a.driver.c_str());
+  std::snprintf(id.szDescription, sizeof id.szDescription, "%s", a.description.c_str());
+  id.liDriverVersionHigh = uint32_t(a.driver_version >> 32);
+  id.liDriverVersionLow = uint32_t(a.driver_version);
+  id.dwVendorId = a.vendor_id;
+  id.dwDeviceId = a.device_id;
   id.guidDeviceIdentifier = {0xD7B71E3E, 0x4340, 0x11CF, {0x83, 0x63, 0x23, 0x01, 0xA4, 0xC2, 0xC3, 0x5B}};
   id.dwWHQLLevel = 1;
   std::memcpy(GPtr(Arg(c, 1)), &id, sizeof id);
