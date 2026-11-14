@@ -76,6 +76,8 @@ int sceSaveDataUmount(const char* mount_point);
 int sceSaveDataDelete(const void* del);
 int sceSaveDataDirNameSearch(const void* cond, void* result);
 int sceSaveDataSetParam(const char* mount_point, int type, const void* buf, unsigned long size);
+int sceSaveDataSetupSaveDataMemory(int user, unsigned long size, const void* param);
+int sceSaveDataGetSaveDataMemory(int user, void* buf, unsigned long size, unsigned long offset);
 long sceKernelWrite(int fd, const void* buf, unsigned long n);
 long sceKernelRead(int fd, void* buf, unsigned long n);
 
@@ -458,6 +460,8 @@ typedef struct {
   char reserved[28];
 } SaveMountResult;
 
+static char save_chunk[0x10000];
+
 static int save_checks(void) {
   int failed = 0;
   failed += test_check(110, sceSaveDataInitialize(0), 0);
@@ -468,6 +472,10 @@ static int save_checks(void) {
   failed += test_check(113, (unsigned)sceSaveDataMount(&m, &r), 0x809F0003);  // busy: mounted
   int fd = sceKernelOpen("/savedata0/slot.bin", 0x201 | 0x400, 0644);  // write, create, trunc
   failed += test_check(114, sceKernelWrite(fd, "progress", 8), 8);
+  sceKernelClose(fd);
+  // More than its 96 blocks (3 MiB): the host does not stop it.
+  fd = sceKernelOpen("/savedata0/big.bin", 0x201, 0644);
+  for (int i = 0; i < 49; i++) sceKernelWrite(fd, save_chunk, sizeof save_chunk);
   sceKernelClose(fd);
   failed += test_check(115, sceSaveDataSetParam("/savedata0", 4, "\x2a\0\0\0", 4), 0);
   failed += test_check(116, sceSaveDataUmount("/savedata0"), 0);
@@ -492,6 +500,7 @@ static int save_checks(void) {
   } cond = {USER, 0, 0, "SAVE%", 0, 0};
   char names[4][32];
   unsigned char params[4][0x530];
+  unsigned long infos[4][6];  // blocks, free blocks, 32 bytes
   struct {
     unsigned hits, pad;
     void* names;
@@ -499,11 +508,14 @@ static int save_checks(void) {
     void* params;
     void* infos;
     char reserved[12];
-  } found = {0, 0, names, 4, 0, params, 0};
+  } found = {0, 0, names, 4, 0, params, infos};
+  // The host's data directory also has one whose name is too long for a
+  // save data directory (orbis_process_test.cpp): not found.
   failed += test_check(123, sceSaveDataDirNameSearch(&cond, &found), 0);
   failed += test_check(124, found.hits == 1 && found.set == 1 && streq(names[0], "SAVE0001") &&
                                 params[0][0x500] == 42,
                        1);
+  failed += test_check(476, infos[0][0] == 96 && infos[0][1] == 0, 1);  // none free, past them
   struct {
     int user, pad;
     const char* title;
@@ -515,6 +527,11 @@ static int save_checks(void) {
   failed += test_check(126, (unsigned)sceSaveDataDelete(&del), 0x809F0008);  // not found
   m.mode = 2;
   failed += test_check(127, (unsigned)sceSaveDataMount(&m, &r), 0x809F0008);
+  // 477: save data memory, read where offset + size wraps.
+  sceSaveDataSetupSaveDataMemory(USER, 0x1000, 0);
+  failed += test_check(477, (unsigned)sceSaveDataGetSaveDataMemory(USER, save_chunk, 0x10,
+                                                                    0xFFFFFFFFFFFFFFF8ul),
+                       0x809F0000);
   return failed;
 }
 

@@ -72,8 +72,11 @@ int main(int argc, char** argv) {
   std::filesystem::create_directories(dir / "sub");
   std::ofstream(dir / "sub" / "b.txt") << "b";
   std::ofstream(dir / "sub" / "a.txt") << "a";
-  // The per-user data (save data) in a directory of its own.
+  // The per-user data (save data) in a directory of its own, with a
+  // directory whose name no save data directory can have.
   setenv("XDG_DATA_HOME", (dir / "data").c_str(), 1);
+  std::filesystem::create_directories(dir / "data" / game.id / "savedata" / "1" /
+                                      "SAVE_a_name_longer_than_31_characters");
   // The pad as a background run's script holds it (the e2e pad checks).
   const auto pad = dir.string() + "_pad.txt";
   std::ofstream(pad) << "0 cross lx=-1 ry=1 for=1000\n+0 circle for=1000\n";
@@ -82,7 +85,7 @@ int main(int argc, char** argv) {
   const int r = recomp::orbis::RunProcess(game, dir.string(), config);
   std::filesystem::remove_all(dir);
   std::filesystem::remove(pad);
-  constexpr int kChecks = 33 + 37 + 20 + 6 + 24 + 27 + 18 + 7 + 6 + 7 + 38 + 3 + 24 + 47 + 22 + 16 + 9 + 16 + 1 + 8 + 5 + 2 + 1 + 1;
+  constexpr int kChecks = 33 + 37 + 20 + 6 + 24 + 27 + 18 + 7 + 6 + 7 + 38 + 3 + 24 + 47 + 22 + 16 + 9 + 16 + 1 + 8 + 5 + 2 + 1 + 1 + 2;
   std::printf("%d checks, %d failed, _start returned %d\n", g_checks, g_failed, r);
   const bool ok = r == 0 && g_failed == 0 && g_checks == kChecks;
   std::printf("%s\n", ok ? "orbis_process: ok" : "orbis_process: FAILED");

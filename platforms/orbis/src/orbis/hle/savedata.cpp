@@ -336,9 +336,9 @@ ORBIS_HLE("libSceSaveData", sceSaveDataDirNameSearch, 2) {
   };
   std::vector<Hit> hits;
   for (const auto& e : fs::directory_iterator(Root())) {
-    if (!e.is_directory()) continue;
     const std::string name = e.path().filename().string();
-    if (!match(pattern, name)) continue;
+    // Only what can be a directory's name (the result has 32 bytes for it).
+    if (!e.is_directory() || !ValidDirName(name, false) || !match(pattern, name)) continue;
     Hit h{name, {}, uint64_t(fs::last_write_time(e.path()).time_since_epoch().count())};
     ReadMeta(name, &h.meta);
     hits.push_back(h);
@@ -367,7 +367,9 @@ ORBIS_HLE("libSceSaveData", sceSaveDataDirNameSearch, 2) {
     if (infos) {
       std::memset(recomp::GPtr(infos + 48 * uint64_t(i)), 0, 48);
       recomp::Wr64(infos + 48 * uint64_t(i), hits[i].meta.blocks);
-      recomp::Wr64(infos + 48 * uint64_t(i) + 8, hits[i].meta.blocks - UsedBlocks(hits[i].name));
+      const uint64_t used = UsedBlocks(hits[i].name);  // the host's files may pass the quota
+      recomp::Wr64(infos + 48 * uint64_t(i) + 8,
+                   used < hits[i].meta.blocks ? hits[i].meta.blocks - used : 0);
     }
   }
   recomp::Wr32(r, uint32_t(hits.size()));
@@ -409,7 +411,8 @@ static uint64_t SaveDataMemory(recomp::Ctx& c, bool write) {
   const uint64_t size = Arg(c, 2), off = Arg(c, 3);
   const std::string path = Root() + "/memory.dat";
   if (!buf || !size) return kErrParameter;
-  if (!fs::exists(path) || off + size > fs::file_size(path)) return kErrParameter;
+  if (!fs::exists(path) || size > fs::file_size(path) || off > fs::file_size(path) - size)
+    return kErrParameter;
   std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
   f.seekg(std::streamoff(off));
   if (write) {

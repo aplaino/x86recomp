@@ -387,6 +387,7 @@ ORBIS_HLE("libSceMsgDialog", sceMsgDialogProgressBarSetMsg, 2) {
   if (const uint32_t r = CheckProgressCall(int32_t(Arg(c, 0)))) return r;
   if (SdkVersion() >= 0x01700000 && !Shorter(Arg(c, 1), 0x2000)) return kErrParam;
   g_dialog->text = recomp::GStr(Arg(c, 1)).substr(0, MsgMax() - 1);
-  recomp::orbis::videoout::SetOverlay(Draw(*g_dialog));
+  // Ended but not yet seen by UpdateStatus: nothing is drawn any more.
+  if (!g_done) recomp::orbis::videoout::SetOverlay(Draw(*g_dialog));
   return 0;
 }

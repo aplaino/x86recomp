@@ -43,7 +43,8 @@ STUB(sceFiberGetSelf) STUB(sceFiberFinalize)
 #define STUB(name) \
   void name(void) {}
 STUB(sceSaveDataInitialize) STUB(sceSaveDataMount) STUB(sceSaveDataUmount) STUB(sceSaveDataDelete)
-STUB(sceSaveDataDirNameSearch) STUB(sceSaveDataSetParam)
+STUB(sceSaveDataDirNameSearch) STUB(sceSaveDataSetParam) STUB(sceSaveDataSetupSaveDataMemory)
+STUB(sceSaveDataGetSaveDataMemory)
 #endif
 
 #ifdef LIB_AUDIOOUT
