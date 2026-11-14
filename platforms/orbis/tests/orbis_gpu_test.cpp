@@ -1278,6 +1278,24 @@ int main() {
           "an indirect draw starts at its first vertex through the shader's register");
   }
 
+  // ADD_TID_ENABLE in a stage run in waves (v_readfirstlane): lane t's
+  // store through a V# of 4-byte records lands at record t.
+  {
+    static const uint32_t kTid[] = {
+        0x7E280500,              // v_readfirstlane_b32 s20, v0
+        0xE0700000, 0x80000000,  // buffer_store_dword v0, off, s[0:3], 0
+        0xBF810000,              // s_endpgm
+    };
+    constexpr gaddr kTidAt = kCode + 0x1C00, kTidOut = 0x1D8400;
+    std::memcpy(GPtr(kTidAt), kTid, sizeof kTid);
+    std::memset(GPtr(kTidOut), 0xEE, 256);
+    const uint32_t user[4] = {uint32_t(kTidOut), 4u << 16, 64, 0xFACu | 4u << 15 | 1u << 23};
+    Run(kTidAt, user, 4, 64, 15);
+    bool ok = true;
+    for (uint32_t t = 0; t < 64; t++) ok &= Rd32(kTidOut + 4 * t) == t;
+    Check(ok, "ADD_TID_ENABLE adds each lane of a wave to the index");
+  }
+
   // DB_RENDER_CONTROL clears: a draw writing depth 0.5, then a
   // stencil-only clear (depth clear value 1.0) with a colour target, then
   // a draw at z 0.75 with a LESS depth test. The clear draws its colour

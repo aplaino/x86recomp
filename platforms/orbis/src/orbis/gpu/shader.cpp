@@ -1407,7 +1407,7 @@ struct Translator {
     *stride_out = 0;
     const bool swizzle = v[1] >> 31, tid = (v[3] >> 23) & 1;
     if (swizzle || tid) {
-      std::string index = tid ? "r_lane" : "0u", offset = U(w0 & 0xFFF);
+      std::string index = tid ? Lane() : "0u", offset = U(w0 & 0xFFF);
       uint32_t next = vaddr;
       if (idxen) index += " + " + V(next++);
       if (offen) offset += " + " + V(next);
