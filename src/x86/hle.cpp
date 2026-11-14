@@ -93,12 +93,20 @@ gaddr DataAddress(const std::string& dll, const std::string& name) {
 
 }  // namespace
 
+// Each import has one handler or data export: a second registration
+// would win or lose by library load order.
 Registrar::Registrar(const char* dll, const char* name, int nargs, Fn fn, bool x64) {
-  Registry()[{dll, name}] = Def{nargs, fn, x64};
+  if (DataRegistry().count({dll, name}) ||
+      !Registry().emplace(std::pair<std::string, std::string>{dll, name}, Def{nargs, fn, x64})
+           .second)
+    FatalF("hle: %s!%s is registered twice", dll, name);
 }
 
 DataExport::DataExport(const char* dll, const char* name, uint32_t size, void (*init)(gaddr)) {
-  DataRegistry()[{dll, name}] = DataDef{size, init};
+  if (Registry().count({dll, name}) ||
+      !DataRegistry().emplace(std::pair<std::string, std::string>{dll, name}, DataDef{size, init})
+           .second)
+    FatalF("hle: %s!%s is registered twice", dll, name);
 }
 
 Serialised::Serialised(const char* lib) { SerialisedLibs().insert(lib); }

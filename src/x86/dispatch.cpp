@@ -152,6 +152,9 @@ namespace {
     backtrace_symbols_fd(frames, nf, 2);
   };
   report();
+  // Before StartProcess (a fatal at library load) there is no data
+  // directory to save the report in.
+  if (!g_proc) std::_Exit(3);
   std::string path = ReportPath("crash");
   int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
   if (fd >= 0) {

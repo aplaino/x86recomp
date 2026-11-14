@@ -41,6 +41,12 @@ add_executable(hle_abi_test hle_abi_test.cpp)
 target_link_libraries(hle_abi_test PRIVATE recomp_x86)
 add_test(NAME hle_abi COMMAND hle_abi_test)
 
+# hle_dup_test: a duplicate HLE registration is fatal (its message passes).
+add_executable(hle_dup_test hle_dup_test.cpp)
+target_link_libraries(hle_dup_test PRIVATE recomp_x86)
+add_test(NAME hle_dup COMMAND hle_dup_test)
+set_tests_properties(hle_dup PROPERTIES PASS_REGULAR_EXPRESSION "test.dll!Twice is registered twice")
+
 # fxsave_test: FXSAVE/FXRSTOR of the x87 and SSE models against the host.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
   add_executable(fxsave_test fxsave_test.cpp)
