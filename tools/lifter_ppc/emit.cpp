@@ -152,12 +152,16 @@ class Emitter {
   }
 
   // Control transfer to `t` from the instruction at `va`: a label in this
-  // function, or a tail call.
+  // function, or a tail call. A guaranteed one, except in a resumable
+  // function's try block, which a tail call cannot leave: its catch has to
+  // cover what the code it branches to runs while its frame is live. Such
+  // a function is sized by its format, so its own loops stay labels.
   std::string Branch(uint64_t va, uint64_t t) {
     if (f_ && f_->insns.count(t)) return "goto " + Label(t) + ";";
     if (p_.functions().count(t)) {
       callees_.insert(t);
-      return "{ " + Spill() + FunctionName(t) + "(c); return; }";
+      if (f_ && f_->resumable) return "{ " + Spill() + FunctionName(t) + "(c); return; }";
+      return "{ " + Spill() + "LIFT_MUSTTAIL return " + FunctionName(t) + "(c); }";
     }
     return "{ " + Spill() + "BadJump(c, " + Hex(va) + ", " + Hex(t) + "); }";
   }

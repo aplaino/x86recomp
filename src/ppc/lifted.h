@@ -27,6 +27,17 @@
 #define RECOMP_PPC_MUTATION 0
 #endif
 
+// Tail calls between lifted functions (all void(Ctx&)) are guaranteed
+// where the compiler supports it: a loop whose back edge crosses a
+// function start would otherwise recurse on the host per iteration.
+#if defined(__clang__)
+#define LIFT_MUSTTAIL [[clang::musttail]]
+#elif defined(__GNUC__) && __GNUC__ >= 15
+#define LIFT_MUSTTAIL [[gnu::musttail]]
+#else
+#define LIFT_MUSTTAIL
+#endif
+
 namespace recomp::ppc {
 
 using GuestFn = void (*)(Ctx&);

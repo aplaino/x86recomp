@@ -81,6 +81,10 @@ int table_back(unsigned v);
 int call_thunk(unsigned v);
 extern int (*const ptr_table[1])(unsigned v);
 
+// fixture/flow.S: a loop crossing function starts.
+unsigned cross_loop(unsigned n);
+unsigned cross_mid(unsigned n);
+
 typedef u64 (*Op)(u64, u64);
 __attribute__((noinline)) static u64 op_add(u64 a, u64 b) { return a + b; }
 __attribute__((noinline)) static u64 op_mul(u64 a, u64 b) { return a * b; }
@@ -176,6 +180,10 @@ int main(void) {
   u64 pt = 0;
   for (u32 k = 0; k < 16; k++) pt = pt * 9 + (u64)(i64)ptr_table[0](k) + (u64)(i64)call_thunk(k % 6);
   hex("pointers", pt);
+
+  u64 fl = cross_loop(1000000);
+  fl = fl * 23 + cross_mid(500000);
+  hex("flow", fl);
 
   u64 acc = 1;
   for (u32 k = 0; k < 200; k++) acc ^= ops_table[k % 5](next(), next() >> (k % 61));

@@ -153,13 +153,17 @@ mask bit 4, an unused immediate).
   start within its range (the length the reader gives, or up to the next
   start), so a call into the middle of a run of code (the register save
   and restore helpers) gets its own overlapping function, and falling
-  through into the next start is a tail call. Then, until nothing changes,
-  the addresses the module holds as constants (words in its data, `lis`
-  with `addi`/`ori` in the code reached) that land on a decodable,
-  non-zero word past the last instruction its function reaches: functions
-  only called through pointers (vtables, callbacks, one-branch thunks) and
-  without a `.pdata` entry, as leaf functions are. Code a function reaches
-  is never split this way.
+  through into the next start, or branching to it, is a tail call: a
+  guaranteed one (`LIFT_MUSTTAIL`), so a loop whose back edge crosses a
+  function start does not grow the host stack, except out of a resumable
+  function's try block (below), which a tail call cannot leave; those are
+  sized by their format, so their own loops stay inside them. Then,
+  until nothing changes, the addresses the module holds as constants
+  (words in its data, `lis` with `addi`/`ori` in the code reached) that
+  land on a decodable, non-zero word past the last instruction its
+  function reaches: functions only called through pointers (vtables,
+  callbacks, one-branch thunks) and without a `.pdata` entry, as leaf
+  functions are. Code a function reaches is never split this way.
 - Jump tables, ending in `mtctr` and `bcctr` with the index bounded by a
   `cmplwi` and a `bgt` or `bge` (or `bgtlr`, `bgelr`: a conditional
   return in place of the default case), also when the code loads the

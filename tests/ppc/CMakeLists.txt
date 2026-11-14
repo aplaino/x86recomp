@@ -69,7 +69,7 @@ add_custom_command(OUTPUT "${_bin}/vectors.elf"
 
 # --- the fixture -----------------------------------------------------------------
 ppc_objects(_fix_objs "${_src}/oracle/crt0.S" "${_src}/fixture/ops.S" "${_src}/fixture/tables.S"
-            "${_src}/fixture/main.c")
+            "${_src}/fixture/flow.S" "${_src}/fixture/main.c")
 add_custom_command(OUTPUT "${_bin}/fixture.elf"
   COMMAND "${RECOMP_LD_LLD}" -static -T "${_src}/fixture/fixture.ld" -o "${_bin}/fixture.elf" ${_fix_objs}
   DEPENDS ${_fix_objs} "${_src}/fixture/fixture.ld"
