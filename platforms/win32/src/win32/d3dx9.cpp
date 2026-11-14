@@ -227,6 +227,9 @@ uint32_t CreateFromMemory(Ctx& c, bool cube, uint32_t device, uint32_t src, uint
   uint32_t hr = NewTexture(*d, device, cube, w, h, want, usage, fmt, pool, &tex);
   if (hr != D3D_OK) return hr;
   Texture* t = com::As<Texture>(tex);
+  // The texture may have fewer levels than asked for (AUTOGENMIPMAP gives
+  // the app one): fill only those.
+  want = std::min(want, t->levels);
   const uint8_t* q = img.data;
   for (uint32_t face = 0; face < t->Faces(); face++) {
     std::vector<uint8_t> generated;
