@@ -25,8 +25,8 @@ import re
 import subprocess
 import sys
 
-# Path prefix -> presets. The first matching prefix wins; anything else
-# builds the default preset.
+# Path prefix -> presets. The first matching prefix wins; a path no rule
+# names builds every preset, as nothing says which ones use it.
 EVERY = ["debug", "x86", "ppc", "a64", "a64-aarch64-qemu", "orbis",
          "xbox360", "horizon"]
 RULES = [
@@ -35,6 +35,8 @@ RULES = [
     ("cmake/", EVERY),
     ("CMakeLists.txt", EVERY),
     ("CMakePresets.json", EVERY),
+    ("src/text_hash.h", ["ppc", "a64", "a64-aarch64-qemu", "xbox360", "horizon"]),
+    ("tools/orbis_sce_elf.py", ["orbis"]),
     ("tests/x86/", ["x86", "debug", "orbis"]),
     ("tests/ppc/", ["ppc", "xbox360"]),
     ("tests/a64/", ["a64", "a64-aarch64-qemu", "horizon"]),
@@ -58,6 +60,7 @@ GAMES = [
     ("src/runtime/", "every game project"),
     ("cmake/", "every game project"),
     ("CMakeLists.txt", "every game project"),
+    ("src/text_hash.h", "the Xbox 360 and Switch games (re-lift)"),
     ("src/x86/", PC + " and the PS4 games"),
     ("tools/lifter_x86/", PC + " and the PS4 games (re-lift)"),
     ("platforms/win32/", PC),
@@ -114,7 +117,7 @@ def presets_for(paths):
         if path.endswith(".md"):
             continue
         rule = match(path, RULES)
-        picked.update(["debug"] if rule is None else rule)
+        picked.update(EVERY if rule is None else rule)
     return [p for p in EVERY if p in picked]
 
 
