@@ -2,14 +2,15 @@
 """Land a topic branch on main: rebase, build and test what it touches,
 fast-forward.
 
-Run from the topic's worktree: tools/land.py [--dry-run]
+Run from the topic's worktree: tools/land.py [--dry-run] [--presets A,B]
 
 1. Refuses a dirty worktree.
 2. Fetches and rebases the topic onto origin/main.
 3. Picks the presets the changed paths call for, builds each in
    out/land/<preset> and runs its ctest (niced, memory-capped). Docs
    (.md) and C/C++ files whose change is only to comments and whitespace
-   build nothing.
+   build nothing. --presets names them instead, when the rules over-reach
+   (a top-level CMakeLists.txt change that only the x86 presets use).
 4. Pushes the commit it rebased, built and tested to origin/main, a
    fast-forward only, after checking that the worktree is still clean and
    on that commit. If main moved in the meantime the push is rejected:
@@ -249,7 +250,12 @@ def main():
                     help="rebase and pick presets, build nothing, push nothing")
     ap.add_argument("--self-test", action="store_true",
                     help="check the comments-only classifier on known cases, then stop")
+    ap.add_argument("--presets", type=lambda v: v.split(","),
+                    help="build and test these presets instead of the ones the paths pick")
     args = ap.parse_args()
+    unknown = [p for p in args.presets or [] if p not in EVERY]
+    if unknown:
+        sys.exit(f"land: unknown presets: {', '.join(unknown)}")
     if not self_test():
         sys.exit("land: the comments-only classifier fails its self-test")
     if args.self_test:
@@ -284,8 +290,11 @@ def main():
     commits = git("log", "--oneline", f"origin/main..{head}")
     print(f"land: {topic}, onto origin/main:\n{commits}\n")
 
-    presets = presets_for(paths)
+    picked = presets_for(paths)
+    presets = [p for p in EVERY if p in args.presets] if args.presets else picked
     print("land: presets:", ", ".join(presets) or "none (docs and comments only)")
+    if args.presets and set(presets) != set(picked):
+        print("land: the paths call for:", ", ".join(picked) or "none")
     if args.dry_run:
         return
     checkout = main_checkout()
@@ -307,7 +316,7 @@ def main():
                  "reached; see git's message); rerun to rebase and retest")
 
     if checkout:
-        if git("-C", checkout, "status", "--porcelain"):
+        if git("-C", checkout, "status", "--porcelain", "--untracked-files=no"):
             print(f"land: {checkout} has uncommitted changes; main there "
                   "was left behind, run `git merge --ff-only origin/main`")
         else:
