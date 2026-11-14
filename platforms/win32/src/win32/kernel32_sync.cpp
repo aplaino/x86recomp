@@ -113,6 +113,11 @@ struct SemaphoreObject : Waitable {
 
 struct ThreadObject : Waitable {
   ThreadObject() : Waitable(Type::Thread) {}
+  // Its last handle is closed, and the thread has finished (g_thread_objs
+  // holds the others): the platform is done with the Thread.
+  ~ThreadObject() override {
+    if (thread) ReleaseThread(thread);
+  }
   bool Signalled(uint32_t) const override { return finished; }
   Thread* thread = nullptr;
   gaddr entry = 0;
@@ -283,21 +288,18 @@ HLE64("kernel32.dll", ResetEvent, 1) {
 
 // ---- mutexes ----------------------------------------------------------------
 
+// bInitialOwner applies only to a mutex this call creates: one that
+// exists already is opened as it is (ERROR_ALREADY_EXISTS), as on Windows.
 HLE("kernel32.dll", CreateMutexA, 3) {
   GuestSyncPoint sync;
   bool own = Arg(c, 1);
   uint32_t tid = CurrentThread()->tid;
-  uint32_t h = CreateNamed(NameOf(Arg(c, 2)), [] {
+  return CreateNamed(NameOf(Arg(c, 2)), [&] {
     auto m = std::make_shared<MutexObject>();
     g_mutexes.push_back(m);
+    if (own) m->Acquire(tid);
     return m;
   });
-  if (own) {
-    auto m = std::dynamic_pointer_cast<MutexObject>(GetHandle(h));
-    std::lock_guard<std::mutex> l(g_wait_mu);
-    if (m->owner == 0 || m->owner == tid) m->Acquire(tid);
-  }
-  return h;
 }
 
 // OpenMutexA/OpenFileMappingA(access, inherit, name): a new handle to an

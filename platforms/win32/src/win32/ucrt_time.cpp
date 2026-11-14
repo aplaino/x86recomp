@@ -65,16 +65,24 @@ std::tm Local(int64_t t) {
   return r;
 }
 
-// The thread's struct tm (gmtime, localtime) and string (ctime, asctime).
+// The thread's struct tm (gmtime, localtime) and string (ctime, asctime),
+// freed when the thread exits.
+struct Buffers {
+  gaddr tm = 0, text = 0;
+  ~Buffers() {
+    if (tm) HeapFreeProcess(tm);
+    if (text) HeapFreeProcess(text);
+  }
+};
+thread_local Buffers t_buffers;
+
 gaddr TmBuffer() {
-  static thread_local gaddr p = 0;
-  if (!p) p = HeapAllocProcess(kTmSize, true);
-  return p;
+  if (!t_buffers.tm) t_buffers.tm = HeapAllocProcess(kTmSize, true);
+  return t_buffers.tm;
 }
 gaddr TextBuffer() {
-  static thread_local gaddr p = 0;
-  if (!p) p = HeapAllocProcess(26, true);
-  return p;
+  if (!t_buffers.text) t_buffers.text = HeapAllocProcess(26, true);
+  return t_buffers.text;
 }
 
 // asctime's form, "Wed Jan 02 02:03:55 1980\n" (day of month two digits);

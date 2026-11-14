@@ -25,18 +25,29 @@ namespace {
 constexpr const char* kDll = "sdl2.dll";
 
 // A guest copy of a host string, kept per thread until the next call
-// (SDL_GetError, SDL_GetHint: SDL2 returns pointers it owns).
-gaddr ThreadString(const char* s, int slot) {
-  static thread_local gaddr buf[4] = {};
-  static thread_local size_t cap[4] = {};
-  size_t n = std::strlen(s) + 1;
-  if (n > cap[slot]) {
-    if (buf[slot]) HeapFreeProcess(buf[slot]);
-    cap[slot] = std::max<size_t>(n, 256);
-    buf[slot] = HeapAllocProcess(cap[slot], false);
+// (SDL_GetError, SDL_GetHint: SDL2 returns pointers it owns), and freed
+// when the thread exits.
+struct ThreadStrings {
+  gaddr buf[4] = {};
+  size_t cap[4] = {};
+  ~ThreadStrings() {
+    for (gaddr b : buf)
+      if (b) HeapFreeProcess(b);
   }
-  std::memcpy(GPtr(buf[slot]), s, n);
-  return buf[slot];
+};
+thread_local ThreadStrings t_strings;
+
+gaddr ThreadString(const char* s, int slot) {
+  gaddr& buf = t_strings.buf[slot];
+  size_t& cap = t_strings.cap[slot];
+  size_t n = std::strlen(s) + 1;
+  if (n > cap) {
+    if (buf) HeapFreeProcess(buf);
+    cap = std::max<size_t>(n, 256);
+    buf = HeapAllocProcess(cap, false);
+  }
+  std::memcpy(GPtr(buf), s, n);
+  return buf;
 }
 
 // SDL2's SDL_bool and int results.

@@ -244,11 +244,19 @@ void DestroyException(Ctx& c, gaddr rec) {
 }
 
 // __current_exception / __current_exception_context: per-thread slots the
-// guest reads (std::current_exception, std::uncaught_exceptions).
+// guest reads (std::current_exception, std::uncaught_exceptions), freed
+// when the thread exits.
+struct Slots {
+  gaddr va = 0;
+  ~Slots() {
+    if (va) HeapFreeProcess(va);
+  }
+};
+thread_local Slots t_slots;
+
 gaddr CurrentSlots() {
-  static thread_local gaddr slots = 0;
-  if (!slots) slots = HeapAllocProcess(16, true);
-  return slots;
+  if (!t_slots.va) t_slots.va = HeapAllocProcess(16, true);
+  return t_slots.va;
 }
 
 }  // namespace
