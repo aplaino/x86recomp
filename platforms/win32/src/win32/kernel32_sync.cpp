@@ -22,6 +22,7 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <typeinfo>
 #include <vector>
 
 #include "runtime/log.h"
@@ -227,8 +228,11 @@ std::string NameOf(gaddr va, bool wide = false) {
 }
 
 // Registers a named object or returns the existing one (ERROR_ALREADY_EXISTS).
+// A name that an object of another type holds fails with
+// ERROR_INVALID_HANDLE, as on Windows.
 template <typename Make>
 uint32_t CreateNamed(const std::string& name, Make make) {
+  using Made = typename decltype(make())::element_type;
   std::shared_ptr<KObject> obj;
   bool existed = false;
   {
@@ -236,6 +240,10 @@ uint32_t CreateNamed(const std::string& name, Make make) {
     if (!name.empty()) {
       auto it = g_named.find(name);
       if (it != g_named.end()) {
+        if (typeid(*it->second) != typeid(Made)) {
+          hle::SetLastError(win32::kErrorInvalidHandle);
+          return 0;
+        }
         obj = it->second;
         existed = true;
       }
