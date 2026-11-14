@@ -10,11 +10,17 @@
 namespace recomp::a64 {
 namespace {
 
+// 0 outside `b` (offsets come from the file and may be anything).
 template <typename T>
 T Get(const std::vector<uint8_t>& b, uint64_t off) {
   T v{};
-  if (off + sizeof(T) <= b.size()) std::memcpy(&v, b.data() + off, sizeof(T));
+  if (off <= b.size() && sizeof(T) <= b.size() - off) std::memcpy(&v, b.data() + off, sizeof(T));
   return v;
+}
+
+// [at, at + size) lies in `b`.
+bool Inside(const std::vector<uint8_t>& b, uint64_t at, uint64_t size) {
+  return at <= b.size() && size <= b.size() - at;
 }
 
 std::string Hex(uint64_t v) {
@@ -106,10 +112,10 @@ bool CieFdeEncoding(const std::vector<uint8_t>& b, uint64_t cie, uint8_t& enc) {
   r.Uleb();                          // augmentation data length
   for (size_t i = 1; i < aug.size(); i++) {
     switch (aug[i]) {
-      case 'R': enc = b[r.p++]; break;
+      case 'R': enc = Get<uint8_t>(b, r.p++); break;
       case 'L': r.p++; break;
       case 'P': {
-        uint8_t penc = b[r.p++];
+        uint8_t penc = Get<uint8_t>(b, r.p++);
         uint64_t ignored;
         if (!r.Ptr(penc & 0x7F, 0, ignored)) return false;
         break;
@@ -161,6 +167,10 @@ bool ReadDynamic(Module& m, std::string& err) {
       return false;
     }
     uint32_t count = Get<uint32_t>(m.image, hash + 4);  // nchain
+    if (!Inside(m.image, symtab, uint64_t(count) * 24) || !Inside(m.image, strtab, strsz)) {
+      err = ".dynsym or .dynstr runs off the image";
+      return false;
+    }
     for (uint32_t i = 0; i < count; i++) {
       uint64_t s = symtab + uint64_t(i) * 24;
       uint32_t name = Get<uint32_t>(m.image, s);
@@ -179,15 +189,18 @@ bool ReadDynamic(Module& m, std::string& err) {
     }
   }
   auto read_relocs = [&](uint64_t at, uint64_t size) {
+    if (!Inside(m.image, at, size)) {
+      err = "relocations run off the image";
+      return false;
+    }
     for (uint64_t p = at; p + 24 <= at + size; p += 24) {
       uint64_t info = Get<uint64_t>(m.image, p + 8);
       m.relocs.push_back({Get<uint64_t>(m.image, p), uint32_t(info),
                           uint32_t(info >> 32), Get<int64_t>(m.image, p + 16)});
     }
+    return true;
   };
-  read_relocs(rela, relasz);
-  read_relocs(jmprel, pltrelsz);
-  return true;
+  return read_relocs(rela, relasz) && read_relocs(jmprel, pltrelsz);
 }
 
 bool LoadElf(const std::string& path, Module& m, std::string& err) {
@@ -227,7 +240,8 @@ bool LoadElf(const std::string& path, Module& m, std::string& err) {
     }
   }
   // Text (R+X), read-only data (R) and data (R+W, then .bss), each
-  // page-aligned, the first at 0.
+  // page-aligned, the first at 0, in address order without overlapping,
+  // so the data segment's end is the image's.
   if (loads.size() != 3 || loads[0].va || loads[0].flags != 5 || loads[1].flags != 4 ||
       loads[2].flags != 6) {
     err = path + ": not linked as text, read-only and data segments from 0";
@@ -236,8 +250,11 @@ bool LoadElf(const std::string& path, Module& m, std::string& err) {
   Segment* segs[3] = {&m.text, &m.ro, &m.data};
   for (int i = 0; i < 3; i++) {
     const Load& l = loads[i];
-    if (l.off + l.filesz > file.size() || l.va % kPage || l.va + l.memsz > 0xFFFFFFFF) {
-      err = path + ": segment " + std::to_string(i) + " is outside the file or unaligned";
+    if (!Inside(file, l.off, l.filesz) || l.filesz > l.memsz || l.va % kPage ||
+        l.memsz > 0xFFFFFFFF || l.va > 0xFFFFFFFF - l.memsz ||
+        (i && l.va < loads[i - 1].va + loads[i - 1].memsz)) {
+      err = path + ": segment " + std::to_string(i) +
+            " is outside the file, unaligned or overlaps the one before";
       return false;
     }
     segs[i]->off = uint32_t(l.va);
@@ -266,7 +283,7 @@ bool Relocate(Module& m, uint64_t base, std::string& err) {
             " is not supported";
       return false;
     }
-    if (r.off + 8 > m.image.size()) {
+    if (!Inside(m.image, r.off, 8)) {
       err = m.path + ": relocation at " + Hex(r.off) + " is outside the image";
       return false;
     }
@@ -284,13 +301,15 @@ std::vector<FdeRange> EhFrameFunctions(const Module& m) {
   const auto& b = m.image;
   uint64_t hdr = m.eh_frame_hdr;
   if (Get<uint8_t>(b, hdr) != 1) return out;
-  uint8_t ptr_enc = b[hdr + 1], count_enc = b[hdr + 2], table_enc = b[hdr + 3];
+  uint8_t ptr_enc = Get<uint8_t>(b, hdr + 1), count_enc = Get<uint8_t>(b, hdr + 2),
+          table_enc = Get<uint8_t>(b, hdr + 3);
   Reader r{b, hdr + 4};
   uint64_t eh_frame = 0, count = 0;
   if (!r.Ptr(ptr_enc, hdr, eh_frame) || !r.Ptr(count_enc, hdr, count)) return out;
   for (uint64_t i = 0; i < count; i++) {
     uint64_t loc = 0, fde = 0;
-    if (!r.Ptr(table_enc, hdr, loc) || !r.Ptr(table_enc, hdr, fde)) break;
+    // The count comes from the file: the table ends with the image.
+    if (r.p >= b.size() || !r.Ptr(table_enc, hdr, loc) || !r.Ptr(table_enc, hdr, fde)) break;
     Reader f{b, fde};
     uint64_t len = Get<uint32_t>(b, f.p);
     f.p += 4;

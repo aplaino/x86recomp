@@ -107,6 +107,21 @@ foreach(_m 0 ${_mutations})
   target_link_libraries(${_t} PRIVATE recomp_a64_image recomp_a64)
 endforeach()
 
+# a64_image_test: the ELF reader on malformed images, with image.cpp
+# compiled in under the address and undefined-behaviour sanitizers where
+# the toolchain links them (not under qemu-aarch64, which cannot host
+# their shadow memory).
+add_executable(a64_image_test image_test.cpp "${RECOMP_ROOT}/src/a64/image.cpp")
+target_include_directories(a64_image_test PRIVATE "${RECOMP_ROOT}/src")
+target_compile_features(a64_image_test PRIVATE cxx_std_20)
+include(CheckLinkerFlag)
+check_linker_flag(CXX -fsanitize=address,undefined RECOMP_A64_SANITIZE)
+if(RECOMP_A64_SANITIZE AND NOT CMAKE_CROSSCOMPILING)
+  target_compile_options(a64_image_test PRIVATE -fsanitize=address,undefined -fno-sanitize-recover=all)
+  target_link_options(a64_image_test PRIVATE -fsanitize=address,undefined)
+endif()
+add_test(NAME a64_image_test COMMAND a64_image_test "${CMAKE_CURRENT_BINARY_DIR}/image_test.elf")
+
 # --- tests against the oracle ----------------------------------------------
 if(NOT EXISTS "${RECOMP_PYTHON}")
   return()
