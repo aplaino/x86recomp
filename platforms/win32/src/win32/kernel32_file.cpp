@@ -8,7 +8,6 @@
 
 #include <dirent.h>
 #include <fcntl.h>
-#include <fnmatch.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -728,15 +727,13 @@ HLE("kernel32.dll", FindFirstFileA, 2) {
   std::string gdir = pattern.substr(0, s), mask = pattern.substr(s + 1);
   if (gdir.size() == 2) gdir += '\\';
   auto f = std::make_shared<FindObject>();
-  std::string lmask = Lower(mask);
-  if (lmask == "*.*") lmask = "*";
   std::set<std::string> seen;  // lower case: the overlay hides the install
   for (const std::string& hdir : HostDirs(gdir)) {
     DIR* d = opendir(hdir.c_str());
     if (!d) continue;
     while (dirent* e = readdir(d)) {
       std::string ln = Lower(e->d_name);
-      if (fnmatch(lmask.c_str(), ln.c_str(), 0) == 0 && seen.insert(ln).second)
+      if (MatchFileMask(mask, e->d_name) && seen.insert(ln).second)
         f->entries.push_back({hdir, e->d_name});
     }
     closedir(d);

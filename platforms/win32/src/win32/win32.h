@@ -156,6 +156,68 @@ std::vector<S> SplitCommandLine(const S& cmd) {
   return args;
 }
 
+// FindFirstFile's pattern (the last component of its path) against a file
+// name, as Windows matches it: case-insensitively, with only `*` and `?`
+// as wildcards. kernel32 turns the pattern into NT's DOS wildcards before
+// the file system matches it (FsRtlIsNameInExpression): "*.*" is `*`;
+// `?` becomes DOS_QM (one character, or none at a '.' or the end, so
+// "file?.txt" matches "file.txt"); a '.' before `?` or `*` becomes
+// DOS_DOT (a '.', or nothing at the end, so "name.*" matches "name");
+// `*` before a '.' becomes DOS_STAR (any run that does not pass the
+// name's last '.'). Trailing dots and blanks are dropped from a path's
+// last component, and a pattern that had a trailing dot ends in DOS_STAR
+// instead of `*`, so "*." matches the names without an extension. The
+// codes are the characters NT uses ('<' DOS_STAR, '>' DOS_QM, '"'
+// DOS_DOT), which no file name contains.
+inline bool MatchDosExpression(const std::string& e, size_t i, const std::string& n, size_t j) {
+  for (;;) {
+    if (i == e.size()) return j == n.size();
+    const char c = e[i];
+    if (c == '*' || c == '<') {
+      size_t lim = n.size();
+      if (c == '<') {
+        const size_t dot = n.rfind('.');
+        if (dot != std::string::npos && dot >= j) lim = dot;
+      }
+      for (size_t k = j; k <= lim; k++)
+        if (MatchDosExpression(e, i + 1, n, k)) return true;
+      return false;
+    }
+    if (c == '>') {
+      if (j < n.size() && n[j] != '.') j++;
+    } else if (c == '"') {
+      if (j < n.size() && n[j] == '.')
+        j++;
+      else if (j != n.size())
+        return false;
+    } else if (j < n.size() && (c == '?' || n[j] == c)) {
+      j++;
+    } else {
+      return false;
+    }
+    i++;
+  }
+}
+
+inline bool MatchFileMask(std::string mask, const std::string& name) {
+  const bool had_dot = !mask.empty() && mask.back() == '.';
+  if (mask.find_first_not_of('.') != std::string::npos)  // "." and ".." stay
+    while (!mask.empty() && (mask.back() == '.' || mask.back() == ' ')) mask.pop_back();
+  std::string e = Lower(mask);
+  if (e == "*.*") {
+    e = "*";
+  } else {
+    for (size_t i = 1; i < e.size(); i++) {
+      if (e[i] == '.' && e[i - 1] == '*') e[i - 1] = '<';
+      if ((e[i] == '?' || e[i] == '*') && e[i - 1] == '.') e[i - 1] = '"';
+    }
+    for (char& ch : e)
+      if (ch == '?') ch = '>';
+  }
+  if (had_dot && !e.empty() && e.back() == '*') e.back() = '<';
+  return MatchDosExpression(e, 0, Lower(name), 0);
+}
+
 // Windows-1252 text as UTF-8, for host APIs that take UTF-8 (SDL window
 // titles, message boxes). macOS rejects titles that are not valid UTF-8.
 inline std::string AnsiToUtf8(const std::string& s) {

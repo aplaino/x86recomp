@@ -1,7 +1,8 @@
 // UTF-8 <-> UTF-16 (win32/win32.h): the Unicode standard's example
 // of U+FFFD substitution by maximal subparts, the other ill-formed classes
 // (overlong, surrogate, beyond U+10FFFF, truncated), unpaired surrogates,
-// and a round trip of every scalar value.
+// and a round trip of every scalar value. Then FindFirstFile's wildcard
+// matching (MatchFileMask).
 
 #include <cstdio>
 #include <string>
@@ -11,6 +12,7 @@
 
 namespace {
 
+using recomp::win32::MatchFileMask;
 using recomp::win32::Utf16ToUtf8;
 using recomp::win32::Utf8ToUtf16;
 
@@ -73,6 +75,32 @@ int main() {
       break;
     }
   }
+
+  struct {
+    const char *mask, *name;
+    bool match;
+  } masks[] = {
+      {"*", "readme", true},        {"*", ".", true},
+      {"*.*", "readme", true},      {"*.*", "a.b", true},
+      {"name.*", "name", true},     {"name.*", "name.txt", true},
+      {"name.*", "names", false},   {"*.txt", "a.TXT", true},
+      {"*.txt", "a.b.txt", true},   {"*.txt", "a.txt.bak", false},
+      {"*.txt", "atxt", false},     {"a?c", "abc", true},
+      {"a?c", "ac", false},         {"file?.txt", "file.txt", true},
+      {"file?.txt", "file1.txt", true}, {"file?.txt", "file12.txt", false},
+      {"a.?", "a", true},           {"a.?", "a.b", true},
+      {"*.", "readme", true},       {"*.", "a.txt", false},
+      {"readme.", "readme", true},  {"[ab]*", "[ab]c", true},
+      {"[ab]*", "a", false},        {"*\\*", "a\\b", true},
+      {"*\\*", "ab", false},      {".", ".", true},
+      {"..", "..", true},           {"FOO", "foo", true},
+  };
+  for (const auto& m : masks)
+    if (MatchFileMask(m.mask, m.name) != m.match) {
+      std::printf("FAIL: \"%s\" %s \"%s\"\n", m.mask, m.match ? "should match" : "matches",
+                  m.name);
+      g_failures++;
+    }
 
   if (g_failures) return 1;
   std::printf("win32_text: ok\n");
