@@ -115,7 +115,11 @@ struct ColorTarget {
 // enabled ones, in order: indices do not matter to the pipeline.
 struct FfState {
   uint32_t rs[256];      // render states by number (D3DRENDERSTATETYPE)
-  uint32_t tss[8][33];   // texture stage states (D3DTEXTURESTAGESTATETYPE)
+  // Texture stage states (D3DTEXTURESTAGESTATETYPE). Devices address by
+  // ADDRESSU/ADDRESSV (13, 14) alone: D3D7's ADDRESS (12) sets both, so
+  // a front end setting it sets those two as well (a value cannot say
+  // whether ADDRESS or ADDRESSU was set last).
+  uint32_t tss[8][33];
   TextureId textures[8];
   float world[4][16];    // D3D transforms: WORLD, WORLD1-3
   float view[16], proj[16];

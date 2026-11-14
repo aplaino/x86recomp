@@ -477,10 +477,7 @@ class D3D9Device final : public Device {
 
   void SetTextureStageState(uint32_t stage, uint32_t type, uint32_t v) {
     switch (type) {
-      case 12:  // ADDRESS (both)
-        dev_->SetSamplerState(stage, D3DSAMP_ADDRESSU, v);
-        dev_->SetSamplerState(stage, D3DSAMP_ADDRESSV, v);
-        return;
+      case 12: return;  // ADDRESS: the front end's, in ADDRESSU/V (FfState)
       case 13: dev_->SetSamplerState(stage, D3DSAMP_ADDRESSU, v); return;
       case 14: dev_->SetSamplerState(stage, D3DSAMP_ADDRESSV, v); return;
       case 15: dev_->SetSamplerState(stage, D3DSAMP_BORDERCOLOR, v); return;
