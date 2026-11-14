@@ -5,6 +5,7 @@
 #include "win32/seh64.h"
 
 #include <cstring>
+#include <exception>
 #include <vector>
 
 #include "runtime/log.h"
@@ -21,11 +22,15 @@ constexpr uint32_t kRecordSize = 0x98, kDcSize = 0x50;
 thread_local std::vector<Dispatching> t_dispatching;
 
 // Guest scratch memory below the current stack pointer for the structures a
-// handler call needs; c.rsp moves below it for the call and back after.
+// handler call needs; c.rsp moves below it for the call and back after. An
+// unwind that leaves through it (ContinueAt's GuestResume) has already set
+// c.rsp to the target frame's, which must survive: restore only on a
+// normal return.
 struct Scratch {
   Ctx& c;
   uint64_t saved;
   gaddr base;
+  int unwinding = std::uncaught_exceptions();
   Scratch(Ctx& cc, uint64_t size) : c(cc), saved(cc.rsp) {
     base = (c.rsp - size - 0x100) & ~15ull;
     if (base < CurrentThread()->stack_lo + 0x10000)
@@ -33,7 +38,9 @@ struct Scratch {
              (unsigned long long)c.rsp);
     c.rsp = base - 0x40;
   }
-  ~Scratch() { c.rsp = saved; }
+  ~Scratch() {
+    if (std::uncaught_exceptions() == unwinding) c.rsp = saved;
+  }
 };
 
 bool OnStack(uint64_t a) {
