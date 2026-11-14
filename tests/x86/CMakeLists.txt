@@ -125,7 +125,6 @@ endif()
 # x86_prerequisites fails, naming them, unless
 # RECOMP_ALLOW_MISSING_TEST_TOOLS says this host cannot run these tests.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$" AND TARGET recomp_lift)
-  option(RECOMP_ALLOW_MISSING_TEST_TOOLS "Leave out the tests whose tools are missing instead of failing" OFF)
   find_program(RECOMP_LD_LLD ld.lld)
   set(_missing)
   if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
