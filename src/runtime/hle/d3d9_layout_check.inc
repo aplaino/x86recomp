@@ -128,6 +128,9 @@ static_assert(offsetof(D3DSURFACE_DESC, MultiSampleQuality) == 20, "D3DSURFACE_D
 static_assert(offsetof(D3DSURFACE_DESC, Width) == 24, "D3DSURFACE_DESC.Width");
 static_assert(offsetof(D3DSURFACE_DESC, Height) == 28, "D3DSURFACE_DESC.Height");
 static_assert(sizeof(D3DLOCKED_RECT) == 8, "D3DLOCKED_RECT size");
+static_assert(sizeof(D3DVOLUME_DESC) == 28, "D3DVOLUME_DESC size");
+static_assert(sizeof(D3DLOCKED_BOX) == 12, "D3DLOCKED_BOX size");
+static_assert(sizeof(D3DBOX) == 24, "D3DBOX size");
 static_assert(offsetof(D3DLOCKED_RECT, Pitch) == 0, "D3DLOCKED_RECT.Pitch");
 static_assert(offsetof(D3DLOCKED_RECT, pBits) == 4, "D3DLOCKED_RECT.pBits");
 static_assert(sizeof(D3DVIEWPORT9) == 24, "D3DVIEWPORT9 size");

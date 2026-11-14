@@ -111,12 +111,15 @@ struct Surface final : com::Tagged<com::TagOf("d3d9.Surface")> {
 struct Texture final : com::Tagged<com::TagOf("d3d9.Texture")> {
   uint32_t device = 0;
   bool cube = false;  // IDirect3DCubeTexture9: six faces of levels each
+  bool volume = false;  // IDirect3DVolumeTexture9: levels of depth slices
   uint32_t width = 0, height = 0, levels = 0, usage = 0, format = 0, pool = 0;
+  uint32_t volume_depth = 1;  // the top level's slices
   gfx::Format fmt = gfx::Format::Unknown;
   gfx::TextureId tex = 0;  // none for SYSTEMMEM/SCRATCH
   gfx::DepthId depth = 0;  // INTZ: the depth buffer behind `tex` (level 0)
   struct Level {
     uint32_t w = 0, h = 0, pitch = 0, size = 0;
+    uint32_t d = 1, slice_pitch = 0;  // volumes: slices, bytes per slice
     uint32_t mem = 0;  // lock shadow, allocated on first lock
     // mem is in the shared heap (SetUpSharedBuffers): the gfx frame of the
     // last upload from it, which the GPU may still be copying.
@@ -124,6 +127,7 @@ struct Texture final : com::Tagged<com::TagOf("d3d9.Texture")> {
     uint64_t gpu_use = 0;
     bool locked = false;
     gfx::Rect locked_rect{};
+    uint32_t locked_front = 0, locked_back = 1;  // volumes: the locked slices
     bool lock_readonly = false;
     std::shared_ptr<Surface> surface;  // GetSurfaceLevel, created lazily
   };
@@ -384,6 +388,10 @@ void SyncState(Device& d);
 uint32_t NewTexture(Device& d, uint32_t device, bool cube, uint32_t w, uint32_t h,
                     uint32_t levels, uint32_t usage, uint32_t fmt, uint32_t pool,
                     uint32_t* out);
+// CreateVolumeTexture: the same for a w x h x depth volume.
+uint32_t NewVolumeTexture(Device& d, uint32_t device, uint32_t w, uint32_t h, uint32_t depth,
+                          uint32_t levels, uint32_t usage, uint32_t fmt, uint32_t pool,
+                          uint32_t* out);
 
 // D3DXCompileShader's output: a shader function holding the HLSL
 // translation instead of shader model bytecode. Version token, one comment

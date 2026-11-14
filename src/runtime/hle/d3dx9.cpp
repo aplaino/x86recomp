@@ -305,6 +305,21 @@ HLE_NAMED("d3dx9_43.dll","D3DXCreateCubeTextureFromFileInMemoryEx", D3DXCreateCu
 }
 HLE_NAMED("d3dx9_43.dll","D3DXCreateCubeTexture", D3DXCreateCubeTexture43, 7) { return ImplD3DXCreateCubeTexture(c); }
 HLE_NAMED("d3dx9_43.dll","D3DXCreateTexture", D3DXCreateTexture43, 8) { return ImplD3DXCreateTexture(c); }
+// (pDevice, Width, Height, Depth, MipLevels, Usage, Format, Pool,
+// ppVolumeTexture): the defaults as CreateEmpty's.
+HLE_NAMED("d3dx9_43.dll", "D3DXCreateVolumeTexture", D3DXCreateVolumeTexture43, 9) {
+  const uint32_t out = Arg(c, 8);
+  Wr32(out, 0);
+  auto size = [](uint32_t v) { return v == 0 || v == D3DX_DEFAULT ? 256u : v; };
+  const uint32_t w = size(Arg(c, 1)), h = size(Arg(c, 2)), d = size(Arg(c, 3));
+  const uint32_t levels = Arg(c, 4) == D3DX_DEFAULT ? 0 : Arg(c, 4);
+  const uint32_t fmt = Arg(c, 6) == D3DFMT_UNKNOWN || Arg(c, 6) == D3DX_DEFAULT ? D3DFMT_A8R8G8B8 : Arg(c, 6);
+  uint32_t tex;
+  const uint32_t hr = NewVolumeTexture(*DeviceOf(Arg(c, 0)), Arg(c, 0), w, h, d, levels, Arg(c, 5), fmt,
+                                       Arg(c, 7), &tex);
+  if (hr == D3D_OK) Wr32(out, tex);
+  return hr;
+}
 
 // ---- maths -----------------------------------------------------------------------------
 // In single precision, operations in the order D3DX evaluates them (built
