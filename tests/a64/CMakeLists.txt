@@ -108,8 +108,9 @@ set_tests_properties(a64_lift_forms_vectors PROPERTIES FIXTURES_SETUP a64_forms_
 add_test(NAME a64_lift_forms COMMAND a64_lift_forms_test "${_elf}" "${_vectors}")
 set_tests_properties(a64_lift_forms PROPERTIES FIXTURES_REQUIRED a64_forms_vectors)
 foreach(_m ${_mutations})
-  add_test(NAME a64_lift_forms_mutation_${_m}
-    COMMAND a64_lift_forms_mutation_${_m} "${_elf}" "${_vectors}")
-  set_tests_properties(a64_lift_forms_mutation_${_m} PROPERTIES
-    FIXTURES_REQUIRED a64_forms_vectors WILL_FAIL TRUE)
+  string(JOIN "|" _cmd ${CMAKE_CROSSCOMPILING_EMULATOR} $<TARGET_FILE:a64_lift_forms_mutation_${_m}>
+         "${_elf}" "${_vectors}")
+  add_test(NAME a64_lift_forms_mutation_${_m} COMMAND "${CMAKE_COMMAND}" -DEXIT=1 "-DOUTPUT=FAIL form "
+           "-DCMD=${_cmd}" -P "${RECOMP_ROOT}/tests/expect_exit.cmake")
+  set_tests_properties(a64_lift_forms_mutation_${_m} PROPERTIES FIXTURES_REQUIRED a64_forms_vectors)
 endforeach()
