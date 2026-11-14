@@ -133,6 +133,7 @@ float Fv(uint32_t va, int i) { return std::bit_cast<float>(Rd32(va + 4 * uint32_
 
 struct GlContext {
   uint32_t hwnd = 0;
+  bool current = false;  // a thread's current context (one at a time)
   std::unique_ptr<gfx::Device> dev;
   std::unique_ptr<gl::Context> gl;
 };
@@ -221,17 +222,24 @@ HLE("opengl32.dll", wglCreateContext, 1) {
   return h;
 }
 
+// A context is current to one thread at a time: making one current that
+// another thread has fails with ERROR_BUSY.
 HLE("opengl32.dll", wglMakeCurrent, 2) {
   uint32_t dc = Arg(c, 0), h = Arg(c, 1);
+  std::lock_guard<std::mutex> l(g_mu);
   if (!h) {
+    if (t_current) t_current->current = false;
     t_current = nullptr;
     t_current_hglrc = t_current_dc = 0;
     return 1;
   }
-  std::lock_guard<std::mutex> l(g_mu);
   auto it = g_contexts.find(h);
   if (it == g_contexts.end()) return 0;
   GlContext* ctx = it->second.get();
+  if (ctx->current && ctx != t_current) {
+    SetLastError(170);  // ERROR_BUSY
+    return 0;
+  }
   if (!ctx->gl) {
     SDL_Window* w = SdlWindowFor(ctx->hwnd);
     if (!w) return 0;
@@ -241,12 +249,16 @@ HLE("opengl32.dll", wglMakeCurrent, 2) {
     ctx->dev->ResetSwapChain(pw, ph, false);
     ctx->gl = std::make_unique<gl::Context>(ctx->dev.get(), pw, ph);
   }
+  if (t_current) t_current->current = false;
+  ctx->current = true;
   t_current = ctx;
   t_current_hglrc = h;
   t_current_dc = dc;
   return 1;
 }
 
+// The calling thread's current context stops being current first; one
+// current to another thread cannot be deleted (ERROR_BUSY).
 HLE("opengl32.dll", wglDeleteContext, 1) {
   std::lock_guard<std::mutex> l(g_mu);
   auto it = g_contexts.find(Arg(c, 0));
@@ -254,6 +266,9 @@ HLE("opengl32.dll", wglDeleteContext, 1) {
   if (t_current == it->second.get()) {
     t_current = nullptr;
     t_current_hglrc = t_current_dc = 0;
+  } else if (it->second->current) {
+    SetLastError(170);  // ERROR_BUSY
+    return 0;
   }
   it->second->gl.reset();
   it->second->dev.reset();
