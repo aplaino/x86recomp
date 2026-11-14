@@ -10,7 +10,9 @@
 //   - a watch destroyed while armed leaves its pages writable;
 //   - threads writing while another arms and checks never lose a write;
 //   - threads writing one watched page at once all land (one disarms it,
-//     the others' faults are retried).
+//     the others' faults are retried);
+//   - a watch disarmed by another thread's fault can be destroyed as soon
+//     as it reads as written (that disarm is finished with it first).
 
 #include <signal.h>
 #include <unistd.h>
@@ -20,6 +22,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <thread>
 #include <vector>
 
@@ -199,6 +202,43 @@ int main() {
       for (int t = 0; t < kThreads; t++) CHECK(Load(at + uint64_t(t)) == uint8_t(r));
     }
     for (auto& t : writers) t.join();
+  }
+
+  {
+    // A writer's fault disarms the watch; its owner destroys it once it
+    // reads as written and scribbles over its memory. Many other armed
+    // watches keep the fault's disarm walking the list after it has taken
+    // the watch off: the destructor must wait for that walk, or the walk
+    // reads the scribble (and mprotects garbage, or follows a garbage
+    // list).
+    constexpr int kFillers = 1024, kRounds = 2000;
+    const gaddr base = g_vm.Reserve(0, uint32_t((kFillers + 1) * hp));
+    g_vm.Commit(base, uint32_t((kFillers + 1) * hp), Prot::RW);
+    std::vector<std::unique_ptr<watch::Watch>> fillers;
+    for (int i = 0; i < kFillers; i++) {
+      fillers.push_back(std::make_unique<watch::Watch>());
+      fillers.back()->Arm(g_mem, base + uint64_t(i + 1) * hp, hp);
+    }
+    alignas(watch::Watch) unsigned char buf[sizeof(watch::Watch)];
+    std::atomic<int> round{0};
+    std::thread writer([&] {
+      for (int r = 1; r <= kRounds; r++) {
+        while (round.load() < r) {
+        }
+        Store(base, uint8_t(r));
+      }
+    });
+    for (int r = 1; r <= kRounds; r++) {
+      auto* w = new (buf) watch::Watch;
+      w->Arm(g_mem, base, hp);
+      round.store(r);
+      while (w->clean()) {
+      }
+      w->~Watch();
+      std::memset(buf, 0xFF, sizeof buf);
+    }
+    writer.join();
+    for (const auto& f : fillers) CHECK(f->clean());
   }
 
   if (g_failures) return 1;

@@ -108,7 +108,9 @@ void Watch::Arm(GuestMemory& mem, gaddr va, uint64_t size) {
 }
 
 void Watch::Disarm() {
-  if (!armed_.load()) return;
+  // Always under the lock, even when not armed: another thread's disarm
+  // clears armed_ as it takes the watch off the list and still reads it
+  // until that disarm ends.
   Guard g;
   if (armed_.load()) R().DisarmOverlapping(lo_, hi_);
 }
