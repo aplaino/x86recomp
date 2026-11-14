@@ -353,11 +353,13 @@ inline void AddSat(Xmm& d, const Xmm& s, bool sub) {
     SetLane<T>(d, i, T(v < lo ? lo : v > hi ? hi : v));
   }
 }
-// PMULHW / PMULHUW: the high half of each word product.
+// PMULHW / PMULHUW: the high half of each word product (unsigned words
+// multiply as uint32_t: 0xFFFF * 0xFFFF overflows int32_t).
 template <typename T>
 inline void MulHi16(Xmm& d, const Xmm& s) {
+  using P = std::conditional_t<std::is_signed_v<T>, int32_t, uint32_t>;
   for (int i = 0; i < 8; i++)
-    SetLane<uint16_t>(d, i, uint16_t((int32_t(Lane<T>(d, i)) * int32_t(Lane<T>(s, i))) >> 16));
+    SetLane<uint16_t>(d, i, uint16_t((P(Lane<T>(d, i)) * P(Lane<T>(s, i))) >> 16));
 }
 // PMULHRSW (SSSE3): each word product scaled by 2^-15 with rounding.
 inline void MulHrs(Xmm& d, const Xmm& s) {
