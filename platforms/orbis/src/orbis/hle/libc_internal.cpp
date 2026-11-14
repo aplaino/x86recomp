@@ -119,18 +119,37 @@ std::string Format(const std::string& fmt, Args& a) {
     std::string spec = "%";
     size_t j = i + 1;
     while (j < fmt.size() && std::strchr("-+ #0", fmt[j])) spec += fmt[j++];
-    auto number = [&] {
+    // A width or precision, also from an argument; its value (-1: none).
+    auto number = [&]() -> int64_t {
       if (j < fmt.size() && fmt[j] == '*') {
-        spec += std::to_string(int32_t(a.Int()));
+        const int32_t v = int32_t(a.Int());
+        spec += std::to_string(v);
         j++;
-        return;
+        return v;
       }
-      while (j < fmt.size() && fmt[j] >= '0' && fmt[j] <= '9') spec += fmt[j++];
+      int64_t v = -1;
+      for (; j < fmt.size() && fmt[j] >= '0' && fmt[j] <= '9'; j++) {
+        spec += fmt[j];
+        v = std::min<int64_t>((v < 0 ? 0 : v) * 10 + (fmt[j] - '0'), INT32_MAX);
+      }
+      return v;
     };
     number();
+    int64_t precision = -1;
     if (j < fmt.size() && fmt[j] == '.') {
+      const size_t dot = spec.size();
       spec += fmt[j++];
-      number();
+      precision = number();
+      if (precision < 0) {
+        // "." alone is a precision of 0; a negative one from an argument
+        // is as if none were given (C99 7.19.6.1).
+        if (spec.size() == dot + 1) {
+          precision = 0;
+        } else {
+          spec.resize(dot);
+          precision = -1;
+        }
+      }
     }
     std::string len;
     while (j < fmt.size() && std::strchr("hljztL", fmt[j])) len += fmt[j++];
@@ -166,8 +185,17 @@ std::string Format(const std::string& fmt, Args& a) {
       }
       case 'c': buf = Snprintf(spec + "c", int(a.Int())); break;
       case 's': {
+        // With a precision, no more bytes than it are read: the array
+        // need not be terminated.
         const recomp::gaddr p = a.Int();
-        const std::string str = p ? recomp::GStr(p) : "(null)";
+        std::string str;
+        if (!p)
+          str = "(null)";
+        else if (precision < 0)
+          str = recomp::GStr(p);
+        else
+          for (int64_t k = 0; k < precision && recomp::Rd8(p + uint64_t(k)); k++)
+            str += char(recomp::Rd8(p + uint64_t(k)));
         buf = Snprintf(spec + "s", str.c_str());
         break;
       }

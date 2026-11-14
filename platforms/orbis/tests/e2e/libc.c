@@ -33,6 +33,10 @@ void _ZdlPv(void* p);
 float powf(float x, float y);
 double ldexp(double x, int e);
 
+// libkernel
+void* mmap(void* addr, unsigned long len, int prot, int flags, int fd, long off);
+int munmap(void* addr, unsigned long len);
+
 // libSceRtc
 typedef struct {
   unsigned short year, month, day, hour, minute, second;
@@ -69,6 +73,17 @@ extern int prx_inited;  // libTestPrx's
 static int c_checks(void) {
   int failed = 0;
   char buf[32] = "abcdef";
+  // 478: a negative precision from an argument is none.
+  fmt(buf, sizeof buf, "%.*d|%.*s|%.d", -1, 42, -1, "abc", 0);
+  failed += test_check(478, same(buf, "42|abc|"), 1);
+  // 479: %.3s of three bytes that end a mapping, without a terminator.
+  char* page = (char*)mmap(0, 0x8000, 3, 0x1000 | 2, -1, 0);
+  munmap(page + 0x4000, 0x4000);
+  page[0x3FFD] = 'x', page[0x3FFE] = 'y', page[0x3FFF] = 'z';
+  fmt(buf, sizeof buf, "%.3s", page + 0x3FFD);
+  failed += test_check(479, same(buf, "xyz"), 1);
+  munmap(page, 0x4000);
+  for (int i = 0; i < 7; i++) buf[i] = "abcdef"[i];
   failed += test_check(300, strlen("hello"), 5);
   failed += test_check(301, strcmp("abc", "abd") < 0, 1);
   memmove(buf + 1, buf, 5);
