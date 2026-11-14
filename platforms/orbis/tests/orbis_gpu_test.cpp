@@ -1278,6 +1278,58 @@ int main() {
           "an indirect draw starts at its first vertex through the shader's register");
   }
 
+  // DB_RENDER_CONTROL clears: a draw writing depth 0.5, then a
+  // stencil-only clear (depth clear value 1.0) with a colour target, then
+  // a draw at z 0.75 with a LESS depth test. The clear draws its colour
+  // target and keeps the depth, so the last draw draws nothing; the
+  // stencil reads the clear's 0x5A.
+  {
+    constexpr gaddr kClA = 0x1D2000, kClB = 0x1D2400, kClC = 0x1D2800, kDepth = 0x1D0000,
+                    kStencil = 0x1D1000;
+    auto clear_draw = [&](gaddr target, float z, uint32_t render_control, uint32_t depth_control) {
+      for (int i = 0; i < 3; i++) {
+        const float v[4] = {i == 1 ? 1.0f : -1.0f, i == 2 ? 1.0f : -1.0f, z, 1.0f};
+        std::memcpy(GPtr(kVerts + 16 * i), v, sizeof v);
+      }
+      Regs r;
+      DrawRegs(r, 0x11, target, kVsAt);
+      uint32_t* cx = r.context;
+      const float one = 1.0f;
+      cx[0x000] = render_control;
+      cx[0x00A] = 0x5A;                       // DB_STENCIL_CLEAR
+      std::memcpy(&cx[0x00B], &one, 4);       // DB_DEPTH_CLEAR
+      cx[0x010] = 3;
+      cx[0x011] = 1;
+      cx[0x012] = uint32_t(kDepth >> 8);
+      cx[0x013] = uint32_t(kStencil >> 8);
+      cx[0x200] = depth_control;
+      Draw(r, {3, 1, 0, 2});
+      Settle(true);
+    };
+    clear_draw(kClA, 0.5f, 0, 2u | 4u | 7u << 4);  // depth written, always
+    clear_draw(kClB, 0.5f, 2, 0);                   // stencil clear
+    clear_draw(kClC, 0.75f, 0, 2u | 1u << 4);       // depth test LESS, no writes
+    const bool drawn = Covered(0x11, kClB, dev.get());
+    float px[8 * 8 * 4] = {};
+    gfx::TextureId tex = 0;
+    Exclusive([&] { tex = TargetAt(kClC, 8, 8); });
+    if (tex) dev->ReadImage(tex, 0, 0, {0, 0, 8, 8}, px, 8 * 16);
+    const bool kept = tex && px[3] == 0.0f;
+    uint32_t user[16] = {};
+    TSharp(user, kStencil, 8, 8, 9, 14, 0, 1);
+    user[1] = 1u << 20 | 4u << 26;  // 8, UINT
+    VSharp(user + 8, kOut, 16);
+    user[12] = 6;
+    user[13] = 3;
+    Wr32(kOut, 0xEEEEEEEEu);
+    Run(kLoadAt, user, 16);
+    const bool stencil = Rd32(kOut) == 0x5A;
+    if (!drawn || !kept || !stencil)
+      std::printf("  clear drawn %d, depth kept %d (alpha %g), stencil %08X\n", drawn, kept, px[3],
+                  Rd32(kOut));
+    Check(drawn && kept && stencil, "a stencil clear keeps the depth and draws its colour targets");
+  }
+
   // A CMASK fast clear from a dispatch: a draw into an R8G8B8A8 target
   // with FAST_CLEAR (its CMASK cleared in memory), a dispatch storing
   // zeros over the whole CMASK, then a draw that covers no pixel: the

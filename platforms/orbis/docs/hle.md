@@ -179,7 +179,11 @@ library.
   address, each with bit 63 set (measured on 11.00 under the control
   word 0x7FC00, the only one handled: a query's begin at +0, its end at
   +8). Backend 0 carries the whole count and the rest stay at 0, so the
-  begin-to-end differences add up as the console's do. Buffer loads at a 64-bit address (ADDR64, a V# of base
+  begin-to-end differences add up as the console's do. A draw with
+  DB_RENDER_CONTROL's depth or stencil clear writes the clear value over
+  the slices it draws (all of each), the other one kept; its colour
+  targets are drawn as its tests of what it clears allow, comparing the
+  clear value with itself. Buffer loads at a 64-bit address (ADDR64, a V# of base
   0 and no range) whose address is a lane's offset added to a known
   pointer read the bytes that offset can reach when its range is known
   (small constants picked per lane, added and multiplied: any stage, no

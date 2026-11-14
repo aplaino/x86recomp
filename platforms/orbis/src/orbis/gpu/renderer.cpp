@@ -125,6 +125,22 @@ gfx::StencilOp StencilOp(uint32_t op) {
   }
   FatalF("GPU: stencil operation %u is not drawn yet", op);
 }
+// Whether a depth or stencil test of op passes for the draw's value a
+// against the target's b.
+bool Passes(gfx::CompareOp op, uint32_t a, uint32_t b) {
+  using C = gfx::CompareOp;
+  switch (op) {
+    case C::Never: return false;
+    case C::Less: return a < b;
+    case C::Equal: return a == b;
+    case C::LessEqual: return a <= b;
+    case C::Greater: return a > b;
+    case C::NotEqual: return a != b;
+    case C::GreaterEqual: return a >= b;
+    case C::Always: return true;
+  }
+  return true;
+}
 gfx::AddressMode Address(uint32_t clamp) {
   return clamp == 0 ? gfx::AddressMode::Repeat
          : clamp == 1 ? gfx::AddressMode::MirroredRepeat
@@ -241,7 +257,8 @@ struct State {
   gfx::ProgramId stencil_program = 0, stencil_uint = 0;  // SampledStencil's
   std::map<uint32_t, gfx::ProgramId> meta_tests;  // MetaTest's, by mask
   gfx::BufferId meta_draw = 0;
-  gfx::ProgramId htile_clear = 0, color_clear = 0;  // HtileClear's, ColorClear's
+  // HtileClear's, ColorClear's, StencilClear's
+  gfx::ProgramId htile_clear = 0, color_clear = 0, stencil_clear = 0;
   std::map<gaddr, Cmask> cmasks;
   gfx::ProgramId strip_program = 0;    // StripProgram's
   // Geometry shaders' GPU buffers: the ESGS and GSVS rings, the GS's
@@ -601,6 +618,30 @@ void HtileClear(State& s, DepthTarget& d, float z) {
     c.depth_layer = int(i);
     s.dev->DrawProgram(c);
   }
+}
+
+// Writes stencil value v over layer `layer` of d, its depth kept.
+void StencilClear(State& s, DepthTarget& d, uint8_t v, uint32_t layer) {
+  if (!s.stencil_clear) {
+    gfx::ProgramDesc pd;
+    pd.vs.glsl = kFullScreenVs;
+    pd.fs.glsl = "void main() {}\n";
+    s.stencil_clear = s.dev->CreateProgram(pd);
+  }
+  if (!s.stencil_clear) return;
+  gfx::ProgramDraw c;
+  c.program = s.stencil_clear;
+  c.depth = d.depth;
+  c.depth_layer = d.layers ? int(layer) : 0;
+  c.viewport = {0, 0, d.w, d.h, 0.0f, 1.0f};
+  c.scissor = {0, 0, int32_t(d.w), int32_t(d.h)};
+  c.state.stencil = true;
+  c.state.stencil_front = {gfx::StencilOp::Replace, gfx::StencilOp::Replace, gfx::StencilOp::Replace,
+                           gfx::CompareOp::Always};
+  c.state.stencil_back = c.state.stencil_front;
+  c.state.stencil_ref = v;
+  c.vertex_count = 3;
+  s.dev->DrawProgram(c);
 }
 
 // Fills a colour target with a clear colour (CB_COLORn_CLEAR_WORD0-1: the
@@ -1683,6 +1724,7 @@ void Draw(const Regs& r, const DrawCall& call) {
   if (cb_mode == 2) return;
   const uint32_t zfmt = cx[kDbZInfo] & 3;
   const bool stencil = cx[kDbStencilInfo] & 1;
+  uint32_t clears = 0;  // DB_RENDER_CONTROL's depth (1) and stencil (2) clears
   if (zfmt) {
     const uint32_t size = cx[kDbDepthSize];
     const uint32_t dw = ((size & 0x7FF) + 1) * 8, dh = (((size >> 11) & 0x7FF) + 1) * 8;
@@ -1709,12 +1751,20 @@ void Draw(const Regs& r, const DrawCall& call) {
       for (uint32_t i = 0; i < std::max(dt->layers, 1u); i++)
         s.dev->ClearDepth(d.depth, AsFloat(cx[kDbDepthClear]), -1, int(i));
     }
-    // A depth (and stencil) clear: the draw writes the clear values.
-    if (cx[kDbRenderControl] & 3) {
-      for (uint32_t i = first; i <= last; i++)
-        s.dev->ClearDepth(d.depth, AsFloat(cx[kDbDepthClear]),
-                          (cx[kDbRenderControl] & 2) ? int(cx[kDbStencilClear] & 0xFF) : -1, int(i));
-      return;
+    // A depth or stencil clear (DEPTH_CLEAR_ENABLE, STENCIL_CLEAR_ENABLE;
+    // the latter only with a stencil): the draw's depth or stencil is the
+    // clear value, written over the slices it draws (all of each). Its
+    // colour targets are drawn too (below).
+    clears = cx[kDbRenderControl] & (stencil ? 3 : 1);
+    if (clears) {
+      for (uint32_t i = first; i <= last; i++) {
+        if (clears & 1)
+          s.dev->ClearDepth(d.depth, AsFloat(cx[kDbDepthClear]),
+                            (clears & 2) ? int(cx[kDbStencilClear] & 0xFF) : -1, int(i));
+        else
+          StencilClear(s, *dt, uint8_t(cx[kDbStencilClear]), i);
+      }
+      if (!ntargets) return;
     }
     if (last != first) FatalF("GPU: a draw into several depth slices is not drawn yet");
     d.depth_layer = dt->layers ? int(first) : 0;
@@ -1824,6 +1874,33 @@ void Draw(const Regs& r, const DrawCall& call) {
     ps_.stencil_ref = uint8_t(ref & 0xFF);
     ps_.stencil_read_mask = uint8_t(ref >> 8);
     ps_.stencil_write_mask = uint8_t(ref >> 16);
+  }
+  // A clear's tests of what it clears compare the clear value with what
+  // the target holds now, the same value: they pass or fail the whole
+  // draw, and what they test needs no more writes.
+  if (clears) {
+    bool pass = true;
+    if (clears & 1) {
+      pass = !ps_.depth_test || Passes(ps_.depth_compare, 0, 0);
+      ps_.depth_test = ps_.depth_write = false;
+    }
+    if ((clears & 2) && ps_.stencil) {
+      const uint32_t m = ps_.stencil_read_mask, ref = ps_.stencil_ref & m,
+                     v = cx[kDbStencilClear] & m;
+      const bool front = Passes(ps_.stencil_front.compare, ref, v);
+      if (front != Passes(ps_.stencil_back.compare, ref, v))
+        FatalF("GPU: a stencil clear whose faces' stencil tests differ is not drawn yet");
+      pass = pass && front;
+      ps_.stencil = false;
+    }
+    if (!pass) {
+      const auto writes = [](const gfx::StencilFace& f) {
+        return f.fail != gfx::StencilOp::Keep || f.depth_fail != gfx::StencilOp::Keep;
+      };
+      if (ps_.stencil && ps_.stencil_write_mask && (writes(ps_.stencil_front) || writes(ps_.stencil_back)))
+        FatalF("GPU: a depth clear whose depth test fails, with stencil writes, is not drawn yet");
+      return;
+    }
   }
   const uint32_t mask = cx[kCbTargetMask];
   for (int i = 0; i < ntargets; i++) {
