@@ -39,7 +39,9 @@ void Add12(Ld12& x, const Ld12& y);
 void Ld12Mul(Ld12& x, const Ld12& y);
 // __multtenpow12(x, n, mult12): x *= 10^n, n's octal digits from the
 // lowest; without mult12 the guard word is cleared first (when n is not
-// 0).
+// 0). |n| < 8192, as the tables go (the original does not check; its
+// callers keep |n| within the 80-bit exponent range, 5200 at most): fatal
+// otherwise.
 void MultTenPow12(Ld12& x, int n, bool mult12);
 
 }  // namespace recomp::native::msvc_crt::vc6

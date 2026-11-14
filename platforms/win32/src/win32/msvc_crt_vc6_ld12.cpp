@@ -2,6 +2,8 @@
 
 #include "win32/msvc_crt_vc6_ld12.h"
 
+#include "runtime/log.h"
+
 namespace recomp::native::msvc_crt::vc6 {
 
 void Shl12(Ld12& x) {
@@ -200,6 +202,8 @@ constexpr uint16_t kPow10[2][29][6] = {
 
 void MultTenPow12(Ld12& x, int n, bool mult12) {
   if (!n) return;
+  // The tables reach 10^8191 (octal digits up to 10^4096's).
+  if (n <= -8192 || n >= 8192) FatalF("msvc_crt::vc6: __multtenpow12 by 10^%d", n);
   const bool neg = n < 0;
   if (neg) n = -n;
   if (!mult12) x.SetW(0, 0);
