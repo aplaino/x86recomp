@@ -46,8 +46,15 @@ file(WRITE "${_title_game}/Sub/other.dat" "x")
 set(_title_shots "${CMAKE_CURRENT_BINARY_DIR}/title_shots")
 add_test(NAME xbox360_runtime_data COMMAND "${CMAKE_COMMAND}" -E rm -rf "${_title_data}" "${_title_shots}")
 add_test(NAME xbox360_runtime_shots COMMAND "${CMAKE_COMMAND}" -E make_directory "${_title_shots}")
-set_tests_properties(xbox360_runtime_data xbox360_runtime_shots PROPERTIES FIXTURES_SETUP xbox360_runtime_data)
-set_tests_properties(xbox360_runtime_shots PROPERTIES DEPENDS xbox360_runtime_data)
+# A file in the profile's settings directory that is no setting, as a
+# host's file manager leaves: the profile reads past it.
+set(_title_stray "${CMAKE_CURRENT_BINARY_DIR}/title_stray")
+file(WRITE "${_title_stray}/Thumbs.db" "x")
+add_test(NAME xbox360_runtime_stray COMMAND "${CMAKE_COMMAND}" -E copy_directory "${_title_stray}"
+         "${_title_data}/profiles/E000000000000001/54540001")
+set_tests_properties(xbox360_runtime_data xbox360_runtime_shots xbox360_runtime_stray PROPERTIES
+                     FIXTURES_SETUP xbox360_runtime_data)
+set_tests_properties(xbox360_runtime_shots xbox360_runtime_stray PROPERTIES DEPENDS xbox360_runtime_data)
 add_test(NAME xbox360_runtime COMMAND xbox360_title "${_bin}/title.xex" "${_title_game}" "${_title_data}")
 # Its window and GPU device (lavapipe will do) on SDL's offscreen video
 # driver.

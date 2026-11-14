@@ -9,6 +9,7 @@
 // Xenia gives one, as NO_VALUE where the runtime knows the setting, and is
 // fatal otherwise, to be added with its evidence.
 
+#include <charconv>
 #include <cstdio>
 #include <fstream>
 #include <iterator>
@@ -101,7 +102,13 @@ void Load(const Profile& p, uint32_t owner) {
   if (!g_loaded.insert(owner).second) return;
   std::error_code ec;
   for (const auto& f : std::filesystem::directory_iterator(p.directory / Hex(owner), ec)) {
-    uint32_t id = uint32_t(std::stoul(f.path().filename().string(), nullptr, 16));
+    // A setting's file is named by its id in 8 hex digits (Store); anything
+    // else in the directory is not one.
+    std::string name = f.path().filename().string();
+    uint32_t id;
+    auto [end, err] = std::from_chars(name.data(), name.data() + name.size(), id, 16);
+    if (name.size() != 8 || err != std::errc() || end != name.data() + name.size() || !f.is_regular_file(ec))
+      continue;
     std::ifstream in(f.path(), std::ios::binary);
     g_store[{owner, id}].assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
   }
