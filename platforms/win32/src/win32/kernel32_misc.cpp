@@ -29,13 +29,31 @@ uint32_t RsrcBase() {
 
 bool IsOwnModule(uint32_t h) { return h == 0 || h == g_win32->img.image_base; }
 
-// Name-or-id argument as a comparable key: "#123" for integer ids.
-std::string ResKey(uint32_t v) {
-  if (v < 0x10000) return "#" + std::to_string(v);
+// Name-or-id argument as a comparable key: "#123" for integer ids. A
+// string "#..." is an id too, read as RtlCharToInteger reads it in base 10
+// (blanks, a sign, then digits up to the first other character, wrapping
+// at 32 bits); false (ERROR_INVALID_PARAMETER) if it is not a 16-bit one.
+bool ResKey(uint32_t v, std::string* key) {
+  if (v < 0x10000) {
+    *key = "#" + std::to_string(v);
+    return true;
+  }
   std::string s = GStr(v);
-  if (!s.empty() && s[0] == '#') return "#" + std::to_string(std::stoul(s.substr(1)));
+  if (!s.empty() && s[0] == '#') {
+    size_t i = 1;
+    while (i < s.size() && uint8_t(s[i]) <= ' ') i++;
+    const bool minus = i < s.size() && s[i] == '-';
+    if (i < s.size() && (s[i] == '-' || s[i] == '+')) i++;
+    uint32_t id = 0;
+    for (; i < s.size() && s[i] >= '0' && s[i] <= '9'; i++) id = id * 10 + uint32_t(s[i] - '0');
+    if (minus) id = 0 - id;
+    if (id > 0xFFFF) return false;
+    *key = "#" + std::to_string(id);
+    return true;
+  }
   for (auto& ch : s) ch = char(std::toupper(uint8_t(ch)));
-  return s;
+  *key = s;
+  return true;
 }
 
 // Key of a directory entry (names are UTF-16, upper-cased like Windows).
@@ -79,14 +97,24 @@ uint32_t FindResourceImpl(const std::string& type, const std::string& name, uint
 
 HLE("kernel32.dll", FindResourceA, 3) {
   if (!IsOwnModule(Arg(c, 0))) return 0;
-  uint32_t r = FindResourceImpl(ResKey(Arg(c, 2)), ResKey(Arg(c, 1)), 0);
+  std::string type, name;
+  if (!ResKey(Arg(c, 2), &type) || !ResKey(Arg(c, 1), &name)) {
+    SetLastError(kErrorInvalidParameter);
+    return 0;
+  }
+  uint32_t r = FindResourceImpl(type, name, 0);
   if (!r) SetLastError(kErrorResourceNameNotFound);
   return r;
 }
 
 HLE("kernel32.dll", FindResourceExA, 4) {
   if (!IsOwnModule(Arg(c, 0))) return 0;
-  uint32_t r = FindResourceImpl(ResKey(Arg(c, 1)), ResKey(Arg(c, 2)), Arg(c, 3) & 0xFFFF);
+  std::string type, name;
+  if (!ResKey(Arg(c, 1), &type) || !ResKey(Arg(c, 2), &name)) {
+    SetLastError(kErrorInvalidParameter);
+    return 0;
+  }
+  uint32_t r = FindResourceImpl(type, name, Arg(c, 3) & 0xFFFF);
   if (!r) SetLastError(kErrorResourceNameNotFound);
   return r;
 }
@@ -100,7 +128,9 @@ HLE("kernel32.dll", LockResource, 1) { return Arg(c, 0); }
 
 // Enumeration callbacks get either an integer id or a guest string.
 uint32_t KeyArg(const std::string& key, uint32_t* tmp) {
-  if (key[0] == '#') return uint32_t(std::stoul(key.substr(1)));
+  if (key.size() > 1 && key[0] == '#' &&
+      key.find_first_not_of("0123456789", 1) == std::string::npos)
+    return uint32_t(std::stoul(key.substr(1)));
   *tmp = HeapAllocProcess(uint32_t(key.size() + 1), false);
   PutStr(*tmp, key);
   return *tmp;
@@ -122,8 +152,13 @@ HLE("kernel32.dll", EnumResourceTypesA, 3) {
 
 HLE("kernel32.dll", EnumResourceNamesA, 4) {
   uint32_t rsrc = RsrcBase(), type = Arg(c, 1), fn = Arg(c, 2), param = Arg(c, 3);
+  std::string tkey;
   if (!rsrc || !IsOwnModule(Arg(c, 0))) return 0;
-  uint32_t t = FindEntry(rsrc, rsrc, ResKey(type));
+  if (!ResKey(type, &tkey)) {
+    SetLastError(kErrorInvalidParameter);
+    return 0;
+  }
+  uint32_t t = FindEntry(rsrc, rsrc, tkey);
   if (!(t & 0x80000000)) return 0;
   uint32_t dir = rsrc + (t & 0x7FFFFFFF);
   uint32_t n = uint32_t(Rd16(dir + 12)) + Rd16(dir + 14);
@@ -140,10 +175,15 @@ HLE("kernel32.dll", EnumResourceNamesA, 4) {
 HLE("kernel32.dll", EnumResourceLanguagesA, 5) {
   uint32_t rsrc = RsrcBase(), type = Arg(c, 1), name = Arg(c, 2), fn = Arg(c, 3),
            param = Arg(c, 4);
+  std::string tkey, nkey;
   if (!rsrc || !IsOwnModule(Arg(c, 0))) return 0;
-  uint32_t t = FindEntry(rsrc, rsrc, ResKey(type));
+  if (!ResKey(type, &tkey) || !ResKey(name, &nkey)) {
+    SetLastError(kErrorInvalidParameter);
+    return 0;
+  }
+  uint32_t t = FindEntry(rsrc, rsrc, tkey);
   if (!(t & 0x80000000)) return 0;
-  uint32_t nd = FindEntry(rsrc, rsrc + (t & 0x7FFFFFFF), ResKey(name));
+  uint32_t nd = FindEntry(rsrc, rsrc + (t & 0x7FFFFFFF), nkey);
   if (!(nd & 0x80000000)) return 0;
   uint32_t dir = rsrc + (nd & 0x7FFFFFFF);
   uint32_t n = uint32_t(Rd16(dir + 12)) + Rd16(dir + 14);
@@ -342,8 +382,9 @@ HLE("version.dll", GetFileVersionInfoSizeA, 2) {
     SetLastError(kErrorFileNotFound);
     return 0;
   }
-  // Room after the resource for ANSI copies handed out by VerQueryValueA.
-  return size * 3;
+  // As Windows: the resource, a 4-byte signature, then as much again for
+  // the ANSI copies VerQueryValueA hands out.
+  return size * 2 + 4;
 }
 
 HLE("version.dll", GetFileVersionInfoA, 4) {
@@ -354,8 +395,8 @@ HLE("version.dll", GetFileVersionInfoA, 4) {
     return 0;
   }
   std::memcpy(GPtr(buf), GPtr(va), std::min(len, size));
-  // Remember where the scratch area starts (stored after the resource).
-  if (len >= size + 8) Wr32(buf + size, size + 8);
+  // The signature Windows puts after the block when the buffer has room.
+  if (len >= size + 4) std::memcpy(GPtr(buf + size), "FE2X", 4);
   return 1;
 }
 
@@ -402,15 +443,19 @@ HLE("version.dll", VerQueryValueA, 4) {
   bool text;
   if (!VersionLookup(buf, path, 0, &value, &vlen, &text)) return 0;
   if (text) {
-    // Hand out an ANSI copy from the scratch area after the resource.
-    uint32_t size = Rd16(buf);
-    uint32_t scratch_off = Rd32(buf + size);
-    std::string s = Narrow(GWStr(value));
-    uint32_t dst = buf + scratch_off;
-    PutStr(dst, s);
-    Wr32(buf + size, scratch_off + uint32_t(s.size()) + 1);
+    // An ANSI copy of the value's characters (the count includes the NUL
+    // the resource stores) at the same offset in the area after the block
+    // and its signature, as Windows places it: in bounds, and the same
+    // place for every query of it. At most what is left of the block from
+    // there, as WideCharToMultiByte is bounded there.
+    const uint32_t size = Rd16(buf), pos = value - buf, room = pos < size ? size - pos : 0;
+    std::u16string w;
+    for (uint32_t i = 0; i < vlen && 2 * i + 2 <= room; i++) w.push_back(Rd16(value + 2 * i));
+    std::string s = Narrow(w);
+    const uint32_t dst = buf + size + 4 + pos;
+    std::memcpy(GPtr(dst), s.data(), s.size());
     Wr32(out_ptr, dst);
-    Wr32(out_len, uint32_t(s.size() + 1));
+    Wr32(out_len, uint32_t(s.size()));
   } else {
     Wr32(out_ptr, value);
     Wr32(out_len, vlen);
