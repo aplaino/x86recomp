@@ -55,18 +55,17 @@ uint32_t CreateEnumerator(uint32_t app, uint32_t message, uint32_t items, uint32
 // items returned.
 HLE(kXam, 592, XamEnumerate) {
   uint32_t flags = Arg(c, 1), buffer = Arg(c, 2), size = Arg(c, 3), returned = Arg(c, 4), ov = Arg(c, 5);
-  uint32_t obj = HandleObject(Arg(c, 0));
+  HandleRef h(Arg(c, 0));
+  uint32_t obj = h.obj;
   {
     std::lock_guard<std::mutex> g(g_lock);
     if (!g_enumerators.count(obj)) return kErrorInvalidHandle;
   }
-  Reference(obj);
   uint32_t request = SystemAlloc(0x20);
   const uint32_t fields[8] = {0, flags | 0x80000000, obj + kHeaderSize, buffer, size, Rd32(obj + 0x10), returned, ov};
   for (uint32_t k = 0; k < 8; k++) Wr32(request + 4 * k, fields[k]);
   uint32_t hr = ProcessXMsgRequest(c, Rd32(obj), Rd32(obj + 4), ov, request, 0x20);
   SystemFree(request);
-  Dereference(obj);
   return Win32FromHResult(hr);
 }
 

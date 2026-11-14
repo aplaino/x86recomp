@@ -202,6 +202,9 @@ returns.
   the code that waits; queues (KQUEUE) are not there yet.
 - Handles name objects by guest address and hold references; objects the
   kernel created (NtCreateEvent, threads) go with their last reference.
+  A call that looks a handle up holds a reference on its object until it
+  returns, a wait until it ends, so closing the handle meanwhile frees
+  nothing in use.
 - Critical sections follow the kernel's algorithm on the guest structure;
   spin locks hold their owner's KPCR; IRQL is the KPCR's byte, and no
   interrupt or DPC ever runs.

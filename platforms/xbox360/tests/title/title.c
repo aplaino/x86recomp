@@ -501,6 +501,8 @@ static u32 EventWaiter(void* event) {
   return status;
 }
 
+static u32 Quick(void* arg) { return (u32)(uintptr_t)arg; }
+
 static u32 Setter(void* arg) {
   int64_t ms = -200000;
   KeDelayExecutionThread(1, 0, &ms);
@@ -606,6 +608,15 @@ static void Threads(void) {
   KeSetEvent(sync, 1, 0);
   CHECK(NtWaitForSingleObjectEx(h, 1, 0, 0) == 0 && handed[0] == 1 && sync[1] == 0);
   NtClose(h);
+  // A thread whose start routine returns at once: its handle and id are
+  // still its own (its creator holds it until they are written).
+  for (u32 k = 0; k < 64; k++) {
+    CHECK(ExCreateThread(&h, 0, &id, (void*)thread_startup, (void*)Quick, (void*)(uintptr_t)k, 0) == 0);
+    CHECK(ObReferenceObjectByHandle(h, __imp_ExThreadObjectType, &obj) == 0 && *At(obj + 0x14C) == id);
+    CHECK(NtWaitForSingleObjectEx(h, 1, 0, 0) == 0 && *At(obj + 0x140) == k);
+    ObDereferenceObject(obj);
+    NtClose(h);
+  }
 
   // A relative timeout of 0x8000000000000000 (XAPI's INFINITE) waits
   // until the object is signalled.
@@ -1267,6 +1278,29 @@ static void Owners(void) {
   CHECK(NtReleaseMutant(mutant, &previous) == 0);
   NtClose(mutant);
   NtClose(e);
+}
+
+// A wait on a handle closed meanwhile goes on on its object.
+static u32 HandleWaiter(void* handle) {
+  int64_t timeout = -2000000;  // 200 ms
+  return NtWaitForSingleObjectEx((u32)(uintptr_t)handle, 1, 0, &timeout);
+}
+
+// The event a wait is on outlives its handle: an event created after the
+// close is another one, and its set does not end the wait.
+static void Closes(void) {
+  int64_t ten_ms = -100000;
+  u32 h = 0, e = 0, obj = 0;
+  CHECK(NtCreateEvent(&e, 0, 0, 0) == 0);
+  CHECK(ExCreateThread(&h, 0, 0, (void*)thread_startup, (void*)HandleWaiter, (void*)(uintptr_t)e, 0) == 0);
+  KeDelayExecutionThread(1, 0, &ten_ms);
+  u32 other = 0;
+  CHECK(NtClose(e) == 0 && NtCreateEvent(&other, 0, 0, 0) == 0 && NtSetEvent(other, 0) == 0);
+  CHECK(NtWaitForSingleObjectEx(h, 1, 0, 0) == 0);
+  CHECK(ObReferenceObjectByHandle(h, __imp_ExThreadObjectType, &obj) == 0 && *At(obj + 0x140) == kStatusTimeout);
+  ObDereferenceObject(obj);
+  NtClose(h);
+  NtClose(other);
 }
 
 // PulseEvent lets the threads waiting through, all of them for a
@@ -2463,6 +2497,7 @@ int main(void) {
   Pulses();
   Handoff();
   Owners();
+  Closes();
   Strings();
   Variables();
   Files();

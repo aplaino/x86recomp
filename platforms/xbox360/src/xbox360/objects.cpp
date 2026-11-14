@@ -551,10 +551,16 @@ uint32_t NewHandle(uint32_t obj) {
 }
 
 uint32_t HandleObject(uint32_t handle) {
-  if (handle == kCurrentThreadHandle) return KThread(CurrentThread());
+  uint32_t obj = handle == kCurrentThreadHandle ? KThread(CurrentThread()) : 0;
   std::lock_guard<std::mutex> g(g_handles);
-  auto it = g_table.find(handle);
-  return it == g_table.end() ? 0 : it->second;
+  if (!obj) {
+    auto it = g_table.find(handle);
+    if (it == g_table.end()) return 0;
+    obj = it->second;
+  }
+  // Under the lock that CloseHandle takes the handle out under.
+  if (auto it = g_owned.find(obj); it != g_owned.end()) it->second.refs++;
+  return obj;
 }
 
 bool CloseHandle(uint32_t handle) {

@@ -93,7 +93,8 @@ HLE(kXam, 651, XNotifyGetNext) {
   uint32_t match = Arg(c, 1), id_ptr = Arg(c, 2), value_ptr = Arg(c, 3);
   if (id_ptr) Wr32(id_ptr, 0);
   if (value_ptr) Wr32(value_ptr, 0);
-  uint32_t obj = HandleObject(Arg(c, 0));
+  HandleRef h(Arg(c, 0));
+  uint32_t obj = h.obj;
   std::lock_guard<std::mutex> g(g_lock);
   auto it = g_listeners.find(obj);
   if (it == g_listeners.end()) return 0;

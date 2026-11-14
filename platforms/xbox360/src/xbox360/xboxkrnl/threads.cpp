@@ -36,13 +36,14 @@ std::vector<uint32_t> g_terminate_routines;
 HLE(kKrnl, 13, ExCreateThread) {
   uint32_t handle_ptr = Arg(c, 0), id_ptr = Arg(c, 2), flags = Arg(c, 6);
   Thread* t = CreateThread({Arg(c, 1), Arg(c, 3), Arg(c, 4), Arg(c, 5), flags});
-  if (handle_ptr && flags & kCreateKThread) {
-    Reference(KThread(t));
-    Wr32(handle_ptr, KThread(t));
-  } else if (handle_ptr) {
-    Wr32(handle_ptr, NewHandle(KThread(t)));
-  }
+  uint32_t k = KThread(t);
   if (id_ptr) Wr32(id_ptr, ThreadId(t));
+  if (handle_ptr && flags & kCreateKThread) {
+    Wr32(handle_ptr, k);  // with CreateThread's reference
+    return kStatusSuccess;
+  }
+  if (handle_ptr) Wr32(handle_ptr, NewHandle(k));
+  Dereference(k);
   return kStatusSuccess;
 }
 
@@ -105,8 +106,8 @@ HLE(kKrnl, 146, KeResumeThread) { return ResumeThread(ThreadArg(c, Arg(c, 0))); 
 
 // NtResumeThread(handle, *previous count), NtSuspendThread(handle, *previous count).
 HLE(kKrnl, 245, NtResumeThread) {
-  uint32_t obj = HandleObject(Arg(c, 0));
-  Thread* t = ThreadOf(obj);
+  HandleRef h(Arg(c, 0));
+  Thread* t = ThreadOf(h.obj);
   if (!t) return kStatusInvalidHandle;
   uint32_t old = ResumeThread(t);
   if (Arg(c, 1)) Wr32(Arg(c, 1), old);
@@ -114,7 +115,8 @@ HLE(kKrnl, 245, NtResumeThread) {
 }
 
 HLE(kKrnl, 252, NtSuspendThread) {
-  Thread* t = ThreadOf(HandleObject(Arg(c, 0)));
+  HandleRef h(Arg(c, 0));
+  Thread* t = ThreadOf(h.obj);
   if (!t) return kStatusInvalidHandle;
   uint32_t old = SuspendThread(t);
   if (Arg(c, 1)) Wr32(Arg(c, 1), old);
@@ -142,10 +144,10 @@ HLE(kKrnl, 122, KeInsertQueueApc) { return InsertApc(Arg(c, 0), Arg(c, 1), Arg(c
 // NtQueueApcThread(thread handle, routine, context, argument 1, 2): a user
 // APC of the kernel's own, routine(context, argument 1, argument 2).
 HLE(kKrnl, 227, NtQueueApcThread) {
-  uint32_t kthread = HandleObject(Arg(c, 0));
-  if (!kthread || Rd8(kthread) != kThreadObject) return kStatusInvalidHandle;
-  return QueueApc(kthread, Arg(c, 1), kUserMode, Arg(c, 2), Arg(c, 3), Arg(c, 4)) ? kStatusSuccess
-                                                                                   : kStatusUnsuccessful;
+  HandleRef h(Arg(c, 0));
+  if (!h.obj || Rd8(h.obj) != kThreadObject) return kStatusInvalidHandle;
+  return QueueApc(h.obj, Arg(c, 1), kUserMode, Arg(c, 2), Arg(c, 3), Arg(c, 4)) ? kStatusSuccess
+                                                                                 : kStatusUnsuccessful;
 }
 
 // Critical regions disable kernel APCs: the thread's count goes negative

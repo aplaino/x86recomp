@@ -82,9 +82,9 @@ uint32_t StartXMsgRequest(ppc::Ctx& c, uint32_t app, uint32_t message, uint32_t 
   if (uint32_t routine = Rd32(ov + 0x10)) {
     QueueApc(KThread(CurrentThread()), routine, kUserMode, Rd32(ov), length, ov);
   } else if (uint32_t event = Rd32(ov + 0xC)) {
-    uint32_t obj = HandleObject(event);
-    if (!obj) ppc::Fatal(&c, "XMsg: the XOVERLAPPED's event %x is not a handle", event);
-    SetSignal(obj, 1);
+    HandleRef h(event);
+    if (!h.obj) ppc::Fatal(&c, "XMsg: the XOVERLAPPED's event %x is not a handle", event);
+    SetSignal(h.obj, 1);
   }
   return 0;
 }

@@ -136,10 +136,12 @@ HLE(kXam, 791, XamSessionRefObjByHandle) {
   uint32_t obj = HandleObject(Arg(c, 0));
   {
     std::lock_guard<std::mutex> g(g_lock);
-    if (!g_session_objects.count(obj)) return 6;
+    if (!g_session_objects.count(obj)) {
+      if (obj) Dereference(obj);
+      return 6;
+    }
   }
-  Reference(obj);
-  Wr32(Arg(c, 1), obj);
+  Wr32(Arg(c, 1), obj);  // with HandleObject's reference
   return 0;
 }
 

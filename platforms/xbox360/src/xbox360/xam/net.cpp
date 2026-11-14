@@ -1173,10 +1173,12 @@ HLE(kXam, 67, NetDll_XNetDnsLookup) {
   if (!valid) return kWsaEfault;
   uint32_t event = 0;
   if (handle) {
-    event = HandleObject(handle);
-    if (!event || (Rd8(event) != kNotificationEvent && Rd8(event) != kSynchronizationEvent))
-      return kWsaSyscallFailure;
-    Reference(event);
+    event = HandleObject(handle);  // its reference stays with the lookup
+    if (event && Rd8(event) != kNotificationEvent && Rd8(event) != kSynchronizationEvent) {
+      Dereference(event);
+      event = 0;
+    }
+    if (!event) return kWsaSyscallFailure;
   }
   uint32_t va = SystemAlloc(0x28);
   Wr32(va, kWsaHostNotFound);
@@ -1255,9 +1257,11 @@ HLE(kXam, 70, NetDll_XNetQosLookup) {
   uint32_t va = SystemAlloc(8 + count * (kQosInfo + limit));
   Wr32(va, count);
   Wr32(va + 4, count);
-  uint32_t event = handle ? HandleObject(handle) : 0;
-  if (event && Rd8(event) != kNotificationEvent && Rd8(event) != kSynchronizationEvent) event = 0;
-  if (event) Reference(event);
+  uint32_t event = handle ? HandleObject(handle) : 0;  // its reference stays with the lookup
+  if (event && Rd8(event) != kNotificationEvent && Rd8(event) != kSynchronizationEvent) {
+    Dereference(event);
+    event = 0;
+  }
   Qos q{caller, va, event, ++g_stack->qos_ids};
   g_stack->qos.push_back(q);
   const auto& p = g_stack->callers[caller < 4 ? caller : 0].params;

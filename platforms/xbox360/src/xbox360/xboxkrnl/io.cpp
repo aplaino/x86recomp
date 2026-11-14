@@ -78,8 +78,9 @@ void DestroyFile(uint32_t obj) {
   SystemFree(obj);
 }
 
-File* FileOf(uint32_t handle) {
-  uint32_t obj = HandleObject(handle);
+// The file of a kernel object (a handle's, which the caller holds with a
+// HandleRef while it uses the file), null if it is none.
+File* FileOf(uint32_t obj) {
   std::lock_guard<std::mutex> g(g_files_lock);
   auto it = g_files.find(obj);
   return it == g_files.end() ? nullptr : it->second;
@@ -102,11 +103,12 @@ void SetIoStatus(uint32_t io_status, uint32_t status, uint32_t information) {
   Wr32(io_status + 4, information);
 }
 
-// An I/O's file, event, APC routine and context, and status block.
+// An I/O's file (its object, held by the caller), event, APC routine and
+// context, and status block.
 struct Request {
-  uint32_t handle, event, apc, context, io_status;
+  uint32_t file, event, apc, context, io_status;
 };
-Request RequestOf(ppc::Ctx& c) { return {Arg(c, 0), Arg(c, 1), Arg(c, 2), Arg(c, 3), Arg(c, 4)}; }
+Request RequestOf(ppc::Ctx& c, uint32_t file) { return {file, Arg(c, 1), Arg(c, 2), Arg(c, 3), Arg(c, 4)}; }
 
 // The end of an I/O: its status block, its event and the file object
 // signalled, and unless it failed (an NTSTATUS error) its APC routine
@@ -114,8 +116,11 @@ Request RequestOf(ppc::Ctx& c) { return {Arg(c, 0), Arg(c, 1), Arg(c, 2), Arg(c,
 // as NT's I/O manager does. Every I/O here ends in its call.
 uint32_t Complete(const Request& r, uint32_t status, uint32_t info) {
   SetIoStatus(r.io_status, status, info);
-  if (uint32_t e = r.event ? HandleObject(r.event) : 0) SetSignal(e, 1);
-  SetSignal(HandleObject(r.handle), 1);
+  if (r.event) {
+    HandleRef e(r.event);
+    if (e.obj) SetSignal(e.obj, 1);
+  }
+  SetSignal(r.file, 1);
   if (r.apc && status < 0xC0000000)
     QueueApc(KThread(CurrentThread()), r.apc, kUserMode, r.context, r.io_status, 0);
   return status;
@@ -129,7 +134,8 @@ uint32_t ResolveIn(uint32_t root, std::string name, Location& loc) {
   if (root == kObDosDevices) {
     name = "\\??\\" + name;
   } else if (root) {
-    File* dir = FileOf(root);
+    HandleRef h(root);
+    File* dir = FileOf(h.obj);
     if (!dir) return kStatusInvalidHandle;
     name = dir->loc.guest + "\\" + name;
   }
@@ -239,10 +245,11 @@ HLE(kKrnl, 223, NtOpenFile) { return Open(Arg(c, 0), Arg(c, 1), Arg(c, 2), Arg(c
 // NtReadFile(handle, event, APC routine, APC context, *io_status, buffer,
 // length, *byte offset).
 HLE(kKrnl, 240, NtReadFile) {
-  uint32_t handle = Arg(c, 0), buf = Arg(c, 5), len = Arg(c, 6);
-  Request r = RequestOf(c);
-  File* f = FileOf(handle);
+  uint32_t buf = Arg(c, 5), len = Arg(c, 6);
+  HandleRef h(Arg(c, 0));
+  File* f = FileOf(h.obj);
   if (!f) return kStatusInvalidHandle;
+  Request r = RequestOf(c, h.obj);
   if (f->fd < 0) return Complete(r, kStatusFileIsADirectory, 0);
   std::lock_guard<std::mutex> g(f->lock);
   uint64_t off = Offset(*f, Arg(c, 7));
@@ -255,10 +262,11 @@ HLE(kKrnl, 240, NtReadFile) {
 // NtWriteFile(handle, event, APC routine, APC context, *io_status, buffer,
 // length, *byte offset): FILE_WRITE_TO_END_OF_FILE (-1) appends.
 HLE(kKrnl, 255, NtWriteFile) {
-  uint32_t handle = Arg(c, 0), buf = Arg(c, 5), len = Arg(c, 6);
-  Request r = RequestOf(c);
-  File* f = FileOf(handle);
+  uint32_t buf = Arg(c, 5), len = Arg(c, 6);
+  HandleRef h(Arg(c, 0));
+  File* f = FileOf(h.obj);
   if (!f) return kStatusInvalidHandle;
+  Request r = RequestOf(c, h.obj);
   if (f->fd < 0) return Complete(r, kStatusFileIsADirectory, 0);
   if (!f->loc.device->writable) return Complete(r, kStatusAccessDenied, 0);
   std::lock_guard<std::mutex> g(f->lock);
@@ -277,7 +285,8 @@ HLE(kKrnl, 255, NtWriteFile) {
 // NtQueryInformationFile(handle, *io_status, info, length, class).
 HLE(kKrnl, 232, NtQueryInformationFile) {
   uint32_t io_status = Arg(c, 1), info = Arg(c, 2), len = Arg(c, 3), cls = Arg(c, 4);
-  File* f = FileOf(Arg(c, 0));
+  HandleRef h(Arg(c, 0));
+  File* f = FileOf(h.obj);
   if (!f) return kStatusInvalidHandle;
   struct stat st;
   if (stat(f->loc.host.c_str(), &st) != 0) {
@@ -326,7 +335,8 @@ HLE(kKrnl, 232, NtQueryInformationFile) {
 // NtSetInformationFile(handle, *io_status, info, length, class).
 HLE(kKrnl, 247, NtSetInformationFile) {
   uint32_t io_status = Arg(c, 1), info = Arg(c, 2), len = Arg(c, 3), cls = Arg(c, 4);
-  File* f = FileOf(Arg(c, 0));
+  HandleRef h(Arg(c, 0));
+  File* f = FileOf(h.obj);
   if (!f) return kStatusInvalidHandle;
   auto done = [&](uint32_t status, uint32_t information) {
     SetIoStatus(io_status, status, information);
@@ -403,7 +413,8 @@ HLE(kKrnl, 231, NtQueryFullAttributesFile) {
 // NtQueryVolumeInformationFile(handle, *io_status, info, length, class).
 HLE(kKrnl, 239, NtQueryVolumeInformationFile) {
   uint32_t io_status = Arg(c, 1), info = Arg(c, 2), len = Arg(c, 3), cls = Arg(c, 4);
-  File* f = FileOf(Arg(c, 0));
+  HandleRef h(Arg(c, 0));
+  File* f = FileOf(h.obj);
   if (!f) return kStatusInvalidHandle;
   const Device& d = *f->loc.device;
   uint32_t need = cls == kFsDevice ? 8 : cls == kFsAttribute ? 0x10 : 0x18;
@@ -452,12 +463,13 @@ HLE(kKrnl, 239, NtQueryVolumeInformationFile) {
 // FILE_DIRECTORY_INFORMATION per call, its name in ANSI at 0x40. The mask
 // applies from the first query (or a restart) on.
 HLE(kKrnl, 228, NtQueryDirectoryFile) {
-  uint32_t handle = Arg(c, 0), info = Arg(c, 5), len = Arg(c, 6);
+  uint32_t info = Arg(c, 5), len = Arg(c, 6);
   uint32_t mask_ptr = Arg(c, 7);
   bool restart = Arg(c, 8) != 0;
-  Request r = RequestOf(c);
-  File* f = FileOf(handle);
+  HandleRef h(Arg(c, 0));
+  File* f = FileOf(h.obj);
   if (!f) return kStatusInvalidHandle;
+  Request r = RequestOf(c, h.obj);
   if (f->fd >= 0) return Complete(r, kStatusNotADirectory, 0);
   if (len < 0x48) return Complete(r, kStatusInfoLengthMismatch, 0);
   std::lock_guard<std::mutex> g(f->lock);
@@ -504,7 +516,8 @@ HLE(kKrnl, 228, NtQueryDirectoryFile) {
 
 // NtFlushBuffersFile(handle, *io_status).
 HLE(kKrnl, 219, NtFlushBuffersFile) {
-  File* f = FileOf(Arg(c, 0));
+  HandleRef h(Arg(c, 0));
+  File* f = FileOf(h.obj);
   if (!f) return kStatusInvalidHandle;
   if (f->fd >= 0) fsync(f->fd);
   SetIoStatus(Arg(c, 1), kStatusSuccess, 0);

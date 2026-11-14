@@ -212,9 +212,10 @@ Thread* NewThread(const ThreadParams& p, void (*system_body)(void*), void* syste
   t->c.r[13] = pcr;
   t->c.vscr = kVscrNj;
   t->suspend = p.flags & kCreateSuspended ? 1 : 0;
-  // The thread's own reference, dropped when it ends.
+  // The thread's own reference, dropped when it ends, and its creator's.
   Own(k, Destroy);
   Reference(k);
+  if (!system_body) Reference(k);
 
   pthread_attr_t attr;
   pthread_attr_init(&attr);

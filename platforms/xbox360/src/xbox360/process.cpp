@@ -97,7 +97,7 @@ void RunProcess(const GameConfig& cfg) {
                   m.tls.raw_size, m.stack_size ? m.stack_size : kDefaultStackSize});
   StartGpu();
   StartXma();
-  CreateThread({0, 0, m.entry, 0, 0, true});
+  Dereference(KThread(CreateThread({0, 0, m.entry, 0, 0, true})));
   // The title runs on its own threads; this one services the window and
   // shows frames until the end, which ExitProcess makes.
   RunDisplay();

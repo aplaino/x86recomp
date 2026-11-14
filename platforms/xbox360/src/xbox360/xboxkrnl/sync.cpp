@@ -127,7 +127,8 @@ HLE(kKrnl, 215, NtCreateTimer) {
 // previous state is whether it was signalled. Resuming the console from
 // standby does not apply.
 HLE(kKrnl, 250, NtSetTimerEx) {
-  uint32_t obj = HandleObject(Arg(c, 0));
+  HandleRef h(Arg(c, 0));
+  uint32_t obj = h.obj;
   if (!obj) return kStatusInvalidHandle;
   uint32_t signalled = Rd32(obj + 4) != 0;
   SetTimer(obj, int64_t(Rd64(Arg(c, 1))), Arg(c, 6), Arg(c, 2), uint8_t(Arg(c, 3)), Arg(c, 4));
@@ -137,7 +138,8 @@ HLE(kKrnl, 250, NtSetTimerEx) {
 
 // NtCancelTimer(handle, *current state): whether it is signalled.
 HLE(kKrnl, 205, NtCancelTimer) {
-  uint32_t obj = HandleObject(Arg(c, 0));
+  HandleRef h(Arg(c, 0));
+  uint32_t obj = h.obj;
   if (!obj) return kStatusInvalidHandle;
   CancelTimer(obj);
   if (Arg(c, 1)) Wr32(Arg(c, 1), Rd32(obj + 4) != 0);
@@ -146,22 +148,22 @@ HLE(kKrnl, 205, NtCancelTimer) {
 
 // NtSetEvent(handle, *previous), NtClearEvent(handle), NtPulseEvent(handle, *previous).
 HLE(kKrnl, 246, NtSetEvent) {
-  uint32_t obj = HandleObject(Arg(c, 0));
-  if (!obj) return kStatusInvalidHandle;
-  int32_t old = SetSignal(obj, 1);
+  HandleRef h(Arg(c, 0));
+  if (!h.obj) return kStatusInvalidHandle;
+  int32_t old = SetSignal(h.obj, 1);
   if (Arg(c, 1)) Wr32(Arg(c, 1), uint32_t(old));
   return kStatusSuccess;
 }
 HLE(kKrnl, 206, NtClearEvent) {
-  uint32_t obj = HandleObject(Arg(c, 0));
-  if (!obj) return kStatusInvalidHandle;
-  SetSignal(obj, 0);
+  HandleRef h(Arg(c, 0));
+  if (!h.obj) return kStatusInvalidHandle;
+  SetSignal(h.obj, 0);
   return kStatusSuccess;
 }
 HLE(kKrnl, 226, NtPulseEvent) {
-  uint32_t obj = HandleObject(Arg(c, 0));
-  if (!obj) return kStatusInvalidHandle;
-  int32_t old = PulseEvent(obj);
+  HandleRef h(Arg(c, 0));
+  if (!h.obj) return kStatusInvalidHandle;
+  int32_t old = PulseEvent(h.obj);
   if (Arg(c, 1)) Wr32(Arg(c, 1), uint32_t(old));
   return kStatusSuccess;
 }
@@ -194,10 +196,10 @@ HLE(kKrnl, 212, NtCreateMutant) {
 
 // NtReleaseMutant(handle, *previous count).
 HLE(kKrnl, 242, NtReleaseMutant) {
-  uint32_t obj = HandleObject(Arg(c, 0));
-  if (!obj) return kStatusInvalidHandle;
+  HandleRef h(Arg(c, 0));
+  if (!h.obj) return kStatusInvalidHandle;
   int32_t old;
-  uint32_t status = ReleaseMutant(obj, old);
+  uint32_t status = ReleaseMutant(h.obj, old);
   if (status == kStatusSuccess && Arg(c, 1)) Wr32(Arg(c, 1), uint32_t(old));
   return status;
 }
@@ -222,20 +224,22 @@ HLE(kKrnl, 175, KeWaitForMultipleObjects) {
 }
 
 // NtWaitForSingleObjectEx(handle, mode, alertable, *timeout).
+// The objects stay referenced for the wait, as NT's do.
 HLE(kKrnl, 253, NtWaitForSingleObjectEx) {
-  uint32_t obj = HandleObject(Arg(c, 0));
-  if (!obj) return kStatusInvalidHandle;
+  HandleRef h(Arg(c, 0));
+  if (!h.obj) return kStatusInvalidHandle;
   int64_t t;
-  return Wait(&obj, 1, false, Timeout(Arg(c, 3), t), UserAlertable(Arg(c, 1), Arg(c, 2)));
+  return Wait(&h.obj, 1, false, Timeout(Arg(c, 3), t), UserAlertable(Arg(c, 1), Arg(c, 2)));
 }
 
 // NtWaitForMultipleObjectsEx(count, handles[], wait type, mode, alertable, *timeout).
 HLE(kKrnl, 254, NtWaitForMultipleObjectsEx) {
   uint32_t count = Arg(c, 0), list = Arg(c, 1);
   if (!count || count > kMaxWaitObjects) return kStatusInvalidParameter;
+  HandleRef refs[kMaxWaitObjects];
   uint32_t objs[kMaxWaitObjects];
   for (uint32_t i = 0; i < count; i++)
-    if (!(objs[i] = HandleObject(Rd32(list + 4 * i)))) return kStatusInvalidHandle;
+    if (!(objs[i] = refs[i].obj = HandleObject(Rd32(list + 4 * i)))) return kStatusInvalidHandle;
   int64_t t;
   return Wait(objs, count, Arg(c, 2) == 0, Timeout(Arg(c, 5), t), UserAlertable(Arg(c, 3), Arg(c, 4)));
 }
@@ -246,9 +250,9 @@ HLE(kKrnl, 207, NtClose) { return CloseHandle(Arg(c, 0)) ? kStatusSuccess : kSta
 // NtDuplicateObject(handle, *new handle, options): options 1
 // (DUPLICATE_CLOSE_SOURCE) closes the original.
 HLE(kKrnl, 218, NtDuplicateObject) {
-  uint32_t obj = HandleObject(Arg(c, 0));
-  if (!obj) return kStatusInvalidHandle;
-  Wr32(Arg(c, 1), NewHandle(obj));
+  HandleRef h(Arg(c, 0));
+  if (!h.obj) return kStatusInvalidHandle;
+  Wr32(Arg(c, 1), NewHandle(h.obj));
   if (Arg(c, 2) & 1) CloseHandle(Arg(c, 0));
   return kStatusSuccess;
 }
@@ -256,12 +260,15 @@ HLE(kKrnl, 218, NtDuplicateObject) {
 // The object type a caller may ask ObReferenceObjectByHandle for.
 HLE_VARIABLE(kKrnl, 27, ExThreadObjectType, 0x40, nullptr);
 
-// ObReferenceObjectByHandle(handle, object type (0: any), *object).
+// ObReferenceObjectByHandle(handle, object type (0: any), *object): the
+// reference HandleObject takes is the caller's.
 HLE(kKrnl, 272, ObReferenceObjectByHandle) {
   uint32_t obj = HandleObject(Arg(c, 0)), type = Arg(c, 1);
   if (!obj) return kStatusInvalidHandle;
-  if (type == VariableAddress(kKrnl, 27) && Rd8(obj) != kThreadObject) return kStatusObjectTypeMismatch;
-  Reference(obj);
+  if (type == VariableAddress(kKrnl, 27) && Rd8(obj) != kThreadObject) {
+    Dereference(obj);
+    return kStatusObjectTypeMismatch;
+  }
   Wr32(Arg(c, 2), obj);
   return kStatusSuccess;
 }

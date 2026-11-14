@@ -166,7 +166,11 @@ void DeleteTimer(uint32_t timer);
 // (NtCreateEvent, threads) are freed with their last reference.
 constexpr uint32_t kCurrentThreadHandle = 0xFFFFFFFE, kCurrentProcessHandle = 0xFFFFFFFF;
 uint32_t NewHandle(uint32_t obj);
-// The object of a handle (pseudo handles included), 0 if it names none.
+// The object of a handle (pseudo handles included), 0 if it names none,
+// with a reference taken for the caller (ObReferenceObjectByHandle), so
+// that a handle closed meanwhile does not free what a call or a wait is
+// using. The caller drops it with Dereference, or holds it in a
+// HandleRef.
 uint32_t HandleObject(uint32_t handle);
 bool CloseHandle(uint32_t handle);
 // References on objects (ObReferenceObjectByHandle, ObDereferenceObject).
@@ -179,6 +183,18 @@ void Own(uint32_t obj, void (*destroy)(uint32_t obj));
 uint32_t NameObject(uint32_t obj, const std::string& name, bool case_insensitive);
 void Reference(uint32_t obj);
 void Dereference(uint32_t obj);
+// A handle's object (HandleObject) and its reference, dropped when the
+// HandleRef goes; obj is 0 if the handle names none.
+struct HandleRef {
+  uint32_t obj = 0;
+  HandleRef() = default;
+  explicit HandleRef(uint32_t handle) : obj(HandleObject(handle)) {}
+  ~HandleRef() {
+    if (obj) Dereference(obj);
+  }
+  HandleRef(const HandleRef&) = delete;
+  HandleRef& operator=(const HandleRef&) = delete;
+};
 
 // ---- threads ------------------------------------------------------------
 struct Thread;
@@ -194,7 +210,9 @@ struct ThreadParams {
   bool main = false;
 };
 // A new guest thread on its own host thread; it holds one reference on its
-// KTHREAD until it ends.
+// KTHREAD until it ends, and the caller gets another, which it drops
+// (Dereference) or hands to a handle: the thread may have ended and gone
+// before CreateThread returns otherwise.
 Thread* CreateThread(const ThreadParams& p);
 Thread* CurrentThread();
 // The current thread's guest stack, [limit, base).
