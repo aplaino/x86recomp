@@ -69,6 +69,7 @@ Undefined UndefinedIn(uint32_t raw, const NativeState& in) {
   // - FCMPU/FCMPO change FI and FPRF's C bit in QEMU, only FPCC in the ISA;
   // - FRES: QEMU's FPRF classifies its double intermediate, and its
   //   estimate of 1/±0 is ±0.5 (the ISA's, with ZX as QEMU sets it, ±inf).
+  // ppc_fpscr_test checks these bits against the ISA instead.
   if (raw >> 26 == 59 || raw >> 26 == 63) {
     u.fpscr |= 0x80040000u;
     if (raw & 1) u.cr |= 0x08000000u;

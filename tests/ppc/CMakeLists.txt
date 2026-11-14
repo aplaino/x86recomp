@@ -149,6 +149,28 @@ foreach(_m 0 ${_vmx128_mutations})
   endif()
 endforeach()
 
+# ppc_fpscr_test: the FPSCR bits the form test leaves out where QEMU
+# departs from the ISA (FX, FR, FI and FPRF's C on compares, FRES's FPRF,
+# CR1's FX), checked against the ISA with exact arithmetic; no oracle. With
+# its own planted bugs, in ppc/fp.cpp.
+set(_fpscr_mutations 13 14 15 16)
+foreach(_m 0 ${_fpscr_mutations})
+  set(_t ppc_fpscr_test)
+  if(_m)
+    set(_t ppc_fpscr_mutation_${_m})
+  endif()
+  add_executable(${_t} fpscr_test.cpp "${_gen}/forms.cpp" "${RECOMP_ROOT}/src/ppc/fp.cpp"
+                 "${RECOMP_ROOT}/src/ppc/vmx.cpp")
+  target_include_directories(${_t} PRIVATE "${_src}")
+  target_compile_definitions(${_t} PRIVATE RECOMP_PPC_MUTATION=${_m})
+  target_compile_options(${_t} PRIVATE -O1 -fno-strict-aliasing)
+  target_link_libraries(${_t} PRIVATE recomp_ppc softfloat)
+  add_test(NAME ${_t} COMMAND ${_t})
+  if(_m)
+    set_tests_properties(${_t} PROPERTIES WILL_FAIL TRUE)
+  endif()
+endforeach()
+
 # --- tests against the oracle ----------------------------------------------
 if(NOT RECOMP_QEMU_PPC64 OR NOT EXISTS "${RECOMP_PYTHON}")
   return()

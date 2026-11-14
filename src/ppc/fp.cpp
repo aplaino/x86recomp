@@ -13,7 +13,10 @@
 // ways not modelled yet; it is a fatal error. So is FPSCR[NI].
 //
 // RECOMP_PPC_MUTATION 4-6 plant known bugs here (ppc/lifted.h); the form
-// test builds its own copy of this file for them.
+// test builds its own copy of this file for them. 13-16 plant QEMU's
+// departures from the ISA in the bits the form test does not compare, for
+// ppc_fpscr_test (FX on every exception, FR whenever inexact, compares
+// changing FI and FPRF's C, FRES leaving FPRF).
 
 #include <cstring>
 #include <utility>
@@ -63,7 +66,7 @@ uint32_t Summaries(uint32_t f) {
 
 // Raises exception bits: sticky, FX when any goes from 0 to 1.
 uint32_t Raise(uint32_t f, uint32_t exc) {
-  if (exc & ~f & kExceptions) f |= kFx;
+  if ((Mutated(13) ? exc : exc & ~f) & kExceptions) f |= kFx;
   return Summaries(f | exc);
 }
 
@@ -244,10 +247,10 @@ uint64_t FpArith(Ctx& c, unsigned op, bool single, uint64_t a, uint64_t b, uint6
     // truncated toward zero).
     uint_fast8_t ignored;
     uint64_t t = Compute(op, single, a, b, cc, softfloat_round_minMag, ignored);
-    fr = (r & ~kSign) != (t & ~kSign);
+    fr = Mutated(14) || (r & ~kSign) != (t & ~kSign);
   }
   if (negate) r ^= kSign;
-  return Finish(c, r, exc, fr, fi);
+  return Finish(c, r, exc, fr, fi, !(Mutated(16) && op == kFRes));
 }
 
 uint64_t Frsp(Ctx& c, uint64_t b) {
@@ -287,7 +290,8 @@ uint64_t Fctiw(Ctx& c, unsigned mode, uint64_t b) {
                     : int64_t(f64_to_i32(rounded, softfloat_round_minMag, false));
   bool fr = fi && (rounded.v & ~kSign) != (f64_roundToInt(F64(b), softfloat_round_minMag, false).v & ~kSign);
   // FCTIW leaves the word in the low half; the high half is undefined
-  // (this keeps the sign extension of the word).
+  // (this keeps the sign extension of the word), and so is FPRF (left as
+  // it was).
   return Finish(c, uint64_t(v), fi ? kXx : 0, fr, fi, false);
 }
 
@@ -320,7 +324,8 @@ uint32_t Fcmp(Ctx& c, bool ordered, uint64_t a, uint64_t b) {
     field = 2;
   }
   CheckEnables(c, exc);
-  c.fpscr = Raise((c.fpscr & ~kFpcc) | (field << 12), exc);
+  // Only FPCC: FI, FR and FPRF's C bit are as they were.
+  c.fpscr = Raise((c.fpscr & ~(Mutated(15) ? kFprf | kFi : kFpcc)) | (field << 12), exc);
   return field;
 }
 

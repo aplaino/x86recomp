@@ -87,7 +87,8 @@ tininess detected before rounding, and the PowerPC's own rules on top:
 FRES and FRSQRTE are estimates whose exact values are the CPU's own: the
 model returns the correctly rounded reciprocal (square root), as QEMU's
 970 does; the Xenon's tables wait for a console. FCTIW(Z)'s high word is
-undefined (the word's sign extension here), so is MFFS's (0).
+undefined (the word's sign extension here), so is MFFS's (0), and so is
+FPRF after the conversions to integer (left as it was).
 
 ### VMX
 The context holds 128 vector registers (VMX's 32 are VMX128's first 32)
@@ -286,7 +287,11 @@ left in memory; any other interrupt fails the run.
   arithmetic show), FX (QEMU sets it on every exception, not on a 0 to 1
   change), FI and FPRF's C bit on compares (the ISA alters only FPCC),
   FRES's FPRF and its estimate of 1/±0 (QEMU: ±0.5), and VSCR's reserved
-  bits (QEMU keeps what MTVSCR wrote).
+  bits (QEMU keeps what MTVSCR wrote). `ppc_fpscr_test` checks those
+  FPSCR bits (and CR1's copy of FX) against the ISA with exact integer
+  arithmetic on the operands instead, with planted bugs of its own: FI
+  and FR of every rounding operation, FX's 0 to 1 rule, compares leaving
+  FI, FR and C, FRES's FPRF.
 - The form test fails on a form that has a native stub but no run on the
   oracle; forms without one (the Xenon's own, absolute addresses, r31)
   are counted. `qemu_run.py` fails on a program whose `main` returned
