@@ -38,30 +38,37 @@ uint8_t* g_guest_base = nullptr;
 
 namespace {
 
-// One per image: the EXE's first, then the lifted DLLs'. Built before any
-// guest code runs and never changed afterwards.
+// One per executable section: the EXE's first, then the rest (a protected
+// EXE's other sections, the lifted DLLs'). Built before any guest code runs
+// and never changed afterwards.
 struct CodeRange {
   uint64_t lo = 0, size = 0;
   std::vector<GuestFn> table;  // by va - lo
 };
 CodeRange g_exe;
-std::vector<CodeRange> g_dlls;
+std::vector<CodeRange> g_more;
 const LiftedFn* g_lifted = nullptr;
 uint32_t g_lifted_count = 0;
 
-CodeRange TextOf(const PeImage& img) {
-  CodeRange r;
-  for (const auto& s : img.sections)
-    if (s.name == ".text") {
-      r.lo = s.va;
-      r.size = s.vsize;
+// The executable sections, and any other holding lifted code (the
+// manifest's `code` ranges: a protector's code in a data section).
+std::vector<CodeRange> TextOf(const PeImage& img) {
+  std::vector<CodeRange> rs;
+  for (const auto& s : img.sections) {
+    CodeRange r;
+    r.lo = s.va;
+    r.size = s.vsize;
+    bool code = s.characteristics & kScnMemExecute;
+    for (uint32_t i = 0; i < g_lifted_count && !code; i++) code = g_lifted[i].va - r.lo < r.size;
+    if (!code) continue;
+    r.table.assign(r.size, nullptr);
+    for (uint32_t i = 0; i < g_lifted_count; i++) {
+      const LiftedFn& f = g_lifted[i];
+      if (f.va - r.lo < r.size) r.table[f.va - r.lo] = f.fn;
     }
-  r.table.assign(r.size, nullptr);
-  for (uint32_t i = 0; i < g_lifted_count; i++) {
-    const LiftedFn& f = g_lifted[i];
-    if (f.va - r.lo < r.size) r.table[f.va - r.lo] = f.fn;
+    rs.push_back(std::move(r));
   }
-  return r;
+  return rs;
 }
 
 void DumpGuestState64(const Ctx& c) {
@@ -310,11 +317,18 @@ void InitDispatch() {
     FatalF("no lifted code registered (recomp_add_lifted compiles "
            "runtime/lifted_table.cpp into it)");
   InstallFaultHandler();
-  g_exe = TextOf(g_proc->img);
+  std::vector<CodeRange> exe = TextOf(g_proc->img);
+  if (exe.empty()) FatalF("the EXE has no executable section");
+  g_exe = std::move(exe[0]);
+  for (size_t i = 1; i < exe.size(); i++) g_more.push_back(std::move(exe[i]));
   for (const Module& m : g_proc->modules) {
-    CodeRange& r = g_dlls.emplace_back(TextOf(m.img));
+    const size_t first = g_more.size();
+    for (CodeRange& r : TextOf(m.img)) g_more.push_back(std::move(r));
     // A DLL lifted at another base, or not at all, has no functions here.
-    if (m.img.entry && !r.table[m.img.entry - r.lo])
+    const CodeRange* r = nullptr;
+    for (size_t i = first; i < g_more.size(); i++)
+      if (m.img.entry - g_more[i].lo < g_more[i].size) r = &g_more[i];
+    if (m.img.entry && (!r || !r->table[m.img.entry - r->lo]))
       FatalF("%s at %08llX: its entry point %08llX is not lifted (lift it with "
              "recomp_lift --module, at the same --base)",
              m.name.c_str(), (unsigned long long)m.img.image_base,
@@ -330,7 +344,7 @@ void Dispatch(Ctx& c, uint64_t target, uint64_t va) {
       return;
     }
     r = nullptr;
-    for (const CodeRange& d : g_dlls)
+    for (const CodeRange& d : g_more)
       if (target - d.lo < d.size) r = &d;
     if (!r)
       FatalF("indirect branch to %08llX from %08llX: not code", (unsigned long long)target,
@@ -353,7 +367,7 @@ void Dispatch(Ctx& c, uint32_t target, uint32_t va) {
       return;
     }
     r = nullptr;
-    for (const CodeRange& d : g_dlls)
+    for (const CodeRange& d : g_more)
       if (target - d.lo < d.size) r = &d;
     if (!r) FatalF("indirect branch to %08X from %08X: not code", target, va);
   }

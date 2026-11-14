@@ -61,18 +61,15 @@ bool Program::Load(const std::string& path, const std::string& symdir,
   }
   const recomp::PeImage& img = m.img;
   for (const auto& s : img.sections)
-    if (s.name == ".text") {
-      m.text_lo = s.va;
-      m.text_hi = s.va + s.vsize;
-    }
-  if (!m.text_hi) {
-    *err = "no .text section";
+    if (s.characteristics & recomp::kScnMemExecute) m.text.emplace_back(s.va, s.va + s.vsize);
+  if (m.text.empty()) {
+    *err = "no executable section";
     return false;
   }
   // Symbol files hold VAs at the preferred base; a moved module's are
   // shifted by the same delta as its relocations.
   const uint64_t delta = img.image_base - img.preferred_base;
-  auto in_text = [&](uint64_t va) { return va >= m.text_lo && va < m.text_hi; };
+  auto in_text = [&](uint64_t va) { return m.TextEnd(va) != 0; };
 
   // Ghidra's function list: entry, min, max, chunks, thunk, noreturn,
   // callconv, name.
@@ -175,6 +172,16 @@ bool Program::LoadManifest(const std::string& path, std::string* err) {
         return false;
       }
       hooks[va] = Hex(name) + (img.image_base - img.preferred_base);
+    } else if (kind == "code") {
+      // code <va> <end>: [va, end) of a section not marked executable holds
+      // code (protectors put some there and make the section executable at
+      // run time); it is decoded like .text. The runtime dispatches into
+      // any section that holds a lifted function.
+      if (name.empty()) {
+        *err = path + ":" + std::to_string(no) + ": code needs an end address";
+        return false;
+      }
+      modules.back().text.emplace_back(va, Hex(name) + (img.image_base - img.preferred_base));
     } else if (kind == "probe") {
       entries.insert(va);
       probes[va] = name.empty() ? "probe" : name;

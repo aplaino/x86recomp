@@ -119,8 +119,7 @@ int WriteFlagsTest(const Decoder& dec, const std::string& out, const char* prolo
     if (!q.mem.Reserve(32)) return 1;
     q.mem.Commit(src.base, 0x1000, recomp::Prot::RWX);
     Module& m = q.modules.emplace_back();
-    m.text_lo = src.base;
-    m.text_hi = src.base + src.size;
+    m.text = {{src.base, src.base + src.size}};
     for (size_t i = 0; i < src.size; i++) q.mem.write<uint8_t>(src.base + i, src.code[i]);
     for (size_t i = 0; i < src.count; i++) q.entries.insert(src.base + src.entries[i].offset);
     FlagLiveness flags;

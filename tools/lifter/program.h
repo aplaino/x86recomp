@@ -22,7 +22,15 @@ class FlagLiveness;
 struct Module {
   std::string name;  // file name without extension, e.g. "game"
   recomp::PeImage img;
-  uint64_t text_lo = 0, text_hi = 0;  // [lo, hi) of .text
+  // [lo, hi) of each executable section (.text; a protected image adds
+  // the protector's own).
+  std::vector<std::pair<uint64_t, uint64_t>> text;
+  // The section's end if va is in one, else 0.
+  uint64_t TextEnd(uint64_t va) const {
+    for (const auto& [lo, hi] : text)
+      if (va >= lo && va < hi) return hi;
+    return 0;
+  }
 };
 
 struct Program {
@@ -91,15 +99,15 @@ struct Program {
   // resume/replace/setjmp lines, VAs at its preferred base).
   bool LoadManifest(const std::string& path, std::string* err);
 
-  // The module whose .text contains va, or null.
+  // The module whose code contains va, or null.
   const Module* TextOf(uint64_t va) const {
     for (const auto& m : modules)
-      if (va >= m.text_lo && va < m.text_hi) return &m;
+      if (m.TextEnd(va)) return &m;
     return nullptr;
   }
   bool InText(uint64_t va) const { return TextOf(va) != nullptr; }
   const uint8_t* Bytes(uint64_t va) const { return mem.ptr<uint8_t>(va); }
-  size_t BytesLeft(uint64_t va) const { return TextOf(va)->text_hi - va; }
+  size_t BytesLeft(uint64_t va) const { return TextOf(va)->TextEnd(va) - va; }
 };
 
 }  // namespace lifter

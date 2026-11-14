@@ -25,6 +25,8 @@ inline constexpr uint32_t kThunkRegionSize = 0x00100000;
 // their thunks sit near the top of the default 64 GiB arena.
 inline constexpr gaddr kThunkBase64 = 0xFFF000000;
 
+inline constexpr uint32_t kScnMemExecute = 0x20000000;  // IMAGE_SCN_MEM_EXECUTE
+
 struct PeSection {
   std::string name;
   gaddr va;
