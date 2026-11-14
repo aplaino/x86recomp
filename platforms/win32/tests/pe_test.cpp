@@ -1,5 +1,6 @@
-// recomp_pe (win32/pe_image.h): the loader refuses images whose headers
-// or tables point outside the file or the image.
+// recomp_pe (win32/pe_image.h, win32/unwind.h): the loader refuses
+// images whose headers or tables point outside the file or the image, and
+// the x64 unwinder decodes epilog prefixes as the CPU does.
 
 #include <unistd.h>
 
@@ -10,6 +11,7 @@
 #include <vector>
 
 #include "win32/pe_image.h"
+#include "win32/unwind.h"
 
 using namespace recomp;
 
@@ -149,15 +151,55 @@ void Loader(GuestMemory& mem) {
   Check(Load(mem, d, &err), "directories past NumberOfRvaAndSizes are empty");
 }
 
+// ---- the x64 unwinder's epilogs ------------------------------------------------
+
+constexpr gaddr kImg = 0x10000000, kFn = kImg + 0x40, kInfo = kImg + 0x80,
+                kCode = kImg + 0x100, kStack = kImg + 0x800;
+
+// Unwinds from the code `bytes` (the function's body at kCode, with no
+// unwind codes) with rsp at kStack, which holds 1, 2, 3, ...
+unwind::Regs Unwind(GuestMemory& m, const std::vector<uint8_t>& bytes) {
+  std::memset(m.ptr(kImg), 0, 0x1000);
+  m.write<uint32_t>(kFn, 0x100);
+  m.write<uint32_t>(kFn + 4, 0x200);
+  m.write<uint32_t>(kFn + 8, 0x80);
+  m.write<uint8_t>(kInfo, 1);  // version 1, no flags, no prologue, no codes
+  std::memcpy(m.ptr(kCode), bytes.data(), bytes.size());
+  for (int i = 0; i < 16; i++) m.write<uint64_t>(kStack + 8 * i, 1 + i);
+  unwind::Regs r{};
+  r.rip = kCode;
+  r.gpr[4] = kStack;
+  gaddr h, data;
+  unwind::VirtualUnwind(m, kImg, kFn, r, unwind::kEHandler, &h, &data);
+  return r;
+}
+
+void Epilogs(GuestMemory& m) {
+  // add rsp, 8; pop r14; pop rdi; ret
+  auto r = Unwind(m, {0x48, 0x83, 0xC4, 0x08, 0x41, 0x5E, 0x5F, 0xC3});
+  Check(r.gpr[14] == 2 && r.gpr[7] == 3 && r.rip == 4 && r.gpr[4] == kStack + 32,
+        "add rsp, pop r14, pop rdi, ret");
+  // pop rdi with a REX prefix without REX.B: rdi, not r15
+  r = Unwind(m, {0x40, 0x5F, 0xC3});
+  Check(r.gpr[7] == 1 && r.gpr[15] == 0 && r.rip == 2, "REX 40 pop is rdi");
+  // REX.W pop rbx, then REX.WB pop r13
+  r = Unwind(m, {0x48, 0x5B, 0x49, 0x5D, 0xC3});
+  Check(r.gpr[3] == 1 && r.gpr[13] == 2 && r.rip == 3, "REX.W pops are pops");
+  // add r12, 8 (REX.WB) is not an epilog: the body returns to [rsp]
+  r = Unwind(m, {0x49, 0x83, 0xC4, 0x08, 0xC3});
+  Check(r.rip == 1 && r.gpr[4] == kStack + 8, "add r12 is not an epilog");
+}
+
 }  // namespace
 
 int main() {
   GuestMemory mem;
-  if (!mem.Reserve(32)) {
+  if (!mem.Reserve(32) || !mem.Commit(kImg, 0x1000, Prot::RW)) {
     std::printf("cannot set up guest memory\n");
     return 1;
   }
   Loader(mem);
+  Epilogs(mem);
   if (g_failures) return 1;
   std::printf("pe: ok\n");
   return 0;

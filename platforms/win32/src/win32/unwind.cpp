@@ -40,22 +40,27 @@ uint64_t Rd64(const GuestMemory& m, gaddr a) { return m.read<uint64_t>(a); }
 // Is r.rip in an epilog? x64 epilogs have one form: an optional
 // `add rsp, imm` (or `lea rsp, [frame reg + disp]` with a frame register),
 // pops of non-volatile registers, then `ret` or a tail `jmp`. If so, runs
-// what remains of it on r and returns true.
+// what remains of it on r and returns true. The prefixes are decoded as
+// the CPU reads them, and only the encodings Windows' unwinder accepts
+// count: REX.W 0x48 on the add (REX.B would make it r12), REX.W without
+// REX.R and REX.X on the lea and no SIB byte, any REX before a pop
+// (REX.B selects r8-r15).
 bool UnwindEpilog(const GuestMemory& m, const Info& info, Regs& r) {
   gaddr p = r.rip;
   uint64_t rsp = r.gpr[kRsp];
   auto b = [&](int i) { return Rd8(m, p + i); };
   // add rsp, imm8 / imm32
-  if ((b(0) & 0xF8) == 0x48 && b(1) == 0x83 && b(2) == 0xC4) {
+  if (b(0) == 0x48 && b(1) == 0x83 && b(2) == 0xC4) {
     rsp += int8_t(b(3));
     p += 4;
-  } else if ((b(0) & 0xF8) == 0x48 && b(1) == 0x81 && b(2) == 0xC4) {
+  } else if (b(0) == 0x48 && b(1) == 0x81 && b(2) == 0xC4) {
     rsp += int32_t(Rd32(m, p + 3));
     p += 7;
-  } else if (info.frame_reg && (b(0) & 0xF8) == 0x48 && b(1) == 0x8D &&
-             ((b(2) >> 3) & 7) == kRsp && (b(2) & 7) == (info.frame_reg & 7) &&
-             (b(0) & 1) == (info.frame_reg >> 3) && (b(2) >> 6) != 0 && (b(2) >> 6) != 3) {
-    // lea rsp, [frame + disp8/disp32] (no SIB: the frame register is not rsp)
+  } else if (info.frame_reg && (b(0) & 0xFE) == 0x48 && b(1) == 0x8D &&
+             ((b(2) >> 3) & 7) == kRsp && (b(2) & 7) != 4 &&
+             (b(2) & 7) == (info.frame_reg & 7) && (b(0) & 1) == (info.frame_reg >> 3) &&
+             (b(2) >> 6) != 0 && (b(2) >> 6) != 3) {
+    // lea rsp, [frame + disp8/disp32]
     int mod = b(2) >> 6;
     int32_t disp = mod == 1 ? int8_t(b(3)) : int32_t(Rd32(m, p + 3));
     rsp = r.gpr[info.frame_reg] + int64_t(disp);
@@ -68,7 +73,7 @@ bool UnwindEpilog(const GuestMemory& m, const Info& info, Regs& r) {
     uint8_t x = Rd8(m, q);
     if ((x & 0xF8) == 0x58) {
       q += 1;
-    } else if ((x & 0xFE) == 0x40 && (Rd8(m, q + 1) & 0xF8) == 0x58) {
+    } else if ((x & 0xF0) == 0x40 && (Rd8(m, q + 1) & 0xF8) == 0x58) {
       q += 2;
     } else {
       break;
@@ -85,8 +90,8 @@ bool UnwindEpilog(const GuestMemory& m, const Info& info, Regs& r) {
   for (gaddr s = p; s < q;) {
     uint8_t v = Rd8(m, s);
     int reg;
-    if ((v & 0xFE) == 0x40) {
-      reg = 8 + (Rd8(m, s + 1) & 7);
+    if ((v & 0xF0) == 0x40) {
+      reg = (v & 1) << 3 | (Rd8(m, s + 1) & 7);
       s += 2;
     } else {
       reg = v & 7;
