@@ -226,6 +226,10 @@ static uint32_t RunGuestThread(Thread* t, const std::function<uint64_t(Ctx&)>& b
     r = e.code;
   }
   if (g_proc->thread_exit) g_proc->thread_exit(t, r);
+  // Its guest stack goes back, as Windows and FreeBSD free a finished
+  // thread's stack; the Thread (Ctx, stack bounds) stays for the platform's
+  // handles to it.
+  g_proc->vm.Release(t->stack_lo);
   GuestSyncFence();
   return r;
 }
