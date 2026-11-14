@@ -60,12 +60,12 @@ bool SignalValue(gaddr a, uint32_t* v);
 // for them; all of them, waiting, with wait.
 void Settle(bool wait);
 
-// The colour target the GPU rendered at a guest address with this size, or
-// 0 (VideoOut shows it).
-gfx::TextureId TargetAt(gaddr addr, uint32_t w, uint32_t h);
 // Runs fn with no draw or dispatch in between (they set the device's
-// targets): presentation.
+// targets, and make and retire targets): presentation.
 void Exclusive(const std::function<void()>& fn);
+// The colour target the GPU rendered at a guest address with this size, or
+// 0 (VideoOut shows it). Inside Exclusive's fn, which it stays for.
+gfx::TextureId TargetAt(gaddr addr, uint32_t w, uint32_t h);
 
 // The pixels the draws DB_COUNT_CONTROL counts have written so far (the
 // occlusion counter, all render backends together), once they have landed.

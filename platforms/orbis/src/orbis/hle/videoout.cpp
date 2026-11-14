@@ -128,55 +128,57 @@ void DrawOverlay(gfx::Device& dev, int w, int h) {
   if (o) dev.BlitBlend(o->px.data(), uint32_t(o->w * 4), {0, 0, o->w, o->h}, {0, 0, w, h});
 }
 
-// Shows a flip's buffer (host thread).
+// Shows a flip's buffer (host thread), with no draw or dispatch in
+// between: they use the device too (gpu::SetDevice), and a target shown
+// stays while it is.
 void Show(Port& p, const Flip& f) {
-  std::vector<uint8_t> px;
-  int w, h;
-  if (f.index < 0) {
-    w = p.w ? p.w : 1920;
-    h = p.h ? p.h : 1080;
-    px.assign(size_t(w) * h * 4, 0);
-  } else {
-    const Attr& a = f.attr;
-    w = int(a.width);
-    h = int(a.height);
-    px.resize(size_t(w) * h * 4);
-    if (a.tiling != kTilingLinear) {
-      // Only the GPU writes tiled buffers: its colour target at the
-      // buffer's address is what to show (black if it has drawn none).
-      const gfx::TextureId t = gpu::TargetAt(f.addr, uint32_t(w), uint32_t(h));
-      if (t && p.window && w == p.w && h == p.h) {
-        gpu::Exclusive([&] {
+  gpu::Exclusive([&] {
+    std::vector<uint8_t> px;
+    int w, h;
+    if (f.index < 0) {
+      w = p.w ? p.w : 1920;
+      h = p.h ? p.h : 1080;
+      px.assign(size_t(w) * h * 4, 0);
+    } else {
+      const Attr& a = f.attr;
+      w = int(a.width);
+      h = int(a.height);
+      px.resize(size_t(w) * h * 4);
+      if (a.tiling != kTilingLinear) {
+        // Only the GPU writes tiled buffers: its colour target at the
+        // buffer's address is what to show (black if it has drawn none).
+        const gfx::TextureId t = gpu::TargetAt(f.addr, uint32_t(w), uint32_t(h));
+        if (t && p.window && w == p.w && h == p.h) {
           p.dev->SetRenderTarget(0, 0);
           p.dev->DrawImage(t, {0, 0, w, h});
           DrawOverlay(*p.dev, w, h);
           hle::PresentFrame(*p.dev, w, h);
-        });
-        return;
+          return;
+        }
+        std::fill(px.begin(), px.end(), uint8_t(0));
+        goto show;
       }
-      std::fill(px.begin(), px.end(), uint8_t(0));
-      goto show;
+      for (int y = 0; y < h; y++)
+        std::memcpy(&px[size_t(y) * w * 4], GPtr(f.addr + uint64_t(y) * a.pitch * 4),
+                    size_t(w) * 4);
+      if (a.format == kA8B8G8R8Srgb)
+        for (size_t i = 0; i < px.size(); i += 4) std::swap(px[i], px[i + 2]);
+      else if (a.format != kA8R8G8B8Srgb)
+        FatalF("sceVideoOutSubmitFlip: pixel format %08X not implemented yet", a.format);
     }
-    for (int y = 0; y < h; y++)
-      std::memcpy(&px[size_t(y) * w * 4], GPtr(f.addr + uint64_t(y) * a.pitch * 4),
-                  size_t(w) * 4);
-    if (a.format == kA8B8G8R8Srgb)
-      for (size_t i = 0; i < px.size(); i += 4) std::swap(px[i], px[i + 2]);
-    else if (a.format != kA8R8G8B8Srgb)
-      FatalF("sceVideoOutSubmitFlip: pixel format %08X not implemented yet", a.format);
-  }
-show:
-  if (!p.window) OpenWindow(p, w, h);
-  if (w != p.w || h != p.h) {
-    p.w = w;
-    p.h = h;
-    p.dev->ResetSwapChain(w, h, false);
-  }
-  p.dev->SetRenderTarget(0, 0);
-  const gfx::Rect r{0, 0, w, h};
-  p.dev->Blit(px.data(), uint32_t(w * 4), gfx::Format::X8R8G8B8, r, r, false, 0);
-  DrawOverlay(*p.dev, w, h);
-  hle::PresentFrame(*p.dev, w, h);
+  show:
+    if (!p.window) OpenWindow(p, w, h);
+    if (w != p.w || h != p.h) {
+      p.w = w;
+      p.h = h;
+      p.dev->ResetSwapChain(w, h, false);
+    }
+    p.dev->SetRenderTarget(0, 0);
+    const gfx::Rect r{0, 0, w, h};
+    p.dev->Blit(px.data(), uint32_t(w * 4), gfx::Format::X8R8G8B8, r, r, false, 0);
+    DrawOverlay(*p.dev, w, h);
+    hle::PresentFrame(*p.dev, w, h);
+  });
 }
 
 // Runs the flip at the head of the queue (g_mu held): shows it on the host

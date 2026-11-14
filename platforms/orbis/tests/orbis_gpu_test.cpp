@@ -127,7 +127,8 @@ void DrawRegs(Regs& r, uint32_t prim, gaddr target, gaddr vs) {
 // True if every pixel of the target at `target` has its centre's x in clip
 // space as its red (so drawn, and its parameter where the vertices put it).
 bool Covered(uint32_t prim, gaddr target, gfx::Device* dev) {
-  const gfx::TextureId tex = TargetAt(target, 8, 8);
+  gfx::TextureId tex = 0;
+  Exclusive([&] { tex = TargetAt(target, 8, 8); });
   if (!tex) return false;
   float px[8 * 8 * 4] = {};
   dev->ReadImage(tex, 0, 0, {0, 0, 8, 8}, px, 8 * 16);
@@ -1032,7 +1033,8 @@ int main() {
     Draw(r, {3, 1, 0, 2});
     Settle(true);
     float px[8 * 8 * 4] = {};
-    const gfx::TextureId tex = TargetAt(kWqmTarget, 8, 8);
+    gfx::TextureId tex = 0;
+    Exclusive([&] { tex = TargetAt(kWqmTarget, 8, 8); });
     if (tex) dev->ReadImage(tex, 0, 0, {0, 0, 8, 8}, px, 8 * 16);
     bool ok = tex;
     for (int i = 0; i < 64 && ok; i++)
@@ -1080,7 +1082,8 @@ int main() {
     Draw(r, {3, 1, 0, 2});
     Settle(true);
     float px[8 * 8 * 4] = {};
-    const gfx::TextureId tex = TargetAt(kWideTarget, 8, 8);
+    gfx::TextureId tex = 0;
+    Exclusive([&] { tex = TargetAt(kWideTarget, 8, 8); });
     if (tex) dev->ReadImage(tex, 0, 0, {0, 0, 8, 8}, px, 8 * 16);
     bool ok = tex;
     for (int i = 0; i < 64 && ok; i++) {

@@ -1583,7 +1583,6 @@ void SetDevice(gfx::Device* dev) {
 }
 
 gfx::TextureId TargetAt(gaddr addr, uint32_t w, uint32_t h) {
-  std::lock_guard<std::mutex> l(G().mu);
   for (const Target& t : G().targets)
     if (t.addr == addr && t.w >= w && t.h >= h) return t.tex;
   return 0;
