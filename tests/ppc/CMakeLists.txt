@@ -165,9 +165,11 @@ foreach(_m 0 ${_fpscr_mutations})
   target_compile_definitions(${_t} PRIVATE RECOMP_PPC_MUTATION=${_m})
   target_compile_options(${_t} PRIVATE -O1 -fno-strict-aliasing)
   target_link_libraries(${_t} PRIVATE recomp_ppc softfloat)
-  add_test(NAME ${_t} COMMAND ${_t})
   if(_m)
-    set_tests_properties(${_t} PROPERTIES WILL_FAIL TRUE)
+    add_test(NAME ${_t} COMMAND "${CMAKE_COMMAND}" "-DCMD=$<TARGET_FILE:${_t}>" -DEXIT=1 "-DOUTPUT=FAIL "
+             -P "${RECOMP_ROOT}/tests/expect_exit.cmake")
+  else()
+    add_test(NAME ${_t} COMMAND ${_t})
   endif()
 endforeach()
 
