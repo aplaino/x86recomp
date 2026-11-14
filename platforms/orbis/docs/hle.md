@@ -127,7 +127,8 @@ library.
   through an array T#, becomes a 2D array of as many slices as used; a
   2D T# of several levels over colour targets takes each level from the
   target at its address, else from memory), textures read from guest
-  memory once a submission when they change: every level from BASE_LEVEL
+  memory once a submission (or a compute queue's run) when they change:
+  every level from BASE_LEVEL
   to LAST_LEVEL and every slice (a 2D array's from 0 to LAST_ARRAY, a
   cube's six faces, a 3D texture's depth), laid out as the firmware's
   (11.00) GL library lays out a T#'s levels and slices (orbis/gpu/tiling.h:

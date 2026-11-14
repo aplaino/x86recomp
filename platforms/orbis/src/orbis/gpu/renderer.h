@@ -41,6 +41,9 @@ void Dispatch(const Regs& r, const uint32_t groups[3]);
 void MemoryWritten(gaddr base, uint64_t size);
 // A new submission: textures read from memory are compared again.
 void NextSubmission();
+// A compute queue's run of packets: the same for what it reads (its
+// runs come between graphics submissions).
+void NextComputeRun();
 
 // Dispatches' results in guest memory land once the device has run them
 // (gfx::ProgramDispatch::land_later), and the command processor's writes

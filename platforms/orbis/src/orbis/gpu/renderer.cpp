@@ -224,11 +224,10 @@ struct DepthTarget {
   // alone (ZMASK, bits 0-3).
   Meta htile;
 };
-// Guest memory a GPU copy is made from, compared once a submission
-// (Changed).
+// Guest memory a GPU copy is made from, compared once a round (Changed).
 struct Compared {
   uint64_t hash = 0;
-  uint64_t checked = ~0ull;  // the submission it was last compared in
+  uint64_t checked = ~0ull;  // the round it was last compared in
   uint32_t same = 0;         // comparisons in a row that found it unchanged
   watch::Watch watch;
 };
@@ -272,6 +271,9 @@ struct State {
   std::unordered_map<std::string, Program> programs;
   std::unordered_map<std::string, Program> compute;
   uint64_t submission = 0;
+  // A graphics submission or a compute queue's run: the CPU may have
+  // written memory since the last one.
+  uint64_t round = 0;
   // Occlusion counts: draws DB_COUNT_CONTROL counts add 1 for each pixel
   // they write to a count target of their size (R32F, blended); CountsAdd
   // sums those on the GPU into `counted` as the sums land.
@@ -348,14 +350,14 @@ uint64_t ContentHash(const uint8_t* p, size_t n) {
 }
 
 // Whether n bytes at base changed since c's last comparison (true the
-// first time); compared at most once a submission. Memory found unchanged
+// first time); compared at most once a round. Memory found unchanged
 // twice in a row is watched from then on (write_watch.h), armed before it
 // is hashed so that a write after the hash disarms it, and not hashed
 // while no write has disarmed it.
 bool Changed(State& s, Compared& c, gaddr base, uint64_t n) {
-  if (c.checked == s.submission) return false;
+  if (c.checked == s.round) return false;
   const bool first = c.checked == ~0ull && !c.same;
-  c.checked = s.submission;
+  c.checked = s.round;
   if (c.watch.clean()) return false;
   if (c.same >= 2) c.watch.Arm(g_proc->vm.mem(), base, n);
   const uint64_t hash = ContentHash(GPtr(base), size_t(n));
@@ -939,7 +941,7 @@ gfx::TextureId SampledStencil(State& s, const DepthTarget& dt, const uint32_t t[
 }
 
 // A T#'s texture: the colour target at its address, else its texels from
-// guest memory (compared once a submission and uploaded when they change):
+// guest memory (compared once a round, Changed, and uploaded when they change):
 // its levels from BASE_LEVEL to LAST_LEVEL and its slices (a 2D array's
 // from slice 0 to LAST_ARRAY, a cube's faces, a 3D texture's depth), as
 // tiling.h lays them out. Nothing (black) where memory is not mapped.
@@ -1069,7 +1071,7 @@ gfx::TextureId StorageImage(State& s, const ImageRef& ref) {
 }
 
 // Read-only ranges of at least this many bytes (vertex buffers, mostly)
-// are kept in GPU buffers, compared once a submission and uploaded when
+// are kept in GPU buffers, compared once a round and uploaded when
 // they change, instead of copied for each draw.
 constexpr uint32_t kKeptMin = 64 << 10;
 // Unread for this many submissions, they are let go.
@@ -2107,6 +2109,7 @@ void NextSubmission() {
   std::lock_guard<std::mutex> l(G().mu);
   State& s = G();
   s.submission++;
+  s.round++;
   if (!s.dev) return;
   // The metadata writes applied on the GPU, landed by now: only to stop
   // at those that were no full clears.
@@ -2126,6 +2129,11 @@ void NextSubmission() {
     s.dev->DestroyBuffer(it->second.buffer);
     it = s.kept.erase(it);
   }
+}
+
+void NextComputeRun() {
+  std::lock_guard<std::mutex> l(G().mu);
+  G().round++;
 }
 
 }  // namespace recomp::orbis::gpu

@@ -1492,6 +1492,42 @@ int main() {
     Check(ok, "a dispatch's CMASK clear fills the target with the clear colour");
   }
 
+  // A compute queue's runs read a texture again: a dispatch of the image
+  // load above from a 1x1 texture through a mapped ring, the texel
+  // changed by the CPU, the same dispatch kicked again (no graphics
+  // submission in between): it loads the new texel.
+  {
+    constexpr gaddr kRing = 0x1D9000, kRptr = 0x1D9800, kRingTex = 0x1D9A00, kRingOut = 0x1D9B00;
+    uint32_t user[16] = {};
+    TSharp(user, kRingTex, 1, 1, 9, 8, 0, 1);
+    VSharp(user + 8, kRingOut, 16);
+    std::vector<uint32_t> packets;
+    auto sh = [&](uint32_t reg, uint32_t v) { packets.insert(packets.end(), {0xC0017602, reg, v}); };
+    sh(kThreadX, 1);
+    sh(kThreadX + 1, 1);
+    sh(kThreadX + 2, 1);
+    sh(kPgmLo, uint32_t(kLoadAt >> 8));
+    sh(kRsrc1 + 1, 16u << 1);
+    for (uint32_t i = 0; i < 16; i++) sh(kUser + i, user[i]);
+    packets.insert(packets.end(), {0xC0031502, 1, 1, 1, 1});  // DISPATCH_DIRECT
+    const uint32_t n = uint32_t(packets.size());
+    MapComputeRing(1, 0, kRing, 256, kRptr);
+    bool ok = true;
+    for (uint32_t run = 0; run < 2; run++) {
+      Wr32(kRingTex, 111 * (run + 1));
+      Wr32(kRingOut, 0);
+      std::memcpy(GPtr(kRing + 4 * n * run), packets.data(), 4 * n);
+      KickComputeRing(1, n * (run + 1));
+      for (int i = 0; i < 5000 && Rd32(kRptr) != n * (run + 1); i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      Settle(true);
+      if (Rd32(kRingOut) != 111 * (run + 1)) std::printf("  run %u: %u\n", run, Rd32(kRingOut));
+      ok &= Rd32(kRingOut) == 111 * (run + 1);
+    }
+    UnmapComputeRing(1);
+    Check(ok, "a compute queue's second run reads what the CPU wrote since its first");
+  }
+
   SetDevice(nullptr);
   dev.reset();
   SDL_DestroyWindow(w);

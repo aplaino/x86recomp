@@ -525,6 +525,7 @@ void ComputeThread(std::shared_ptr<Ring> r) {
       w = r->wptr.load() % r->size_dw;
     }
     const uint32_t end = w > rptr ? w : r->size_dw;
+    NextComputeRun();
     Stream de, ce;
     de.stack.push_back({r->base + 4 * uint64_t(rptr), r->base + 4 * uint64_t(end)});
     Run(*e, de, ce);
