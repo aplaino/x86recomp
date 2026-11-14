@@ -37,7 +37,8 @@ LIBS = (("libSceFiber", "LIB_FIBER"), ("libSceGnmDriver", "LIB_GNM"),
         ("libSceLibcInternal", "LIB_LIBC"), ("libSceRtc", "LIB_RTC"),
         ("libSceMsgDialog", "LIB_MSGDIALOG"), ("libSceAppContent", "LIB_APPCONTENT"),
         ("libSceAjm", "LIB_AJM"), ("libSceVideodec2", "LIB_VIDEODEC2"),
-        ("libSceNpTus", "LIB_NPTUS"), ("libScePlayGo", "LIB_PLAYGO"))
+        ("libSceNpTus", "LIB_NPTUS"), ("libScePlayGo", "LIB_PLAYGO"),
+        ("libSceNet", "LIB_NET"))
 for lib, define in LIBS:
     run(clang, *cflags, "-D" + define, os.path.join(here, "stubs.c"), "-o", o(lib + "_stub.o"))
     run(lld, "-shared", "-soname", lib, o(lib + "_stub.o"), "-o", o(lib + ".so"))

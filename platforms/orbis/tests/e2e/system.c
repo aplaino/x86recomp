@@ -1019,8 +1019,23 @@ static int playgo_checks(void) {
   return failed;
 }
 
+// ---- libSceNet: pool errors set the net errno while the library's
+// lock is held (a deadlock when the errno took that lock too).
+
+int sceNetInit(void);
+int sceNetPoolCreate(const char* name, int size, int flags);
+int sceNetPoolDestroy(int id);
+
+static int net_checks(void) {
+  int failed = 0;
+  failed += test_check(484, (unsigned)sceNetPoolCreate("pool", 0x4000, 0), 0x804101C8);  // ENOTINIT
+  sceNetInit();
+  failed += test_check(485, (unsigned)sceNetPoolDestroy(1), 0x80410109);  // EBADF
+  return failed;
+}
+
 int system_checks(void) {
   return fiber_checks() + dir_checks() + user_event_checks() + gpu_checks() + packet_checks() + save_checks() + audio_checks() +
          pad_checks() + dialog_checks() + msg_dialog_checks() + trophy_checks() + ngs2_checks() +
-         appcontent_checks() + tus_checks() + playgo_checks();
+         appcontent_checks() + tus_checks() + playgo_checks() + net_checks();
 }

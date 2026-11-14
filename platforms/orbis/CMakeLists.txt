@@ -213,7 +213,8 @@ else()
                         recomp_orbis_kernel recomp_orbis_fiber recomp_orbis_gnm
                         recomp_orbis_savedata recomp_orbis_audio recomp_orbis_pad recomp_orbis_np
                         recomp_orbis_ngs2 recomp_orbis_ajm recomp_orbis_videodec
-                        recomp_orbis_savedata_dialog recomp_orbis_libc_internal)
+                        recomp_orbis_savedata_dialog recomp_orbis_libc_internal
+                        recomp_orbis_net)
   recomp_bundle(orbis_process_test)
   add_test(NAME orbis_process COMMAND orbis_process_test "${_e2e}/eboot.elf" "${_e2e}/prx.elf"
            "${_e2e}/app0/sce_module/libTestLoad.prx")

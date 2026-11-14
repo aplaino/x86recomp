@@ -124,6 +124,12 @@ STUB(sceMsgDialogTerminate) STUB(sceMsgDialogProgressBarSetValue) STUB(sceMsgDia
 STUB(scePlayGoInitialize) STUB(scePlayGoOpen) STUB(scePlayGoGetEta)
 #endif
 
+#ifdef LIB_NET
+#define STUB(name) \
+  void name(void) {}
+STUB(sceNetInit) STUB(sceNetPoolCreate) STUB(sceNetPoolDestroy)
+#endif
+
 #ifdef LIB_NPTUS
 void sceNpTusDeleteNpTitleCtx(void) {}
 #endif
