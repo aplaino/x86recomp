@@ -10,8 +10,10 @@ Run from the topic's worktree: tools/land.py [--dry-run]
    out/land/<preset> and runs its ctest (niced, memory-capped). Docs
    (.md) and C/C++ files whose change is only to comments and whitespace
    build nothing.
-4. Pushes the topic to origin/main, a fast-forward only. If main moved in
-   the meantime the push is rejected: rerun.
+4. Pushes the commit it rebased, built and tested to origin/main, a
+   fast-forward only, after checking that the worktree is still clean and
+   on that commit. If main moved in the meantime the push is rejected:
+   rerun.
 5. Fast-forwards the checkout that has main, when it is clean.
 
 It does not run the game projects; it prints which ones the change calls
@@ -168,14 +170,17 @@ def main():
     if not up_to_date and subprocess.run(["git", "rebase", "origin/main"]).returncode != 0:
         sys.exit("land: rebase stopped; resolve, `git rebase --continue`, rerun")
 
-    paths = git("diff", "--name-only", "origin/main...HEAD").splitlines()
+    # What is built, tested and pushed: a commit made in the worktree
+    # while the presets build must not ride along untested.
+    head = git("rev-parse", "HEAD")
+    paths = git("diff", "--name-only", f"origin/main...{head}").splitlines()
     if not paths:
         sys.exit("land: nothing to land")
     comments = [p for p in paths if comment_only(p)]
     if comments:
         print("land: comments only, nothing to build:", ", ".join(comments))
     paths = [p for p in paths if p not in comments]
-    commits = git("log", "--oneline", "origin/main..HEAD")
+    commits = git("log", "--oneline", f"origin/main..{head}")
     print(f"land: {topic}, onto origin/main:\n{commits}\n")
 
     presets = presets_for(paths)
@@ -187,7 +192,10 @@ def main():
         if not run_preset(preset, root):
             sys.exit(f"land: {preset} failed; nothing pushed")
 
-    push = subprocess.run(["git", "push", "origin", "HEAD:main"])
+    if git("status", "--porcelain") or git("rev-parse", "HEAD") != head:
+        sys.exit(f"land: the worktree changed during the builds; nothing pushed "
+                 f"(tested {head[:12]}); rerun")
+    push = subprocess.run(["git", "push", "origin", f"{head}:refs/heads/main"])
     if push.returncode != 0:
         sys.exit("land: push failed (main moved, or the remote could not be "
                  "reached; see git's message); rerun to rebase and retest")
@@ -198,7 +206,7 @@ def main():
             print(f"land: {checkout} has uncommitted changes; main there "
                   "was left behind, run `git merge --ff-only origin/main`")
         else:
-            git("-C", checkout, "merge", "--ff-only", "origin/main")
+            git("-C", checkout, "merge", "--ff-only", head)
 
     games = sorted({g for p in paths if (g := match(p, GAMES))})
     if games:
