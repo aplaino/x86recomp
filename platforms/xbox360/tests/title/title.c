@@ -1417,6 +1417,23 @@ static void XmaDecode(void) {
     c[1] |= 1u << 31;
   }
   CHECK(total == 33 && (c[0] >> 12 & 0xFF) == 0 && !(c[0] >> 20 & 1));
+
+  // Both buffers valid, a packet each, no frame beginning in either: the
+  // scan for a frame goes through both, consumes them and stops, back at
+  // buffer 0 past its header.
+  c[2] = 0;
+  *XmaReg(0x6A0 + (index >> 5)) = __builtin_bswap32(1u << (index & 31));
+  CHECK(WaitFor(&c[2], 32));
+  XmaHeader(input, 0, 0x7FFF);
+  XmaHeader(input + 2048, 0, 0x7FFF);
+  c[3] = c[4] = 0;
+  c[6] = pa + 2048;
+  c[1] = 1u << 31 | 3u << 27 | 1u << 20 | 1;
+  c[0] = 8u << 22 | 3u << 20 | 1;
+  *XmaReg(0x650 + (index >> 5)) = __builtin_bswap32(1u << (index & 31));
+  int64_t ms = -10000;
+  for (int k = 0; k < 1000 && c[0] >> 20 & 3; k++) KeDelayExecutionThread(1, 0, &ms);
+  CHECK(!(c[0] >> 20 & 3) && c[2] == 32 && !(c[4] >> 31) && c[1] >> 31 && !(c[0] >> 27));
   CHECK(XMAReleaseContext(va) == 0);
   MmFreePhysicalMemory(0, memory);
 }

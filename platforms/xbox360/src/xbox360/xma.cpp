@@ -189,9 +189,13 @@ void ClearContext(uint32_t index) {
 }
 
 // Where decoding is in a context's input: a buffer, a packet of it and a
-// bit of that packet.
+// bit of that packet. Every walk through the input starts at the read
+// position; one that leaves its buffer and then the other one too comes
+// back to the first `spent`: both are consumed, and the first is not
+// available again until the title sets it valid.
 struct Position {
   uint32_t buffer, packet, bit;
+  bool spent = false;
 };
 
 // A context as a kick finds it, and what decoding changes of it.
@@ -207,19 +211,20 @@ struct Context {
   bool looped = false;
 
   uint32_t Get(Field f) const { return f.width == 32 ? words[f.word] : (words[f.word] & Mask(f)) >> f.shift; }
-  bool Available(const Position& p) const { return valid[p.buffer] && p.packet < packets[p.buffer]; }
+  bool Available(const Position& p) const { return !p.spent && valid[p.buffer] && p.packet < packets[p.buffer]; }
   const uint8_t* Packet(const Position& p) const {
     return Mem() + PhysicalToVirtual(input[p.buffer]) + p.packet * kPacketBytes;
   }
   // The stream's packet after p's: the header's skip count is the packets
   // of other streams in between (0xFF, the next packet: Xenia's). Past the
-  // end of p's buffer, into the other.
+  // end of p's buffer, into the other; back into the read position's, spent.
   Position NextPacket(const Position& p) const {
     uint8_t skip = Packet(p)[3];
-    Position q{p.buffer, p.packet + (skip == 0xFF ? 1 : skip + 1u), kHeaderBits};
+    Position q{p.buffer, p.packet + (skip == 0xFF ? 1 : skip + 1u), kHeaderBits, p.spent};
     if (q.packet >= packets[q.buffer]) {
       q.packet -= packets[q.buffer];
       q.buffer ^= 1;
+      q.spent |= q.buffer == current;
     }
     return q;
   }
@@ -239,14 +244,17 @@ struct Context {
     }
     return true;
   }
-  // Moves the read position to p; a buffer it leaves is consumed.
+  // Moves the read position to p; a buffer it leaves is consumed (both, to
+  // a spent position).
   void MoveTo(const Position& p) {
-    if (p.buffer != current) {
-      valid[current] = false;
-      released[current] = true;
-      current = p.buffer;
-    }
+    for (uint32_t b = 0; b < 2; b++)
+      if (p.spent || (b == current && p.buffer != current)) {
+        valid[b] = false;
+        released[b] = true;
+      }
+    current = p.buffer;
     at = p;
+    at.spent = false;
   }
 };
 
@@ -278,7 +286,8 @@ uint32_t FirstFrame(const uint8_t* packet) {
 // Moves p to where the next frame begins, from p on: a packet's first
 // frame when p is before it, the next packet when no frame (or padding)
 // follows. False, with p where it got to, when a packet needed is not
-// available.
+// available: at the latest when the walk comes back to its buffer spent,
+// after every packet of both.
 bool FrameStart(const Context& c, Position& p, uint32_t& length) {
   for (;;) {
     if (!c.Available(p)) return false;
