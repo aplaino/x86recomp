@@ -128,15 +128,17 @@ FaultContext ReadFaultContext(const void* uc) {
     }
     at += size;
   }
+#elif defined(__APPLE__) && defined(__x86_64__)
+  const auto& es = u->uc_mcontext->__es;
+  const auto& ss = u->uc_mcontext->__ss;
+  f.write_known = true;
+  f.write = (es.__err & 2) != 0;
+  f.pc = uintptr_t(ss.__rip);
+  f.caller = *reinterpret_cast<const uintptr_t*>(ss.__rsp);
 #else
 // The x86 core needs the fault's kind and where it was (guest exception
-// dispatch), and where the unwinder cannot leave a signal frame (macOS) a
-// way to resume (RedirectToCall): without them guest faults would read as
-// reads at pc 0, or a guest handler catching one would end the process.
-// macOS x86-64 has the context but no RedirectToCall: a call pushed at the
-// fault would land in the faulting function's red zone and need not leave
-// the stack aligned.
-#error "guest faults are not supported on this host (Linux x86-64 and arm64, macOS arm64 are)"
+// dispatch): without them guest faults would read as reads at pc 0.
+#error "no fault context for this host (Linux and macOS, x86-64 and arm64, have one)"
 #endif
   return f;
 }
@@ -196,13 +198,52 @@ void SleepUntilNs(uint64_t t) {
 }
 #endif
 
+#if defined(__x86_64__)
+namespace {
+thread_local void (*t_redirected)() = nullptr;
+
+// What RedirectToCall makes the faulting instruction call on x86-64: the
+// stack there need not be aligned for a call, so this realigns it (its
+// frame is unwound through rbp) and calls the function asked for.
+[[noreturn]] __attribute__((force_align_arg_pointer, noinline)) void CallRedirected() {
+  void (*fn)() = t_redirected;
+  t_redirected = nullptr;
+  fn();
+  abort();  // fn must not return
+}
+}  // namespace
+#endif
+
 bool RedirectToCall(void* uc, void (*fn)()) {
-#if defined(__APPLE__) && defined(__aarch64__)
+  // The unwinder looks up a return address minus one: one past the start
+  // of the faulting instruction lands inside it on x86-64, pc + 4 (its
+  // end) on arm64, whose instructions are 4 bytes.
+#if defined(__aarch64__)
+#if defined(__APPLE__)
   auto& ss = static_cast<ucontext_t*>(uc)->uc_mcontext->__ss;
-  // The unwinder looks up a return address minus one, which lands inside
-  // the faulting instruction (arm64 instructions are 4 bytes).
-  ss.__lr = ss.__pc + 4;
-  ss.__pc = reinterpret_cast<uint64_t>(fn);
+  auto &pc = ss.__pc, &lr = ss.__lr;
+#else
+  mcontext_t& m = static_cast<ucontext_t*>(uc)->uc_mcontext;
+  auto &pc = m.pc, &lr = m.regs[30];
+#endif
+  lr = pc + 4;
+  pc = reinterpret_cast<uintptr_t>(fn);
+  return true;
+#elif defined(__x86_64__)
+#if defined(__APPLE__)
+  auto& ss = static_cast<ucontext_t*>(uc)->uc_mcontext->__ss;
+  auto &rip = ss.__rip, &rsp = ss.__rsp;
+#else
+  greg_t* g = static_cast<ucontext_t*>(uc)->uc_mcontext.gregs;
+  uint64_t &rip = reinterpret_cast<uint64_t&>(g[REG_RIP]),
+           &rsp = reinterpret_cast<uint64_t&>(g[REG_RSP]);
+#endif
+  // A call's push: it lands where the faulting function's red zone would
+  // be, so code that can fault is built without one (RECOMP_FAULT_FRAME_FLAGS).
+  rsp -= 8;
+  *reinterpret_cast<uint64_t*>(rsp) = rip + 1;
+  rip = reinterpret_cast<uintptr_t>(&CallRedirected);
+  t_redirected = fn;
   return true;
 #else
   (void)uc;

@@ -50,12 +50,15 @@ target_compile_features(pacing_test PRIVATE cxx_std_20)
 add_test(NAME pacing COMMAND pacing_test)
 set_tests_properties(pacing PROPERTIES RUN_SERIAL TRUE)
 
-# platform_fault_test: the platform layer's fault contexts on real faults;
-# portable.
+# platform_fault_test: the platform layer's fault contexts and
+# RedirectToCall on real faults, built as code that faults on guest memory
+# is on hosts that need RedirectToCall; portable.
 add_executable(platform_fault_test platform_fault_test.cpp
                ${PROJECT_SOURCE_DIR}/src/runtime/platform.cpp)
 target_include_directories(platform_fault_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_compile_features(platform_fault_test PRIVATE cxx_std_20)
+set_source_files_properties(platform_fault_test.cpp PROPERTIES COMPILE_OPTIONS
+  "-fnon-call-exceptions;-fno-omit-frame-pointer;-mno-omit-leaf-frame-pointer;-mno-red-zone")
 add_test(NAME platform_fault COMMAND platform_fault_test)
 
 # lazy_mem_test: lazily read-back images (DirectDraw Lock of GPU

@@ -210,9 +210,10 @@ endif()
 # Where the unwinder cannot leave a signal frame (macOS), a guest exception
 # raised by a fault is rethrown as if the faulting instruction had made a
 # call (runtime/platform.h); that needs a frame record in every function
-# that can fault on guest memory, leaf functions included.
+# that can fault on guest memory, leaf functions included, and no red
+# zone under the stack pointer for the call's frame to overwrite.
 if(APPLE)
-  set(RECOMP_FAULT_FRAME_FLAGS -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer
+  set(RECOMP_FAULT_FRAME_FLAGS -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -mno-red-zone
       CACHE INTERNAL "")
 else()
   set(RECOMP_FAULT_FRAME_FLAGS "" CACHE INTERNAL "")

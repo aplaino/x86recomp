@@ -1,8 +1,14 @@
 // platform_fault_test: ReadFaultContext on real faults. A read of an
 // inaccessible page and a write to a read-only one must each report
 // their kind (write_known, write) and a pc; the handler then opens the
-// page and the access is retried. Portable (every host the runtime
-// supports has the context).
+// page and the access is retried. Then RedirectToCall: a fault whose
+// handler redirects to a function that throws must unwind through the
+// faulting function into a handler around the call to it, again and again
+// with the stack intact. (A handler around the faulting access in the
+// same function is not reached: LLVM's call-site tables cover calls only,
+// whatever -fnon-call-exceptions says.) Built like code that faults on
+// guest memory (frame records, no red zone). Portable (every host the
+// runtime supports has both).
 
 #include <signal.h>
 #include <sys/mman.h>
@@ -10,6 +16,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 #include "runtime/platform.h"
 
@@ -25,6 +32,29 @@ void OnFault(int, siginfo_t* si, void* uc) {
   g_fault = recomp::platform::ReadFaultContext(uc);
   g_faults++;
   mprotect(g_page, g_size, PROT_READ | PROT_WRITE);
+}
+
+struct Thrown {};
+
+[[noreturn]] void Throw() { throw Thrown{}; }
+
+void OnFaultRedirect(int, siginfo_t* si, void* uc) {
+  if (size_t(static_cast<uint8_t*>(si->si_addr) - g_page) >= g_size) _exit(2);
+  if (!recomp::platform::RedirectToCall(uc, Throw)) _exit(3);
+}
+
+__attribute__((noinline)) int Read(volatile uint8_t* p) { return p[1]; }
+
+// Through a pointer, so the compiler cannot see that Read only loads (a
+// function it knows cannot throw is called with no call-site entry).
+int (*volatile g_read)(volatile uint8_t*) = Read;
+
+__attribute__((noinline)) int ReadInCallee(volatile uint8_t* p) {
+  try {
+    return g_read(p);
+  } catch (const Thrown&) {
+    return -2;
+  }
 }
 
 }  // namespace
@@ -62,6 +92,23 @@ int main() {
                 reinterpret_cast<void*>(write.pc));
     failures++;
   }
+  // RedirectToCall: the page inaccessible, the handler redirects.
+  mprotect(g_page, g_size, PROT_NONE);
+  sa.sa_sigaction = OnFaultRedirect;
+  sigaction(SIGSEGV, &sa, nullptr);
+  sigaction(SIGBUS, &sa, nullptr);
+  volatile char canary[64];
+  std::memset(const_cast<char*>(canary), 0x5A, sizeof canary);
+  int caught = 0;
+  for (int i = 0; i < 100; i++) caught += ReadInCallee(g_page) == -2;
+  bool intact = true;
+  for (char ch : canary) intact = intact && ch == 0x5A;
+  if (caught != 100 || !intact) {
+    std::printf("FAIL: redirected faults caught %d times of 100, stack %s\n", caught,
+                intact ? "intact" : "overwritten");
+    failures++;
+  }
+
   if (failures) return 1;
   std::printf("fault contexts: ok\n");
   return 0;

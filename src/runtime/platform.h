@@ -118,7 +118,9 @@ inline constexpr bool kThrowThroughSignalFrames = true;
 // faulting function like one thrown by a call made there. The faulting
 // function must have a frame record (lifted code is built with
 // -mno-omit-leaf-frame-pointer on such hosts: the link register is
-// overwritten). False if this host has no implementation.
+// overwritten) and no red zone (-mno-red-zone: the call's frame goes
+// below the stack pointer). Linux hosts implement it too, though they do
+// not need it. False if this host has no implementation.
 bool RedirectToCall(void* uc, void (*fn)());
 
 }  // namespace recomp::platform
