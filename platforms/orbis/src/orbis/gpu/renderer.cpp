@@ -2045,10 +2045,11 @@ void Draw(const Regs& r, const DrawCall& call) {
   } else if (call.indices) {
     // Kept like large ranges: a scene's draws use a few hundred index
     // ranges, each over and over.
-    const uint32_t bytes = call.count * call.index_size;
+    const uint64_t bytes = uint64_t(call.count) * call.index_size;
     gaddr at;
     KeptRange* k;
-    if ((k = Kept(s, call.indices, bytes, &at)) && !((call.indices - at) % call.index_size)) {
+    if (bytes == uint32_t(bytes) && (k = Kept(s, call.indices, uint32_t(bytes), &at)) &&
+        !((call.indices - at) % call.index_size)) {
       d.index_buffer = k->buffer;
       d.first_index = uint32_t((call.indices - at) / call.index_size);
     } else {
