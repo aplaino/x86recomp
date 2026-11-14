@@ -358,8 +358,8 @@ add_library(recomp_ucrt SHARED src/runtime/hle/ucrt.cpp src/runtime/hle/ucrt_std
             src/runtime/hle/msvcp140.cpp)
 target_link_libraries(recomp_ucrt PUBLIC recomp_runtime PRIVATE coremath)
 
-# Store and online service SDKs (GOG Galaxy, ...), answering as offline.
-add_library(recomp_online SHARED src/runtime/hle/galaxy64.cpp)
+# Store and online service SDKs (GOG Galaxy, Steamworks), answering as offline.
+add_library(recomp_online SHARED src/runtime/hle/galaxy64.cpp src/runtime/hle/steam_api.cpp)
 target_link_libraries(recomp_online PUBLIC recomp_runtime)
 
 # Games for Windows - LIVE (xlive.dll), answering as an offline local profile.
