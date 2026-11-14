@@ -53,6 +53,7 @@ constexpr uint32_t DDERR_OUTOFVIDEOMEMORY = 0x8876017C;
 constexpr uint32_t DDERR_NOTLOCKED = 0x887601E6;
 constexpr uint32_t DDERR_NOCOLORKEY = 0x887600D7;
 constexpr uint32_t DDERR_INVALIDPIXELFORMAT = 0x88760091;
+constexpr uint32_t DDERR_CANNOTDETACHSURFACE = 0x88760014;
 
 template <typename T>
 T* G(uint32_t va) {
@@ -89,7 +90,12 @@ struct Surface : com::Object {
   gfx::TextureId tex = 0;  // texture (shared by all mip levels)
   int level = 0;           // mip level of this surface in `tex`
   gfx::DepthId depth = 0;
-  std::vector<std::shared_ptr<Surface>> attached;  // chain / mips / z
+  // Chain / mips / z, each holding a reference: the one a surface created
+  // with it (implicit) was published with, AddAttachedSurface's own.
+  std::vector<std::shared_ptr<Surface>> attached;
+  // Created with a complex surface (a mip sublevel, the back buffer): it
+  // lives as long as that one, the app's Release never destroys it.
+  bool implicit = false;
   Surface* zbuffer = nullptr;   // attached Z buffer (render targets)
   bool has_ck_src = false;
   guest::DDCOLORKEY ck_src{};

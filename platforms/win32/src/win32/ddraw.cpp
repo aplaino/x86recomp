@@ -191,6 +191,8 @@ void PixelFormatFromFormat(gfx::Format f, DDPIXELFORMAT* pf) {
 
 Surface::~Surface() {
   State& s = g_state;
+  // Its attachments lose the reference each holds (implicit ones go).
+  for (const std::shared_ptr<Surface>& a : attached) com::Release(a->guest);
   if (s.gfx) {
     if (tex && level == 0) s.gfx->DestroyTexture(tex);
     if (depth) s.gfx->DestroyDepth(depth);
@@ -323,6 +325,7 @@ uint32_t CreateSurfaceImpl(uint32_t desc_va, uint32_t* out) {
                                DDSCAPS_BACKBUFFER | DDSCAPS_VIDEOMEMORY |
                                DDSCAPS_LOCALVIDMEM,
                            caps2);
+      bb->implicit = true;
       prim->attached.push_back(bb);
       g_state.backbuffer = bb.get();
       if (backs > 1)
@@ -394,6 +397,7 @@ uint32_t CreateSurfaceImpl(uint32_t desc_va, uint32_t* out) {
         s->has_ck_src = true;
         s->ck_src = d.ddckCKSrcBlt;
       }
+      s->implicit = l > 0;
       if (prev) prev->attached.push_back(s);
       if (!top) top = s;
       prev = s;
@@ -806,7 +810,10 @@ HLE_NAMED("ddraw.dll", "IDirectDrawSurface7::QueryInterface", DDS7_QueryInterfac
 }
 
 HLE_NAMED("ddraw.dll", "IDirectDrawSurface7::AddRef", DDS7_AddRef, 1) { return com::AddRef(Arg(c, 0)); }
-HLE_NAMED("ddraw.dll", "IDirectDrawSurface7::Release", DDS7_Release, 1) { return com::Release(Arg(c, 0)); }
+HLE_NAMED("ddraw.dll", "IDirectDrawSurface7::Release", DDS7_Release, 1) {
+  if (Self(c)->implicit && Self(c)->refs == 1) return 0;  // its complex surface's
+  return com::Release(Arg(c, 0));
+}
 
 HLE_NAMED("ddraw.dll", "IDirectDrawSurface7::GetSurfaceDesc", DDS7_GetSurfaceDesc, 2) {
   Surface* s = Self(c);
@@ -859,6 +866,8 @@ HLE_NAMED("ddraw.dll", "IDirectDrawSurface7::DeleteAttachedSurface", DDS7_Delete
   uint32_t which = Arg(c, 2);
   for (auto it = s->attached.begin(); it != s->attached.end(); ++it) {
     if (!which || (*it)->guest == which) {
+      // Only AddAttachedSurface's attachments can be detached.
+      if ((*it)->implicit) return DDERR_CANNOTDETACHSURFACE;
       if (s->zbuffer == it->get()) s->zbuffer = nullptr;
       uint32_t g = (*it)->guest;
       s->attached.erase(it);
