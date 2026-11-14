@@ -104,6 +104,21 @@ struct D3DLOCKED_RECT {
   GPTR pBits;
 };
 
+struct D3DVOLUME_DESC {
+  D3DFORMAT Format;
+  DWORD Type, Usage, Pool;
+  UINT Width, Height, Depth;
+};
+
+struct D3DLOCKED_BOX {
+  INT RowPitch, SlicePitch;
+  GPTR pBits;
+};
+
+struct D3DBOX {
+  UINT Left, Top, Right, Bottom, Front, Back;
+};
+
 struct D3DVIEWPORT9 {
   DWORD X, Y, Width, Height;
   float MinZ, MaxZ;
