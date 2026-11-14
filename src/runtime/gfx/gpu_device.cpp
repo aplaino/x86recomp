@@ -587,6 +587,12 @@ class GpuDevice final : public Device {
     auto it = textures_.find(id);
     if (it == textures_.end()) return;
     if (Pending(it->second.tex)) Flush();
+    // The pass recorded last may name it without it being bound (a
+    // program's targets): forget the pass, its work is flushed.
+    if (std::find(pass_colors_.begin(), pass_colors_.end(), it->second.tex) != pass_colors_.end()) {
+      pass_color_ = pass_depth_ = nullptr;
+      pass_colors_.fill(nullptr);
+    }
     bool bound = current_color_ == id;
     if (current_color_ == id) current_color_ = 0, current_level_ = 0;
     for (ColorTarget& e : current_extra_)
@@ -709,7 +715,8 @@ class GpuDevice final : public Device {
     std::lock_guard<std::recursive_mutex> l(mu_);
     auto it = gpu_buffers_.find(id);
     if (it == gpu_buffers_.end() || !size) return;
-    if (at + size > it->second.size) FatalF("gfx: an upload past buffer %u's end", id);
+    if (at > it->second.size || size > it->second.size - at)
+      FatalF("gfx: an upload past buffer %u's end", id);
     if (std::find(draw_read_.begin(), draw_read_.end(), id) != draw_read_.end())
       Flush();  // draws recorded with it
     std::memcpy(MapUpload(size), src, size);
@@ -768,7 +775,11 @@ class GpuDevice final : public Device {
     std::lock_guard<std::recursive_mutex> l(mu_);
     auto it = depths_.find(id);
     if (it == depths_.end()) return;
-    if (pass_depth_ == it->second.tex) Flush();
+    if (pass_depth_ == it->second.tex) {
+      Flush();
+      pass_color_ = pass_depth_ = nullptr;  // as DestroyTexture
+      pass_colors_.fill(nullptr);
+    }
     if (current_depth_ == id) {
       current_depth_ = 0;
       BindTarget();
@@ -854,14 +865,16 @@ class GpuDevice final : public Device {
 
   void ReadBack(const Rect& r, void* dst, uint32_t pitch, Format fmt) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
-    ReadTexture(pass_color_, pass_w_, pass_h_, r, dst, pitch, fmt, pass_levels_[0]);
+    ReadTexture(pass_color_, SDL_GPUTextureFormat(pass_fmts_[0]), pass_w_, pass_h_, r, dst, pitch,
+                fmt, pass_levels_[0]);
   }
 
   uint32_t StartReadBack(const Rect& r) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     uint32_t t = next_read_++;
     if (!t) t = next_read_++;
-    reads_[t] = StartRead(pass_color_, pass_w_, pass_h_, r, false, pass_levels_[0]);
+    reads_[t] = StartRead(pass_color_, SDL_GPUTextureFormat(pass_fmts_[0]), pass_w_, pass_h_, r,
+                          false, pass_levels_[0]);
     return t;
   }
 
@@ -883,7 +896,7 @@ class GpuDevice final : public Device {
 
   void ReadBackFront(const Rect& r, void* dst, uint32_t pitch, Format fmt) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
-    ReadTexture(front_, bb_w_, bb_h_, r, dst, pitch, fmt);
+    ReadTexture(front_, SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM, bb_w_, bb_h_, r, dst, pitch, fmt);
   }
 
   void PresentFront() override {
@@ -1390,6 +1403,12 @@ void r_color0(inout vec4 c) {
 #if defined(__APPLE__)
     FatalF("gfx: programs on Metal are not implemented yet");
 #endif
+    // What a draw or dispatch binds: ProgramStageCmd's textures and
+    // DispatchProgram's storage images.
+    for (const ProgramStage* st : {&d.vs, &d.fs, &d.cs})
+      if (st->textures > 16 || st->rw_images > 8)
+        FatalF("gfx: a program stage with %u textures and %u storage images (at most 16 and 8)",
+               st->textures, st->rw_images);
     Program pr;
     pr.vs = d.vs;
     pr.fs = d.fs;
@@ -1784,7 +1803,7 @@ void r_color0(inout vec4 c) {
 
     SDL_GPUCommandBuffer* cmd = Begin();
     SDL_GPUStorageTextureReadWriteBinding images[8]{};
-    for (uint32_t i = 0; i < st.rw_images && i < 8; i++) {
+    for (uint32_t i = 0; i < st.rw_images; i++) {
       auto it = textures_.find(d.rw_images[i].tex);
       if (it == textures_.end() || !it->second.storage)
         FatalF("gfx: DispatchProgram: image %u is no storage image", i);
@@ -1997,6 +2016,7 @@ void r_color0(inout vec4 c) {
   // into `tb` (download_tb_ unless `own`), done when `fence` signals.
   struct Read {
     Rect r{}, c{};
+    SDL_GPUTextureFormat fmt = SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;  // the target's
     SDL_GPUTransferBuffer* tb = nullptr;
     SDL_GPUFence* fence = nullptr;
     bool own = false;
@@ -2146,7 +2166,7 @@ void r_color0(inout vec4 c) {
 
   // Whether recorded draws or queued uploads use `t`.
   bool Pending(SDL_GPUTexture* t) const {
-    if (!cmds_.empty())
+    if (!cmds_.empty() || pass_clear_color_ || pass_clear_depth_ || pass_clear_stencil_)
       for (SDL_GPUTexture* x : pass_colors_)
         if (x && x == t) return true;
     for (const Upload& u : uploads_)
@@ -2595,9 +2615,9 @@ void r_color0(inout vec4 c) {
     NotePresentation({bb_w_, bb_h_, int(sw), int(sh), r});
   }
 
-  void ReadTexture(SDL_GPUTexture* tex, int tw, int th, const Rect& r, void* dst, uint32_t pitch,
-                   Format fmt, int level = 0) {
-    Read rd = StartRead(tex, tw, th, r, true, level);
+  void ReadTexture(SDL_GPUTexture* tex, SDL_GPUTextureFormat tex_fmt, int tw, int th, const Rect& r,
+                   void* dst, uint32_t pitch, Format fmt, int level = 0) {
+    Read rd = StartRead(tex, tex_fmt, tw, th, r, true, level);
     FinishRead(rd, dst, pitch, fmt);
   }
 
@@ -2620,17 +2640,20 @@ void r_color0(inout vec4 c) {
     return download_tb_;
   }
 
-  // Copies `r` of `tex` (mip `level`, tw x th; after everything recorded
-  // so far) into a download transfer buffer: the shared one for a read
-  // finished at once (ReadTexture), else one of the read's own.
-  Read StartRead(SDL_GPUTexture* tex, int tw, int th, const Rect& r, bool shared, int level = 0) {
+  // Copies `r` of `tex` (of tex_fmt, mip `level`, tw x th; after
+  // everything recorded so far) into a download transfer buffer: the
+  // shared one for a read finished at once (ReadTexture), else one of the
+  // read's own.
+  Read StartRead(SDL_GPUTexture* tex, SDL_GPUTextureFormat tex_fmt, int tw, int th, const Rect& r,
+                 bool shared, int level = 0) {
     Flush();
     Read rd;
     rd.r = r;
     rd.c = Clip(r, tw, th);
+    rd.fmt = tex_fmt;
     int w = rd.c.right - rd.c.left, h = rd.c.bottom - rd.c.top;
     if (w <= 0 || h <= 0 || !tex) return rd;
-    uint32_t bytes = uint32_t(w) * uint32_t(h) * 4;
+    uint32_t bytes = uint32_t(w) * uint32_t(h) * SDL_GPUTextureFormatTexelBlockSize(tex_fmt);
     if (!shared) {
       rd.tb = NewDownload(bytes);
       rd.own = true;
@@ -2661,11 +2684,16 @@ void r_color0(inout vec4 c) {
   }
 
   // Waits for `rd` and converts it into dst, or only drops it if dst is
-  // null.
+  // null. A B8G8R8A8 target converts to any format EncodePixel writes;
+  // others are read only into their own format.
   void FinishRead(Read& rd, void* dst, uint32_t pitch, Format fmt) {
     if (!rd.fence) return;
     int w = rd.c.right - rd.c.left, h = rd.c.bottom - rd.c.top;
     if (dst) {
+      const bool bgra = rd.fmt == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM ||
+                        rd.fmt == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB;
+      if (!bgra && rd.fmt != GpuFormat(fmt))
+        FatalF("gfx: reading back a target of GPU format %d as format %d", int(rd.fmt), int(fmt));
       SDL_WaitForGPUFences(dev_, true, &rd.fence, 1);
       const auto* px = static_cast<const uint32_t*>(SDL_MapGPUTransferBuffer(dev_, rd.tb, false));
       uint32_t bpp = BitsPerPixel(fmt) / 8;
@@ -2675,7 +2703,10 @@ void r_color0(inout vec4 c) {
       for (int y = 0; y < h; y++) {
         const uint32_t* s = px + size_t(y) * uint32_t(w);
         uint8_t* out = static_cast<uint8_t*>(dst) + size_t(y + oy) * pitch + size_t(ox) * bpp;
-        if (fmt == Format::X8R8G8B8 || fmt == Format::A8R8G8B8) {
+        if (!bgra) {
+          const size_t row = size_t(w) * SDL_GPUTextureFormatTexelBlockSize(rd.fmt);
+          std::memcpy(out, reinterpret_cast<const uint8_t*>(px) + size_t(y) * row, row);
+        } else if (fmt == Format::X8R8G8B8 || fmt == Format::A8R8G8B8) {
           auto* o = reinterpret_cast<uint32_t*>(out);
           for (int x = 0; x < w; x++) o[x] = s[x] | 0xFF000000u;
         } else {
