@@ -86,9 +86,35 @@ struct MountPoint {
 };
 std::map<std::string, MountPoint> g_mounts;
 
+// An absolute guest path with its "." and ".." taken out (".." of the
+// root is the root, as FreeBSD's lookup has it) and its slashes single, a
+// trailing one kept; so a path names something below its mount point's
+// root only. Taken by name, not by what the components are (a ".." after
+// a file, ENOTDIR on the console, goes back over it). Others as they are.
+std::string Normal(const std::string& path) {
+  if (path.empty() || path[0] != '/') return path;
+  std::vector<std::string> parts;
+  for (size_t at = 1; at <= path.size();) {
+    const size_t end = std::min(path.find('/', at), path.size());
+    const std::string part = path.substr(at, end - at);
+    if (part == "..") {
+      if (!parts.empty()) parts.pop_back();
+    } else if (!part.empty() && part != ".") {
+      parts.push_back(part);
+    }
+    at = end + 1;
+  }
+  std::string out;
+  for (const std::string& part : parts) out += "/" + part;
+  if (out.empty()) return "/";
+  if (path.back() == '/') out += '/';
+  return out;
+}
+
 // A guest path to a host path; !ok: below a mount point nothing is
 // mounted on (ENOENT).
-Mapped MapPath(const std::string& guest) {
+Mapped MapPath(const std::string& path) {
+  const std::string guest = Normal(path);
   Mapped m;
   auto under = [&](const std::string& root) {
     const size_t n = root.size();
@@ -190,7 +216,7 @@ void PutStat(gaddr p, const struct stat& st) {
 }
 
 int64_t Stat(const std::string& path, gaddr out) {
-  if (path == "/") {
+  if (Normal(path) == "/") {
     // The sandbox's root: a directory, drwxrwxr-x, owned by root (11.00,
     // as listed over FTP); the rest as the host's data directory has it.
     struct stat st;

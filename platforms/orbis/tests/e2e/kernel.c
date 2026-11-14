@@ -343,6 +343,12 @@ int kernel_checks(void) {
   failed += test_check(57, sceKernelStat("/app0/data.txt", st) == 0 ? st[9] : -1, 6);  // st_size
   failed += test_check(58, (unsigned)sceKernelOpen("/app0/new.txt", 0x201, 0644),
                        0x8002001E);  // EROFS: app0 is read-only
+  // 482-483: ".." is taken out by name, and never leads above the root.
+  fd = sceKernelOpen("/app0/sub/./../data.txt", 0, 0);
+  failed += test_check(482, sceKernelRead(fd, buf, sizeof buf), 6);
+  sceKernelClose(fd);
+  failed += test_check(483, (unsigned)sceKernelStat("/app0/../../../../../../etc/passwd", st),
+                       0x80020002);  // ENOENT: the sandbox has no /etc
 
   // 59: anonymous memory.
   long* p = (long*)mmap(0, 0x10000, 3, 0x1000 | 2, -1, 0);
