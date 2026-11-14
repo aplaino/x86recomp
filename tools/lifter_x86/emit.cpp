@@ -3027,8 +3027,8 @@ void InsnEmitter::Emit64() {
       // A memory operand with a register bit offset can address outside
       // the operand: the offset is signed and selects a byte relative to it.
       if (IsMem(0) && IsReg(1)) {
-        L(Fmt("const int64_t off = int64_t(%s(%s));", n == 8 ? "int64_t" : "int32_t",
-              Read(1).c_str()));
+        L(Fmt("const int64_t off = int64_t(%s(%s));",
+              n == 8 ? "int64_t" : n == 2 ? "int16_t" : "int32_t", Read(1).c_str()));
         L("const uint64_t a = m0 + uint64_t(off >> 3);");
         L("const uint32_t bit = uint32_t(off) & 7u;");
         L("uint32_t v = ::recomp::lift::Rd<uint8_t>(B, a);");
@@ -3495,7 +3495,7 @@ void InsnEmitter::Emit() {
       // Memory operand with a register bit offset can address outside the
       // operand: the offset is signed and selects a byte relative to it.
       if (IsMem(0) && IsReg(1)) {
-        L(Fmt("const int32_t off = int32_t(%s);", Read(1).c_str()));
+        L(Fmt("const int32_t off = %s(%s);", n == 2 ? "int16_t" : "int32_t", Read(1).c_str()));
         L("const uint32_t a = m0 + uint32_t(off >> 3);");
         L("const uint32_t bit = uint32_t(off) & 7u;");
         L("uint32_t v = ::recomp::lift::Rd<uint8_t>(B, a);");

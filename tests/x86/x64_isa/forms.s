@@ -58,6 +58,17 @@ movbe qword ptr [rsi], r11
 movnti dword ptr [rsi], eax
 movnti qword ptr [rsi], r9
 
+# bt* with a register bit offset into memory: the offset is signed at
+# every operand size (the harness gives bt forms offsets of either sign)
+bt word ptr [rsi], ax
+bts word ptr [rsi], cx
+btr word ptr [rsi], dx
+btc word ptr [rsi], ax
+bt dword ptr [rsi], eax
+btc dword ptr [rsi], ecx
+bt qword ptr [rsi], rax
+bts qword ptr [rsi], rcx
+
 # ---- SSE family: forms new to the model (legacy encodings) ----
 pshufb xmm1, xmm2
 pshufb xmm9, xmmword ptr [rsi]

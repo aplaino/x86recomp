@@ -347,8 +347,9 @@ int main(int argc, char** argv) {
       Regs in{};
       for (int r = 0; r < 16; r++) in.r[r] = RandomValue(g);
       in.r[4] = 0;
+      // bt* bit offsets of either sign, a few bytes around the operand.
       if (is_bt)
-        for (int r = 0; r < 16; r++) in.r[r] &= 0x7F;
+        for (int r = 0; r < 16; r++) in.r[r] = uint64_t(int64_t(int8_t(in.r[r])));
       if (f.base >= 0) in.r[f.base] = kBuf + 0x1000;
       if (is_string) {
         in.r[6] = kBuf + 0x1000;  // rsi

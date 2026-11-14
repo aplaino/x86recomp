@@ -41,6 +41,14 @@ f3 4c 0f bd 0e                                   # lzcnt r9, qword ptr [rsi]
 4c 0f 38 f1 1e                                   # movbe qword ptr [rsi], r11
 0f c3 06                                         # movnti dword ptr [rsi], eax
 4c 0f c3 0e                                      # movnti qword ptr [rsi], r9
+66 0f a3 06                                      # bt word ptr [rsi], ax
+66 0f ab 0e                                      # bts word ptr [rsi], cx
+66 0f b3 16                                      # btr word ptr [rsi], dx
+66 0f bb 06                                      # btc word ptr [rsi], ax
+0f a3 06                                         # bt dword ptr [rsi], eax
+0f bb 0e                                         # btc dword ptr [rsi], ecx
+48 0f a3 06                                      # bt qword ptr [rsi], rax
+48 0f ab 0e                                      # bts qword ptr [rsi], rcx
 66 0f 38 00 ca                                   # pshufb xmm1, xmm2
 66 44 0f 38 00 0e                                # pshufb xmm9, xmmword ptr [rsi]
 66 0f 38 0b ca                                   # pmulhrsw xmm1, xmm2
