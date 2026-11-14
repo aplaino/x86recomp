@@ -163,10 +163,31 @@ set_tests_properties(orbis_gpu PROPERTIES SKIP_RETURN_CODE 77
 
 # orbis_process_test: tests/e2e (C for FreeBSD x86-64, linked by ld.lld
 # and made SCE ELFs) lifted at build time and run through the loader.
-# Needs clang and ld.lld.
+# Needs clang, ld.lld and Python 3: each one missing fails
+# orbis_prerequisites, which names it, unless
+# RECOMP_ALLOW_MISSING_TEST_TOOLS says this host cannot run those tests.
+option(RECOMP_ALLOW_MISSING_TEST_TOOLS "Leave out the tests whose tools are missing instead of failing" OFF)
 find_program(RECOMP_LD_LLD ld.lld HINTS "${RECOMP_LLVM_ROOT}/bin")
 find_package(Python3 COMPONENTS Interpreter)
-if(RECOMP_LD_LLD AND Python3_FOUND AND CMAKE_C_COMPILER_ID MATCHES "Clang")
+set(_missing)
+if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+  list(APPEND _missing "clang as the C compiler")
+endif()
+if(NOT RECOMP_LD_LLD)
+  list(APPEND _missing ld.lld)
+endif()
+if(NOT Python3_FOUND)
+  list(APPEND _missing "Python 3")
+endif()
+if(_missing)
+  string(JOIN ", " _missing ${_missing})
+  message(STATUS "orbis: missing ${_missing}; the tests that need them are left out")
+  if(NOT RECOMP_ALLOW_MISSING_TEST_TOOLS)
+    add_test(NAME orbis_prerequisites COMMAND "${CMAKE_COMMAND}" -E echo
+             "missing ${_missing} (RECOMP_ALLOW_MISSING_TEST_TOOLS=ON leaves their tests out)")
+    set_tests_properties(orbis_prerequisites PROPERTIES FAIL_REGULAR_EXPRESSION .)
+  endif()
+else()
   set(_e2e "${CMAKE_CURRENT_BINARY_DIR}/e2e")
   set(_src "${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e")
   add_custom_command(OUTPUT "${_e2e}/eboot.elf" "${_e2e}/prx.elf" "${_e2e}/load.elf"
