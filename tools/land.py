@@ -35,6 +35,13 @@ EVERY = ["debug", "x86", "ppc", "a64", "a64-aarch64-qemu", "orbis",
          "xbox360", "horizon"]
 RULES = [
     ("tools/land.py", []),
+    ("tools/ghidra/", []),
+    ("tools/pe_symbols.py", []),
+    ("tools/x64_forms.py", []),
+    (".github/", []),
+    (".gitignore", []),
+    ("LICENSE", []),
+    ("NOTICE", []),
     ("src/runtime/", EVERY),
     ("cmake/", EVERY),
     ("CMakeLists.txt", EVERY),
