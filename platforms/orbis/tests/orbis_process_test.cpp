@@ -10,10 +10,13 @@
 //
 // usage: orbis_process_test eboot.elf prx.elf libTestLoad.prx
 
+#include <unistd.h>
+
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <string>
 
 #include "orbis/hle.h"
 #include "orbis/process.h"
@@ -65,8 +68,10 @@ int main(int argc, char** argv) {
   config.prxs = {{argv[2], 0x800000000}};
   config.loadable = {{argv[3], 0x810000000}};
   config.args = {"eboot", "hello"};
-  // The game directory (/app0): a file, and a directory of two.
-  const auto dir = std::filesystem::temp_directory_path() / "orbis_process_test";
+  // The game directory (/app0): a file, and a directory of two; one per
+  // run, so runs side by side (other build trees) do not share it.
+  const auto dir = std::filesystem::temp_directory_path() /
+                   ("orbis_process_test-" + std::to_string(getpid()));
   std::filesystem::create_directories(dir);
   std::ofstream(dir / "data.txt") << "hello\n";
   std::filesystem::create_directories(dir / "sub");
@@ -81,6 +86,9 @@ int main(int argc, char** argv) {
   const auto pad = dir.string() + "_pad.txt";
   std::ofstream(pad) << "0 cross lx=-1 ry=1 for=1000\n+0 circle for=1000\n";
   setenv("ORBIS_TEST_BACKGROUND", "1", 1);
+  // Audio out (the e2e audio and ngs2 checks) to SDL3's dummy driver, not
+  // the host's sound.
+  setenv("SDL_AUDIO_DRIVER", "dummy", 1);
   setenv("ORBIS_TEST_TEST_PAD", pad.c_str(), 1);
   const int r = recomp::orbis::RunProcess(game, dir.string(), config);
   std::filesystem::remove_all(dir);
