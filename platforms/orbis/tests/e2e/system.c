@@ -960,8 +960,31 @@ static int tus_checks(void) {
   return test_check(456, (unsigned)sceNpTusDeleteNpTitleCtx(1), 0x8055070E);
 }
 
+// ---- PlayGo: every chunk local, every ETA 0, one per chunk asked for.
+
+int scePlayGoInitialize(const void* init);
+int scePlayGoOpen(unsigned* handle, const void* param);
+int scePlayGoGetEta(unsigned handle, const unsigned short* ids, unsigned n, long* eta);
+
+static _Alignas(16) char playgo_buf[0x200000];
+
+static int playgo_checks(void) {
+  int failed = 0;
+  struct {
+    const void* buf;
+    unsigned size, reserved;
+  } init = {playgo_buf, sizeof playgo_buf, 0};
+  unsigned h = 0;
+  const unsigned short ids[3] = {0, 1, 2};
+  long eta[4] = {-1, -1, -1, -1};
+  failed += test_check(473, scePlayGoInitialize(&init) * 10 + scePlayGoOpen(&h, 0), 0);
+  failed += test_check(474, scePlayGoGetEta(h, ids, 3, eta) == 0 && eta[0] == 0 && eta[1] == 0 &&
+                                eta[2] == 0 && eta[3] == -1, 1);
+  return failed;
+}
+
 int system_checks(void) {
   return fiber_checks() + dir_checks() + user_event_checks() + gpu_checks() + packet_checks() + save_checks() + audio_checks() +
          pad_checks() + dialog_checks() + msg_dialog_checks() + trophy_checks() + ngs2_checks() +
-         appcontent_checks() + tus_checks();
+         appcontent_checks() + tus_checks() + playgo_checks();
 }

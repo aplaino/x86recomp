@@ -117,6 +117,12 @@ STUB(sceMsgDialogGetStatus) STUB(sceMsgDialogGetResult) STUB(sceMsgDialogClose)
 STUB(sceMsgDialogTerminate) STUB(sceMsgDialogProgressBarSetValue) STUB(sceMsgDialogProgressBarInc)
 #endif
 
+#ifdef LIB_PLAYGO
+#define STUB(name) \
+  void name(void) {}
+STUB(scePlayGoInitialize) STUB(scePlayGoOpen) STUB(scePlayGoGetEta)
+#endif
+
 #ifdef LIB_NPTUS
 void sceNpTusDeleteNpTitleCtx(void) {}
 #endif

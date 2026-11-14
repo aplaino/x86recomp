@@ -82,13 +82,14 @@ ORBIS_HLE("libScePlayGo", scePlayGoGetToDoList, 4) {
 }
 
 // int scePlayGoGetEta(ScePlayGoHandle h, const ScePlayGoChunkId* ids,
-// uint32_t n, ScePlayGoEta* out)
+// uint32_t n, ScePlayGoEta* out): an ETA (8 bytes) per chunk.
 ORBIS_HLE("libScePlayGo", scePlayGoGetEta, 4) {
   std::lock_guard<std::mutex> l(g_mu);
   if (!Arg(c, 1) || !Arg(c, 3)) return kErrBadPointer;
-  if (!Arg(c, 2) || uint32_t(Arg(c, 2)) > kMaxEntries) return kErrBadSize;
+  const uint32_t n = uint32_t(Arg(c, 2));
+  if (!n || n > kMaxEntries) return kErrBadSize;
   if (uint32_t e = CheckHandle(uint32_t(Arg(c, 0)))) return e;
-  recomp::Wr64(Arg(c, 3), 0);
+  for (uint32_t i = 0; i < n; i++) recomp::Wr64(Arg(c, 3) + 8 * uint64_t(i), 0);
   return 0;
 }
 
