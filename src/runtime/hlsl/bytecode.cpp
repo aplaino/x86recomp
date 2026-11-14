@@ -26,6 +26,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "runtime/hlsl/hlsl.h"
@@ -117,8 +118,14 @@ class Translator {
  private:
   // ---- decoding
 
+  // The next token of the instruction being decoded (it ends at end_).
+  uint32_t Next(size_t& i) {
+    if (i >= end_) Fail("bad instruction length");
+    return t_[i++];
+  }
+
   Param Dst(size_t& i) {
-    uint32_t tok = t_[i++];
+    uint32_t tok = Next(i);
     Param p;
     p.type = RegTypeOf(tok);
     p.num = tok & 0x7FF;
@@ -132,7 +139,7 @@ class Translator {
   }
 
   Param Src(size_t& i) {
-    uint32_t tok = t_[i++];
+    uint32_t tok = Next(i);
     Param p;
     p.type = RegTypeOf(tok);
     p.num = tok & 0x7FF;
@@ -152,8 +159,7 @@ class Translator {
   }
 
   void RelToken(size_t& i, Param* p) {
-    if (i >= n_) Fail("truncated relative address");
-    uint32_t tok = t_[i++];
+    uint32_t tok = Next(i);
     p->rel_type = RegTypeOf(tok);
     p->rel_num = tok & 0x7FF;
     p->rel_comp = (tok >> 16) & 3;
@@ -186,12 +192,13 @@ class Translator {
         while (end < n_ && (t_[end] & 0x80000000)) end++;
       }
       if (end > n_) Fail("truncated instruction");
+      end_ = end;
       if (op == DEF || op == DEFI || op == DEFB) {
         in.has_dst = true;
         in.dst = Dst(i);
-        for (int k = 0; k < (op == DEFB ? 1 : 4); k++) in.raw[k] = t_[i++];
+        for (int k = 0; k < (op == DEFB ? 1 : 4); k++) in.raw[k] = Next(i);
       } else if (op == DCL) {
-        in.raw[0] = t_[i++];
+        in.raw[0] = Next(i);
         in.has_dst = true;
         in.dst = Dst(i);
       } else {
@@ -237,14 +244,15 @@ class Translator {
       };
       if (in.has_dst && in.op != DCL && in.op != DEF && in.op != DEFI && in.op != DEFB) note(in.dst, true);
       for (const Param& p : in.src) note(p, false);
-      if (in.op == M4X4 || in.op == M4X3 || in.op == M3X4 || in.op == M3X3 || in.op == M3X2) {
+      if ((in.op == M4X4 || in.op == M4X3 || in.op == M3X4 || in.op == M3X3 || in.op == M3X2) &&
+          in.src.size() > 1) {  // fewer fails in Value
         Param p = in.src[1];
         for (int k = 1; k < 4; k++) {
           p.num++;
           note(p, false);
         }
       }
-      if (pixel_ && major_ == 1 && (in.op == TEX || in.op == TEXCOORD)) {
+      if (pixel_ && major_ == 1 && (in.op == TEX || in.op == TEXCOORD || in.op == TEXKILL)) {
         ps_texcoords_.insert(in.dst.num);
         if (in.op == TEX) sampler_type_[in.dst.num] = ParamType::Sampler2D;
       }
@@ -275,9 +283,9 @@ class Translator {
     if (!pixel_ && d.type == INPUT) {
       vs_inputs_[d.num] = s;
     } else if (!pixel_ && d.type == OUTPUT && major_ >= 3) {
-      vs3_outputs_[d.num] = s;
+      vs3_outputs_.insert({d.num, {s, d.mask ? d.mask : 0xF}});
     } else if (pixel_ && d.type == INPUT && major_ >= 3) {
-      ps3_inputs_[d.num] = {s, d.mod};
+      ps3_inputs_.insert({d.num, {s, d.mask ? d.mask : 0xF, d.mod}});
     } else if (pixel_ && d.type == INPUT) {
       ps_colors_.insert(d.num);
       if (d.mod & 4) centroid_.insert({kColor, d.num});
@@ -319,7 +327,9 @@ class Translator {
   std::string Reg(const Param& p) {
     switch (p.type) {
       case TEMP: return "r_t[" + std::to_string(p.num) + "]";
-      case INPUT: return "r_v[" + std::to_string(p.num) + "]";
+      case INPUT:
+        if (p.rel) return "r_v[" + RelIndex(p) + " + " + std::to_string(p.num) + "]";
+        return "r_v[" + std::to_string(p.num) + "]";
       case CONST: case CONST2: case CONST3: case CONST4: {
         uint32_t k = ConstIndex(p);
         if (p.rel) return "r_crel(" + RelIndex(p) + " + " + std::to_string(k) + ")";
@@ -582,6 +592,14 @@ class Translator {
 
   void Instruction(size_t idx) {
     const Ins& in = ins_[idx];
+    auto need = [&](size_t n) {  // as Value's
+      if (in.src.size() < n) Fail("opcode " + std::to_string(in.op) + " with too few sources");
+    };
+    switch (in.op) {
+      case REP: case IF: case BREAKP: case CALL: case LABEL_: need(1); break;
+      case LOOP_: case IFC: case BREAKC: case CALLNZ: case SETP: need(2); break;
+      default: break;
+    }
     switch (in.op) {
       case NOP: case DCL: case DEF: case DEFI: case DEFB: return;
       case PHASE: Fail("ps_1_4 phases are not supported");
@@ -625,6 +643,7 @@ class Translator {
         return;
       }
       case IF:
+        ifs_++;
         if (in.src[0].type == PREDICATE) {
           std::string p = "r_p0" + Swizzle(in.src[0].swz) + ".x";
           Line(std::string("if (") + (in.src[0].mod == 13 ? "!" : "") + p + ") {");
@@ -634,15 +653,19 @@ class Translator {
         indent_++;
         return;
       case IFC:
+        ifs_++;
         Line("if (" + S1(in.src[0]) + " " + Cmp(in.ctl) + " " + S1(in.src[1]) + ") {");
         indent_++;
         return;
       case ELSE:
+        if (!ifs_) Fail("else outside an if");
         indent_--;
         Line("} else {");
         indent_++;
         return;
       case ENDIF:
+        if (!ifs_) Fail("unbalanced endif");
+        ifs_--;
         indent_--;
         Line("}");
         return;
@@ -684,7 +707,9 @@ class Translator {
         return;
       }
       case TEXKILL: {
-        std::string v = pixel_ && major_ == 1 ? Reg(in.dst) : DstName(in.dst);
+        // ps_1_1-1_3 test the stage's texture coordinates, not tN's value.
+        std::string v = pixel_ && major_ == 1 ? "r_tc[" + std::to_string(in.dst.num) + "]"
+                                              : DstName(in.dst);
         const char* sw = major_ == 1 ? ".xyz" : "";
         Line(std::string("if (any(lessThan(") + v + sw + ", " + (major_ == 1 ? "vec3" : "vec4") + "(0.0)))) discard;");
         return;
@@ -807,7 +832,8 @@ class Translator {
       if (major_ >= 3) {
         g += "vec4 r_o[12];\n";
         pre += "  for (int i = 0; i < 12; i++) r_o[i] = vec4(0.0, 0.0, 0.0, 1.0);\n";
-        for (const auto& [reg, s] : vs3_outputs_) {
+        for (const auto& [reg, sm] : vs3_outputs_) {
+          const auto& [s, mask] = sm;
           std::string v = "r_o[" + std::to_string(reg) + "]";
           if (s.usage == kPosition && s.index == 0) {
             post += "  gl_Position = r_position(" + v + ");\n";
@@ -816,8 +842,14 @@ class Translator {
             out_->writes_point_size = true;
           } else if (s.usage == kFog) {
             post += "  " + Varying(s, true) + " = vec4(" + v + ".x, 0.0, 0.0, 1.0);\n";
-          } else {
+          } else if (mask == 0xF) {
             post += "  " + Varying(s, true) + " = " + v + ";\n";
+          } else {
+            // Registers packed with several semantics: each takes its
+            // components, in place.
+            const std::string var = Varying(s, true), m = Mask(mask);
+            post += "  " + var + " = vec4(0.0, 0.0, 0.0, 1.0);\n";
+            post += "  " + var + "." + m + " = " + v + "." + m + ";\n";
           }
         }
       } else {
@@ -845,12 +877,15 @@ class Translator {
       g += "vec4 r_v[16];\nvec4 r_oc[4];\nvec4 r_odepth;\n";
       if (major_ >= 3) {
         for (const auto& [reg, sm] : ps3_inputs_) {
-          const Semantic& s = sm.first;
+          const auto& [s, mask, mods] = sm;
           std::string v = "r_v[" + std::to_string(reg) + "]";
           if (s.usage == kPosition)
             pre += "  " + v + " = vec4(0.0);\n";
+          else if (mask == 0xF)
+            pre += "  " + v + " = " + Varying(s, false, mods) + ";\n";
           else
-            pre += "  " + v + " = " + Varying(s, false, sm.second) + ";\n";
+            pre += "  " + v + "." + Mask(mask) + " = " + Varying(s, false, mods) + "." + Mask(mask) +
+                   ";\n";
         }
       } else {
         for (uint32_t n : ps_colors_)
@@ -916,6 +951,8 @@ class Translator {
 
   const uint32_t* t_;
   size_t n_;
+  size_t end_ = 0;  // where the instruction being decoded ends
+  int ifs_ = 0;     // open if blocks
   Program* out_;
   bool pixel_ = false;
   uint32_t major_ = 0, minor_ = 0;
@@ -925,8 +962,10 @@ class Translator {
   std::map<uint32_t, bool> defb_;
   uint32_t temps_ = 0, max_c_ = 0;
   bool rel_const_ = false, uses_int_ = false;
-  std::map<uint32_t, Semantic> vs_inputs_, vs3_outputs_;
-  std::map<uint32_t, std::pair<Semantic, uint32_t>> ps3_inputs_;  // semantic, dcl modifiers
+  std::map<uint32_t, Semantic> vs_inputs_;
+  // By register; registers packed with several semantics have one each.
+  std::multimap<uint32_t, std::pair<Semantic, uint32_t>> vs3_outputs_;  // semantic, mask
+  std::multimap<uint32_t, std::tuple<Semantic, uint32_t, uint32_t>> ps3_inputs_;  // + dcl modifiers
   std::set<uint32_t> ps_colors_, ps_texcoords_;
   std::set<std::pair<uint32_t, uint32_t>> written_, centroid_;
   std::map<uint32_t, ParamType> sampler_type_;

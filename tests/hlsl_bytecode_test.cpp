@@ -2,8 +2,14 @@
 // shaders covering shader models 1.1-3.0: each translation is completed
 // with tests/hlsl/prelude.glsl and must compile with glslangValidator
 // (argv[1]); interfaces are checked against what the tokens declare.
+// Malformed token streams (short instructions, too few sources,
+// unbalanced blocks) must fail cleanly without reading past the tokens,
+// which end against a page that faults.
 //
 //   hlsl_bytecode_test <glslangValidator> <prelude.glsl> <out dir>
+
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -79,6 +85,7 @@ struct Case {
   Tokens tokens;
   size_t inputs, varyings;
   uint32_t colors;
+  std::vector<const char*> glsl = {};  // lines the translation must have
 };
 
 std::vector<Case> Cases() {
@@ -146,6 +153,16 @@ std::vector<Case> Cases() {
     a.I(MOV, {Dst(O, 2, 0xF, 1), Src(R, 0)});
     cs.push_back({"vs30", a.End(), 2, 2, 0});
   }
+  {  // vs_3_0: one output register packed with two semantics
+    Asm a(false, 3, 0);
+    a.Dcl(0, 0, Dst(V, 0));
+    a.Dcl(0, 0, Dst(O, 0));
+    a.Dcl(5, 0, Dst(O, 1, 3));
+    a.Dcl(5, 1, Dst(O, 1, 12));
+    a.I(MOV, {Dst(O, 0), Src(V, 0)});
+    a.I(MOV, {Dst(O, 1), Src(V, 0)});
+    cs.push_back({"vs30_packed", a.End(), 1, 2, 0, {".xy = r_o[1].xy;", ".zw = r_o[1].zw;"}});
+  }
   {  // ps_1_1: texture registers, co-issue, cnd, lrp, modifiers
     Asm a(true, 1, 1);
     a.Def(0, 0.5f, 0.5f, 0.5f, 0.5f);
@@ -157,6 +174,12 @@ std::vector<Case> Cases() {
     a.I(CND, {Dst(R, 0, 0xF, 0, 1), Src(R, 0, kW), Src(R, 1), Src(T, 0, 0xE4, 6)});
     a.I(TEXKILL, {Dst(T, 1)});
     cs.push_back({"ps11", a.End(), 0, 4, 1});
+  }
+  {  // ps_1_1: texkill on coordinates no tex reads
+    Asm a(true, 1, 1);
+    a.I(TEXKILL, {Dst(T, 2)});
+    a.I(MOV, {Dst(R, 0), Src(V, 0)});
+    cs.push_back({"ps11_texkill", a.End(), 0, 2, 1, {"if (any(lessThan(r_tc[2].xyz"}});
   }
   {  // ps_2_0: declared inputs and samplers, texld variants, multiple outputs
     Asm a(true, 2, 0);
@@ -198,6 +221,53 @@ std::vector<Case> Cases() {
     a.I(MOV, {Dst(OC, 0), Src(R, 0)});
     cs.push_back({"ps30", a.End(), 0, 2, 1});
   }
+  {  // ps_3_0: an input register packed with two semantics, inputs read
+     // relative to aL
+    Asm a(true, 3, 0);
+    a.Dcl(5, 0, Dst(V, 0, 3));
+    a.Dcl(5, 1, Dst(V, 0, 12));
+    a.Dcl(10, 0, Dst(V, 1));
+    a.I(DEFI, {Dst(I, 0), 2, 0, 1, 0});
+    a.I(MOV, {Dst(R, 0), Src(C, 0)});
+    a.I(LOOP, {Src(AL, 0), Src(I, 0)});
+    a.I(ADD, {Dst(R, 0), Src(R, 0), Src(V, 0, 0xE4, 0, true), 0x80000000u | TypeBits(AL)});
+    a.I(ENDLOOP, {});
+    a.I(MOV, {Dst(OC, 0), Src(R, 0)});
+    cs.push_back({"ps30_packed", a.End(), 0, 3, 1,
+                  {"r_v[0].xy = r_var", "r_v[0].zw = r_var", "r_v[r_aL + 0]"}});
+  }
+  return cs;
+}
+
+// Token streams the translator must refuse.
+std::vector<std::pair<const char*, Tokens>> BadCases() {
+  std::vector<std::pair<const char*, Tokens>> cs;
+  // def with a length of 1 (its four values missing), the stream's end.
+  cs.push_back({"short def", {0xFFFE0200u, 81u | 1u << 24, Dst(C, 0)}});
+  // dcl with a length of 0.
+  cs.push_back({"short dcl", {0xFFFF0300u, 31u}});
+  auto bad = [&](const char* name, bool pixel, int major, auto body) {
+    Asm a(pixel, major, 0);
+    body(a);
+    cs.push_back({name, a.End()});
+  };
+  bad("else outside an if", true, 3, [](Asm& a) { a.I(ELSE, {}); });
+  bad("endif outside an if", true, 3, [](Asm& a) { a.I(ENDIF, {}); });
+  bad("ifc with one source", true, 3, [](Asm& a) {
+    a.I(IFC, {Src(C, 0, kXXXX)}, 1);
+    a.I(ENDIF, {});
+  });
+  bad("loop with one source", false, 2, [](Asm& a) {
+    a.I(LOOP, {Src(AL, 0)});
+    a.I(ENDLOOP, {});
+  });
+  bad("rep without a source", false, 2, [](Asm& a) {
+    a.I(REP, {});
+    a.I(ENDREP, {});
+  });
+  bad("callnz with one source", false, 2, [](Asm& a) { a.I(CALLNZ, {Src(LBL, 0)}); });
+  bad("m4x4 with one source", false, 2, [](Asm& a) { a.I(M4X4, {Dst(R, 0), Src(V, 0)}); });
+  bad("setp with one source", true, 3, [](Asm& a) { a.I(SETP, {Dst(P, 0), Src(C, 0)}, 4); });
   return cs;
 }
 
@@ -237,7 +307,29 @@ int main(int argc, char** argv) {
       failures++;
       continue;
     }
+    for (const char* line : c.glsl)
+      if (p.glsl.find(line) == std::string::npos) {
+        std::printf("FAIL %s: no \"%s\" in %s\n", c.name, line, path.c_str());
+        failures++;
+      }
     std::printf("ok %s\n", c.name);
   }
+  const size_t page = size_t(sysconf(_SC_PAGESIZE));
+  auto* map = static_cast<uint8_t*>(
+      mmap(nullptr, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+  if (map == MAP_FAILED || mprotect(map + page, page, PROT_NONE)) return 1;
+  for (const auto& [name, tokens] : BadCases()) {
+    auto* at = reinterpret_cast<uint32_t*>(map + page) - tokens.size();
+    std::memcpy(at, tokens.data(), tokens.size() * 4);
+    Program p;
+    std::string err;
+    if (recomp::hlsl::TranslateBytecode(at, tokens.size(), &p, &err)) {
+      std::printf("FAIL %s: translated\n", name);
+      failures++;
+    } else {
+      std::printf("ok %s: %s\n", name, err.c_str());
+    }
+  }
+  munmap(map, 2 * page);
   return failures ? 1 : 0;
 }
