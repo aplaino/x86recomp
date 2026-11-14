@@ -466,7 +466,7 @@ int RunProcess(const GameConfig& game, const std::string& exe_path,
   for (const auto& d : game.lifted_dlls) {
     Module& m = p.modules.emplace_back();
     m.name = hle::NormaliseDll(d.name);
-    m.host_path = HostPath(GuestGameDir() + "\\" + d.name);
+    m.host_path = d.host_path.empty() ? HostPath(GuestGameDir() + "\\" + d.name) : d.host_path;
     m.base = d.base;
     MapModuleWith(m, [](const std::string&, const std::string&) { return gaddr(0); });
   }

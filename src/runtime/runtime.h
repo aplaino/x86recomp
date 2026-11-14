@@ -159,6 +159,9 @@ struct GameConfig {
   struct LiftedDll {
     std::string name;   // file name, e.g. "game.dll"
     uint32_t base = 0;  // the lifter's --base for it; 0 = preferred base
+    // The image on the host when it is not the game's own file (one
+    // unpacked for lifting, say); empty: `name` in the game folder.
+    std::string host_path;
   };
   std::vector<LiftedDll> lifted_dlls;
 };
