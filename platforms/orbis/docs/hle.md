@@ -552,6 +552,8 @@ noted:
   the HLE follows the ISA's rule for buffer accesses (the two low address
   bits of a dword or larger access ignored), not the unaligned mode Sea
   Islands also has.
+- What the driver answers to a compute queue of 0 or 1 dwords (11.00's
+  library passes it the ring's size as log2, 0 for both): fatal.
 - Which GPU event a compute ring's end-of-pipe interrupt raises: the HLE
   raises its pipe's (0 to 6), as games register ids 0 to 6 beside 0x40,
   one per compute pipe.

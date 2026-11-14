@@ -40,6 +40,24 @@ enum Op : uint32_t {
   kWaitOnDeCounterDiff = 0x88,
 };
 
+// The dwords of a packet's body that Step reads its fields from: a packet
+// with fewer is malformed.
+uint32_t BodyDwords(uint32_t op) {
+  switch (op) {
+    case kIndexBase: case kDrawIndexAuto: case kDispatchIndirect: return 2;
+    case kSetBase: case kDispatchDirect: case kWriteData: case kIndirectBuffer:
+    case kIndirectBufferConst:
+      return 3;
+    case kDrawIndexOffset2: case kDrawIndirect: case kDrawIndexIndirect: case kEventWriteEos:
+    case kLoadConstRam: case kDumpConstRam:
+      return 4;
+    case kDrawIndex2: case kWaitRegMem: case kEventWriteEop: return 5;
+    case kDrawIndirectMulti: case kDrawIndexIndirectMulti: case kReleaseMem: case kDmaData: return 6;
+    case kDrawIndirectCountMulti: case kDrawIndexIndirectCountMulti: return 9;
+  }
+  return 1;
+}
+
 // NOP bodies that start with 0xC01E0000 | offset carry context register
 // values (sceGnm*Update*Shader): applied as SET_CONTEXT_REG.
 constexpr uint32_t kNopContextRegs = 0xC01E0000;
@@ -188,6 +206,9 @@ bool Step(Engines& e, Stream& s, bool ce) {
   const gaddr b = f.p + 4;
   if (b + 4 * uint64_t(n) > f.end)
     FatalF("GPU: packet %02X at %llX runs past its buffer", op, (unsigned long long)f.p);
+  if (n < BodyDwords(op))
+    FatalF("GPU: packet %02X at %llX has %u dwords, fewer than its fields", op,
+           (unsigned long long)f.p, n);
   std::vector<uint32_t>& d = e.packet;
   d.resize(n);
   std::memcpy(d.data(), GPtr(b), 4 * n);

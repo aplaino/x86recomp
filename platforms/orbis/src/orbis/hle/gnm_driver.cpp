@@ -588,6 +588,10 @@ static uint32_t SubmitWithFlip(const char* fn, std::vector<gpu::CmdBuffer> dcbs,
                                std::vector<gpu::CmdBuffer> ccbs, int handle, int index,
                                uint32_t mode, int64_t arg) {
   using recomp::Rd32;
+  // 11.00 looks 64 dwords back from the end without checking the size: in
+  // a shorter DCB it reads 4 * (2^32 + dwords - 64) bytes past it.
+  if (dcbs.back().dwords < 64)
+    recomp::FatalF("%s: a last DCB of %u dwords, shorter than the flip packet", fn, dcbs.back().dwords);
   const gaddr p = dcbs.back().addr + 4 * uint64_t(dcbs.back().dwords - 64);
   const uint32_t kind = Rd32(p + 4);
   const bool known = kind == 0x68750777 || kind == 0x68750778 || kind == 0x68750780 ||
@@ -691,13 +695,17 @@ ORBIS_HLE("libSceGnmDriver", sceGnmGetEqTimeStamp, 1) {
 
 // ---- compute queues
 
+// 11.00's checks, in its order; the priority's comes last and fails with
+// the read pointer's code. The driver gets the ring's size as its log2,
+// 0 for 0 dwords as for 1; what it answers to that is not measured.
 static uint64_t MapComputeQueue(uint32_t pipe, uint32_t queue, gaddr ring, uint32_t size_dw,
-                                gaddr rptr) {
+                                gaddr rptr, uint32_t priority) {
   if (pipe > 6) return 0x80D17000;
   if (queue > 7) return 0x80D17001;
   if (size_dw & (size_dw - 1)) return 0x80D17002;
   if (ring & 0xFF) return 0x80D17003;
-  if (rptr & 3) return 0x80D17004;
+  if (rptr & 3 || priority > 1) return 0x80D17004;
+  if (size_dw < 2) recomp::FatalF("sceGnmMapComputeQueue: a ring of %u dwords not implemented", size_dw);
   const uint32_t vqid = pipe * 8 + queue + 1;
   gpu::MapComputeRing(vqid, pipe, ring, size_dw, rptr);
   return vqid;
@@ -707,12 +715,12 @@ static uint64_t MapComputeQueue(uint32_t pipe, uint32_t queue, gaddr ring, uint3
 // uint32_t ring_dwords, void* read_ptr): the queue's id.
 ORBIS_HLE("libSceGnmDriver", sceGnmMapComputeQueue, 5) {
   return MapComputeQueue(uint32_t(Arg(c, 0)), uint32_t(Arg(c, 1)), Arg(c, 2), uint32_t(Arg(c, 3)),
-                         Arg(c, 4));
+                         Arg(c, 4), 0);
 }
-// ... and a priority, which the GPU's queues here do not have.
+// ... and a priority (0 or 1), which the GPU's queues here do not have.
 ORBIS_HLE("libSceGnmDriver", sceGnmMapComputeQueueWithPriority, 6) {
   return MapComputeQueue(uint32_t(Arg(c, 0)), uint32_t(Arg(c, 1)), Arg(c, 2), uint32_t(Arg(c, 3)),
-                         Arg(c, 4));
+                         Arg(c, 4), uint32_t(Arg(c, 5)));
 }
 ORBIS_HLE("libSceGnmDriver", sceGnmUnmapComputeQueue, 1) {
   if (uint32_t(Arg(c, 0))) gpu::UnmapComputeRing(uint32_t(Arg(c, 0)));
