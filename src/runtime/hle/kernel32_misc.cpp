@@ -38,6 +38,15 @@ std::string ResKey(uint32_t v) {
   return s;
 }
 
+// ResKey for the W functions' LPCWSTR names.
+std::string ResKeyW(uint32_t v) {
+  if (v < 0x10000) return "#" + std::to_string(v);
+  std::string s = Narrow(GWStr(v));
+  if (!s.empty() && s[0] == '#') return "#" + std::to_string(std::stoul(s.substr(1)));
+  for (auto& ch : s) ch = char(std::toupper(uint8_t(ch)));
+  return s;
+}
+
 // Key of a directory entry (names are UTF-16, upper-cased like Windows).
 std::string EntryKey(uint32_t rsrc, uint32_t entry) {
   uint32_t id = Rd32(entry);
@@ -97,6 +106,14 @@ HLE("kernel32.dll", LoadResource, 2) {
 }
 
 HLE("kernel32.dll", LockResource, 1) { return Arg(c, 0); }
+
+// (hInstance, name): the RT_ACCELERATOR resource's data as the handle (0
+// if there is none). Keystrokes are never translated into commands here.
+HLE("user32.dll", LoadAcceleratorsW, 2) {
+  if (!IsOwnModule(Arg(c, 0))) return 0;
+  const uint32_t e = FindResourceImpl("#9", ResKeyW(Arg(c, 1)), 0);
+  return e ? g_proc->img.image_base + Rd32(e) : 0;
+}
 
 // (hInstance, uID, LPWSTR buffer, cchBufferMax). RT_STRING blocks hold 16
 // strings each, block uID/16 + 1, as {WORD length, WCHAR[length]} with no

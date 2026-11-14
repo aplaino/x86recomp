@@ -1835,6 +1835,25 @@ HLE("user32.dll", AdjustWindowRect, 3) {
   return 1;
 }
 
+// (rect, style, bMenu, exStyle): the frame as AdjustWindowRect's; no
+// extended style draws an edge here.
+HLE("user32.dll", AdjustWindowRectEx, 4) { return hle_AdjustWindowRect(c); }
+
+// Windows have no menu bar here: removing one (NULL) is all there is to do.
+HLE("user32.dll", SetMenu, 2) {
+  if (Arg(c, 1)) FatalF("SetMenu(%08X, %08X): menus are not implemented", Arg(c, 0), Arg(c, 1));
+  return 1;
+}
+
+// The system (window) menu: one pseudo handle, whose items are all
+// enabled; EnableMenuItem returns that previous state (MF_ENABLED, 0).
+constexpr uint32_t kSystemMenu = 0x0000F00D;
+HLE("user32.dll", GetSystemMenu, 2) { return Win(Arg(c, 0)) ? kSystemMenu : 0; }
+HLE("user32.dll", EnableMenuItem, 3) {
+  if (Arg(c, 0) != kSystemMenu) FatalF("EnableMenuItem on menu %08X: menus are not implemented", Arg(c, 0));
+  return 0;
+}
+
 HLE("user32.dll", GetClientRect, 2) {
   std::lock_guard<std::recursive_mutex> l(g_mu);
   Window* w = Win(Arg(c, 0));
@@ -1983,9 +2002,10 @@ HLE("user32.dll", EnumDisplayDevicesA, 4) {
   return 1;
 }
 
-HLE("user32.dll", FindWindowA, 2) {
-  std::string cls = Arg(c, 0) ? Lower(GStr(Arg(c, 0))) : "";
-  std::string title = Arg(c, 1) ? GStr(Arg(c, 1)) : "";
+uint32_t FindWindowImpl(Ctx& c, bool wide) {
+  auto str = [&](uint32_t va) { return wide ? win32::Narrow(GWStr(va)) : GStr(va); };
+  std::string cls = Arg(c, 0) ? Lower(str(Arg(c, 0))) : "";
+  std::string title = Arg(c, 1) ? str(Arg(c, 1)) : "";
   std::lock_guard<std::recursive_mutex> l(g_mu);
   for (auto& [h, w] : g_windows) {
     if (w.destroyed || (w.style & WS_CHILD)) continue;
@@ -1995,6 +2015,9 @@ HLE("user32.dll", FindWindowA, 2) {
   }
   return 0;
 }
+
+HLE("user32.dll", FindWindowA, 2) { return FindWindowImpl(c, false); }
+HLE("user32.dll", FindWindowW, 2) { return FindWindowImpl(c, true); }
 
 HLE("user32.dll", SetWindowTextA, 2) {
   std::string t = GStr(Arg(c, 1));

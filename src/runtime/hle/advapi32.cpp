@@ -228,6 +228,29 @@ HLE("advapi32.dll", RegSetValueExA, 6) {
   return kErrorSuccess;
 }
 
+// SECURITY_DESCRIPTOR (absolute): {BYTE Revision, BYTE Sbz1, WORD Control,
+// PSID Owner, PSID Group, PACL Sacl, PACL Dacl}. Nothing checks access, so
+// a descriptor is only ever built and passed on (games make their objects
+// accessible to everyone with a NULL DACL).
+constexpr uint32_t kSdSize = 20;
+constexpr uint16_t kSeDaclPresent = 0x4, kSeDaclDefaulted = 0x8;
+
+HLE("advapi32.dll", InitializeSecurityDescriptor, 2) {  // (pSD, dwRevision)
+  const uint32_t sd = Arg(c, 0);
+  for (uint32_t i = 0; i < kSdSize; i += 4) Wr32(sd + i, 0);
+  Wr8(sd, uint8_t(Arg(c, 1)));
+  return 1;
+}
+// (pSD, bDaclPresent, pDacl, bDaclDefaulted)
+HLE("advapi32.dll", SetSecurityDescriptorDacl, 4) {
+  const uint32_t sd = Arg(c, 0);
+  uint16_t control = Rd16(sd + 2) & ~(kSeDaclPresent | kSeDaclDefaulted);
+  if (Arg(c, 1)) control |= kSeDaclPresent | (Arg(c, 3) ? kSeDaclDefaulted : 0);
+  Wr16(sd + 2, control);
+  Wr32(sd + 16, Arg(c, 1) ? Arg(c, 2) : 0);
+  return 1;
+}
+
 HLE("advapi32.dll", GetUserNameA, 2) {
   std::string n = "Player";
   uint32_t buf = Arg(c, 0), psize = Arg(c, 1);
