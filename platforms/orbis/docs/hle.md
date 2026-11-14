@@ -183,7 +183,9 @@ library.
   DB_RENDER_CONTROL's depth or stencil clear writes the clear value over
   the slices it draws (all of each), the other one kept; its colour
   targets are drawn as its tests of what it clears allow, comparing the
-  clear value with itself. Buffer loads at a 64-bit address (ADDR64, a V# of base
+  clear value with itself. Buffer accesses of a
+  dword or more ignore their address's two low bits, whatever the V#'s
+  base (Sea Islands ISA, "Alignment"). Buffer loads at a 64-bit address (ADDR64, a V# of base
   0 and no range) whose address is a lane's offset added to a known
   pointer read the bytes that offset can reach when its range is known
   (small constants picked per lane, added and multiplied: any stage, no
@@ -542,6 +544,10 @@ noted:
 - The handles' values (the console's video out and pad handles are not
   small numbers; the HLE's are 1).
 - The GPU's 100 MHz reference clock for timestamps.
+- The alignment mode (SH_MEM_CONFIG) the console's driver gives shaders:
+  the HLE follows the ISA's rule for buffer accesses (the two low address
+  bits of a dword or larger access ignored), not the unaligned mode Sea
+  Islands also has.
 - Which GPU event a compute ring's end-of-pipe interrupt raises: the HLE
   raises its pipe's (0 to 6), as games register ids 0 to 6 beside 0x40,
   one per compute pipe.

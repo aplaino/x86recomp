@@ -2668,19 +2668,25 @@ struct Translator {
     if (nrw) g += "  uvec4 r_rwregion[" + std::to_string(nrw) + "];\n";
     if (!res.r.match.empty()) g += "  uvec4 r_match[" + std::to_string(res.r.match.size() / 4) + "];\n";
     g += "};\n";
+    // A range's words are the dwords from the one holding its first byte
+    // (Bind). A dword access at a reads or writes the dword holding a, as
+    // buffer accesses of a dword or more ignore their address's two low
+    // bits, whatever the range's base; a shorter read (r_rdu) takes the
+    // bytes from a.
     if (nro)
       g += "uint r_rd(int b, uint a) {\n  uint o = a - r_region[b].x;\n"
-           "  return o < r_region[b].z ? r_ld(uint(b), o >> 2) : 0u;\n}\n"
-           "uint r_rdu(int b, uint a) {\n  uint lo = r_rd(b, a & ~3u), hi = r_rd(b, (a & ~3u) + 4u);\n"
+           "  return o < r_region[b].z ? r_ld(uint(b), (o + (r_region[b].x & 3u)) >> 2) : 0u;\n}\n"
+           "uint r_rdu(int b, uint a) {\n  uint lo = r_rd(b, a), hi = r_rd(b, a + 4u - (a & 3u));\n"
            "  uint sh = (a & 3u) * 8u;\n  return sh == 0u ? lo : (lo >> sh) | (hi << (32u - sh));\n}\n";
     if (nrw)
-      g += "uint r_rdw(int b, uint a) {\n  uint o = a - r_rwregion[b].x;\n"
-           "  return o < r_rwregion[b].z ? r_rw[r_rwbuf[b].x + (o >> 2)] : 0u;\n}\n"
+      g += "uint r_rwi(int b, uint o) { return r_rwbuf[b].x + ((o + (r_rwregion[b].x & 3u)) >> 2); }\n"
+           "uint r_rdw(int b, uint a) {\n  uint o = a - r_rwregion[b].x;\n"
+           "  return o < r_rwregion[b].z ? r_rw[r_rwi(b, o)] : 0u;\n}\n"
            "void r_wr(int b, uint a, uint v) {\n  uint o = a - r_rwregion[b].x;\n"
-           "  if (o < r_rwregion[b].z) r_rw[r_rwbuf[b].x + (o >> 2)] = v;\n}\n"
+           "  if (o < r_rwregion[b].z) r_rw[r_rwi(b, o)] = v;\n}\n"
            // One 16-bit half at a (2-aligned), its dword's other half kept.
            "void r_wh(int b, uint a, uint h) {\n  uint o = a - r_rwregion[b].x;\n"
-           "  if (o >= r_rwregion[b].z) return;\n  uint i = r_rwbuf[b].x + (o >> 2), sh = (o & 2u) * 8u;\n"
+           "  if (o >= r_rwregion[b].z) return;\n  uint i = r_rwi(b, o), sh = (a & 2u) * 8u;\n"
            "  atomicAnd(r_rw[i], ~(0xFFFFu << sh));\n  atomicOr(r_rw[i], (h & 0xFFFFu) << sh);\n}\n"
            // A float's bits to a half's: to nearest even, infinity past
            // the range, half denormals kept, NaNs quieted.
@@ -2695,7 +2701,8 @@ struct Translator {
       g += "void r_fault(uint at) { r_rw[r_rwbuf[" + std::to_string(fault) + "].x] = at; }\n";
       if (nro)
         g += "uint r_rdc(int b, uint a, uint at) {\n  uint o = a - r_region[b].x;\n"
-             "  if (o >= r_region[b].z) { r_fault(at); return 0u; }\n  return r_ld(uint(b), o >> 2);\n}\n";
+             "  if (o >= r_region[b].z) { r_fault(at); return 0u; }\n"
+             "  return r_ld(uint(b), (o + (r_region[b].x & 3u)) >> 2);\n}\n";
     }
     g += "float r_mul_legacy(float a, float b) { return a == 0.0 || b == 0.0 ? 0.0 : a * b; }\n"
          "float r_min_legacy(float a, float b) { return a < b ? a : b; }\n"

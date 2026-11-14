@@ -1296,6 +1296,38 @@ int main() {
     Check(ok, "ADD_TID_ENABLE adds each lane of a wave to the index");
   }
 
+  // Buffer accesses through V#s at unaligned bases: a dword load or store
+  // at byte address a takes the dword holding a (Sea Islands ISA,
+  // "Alignment"). Loads from kIn + 1 at offsets 3 and 0, a store at
+  // kW + 2 offset 2.
+  {
+    static const uint32_t kUnaligned[] = {
+        0xE0300003, 0x80000100,  // buffer_load_dword v1, off, s[0:3], 0 offset:3
+        0xE0300000, 0x80000200,  // buffer_load_dword v2, off, s[0:3], 0
+        0xBF8C0F70,              // s_waitcnt vmcnt(0)
+        0xE0700000, 0x80010100,  // buffer_store_dword v1, off, s[4:7], 0
+        0xE0700004, 0x80010200,  // buffer_store_dword v2, off, s[4:7], 0 offset:4
+        0xE0700002, 0x80020100,  // buffer_store_dword v1, off, s[8:11], 0 offset:2
+        0xBF810000,              // s_endpgm
+    };
+    constexpr gaddr kUnalignedAt = kCode + 0x1D00, kIn = 0x1D8000, kW = 0x1D8100, kUOut = 0x1D8200;
+    std::memcpy(GPtr(kUnalignedAt), kUnaligned, sizeof kUnaligned);
+    for (uint32_t i = 0; i < 32; i++) *static_cast<uint8_t*>(GPtr(kIn + i)) = uint8_t(i);
+    std::memset(GPtr(kW), 0xEE, 32);
+    std::memset(GPtr(kUOut), 0xEE, 8);
+    uint32_t user[12];
+    VSharp(user, kIn + 1, 16);
+    VSharp(user + 4, kUOut, 8);
+    VSharp(user + 8, kW + 2, 16);
+    Run(kUnalignedAt, user, 12);
+    const bool loads = Rd32(kUOut) == 0x07060504u && Rd32(kUOut + 4) == 0x03020100u;
+    const bool store = Rd32(kW + 4) == 0x07060504u && Rd32(kW) == 0xEEEEEEEEu && Rd32(kW + 8) == 0xEEEEEEEEu;
+    if (!loads || !store)
+      std::printf("  loads %08X %08X, store %08X %08X %08X\n", Rd32(kUOut), Rd32(kUOut + 4), Rd32(kW),
+                  Rd32(kW + 4), Rd32(kW + 8));
+    Check(loads && store, "dword buffer accesses at unaligned V# bases take the dword holding the address");
+  }
+
   // DB_RENDER_CONTROL clears: a draw writing depth 0.5, then a
   // stencil-only clear (depth clear value 1.0) with a colour target, then
   // a draw at z 0.75 with a LESS depth test. The clear draws its colour

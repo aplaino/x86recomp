@@ -1143,21 +1143,25 @@ void Bind(State& s, const StageState& st, const Resolved& r, Bound& b,
       else b.ro.push_back({nullptr, br.size, kept});
       continue;
     }
+    // From the dword that holds the range's first byte (the translation
+    // reads and writes whole dwords from there).
+    const gaddr lo = br.base & ~gaddr(3);
+    const uint32_t n = br.size + uint32_t(br.base & 3);
     gaddr at;
     KeptRange* k;
-    if (!rw && br.size >= kKeptMin && (k = Kept(s, br.base, br.size, &at)) && !((br.base - at) & 3)) {
-      b.ro.push_back({nullptr, br.size, k->buffer, uint32_t(br.base - at)});
+    if (!rw && n >= kKeptMin && (k = Kept(s, lo, n, &at)) && !((lo - at) & 3)) {
+      b.ro.push_back({nullptr, n, k->buffer, uint32_t(lo - at)});
       continue;
     }
-    const bool ok = Readable(br.base, br.size);
+    const bool ok = Readable(lo, n);
     Meta* m = rw && ok ? MetaOf(s, br.base, br.size) : nullptr;
     if (m) {
       b.rw.push_back({GPtr(br.base), br.size, m->buf, true});
       b.metas.push_back(br.base);
       continue;
     }
-    if (rw) b.rw.push_back({ok ? GPtr(br.base) : nullptr, ok ? br.size : 0});
-    else b.ro.push_back({ok ? GPtr(br.base) : nullptr, ok ? br.size : 0});
+    if (rw) b.rw.push_back({ok ? GPtr(lo) : nullptr, ok ? n : 0});
+    else b.ro.push_back({ok ? GPtr(lo) : nullptr, ok ? n : 0});
   }
   for (const ImageRef& ref : r.images) {
     if (ref.storage) {
@@ -2070,7 +2074,8 @@ void Dispatch(const Regs& r, const uint32_t groups[3]) {
     Landings& l = L();
     std::lock_guard<std::mutex> lk(l.mu);
     for (const BufferRange& br : rc.buffers)
-      if (br.written) l.ranges.push_back({br.base, br.size, s.dev->WritesQueued()});
+      if (br.written)
+        l.ranges.push_back({br.base & ~gaddr(3), br.size + (br.base & 3), s.dev->WritesQueued()});
     l.pending = l.ranges.size() + l.signals.size();
   }
   if (fault)
@@ -2085,10 +2090,10 @@ void Dispatch(const Regs& r, const uint32_t groups[3]) {
   for (const BufferRange& br : rc.buffers)
     if (br.written) {
       if (std::find(b.metas.begin(), b.metas.end(), br.base) == b.metas.end())
-        MetaWritten(s, br.base, br.size);
+        MetaWritten(s, br.base & ~gaddr(3), br.size + (br.base & 3));
       else
         MetaGpuWritten(s, br.base, br.size);
-      KeptWritten(s, br.base, br.size);
+      KeptWritten(s, br.base & ~gaddr(3), br.size + (br.base & 3));
     }
 }
 
