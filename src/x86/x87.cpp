@@ -880,7 +880,7 @@ X87_INLINE Result FastArith(uint32_t cw, MathOp op, F80 a, F80 b) {
         lo = 0 - yl;
         hi = xs - yh - (yl != 0);
         if (!hi && !lo) {  // exact zero: +0, or -0 rounding down
-          return {Zero(rc == 1), 0, false};
+          return {Zero(rc == 1 && !Mutated(5)), 0, false};
         }
         // Cancellation by more than one bit only happens when the
         // exponents differ by at most one, so no sticky bit was jammed.
@@ -1178,7 +1178,7 @@ bool FastTrig(const Reduced& red, bool use_cos, bool sign, int rc, Rounded* out)
   uint64_t d_half = lo > kHalf ? lo - kHalf : kHalf - lo;
   uint64_t d_edge = lo < kHalf ? lo : 0 - lo;
   if (d_half <= margin || d_edge <= margin) return false;
-  *out = RoundPack(sign, 0x3FFF - lz, hi, lo, 64, rc);
+  *out = RoundPack(sign, 0x3FFF - lz, hi, lo, 64, Mutated(10) ? 0 : rc);
   return true;
 }
 

@@ -35,7 +35,16 @@ static_assert(std::numeric_limits<double>::is_iec559);
 #error "x87.h needs strict IEEE double evaluation"
 #endif
 
+// RECOMP_X86_MUTATION=<n> plants a known bug in a fast path below or in
+// x87.cpp (Mutated) so tests/x86/x87_fast_test can show it catches it;
+// never set it elsewhere.
+#ifndef RECOMP_X86_MUTATION
+#define RECOMP_X86_MUTATION 0
+#endif
+
 namespace recomp::x87 {
+
+constexpr bool Mutated(int n) { return RECOMP_X86_MUTATION == n; }
 
 // 80-bit extended value, same layout as the x87 memory format and as
 // SoftFloat's extFloat80M: 64-bit significand (explicit integer bit), then
@@ -252,7 +261,7 @@ enum class FOp { Add, Sub, Mul, Div };  // Sub: a - b, Div: a / b
     default: {
       uint64_t sbx = op == FOp::Sub ? sb ^ 0x8000u : sb;
       if (za && zb)
-        *out = {0, sa == sbx ? sa : rc == 1 ? 0x8000u : 0u};
+        *out = {0, sa == sbx ? sa : rc == 1 && !Mutated(4) ? 0x8000u : 0u};
       else if (za)
         *out = {b.sig, (b.se & 0x7FFFu) | sbx};
       else
@@ -309,7 +318,7 @@ enum class FOp { Add, Sub, Mul, Div };  // Sub: a - b, Div: a / b
     exp = ex + 1 - lz;
   }
   uint64_t keep = v >> 40, rest = (v & kLow40) | sticky;
-  bool inc = rc == 0 ? rest > (1ull << 39) || (rest == (1ull << 39) && (keep & 1))
+  bool inc = rc == 0 ? rest > (1ull << 39) || (rest == (1ull << 39) && (Mutated(1) || (keep & 1)))
            : rc == 1 ? sign && rest
            : rc == 2 ? !sign && rest
                      : false;
@@ -359,7 +368,7 @@ template <int kPrec>
     bool za = !ea && !a.sig, zb = !eb && !b.sig;
     if ((za || ((a.sig & kJ) && !(a.sig & kLow11) && ea - 1 < 0x7FFEu)) &&
         (zb || ((b.sig & kJ) && !(b.sig & kLow11) && eb - 1 < 0x7FFEu)) && (za || zb)) {
-      if (kPrec < 53 && (op == FOp::Add || op == FOp::Sub) &&
+      if (kPrec < 53 && !Mutated(3) && (op == FOp::Add || op == FOp::Sub) &&
           ((a.sig | b.sig) & ((1ull << kDrop) - 1)))
         return false;
       return ZeroOp(op, rc, a, b, za, zb, out);
@@ -387,7 +396,7 @@ template <int kPrec>
     bool shift = ma < mb;
     unsigned __int128 n = static_cast<unsigned __int128>(ma) << (63 + shift);
     hi = uint64_t(n / mb);
-    lo = uint64_t(n) - hi * mb != 0;  // the remainder (below mb), as sticky
+    lo = !Mutated(2) && uint64_t(n) - hi * mb != 0;  // the remainder (below mb), as sticky
     sign = sa != sb;
     exp = int32_t(ea) - int32_t(eb) + 0x3FFF - shift;
   } else {
@@ -481,11 +490,11 @@ template <bool kWide = false>
 // Zero or normal (exponent field neither all zeros nor all ones).
 [[gnu::always_inline]] inline bool OrdinaryF32(uint32_t bits) {
   uint32_t e = (bits >> 23) & 0xFF;
-  return e - 1 < 254 || !(bits & 0x7FFFFFFF);
+  return e - 1 < 254 || !(bits & 0x7FFFFFFF) || (Mutated(8) && e == 0);
 }
 [[gnu::always_inline]] inline bool OrdinaryF64(uint64_t bits) {
   uint64_t e = (bits >> 52) & 0x7FF;
-  return e - 1 < 2046 || !(bits << 1);
+  return e - 1 < 2046 || !(bits << 1) || (Mutated(9) && e == 0);
 }
 [[gnu::always_inline]] inline V FromOrdinaryF32(uint32_t bits) {
   return (bits & 0x7FFFFFFF) ? FromNormalF32(bits) : V{0, (bits >> 31) << 15};
@@ -550,7 +559,7 @@ template <bool kWide = false>
                      : false;
   if (inc && ++keep == (2ull << mant)) {
     keep >>= 1;
-    if (++e > emax) return false;  // overflow
+    if (++e > emax && !Mutated(6)) return false;  // overflow
   }
   *out = {sign << (width - 1) | uint64_t(e) << mant | (keep & ((1ull << mant) - 1)),
           (rest ? 0x20u : 0u) | uint64_t(rest && inc) << 16};
@@ -576,7 +585,7 @@ template <bool kWide = false>
 [[gnu::always_inline]] inline uint32_t CompareOrdinary(V a, V b) {
   uint32_t ea = a.se & 0x7FFFu, eb = b.se & 0x7FFFu;
   // Negative non-zero values; zeros of either sign are plain 0.
-  bool na = ea && (a.se & 0x8000u), nb = eb && (b.se & 0x8000u);
+  bool na = (ea || Mutated(7)) && (a.se & 0x8000u), nb = (eb || Mutated(7)) && (b.se & 0x8000u);
   if (na != nb) return na ? 0x0100u : 0;
   if (ea == eb && a.sig == b.sig) return 0x4000u;
   bool less = ea < eb || (ea == eb && a.sig < b.sig);  // in magnitude
@@ -629,7 +638,7 @@ template <bool kWide = false>
 
 // Zero, or a magnitude in [2^-511, 2^512): biased exponent 512..1534.
 [[gnu::always_inline]] inline bool InRange(uint64_t bits) {
-  return ((bits >> 52) & 0x7FF) - 512 < 1023 || !(bits << 1);
+  return ((bits >> 52) & 0x7FF) - 512 < 1023u + Mutated(13) || !(bits << 1);
 }
 [[gnu::always_inline]] inline bool InRange(double x) {
   return InRange(std::bit_cast<uint64_t>(x));
@@ -643,7 +652,8 @@ template <bool kWide = false>
     *out = std::bit_cast<double>(sign << 63);
     return true;
   }
-  if ((v.sig & 0x7FF) || !(v.sig >> 63) || e - (0x3FFF - 511) >= 1023) return false;
+  if (((v.sig & 0x7FF) && !Mutated(14)) || !(v.sig >> 63) || e - (0x3FFF - 511) >= 1023)
+    return false;
   *out = std::bit_cast<double>(sign << 63 | (e - 0x3FFF + 1023) << 52 |
                                ((v.sig >> 11) & ((1ull << 52) - 1)));
   return true;
@@ -672,7 +682,7 @@ template <bool kWide = false>
   return true;
 }
 [[gnu::always_inline]] inline bool OperandI64(int64_t v, double* out) {
-  if (uint64_t(v) + (1ull << 53) > (1ull << 54)) return false;
+  if (uint64_t(v) + (1ull << 53) > (1ull << (Mutated(15) ? 55 : 54))) return false;
   *out = double(v);
   return true;
 }
@@ -712,6 +722,7 @@ template <bool kWide = false>
       r = a + b;
       const double bv = r - a;
       e = (a - (r - bv)) + (b - bv);
+      if (Mutated(11)) e = -e;
       ref = r;
       break;
     }
@@ -727,7 +738,7 @@ template <bool kWide = false>
   const double r = std::sqrt(a);
   if (!InRange(r)) return false;
   *out = r;
-  NoteD(std::fma(-r, r, a), r, fl, up);
+  NoteD(std::fma(-r, r, a), Mutated(12) ? -r : r, fl, up);
   return true;
 }
 
@@ -738,7 +749,7 @@ template <bool kWide = false>
   const float f = float(x);
   const uint32_t fb = std::bit_cast<uint32_t>(f);
   const double m = std::fabs(x);
-  if ((m >= 0x1p-126 && ((fb >> 23) & 0xFF) != 0xFF) || m == 0) {
+  if ((m >= (Mutated(16) ? 0x1p-127 : 0x1p-126) && ((fb >> 23) & 0xFF) != 0xFF) || m == 0) {
     const double back = double(f);
     return {fb, (back != x ? 0x20u : 0u) | uint64_t(std::fabs(back) > m) << 16};
   }
@@ -749,7 +760,7 @@ template <bool kWide = false>
 
 // FCOM family on doubles (no NaN can occur): C3/C2/C0 as CompareOrdinary.
 [[gnu::always_inline]] inline uint32_t CompareD(double a, double b) {
-  return a < b ? 0x0100u : a == b ? 0x4000u : 0u;
+  return a < b ? 0x0100u : a == b && !Mutated(17) ? 0x4000u : 0u;
 }
 [[gnu::always_inline]] inline double AbsD(double x) { return std::fabs(x); }
 

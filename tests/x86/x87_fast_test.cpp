@@ -10,10 +10,22 @@
 // the status word (flags, C1) and the tag word bit for bit. The SoftFloat
 // path itself is checked against the hardware by x87_test.
 //
-// Usage: x87_fast_test [cases] [seed]
+// Each fast path's precondition is counted where the test can see it (the
+// inline cores of x87.h): every one must be taken and passed over often
+// enough in each section, or the comparison would check SoftFloat against
+// itself. The trigonometric core is internal to x87.cpp; its planted bug
+// (below) is caught only where it is taken.
+//
+// Built with RECOMP_X86_MUTATION=<n> (a planted bug in a fast path, x87.h)
+// the test must catch it: it then exits 0, and 1 when the bug went
+// unnoticed.
+//
+// Usage: x87_fast_test [cases] [seed]   (a random seed by default, printed)
 
 #include <bit>
+#include <cfloat>
 #include <cinttypes>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <random>
@@ -30,6 +42,24 @@ using recomp::x87::State;
 std::mt19937_64 g_rng;
 
 uint64_t Rand() { return g_rng(); }
+
+// The fast paths whose precondition is counted: taken (the fast path
+// answers) or passed over (the exact path does).
+enum Path {
+  kModelArith, kModel24, kModelWide24, kModelWide53, kModelStore,
+  kArith, kArithF32, kArithF64, kLoadF32, kLoadF64, kStoreF32, kStoreF64, kCompare,
+  kCompareF32, kCompareF64,
+  kArithD, kSqrtD, kOperandF32, kOperandF64, kCompareOperandF64, kOperandI64, kToD,
+  kStoreF32D, kPaths
+};
+const char* const kPathNames[kPaths] = {
+    "model arith (integer cores)", "model Fast24", "model FastWide<24>", "model FastWide<53>",
+    "model store (StoreCore)", "ArithFast", "ArithF32Fast", "ArithF64Fast", "LoadF32Fast",
+    "LoadF64Fast", "StoreF32Fast", "StoreF64Fast", "CompareFast", "CompareF32Fast",
+    "CompareF64Fast", "ArithD", "SqrtD", "OperandF32", "OperandF64", "CompareOperandF64",
+    "OperandI64", "ToD", "StoreF32D"};
+long g_taken[kPaths], g_passed[kPaths];
+void Count(Path p, bool fast) { ++(fast ? g_taken : g_passed)[p]; }
 
 // A normal significand: random, or with only the top 24/53 bits set
 // (values that came from m32/m64), or close to a rounding tie.
@@ -94,6 +124,39 @@ struct Snap {
   uint16_t sw, tw;
 };
 
+namespace run = recomp::x87::run;
+
+// Which of the model's integer paths a case of Run takes: arithmetic on
+// zero or normal operands (not a division by zero) goes to Fast24 or
+// FastWide<24> under PC=24, FastWide<53> under PC=53, else to the exact
+// 128-bit integer core; FST m32/m64 to StoreCore.
+void CountModel(uint16_t cw, F80 a, F80 b, int k, bool st0_first) {
+  static const Op kOps[] = {Op::Add, Op::Mul, Op::Sub, Op::SubR, Op::Div, Op::DivR};
+  run::V va = run::ToV(a), vb = run::ToV(b);
+  if (k >= 6) {
+    run::SV sv;
+    Count(kModelStore, k == 6 ? run::StoreCore(cw, va, 23, 127, 254, &sv)
+                              : run::StoreCore(cw, va, 52, 1023, 2046, &sv));
+    return;
+  }
+  run::V dst = st0_first ? va : vb, src = st0_first ? vb : va;
+  run::V divisor = kOps[k] == Op::Div ? src : dst;
+  bool fast = run::Ordinary(va) && run::Ordinary(vb) &&
+              !((kOps[k] == Op::Div || kOps[k] == Op::DivR) && !(divisor.se & 0x7FFF) &&
+                !divisor.sig);
+  Count(kModelArith, fast);
+  if (!fast) return;
+  const int rc = (cw >> 10) & 3;
+  run::RV r;
+  if ((cw & 0x0300) == 0) {
+    bool f24 = run::Fast24Op(rc, kOps[k], dst, src, &r);
+    Count(kModel24, f24);
+    if (!f24) Count(kModelWide24, run::FastWideOp<24>(rc, kOps[k], dst, src, &r));
+  } else if ((cw & 0x0300) == 0x0200) {
+    Count(kModelWide53, run::FastWideOp<53>(rc, kOps[k], dst, src, &r));
+  }
+}
+
 // k < 6: arithmetic; 6: fst m32; 7: fst m64 (result in r[0].sig);
 // 8: fsin, 9: fcos, 10: fsincos.
 Snap Run(bool softfloat_only, uint16_t cw, F80 a, F80 b, int k, bool st0_first) {
@@ -119,6 +182,7 @@ Snap Run(bool softfloat_only, uint16_t cw, F80 a, F80 b, int k, bool st0_first) 
     recomp::x87::ArithSt0Sti(s, kOps[k], 1);
   else
     recomp::x87::ArithStiSt0(s, kOps[k], 1);
+  if (!softfloat_only && k < 8) CountModel(cw, a, b, k, st0_first);
   Snap r{};
   for (int i = 0; i < 8; i++) r.r[i] = s.r[i];
   r.r[0].sig ^= stored;  // empty slot after two pushes; carries the store
@@ -135,8 +199,6 @@ bool Same(const Snap& x, const Snap& y) {
 }
 
 // ---- inline run forms ----------------------------------------------------
-
-namespace run = recomp::x87::run;
 
 // A register value: mostly what Value() gives, with 24/53-bit significands
 // often, and every special class now and then.
@@ -245,6 +307,22 @@ long RunForms(long n) {
   auto cmp = [&](const char* what, uint32_t fast, uint32_t soft) {
     if (fast != soft) report(what, fast, 0, soft, 0);
   };
+  {
+    run::RV r;
+    Count(kArith, run::FastOp(cw, op, a, b, &r));
+    Count(kArithF32,
+          run::OrdinaryF32(m32) && run::FastOp(cw, op, a, run::FromOrdinaryF32(m32), &r));
+    Count(kArithF64,
+          run::OrdinaryF64(m64) && run::FastOp<true>(cw, op, a, run::FromOrdinaryF64(m64), &r));
+    Count(kLoadF32, run::OrdinaryF32(m32));
+    Count(kLoadF64, run::OrdinaryF64(m64));
+    run::SV sv;
+    Count(kStoreF32, run::StoreCore(cw, a, 23, 127, 254, &sv));
+    Count(kStoreF64, run::StoreCore(cw, a, 52, 1023, 2046, &sv));
+    Count(kCompare, run::Ordinary(a) && run::Ordinary(b));
+    Count(kCompareF32, run::Ordinary(a) && run::OrdinaryF32(m32));
+    Count(kCompareF64, run::Ordinary(a) && run::OrdinaryF64(m64));
+  }
   arith("ArithFast", run::ArithFast(cw, op, a, b), [&] { return run::Arith(cw, op, a, b); });
   arith("ArithF32Fast", run::ArithF32Fast(cw, op, a, m32),
         [&] { return run::ArithF32(cw, op, a, m32); });
@@ -357,12 +435,13 @@ uint64_t AnyF64() {
 // A double result: true for success with value/flags/C1, compared with the
 // reference RV; failure only when the reference cannot be held.
 template <class F>
-long CheckD(const char* what, run::RV ref, F&& fn, double a, double b) {
+long CheckD(const char* what, Path path, run::RV ref, F&& fn, double a, double b) {
   const double kSentinel = 12345.0;
   double out = kSentinel;
   uint32_t fl = 0x40;  // untouched bits must stay
   bool up = true;
   bool ok = fn(&out, &fl, &up);
+  Count(path, ok);
   bool want = InRangeV(run::Val(ref));
   bool good = ok == want &&
               (ok ? SameV(run::FromD(out), run::Val(ref)) &&
@@ -385,12 +464,12 @@ long DoubleForms() {
   double a = RandIn(int(Rand() % 61) - 30), b = RandOther(a);
   int k = int(Rand() % 6);
   run::RV ref = run::Arith(kCw, kOps[k], run::FromD(a), run::FromD(b));
-  fails += CheckD(kOpNames[k], ref, [&](double* o, uint32_t* f, bool* u) {
+  fails += CheckD(kOpNames[k], kArithD, ref, [&](double* o, uint32_t* f, bool* u) {
     return run::ArithD(kOps[k], a, b, o, f, u);
   }, a, b);
   // sqrt: in range, and negative operands (NaN, IE: never held).
   ref = run::Sqrt(kCw, run::FromD(a));
-  fails += CheckD("SqrtD", ref, [&](double* o, uint32_t* f, bool* u) {
+  fails += CheckD("SqrtD", kSqrtD, ref, [&](double* o, uint32_t* f, bool* u) {
     return run::SqrtD(a, o, f, u);
   }, a, 0);
   // m32/m64 operands: held exactly when the load is flag-free and in range.
@@ -406,9 +485,11 @@ long DoubleForms() {
   // unspecified).
   double v = 7.0;
   bool ok = run::OperandF32(m32, &v);
+  Count(kOperandF32, ok);
   fails += load("OperandF32", run::LoadF32(m32), ok, v, m32);
   v = 7.0;
   ok = run::OperandF64(m64, &v);
+  Count(kOperandF64, ok);
   fails += load("OperandF64", run::LoadF64(m64), ok, v, m64);
   // As a run does it: two m64 loads and an operation, from any bits.
   uint64_t n64 = Rand() % 64 ? AnyF64() : Bits(-D(m64));
@@ -423,7 +504,7 @@ long DoubleForms() {
   }
   if (run::OperandF64(m64, &x0) && run::OperandF64(n64, &x1)) {
     run::RV r = run::ArithF64(kCw, kOps[k], run::Val(run::LoadF64(m64)), n64);
-    fails += CheckD(kOpNames[k], r, [&](double* o, uint32_t* f, bool* u) {
+    fails += CheckD(kOpNames[k], kArithD, r, [&](double* o, uint32_t* f, bool* u) {
       return run::ArithD(kOps[k], x0, x1, o, f, u);
     }, x0, x1);
   }
@@ -431,6 +512,7 @@ long DoubleForms() {
   v = 7.0;
   run::RV l64 = run::LoadF64(m64);
   ok = run::CompareOperandF64(m64, &v);
+  Count(kCompareOperandF64, ok);
   if (ok != (run::Flags(l64) == 0 && run::Ordinary(run::Val(l64)) &&
              (run::Val(l64).se & 0x7FFF) != 0x7FFF) ||
       (ok && Bits(v) != m64) || (!ok && v != 7.0)) {
@@ -443,6 +525,7 @@ long DoubleForms() {
   if (Rand() % 4 == 0) iv = (Rand() & 1 ? 1 : -1) * ((1ll << 53) + int64_t(Rand() % 5) - 2);
   v = 7.0;
   ok = run::OperandI64(iv, &v);
+  Count(kOperandI64, ok);
   run::V fi = run::FromInt(iv);
   bool small = iv >= -(1ll << 53) && iv <= (1ll << 53);
   if (ok != small || (ok && !SameV(run::FromD(v), fi)) || (!ok && v != 7.0)) {
@@ -453,6 +536,7 @@ long DoubleForms() {
   run::V rv = Rand() & 1 ? run::FromD(RandIn(0)) : RunValue(0x3FFF + int(Rand() % 1101) - 550);
   v = 7.0;
   ok = run::ToD(rv, &v);
+  Count(kToD, ok);
   if (ok != InRangeV(rv) || (ok && !SameV(run::FromD(v), rv)) || (!ok && v != 7.0)) {
     std::printf("FAIL ToD %04X:%016" PRIX64 " ok=%d\n", unsigned(rv.se), rv.sig, ok);
     ++fails;
@@ -465,6 +549,10 @@ long DoubleForms() {
     case 2: x = Make(int(Rand() % 253) - 126, Frac(), Rand() & 1); break;
     default: break;
   }
+  // Its host conversion answers for zero and results in float's normal
+  // range, the exact store for the rest.
+  const double ax = std::fabs(x);
+  Count(kStoreF32D, ax == 0 || (ax >= 0x1p-126 && std::fabs(double(float(x))) <= FLT_MAX));
   run::SV s32 = run::StoreF32D(kCw, x), r32 = run::StoreF32(kCw, run::FromD(x));
   if (!SameSV(s32, r32)) {
     std::printf("FAIL StoreF32D %a: %08" PRIX64 " %" PRIX64 " soft %08" PRIX64 " %" PRIX64 "\n",
@@ -497,7 +585,11 @@ long DoubleForms() {
 
 int main(int argc, char** argv) {
   long cases = argc > 1 ? std::atol(argv[1]) : 2000000;
-  g_rng.seed(argc > 2 ? std::strtoull(argv[2], nullptr, 0) : 1);
+  std::random_device rd;
+  const uint64_t seed =
+      argc > 2 ? std::strtoull(argv[2], nullptr, 0) : uint64_t(rd()) << 32 | rd();
+  std::printf("seed 0x%" PRIX64 "\n", seed);
+  g_rng.seed(seed);
   static const char* kNames[] = {"add", "mul", "sub", "subr", "div", "divr",
                                  "fst m32", "fst m64", "fsin", "fcos", "fsincos"};
   static const uint16_t kPc[] = {0x0000, 0x0200, 0x0300};
@@ -551,5 +643,21 @@ int main(int argc, char** argv) {
       std::printf("FAIL DoubleMode %04X\n", cw);
       ++dbl_fails;
     }
-  return fails || run_fails || dbl_fails ? 1 : 0;
+  // Every counted path taken and passed over at least once per 1000 cases
+  // (the rarest, the model's arithmetic on specials, runs about 12 times as
+  // often).
+  long coverage_fails = 0;
+  for (int p = 0; p < kPaths; p++) {
+    bool low = g_taken[p] < cases / 1000 + 1 || g_passed[p] < cases / 1000 + 1;
+    std::printf("%s %-28s taken %9ld, passed over %9ld\n", low ? "FAIL" : "    ",
+                kPathNames[p], g_taken[p], g_passed[p]);
+    coverage_fails += low;
+  }
+  const bool caught = fails || run_fails || dbl_fails;
+#if RECOMP_X86_MUTATION
+  std::printf("planted bug %d %s\n", RECOMP_X86_MUTATION, caught ? "caught" : "NOT caught");
+  return caught ? 0 : 1;
+#else
+  return caught || coverage_fails ? 1 : 0;
+#endif
 }

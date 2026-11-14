@@ -17,6 +17,18 @@ target_link_libraries(x87_fast_test PRIVATE recomp_x87)
 target_compile_options(x87_fast_test PRIVATE -O2 ${RECOMP_X87_FP_FLAGS})
 add_test(NAME x87_fast COMMAND x87_fast_test)
 set_tests_properties(x87_fast PROPERTIES TIMEOUT 300)
+# The same built with each planted bug of the fast paths
+# (RECOMP_X86_MUTATION, x86/x87.h), which it must catch (it exits 0 only
+# then); each builds its own x87.cpp.
+foreach(_m RANGE 1 17)
+  add_executable(x87_fast_mutation_${_m} x87_fast_test.cpp "${RECOMP_ROOT}/src/x86/x87.cpp")
+  target_include_directories(x87_fast_mutation_${_m} PRIVATE "${RECOMP_ROOT}/src")
+  target_compile_features(x87_fast_mutation_${_m} PRIVATE cxx_std_20)
+  target_compile_definitions(x87_fast_mutation_${_m} PRIVATE RECOMP_X86_MUTATION=${_m})
+  target_compile_options(x87_fast_mutation_${_m} PRIVATE -O2 ${RECOMP_X87_FP_FLAGS})
+  target_link_libraries(x87_fast_mutation_${_m} PRIVATE softfloat recomp_base)
+  add_test(NAME x87_fast_mutation_${_m} COMMAND x87_fast_mutation_${_m} 200000)
+endforeach()
 
 # sse_rsqrt_test: RSQRTPS is the correctly rounded 1/sqrt(x), checked
 # exhaustively with exact arithmetic (the host oracle cannot: CPUs differ);
