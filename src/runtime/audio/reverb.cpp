@@ -122,6 +122,16 @@ constexpr double kLfCorner = 3.0;
 // The card's LF decay runs up to 12% longer than asked, the most at
 // short decay times: x (1 + kLfExtra e^(-T / 3 s)).
 constexpr double kLfExtra = 0.12;
+// The longest LF decay the network can hold. A longer LF decay is a low
+// shelf of gain k at DC, set for gain t = g^(1/r - 1) at the LF reference
+// (g the line's mid gain per pass, r the ratio); with its pole at that
+// reference the low-pass there is about (1 - j) / 2, so
+// t^2 = (1 + (k - 1) / 2)^2 + ((k - 1) / 2)^2 and k = sqrt(2 t^2 - 1). The
+// loop gain at DC, g k = sqrt(2 g^(2/r) - g^2), stays below 1 for every
+// g < 1 only while r <= 2 (at 2 it is sqrt(1 - (1 - g)^2)); past 2 short
+// lines with short decays grow without bound. EAX's own limit is 2. (Near
+// it the decay at DC is long: about r / (2 - r) times the mid one.)
+constexpr double kMaxLfRatio = 2.0;
 // Modulation: the pitch deviation at full depth (not measured).
 constexpr double kModDeviation = 0.01;
 constexpr float kModCos[Reverb::kLines] = {1,  0.7071068f,  0, -0.7071068f,
@@ -268,8 +278,9 @@ void Reverb::Apply(Bus& b) {
     hf_ratio = std::min(hf_ratio, 60.0 / db_per_s / decay);
   }
   hf_ratio = std::clamp(hf_ratio, 0.1, kMaxHfRatio);
-  double lf_ratio =
-      std::clamp(double(p.decay_lf_ratio), 0.1, 2.0) * (1.0 + kLfExtra * std::exp(-decay / 3.0));
+  double lf_ratio = std::min(
+      std::clamp(double(p.decay_lf_ratio), 0.1, 2.0) * (1.0 + kLfExtra * std::exp(-decay / 3.0)),
+      kMaxLfRatio);
 
   // The burst at this diffusion, both tap sets merged.
   double diffusion = std::clamp(double(p.diffusion), 0.0, 1.0);

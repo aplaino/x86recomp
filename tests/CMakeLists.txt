@@ -21,6 +21,14 @@ target_compile_features(fast2d_test PRIVATE cxx_std_20)
 target_compile_options(fast2d_test PRIVATE -O2 -ffp-contract=off)
 add_test(NAME fast2d COMMAND fast2d_test)
 
+# reverb_test: the EAX environment reverb's network stays stable at its
+# parameters' limits; portable.
+add_executable(reverb_test reverb_test.cpp ${PROJECT_SOURCE_DIR}/src/runtime/audio/reverb.cpp)
+target_include_directories(reverb_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_features(reverb_test PRIVATE cxx_std_20)
+target_compile_options(reverb_test PRIVATE -O2)
+add_test(NAME reverb COMMAND reverb_test)
+
 # gl_draw_test: the GL context's vertex arrays and immediate mode against
 # a reference model of GL's conversions, through a recording device;
 # portable.
