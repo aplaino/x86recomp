@@ -117,9 +117,11 @@ foreach(_m 0 ${_vmx128_mutations})
   target_compile_definitions(${_t} PRIVATE RECOMP_PPC_MUTATION=${_m})
   target_compile_features(${_t} PRIVATE cxx_std_20)
   target_link_libraries(${_t} PRIVATE recomp_ppc softfloat)
-  add_test(NAME ${_t} COMMAND ${_t})
   if(_m)
-    set_tests_properties(${_t} PROPERTIES WILL_FAIL TRUE)
+    add_test(NAME ${_t} COMMAND "${CMAKE_COMMAND}" "-DCMD=$<TARGET_FILE:${_t}>" -DEXIT=1 "-DOUTPUT=FAIL "
+             -P "${RECOMP_ROOT}/tests/expect_exit.cmake")
+  else()
+    add_test(NAME ${_t} COMMAND ${_t})
   endif()
 endforeach()
 
@@ -149,16 +151,17 @@ set_tests_properties(ppc_lift_fixture PROPERTIES FIXTURES_REQUIRED ppc_fixture_o
 # lifter's count shows it.
 set(_relift "${CMAKE_CURRENT_BINARY_DIR}/fixture_relift")
 file(MAKE_DIRECTORY "${_relift}")
-add_test(NAME ppc_lift_fixture_tables COMMAND recomp_lift_ppc --image "${_bin}/fixture.elf" --out "${_relift}"
-         --files 1 --cpu xenon)
-set_tests_properties(ppc_lift_fixture_tables PROPERTIES PASS_REGULAR_EXPRESSION " 7 jump tables,")
+add_test(NAME ppc_lift_fixture_tables COMMAND "${CMAKE_COMMAND}" -DEXIT=0 "-DOUTPUT= 7 jump tables,"
+         "-DCMD=$<TARGET_FILE:recomp_lift_ppc>|--image|${_bin}/fixture.elf|--out|${_relift}|--files|1|--cpu|xenon"
+         -P "${RECOMP_ROOT}/tests/expect_exit.cmake")
 
 add_test(NAME ppc_oracle_forms COMMAND ${_run} --program "${_bin}/forms_oracle.elf" --out "${_records}")
 set_tests_properties(ppc_oracle_forms PROPERTIES FIXTURES_SETUP ppc_forms_records)
 add_test(NAME ppc_lift_forms COMMAND ppc_lift_forms_test "${_records}")
 set_tests_properties(ppc_lift_forms PROPERTIES FIXTURES_REQUIRED ppc_forms_records)
 foreach(_m ${_mutations})
-  add_test(NAME ppc_lift_forms_mutation_${_m} COMMAND ppc_lift_forms_mutation_${_m} "${_records}")
-  set_tests_properties(ppc_lift_forms_mutation_${_m} PROPERTIES
-    FIXTURES_REQUIRED ppc_forms_records WILL_FAIL TRUE)
+  add_test(NAME ppc_lift_forms_mutation_${_m} COMMAND "${CMAKE_COMMAND}" -DEXIT=1 "-DOUTPUT=FAIL form "
+           "-DCMD=$<TARGET_FILE:ppc_lift_forms_mutation_${_m}>|${_records}"
+           -P "${RECOMP_ROOT}/tests/expect_exit.cmake")
+  set_tests_properties(ppc_lift_forms_mutation_${_m} PROPERTIES FIXTURES_REQUIRED ppc_forms_records)
 endforeach()
