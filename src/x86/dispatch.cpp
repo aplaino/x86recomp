@@ -189,6 +189,9 @@ constexpr int kMaxFaultDepth = 8;
 // caught in the handler and rethrown from the faulting instruction.
 thread_local std::exception_ptr t_fault_exception;
 
+// The SIGSEGV and SIGBUS actions installed before ours (InstallFaultHandler).
+struct sigaction g_prev_segv, g_prev_bus;
+
 [[noreturn]] void RethrowFaultException() {
   std::exception_ptr e = std::move(t_fault_exception);
   t_fault_exception = nullptr;
@@ -217,30 +220,43 @@ void FaultHandler(int sig, siginfo_t* si, void* uc) {
     if (t_reopened_n <= 16) return;
   }
   platform::FaultContext fc = platform::ReadFaultContext(uc);
-  if (guest32 && g_proc->guest_fault && CurrentThread() &&
+  // A host that cannot tell a write from a read gets no guest exception:
+  // the guest's handler would be told the wrong access type.
+  if (guest32 && g_proc->guest_fault && CurrentThread() && fc.write_known &&
       t_fault_depth < kMaxFaultDepth && hle::t_hle_depth == 0) {
     ++t_fault_depth;
     bool cont;
-    if constexpr (platform::kThrowThroughSignalFrames) {
+    try {
       cont = g_proc->guest_fault(CurrentThread()->ctx, fc.write, a - base);
-    } else {
-      try {
-        cont = g_proc->guest_fault(CurrentThread()->ctx, fc.write, a - base);
-      } catch (...) {
-        --t_fault_depth;
-        t_fault_exception = std::current_exception();
-        if (platform::RedirectToCall(uc, RethrowFaultException)) return;
-        const char m[] = "FATAL: cannot resume after a guest exception "
-                         "from a fault on this host\n";
-        (void)!write(2, m, sizeof m - 1);
-        _exit(4);
-      }
+    } catch (...) {
+      // Leaving the handler by an exception (an __except unwind) ends this
+      // fault's dispatch too.
+      --t_fault_depth;
+      if constexpr (platform::kThrowThroughSignalFrames) throw;
+      t_fault_exception = std::current_exception();
+      if (platform::RedirectToCall(uc, RethrowFaultException)) return;
+      const char m[] = "FATAL: cannot resume after a guest exception "
+                       "from a fault on this host\n";
+      (void)!write(2, m, sizeof m - 1);
+      _exit(4);
     }
     --t_fault_depth;
     if (cont) return;  // retry the faulting instruction
   }
+  // Not guest memory: a handler installed before ours (a sanitizer, a host
+  // library's own) may own the fault; if it returns, it handled it.
+  const bool in_arena = g_proc && a - base < g_proc->mem.size() * (g_proc->x64 ? 2 : 1);
+  struct sigaction& prev = sig == SIGSEGV ? g_prev_segv : g_prev_bus;
+  if (!in_arena && (prev.sa_flags & SA_SIGINFO)) {
+    prev.sa_sigaction(sig, si, uc);
+    return;
+  }
+  if (!in_arena && prev.sa_handler != SIG_DFL && prev.sa_handler != SIG_IGN) {
+    prev.sa_handler(sig);
+    return;
+  }
   int n;
-  if (g_proc && a - base < g_proc->mem.size() * (g_proc->x64 ? 2 : 1))
+  if (in_arena)
     n = std::snprintf(buf, sizeof buf,
                       "FATAL: %s: guest memory fault at guest %08lX\n",
                       sig == SIGSEGV ? "SIGSEGV" : "SIGBUS",
@@ -250,6 +266,11 @@ void FaultHandler(int sig, siginfo_t* si, void* uc) {
                       "FATAL: %s: host fault at %p (runtime bug)\n",
                       sig == SIGSEGV ? "SIGSEGV" : "SIGBUS", si->si_addr);
   (void)!write(2, buf, size_t(n));
+  if (guest32 && g_proc->guest_fault && !fc.write_known) {
+    const char m[] = "  (not dispatched to the guest: this host does not report "
+                     "whether the access was a write)\n";
+    (void)!write(2, m, sizeof m - 1);
+  }
   char name[32] = "?";
   pthread_getname_np(pthread_self(), name, sizeof name);
   n = std::snprintf(buf, sizeof buf, "  thread '%s', pc %p, caller:\n", name,
@@ -269,15 +290,33 @@ void FaultHandler(int sig, siginfo_t* si, void* uc) {
 }  // namespace
 
 // Each host thread running guest code needs its own signal stack: SEH
-// handlers for guest faults run lifted code on it, so it is large.
+// handlers for guest faults run lifted code on it, so it is large. It is
+// unmapped when the thread exits; a thread installs it once.
+namespace {
+constexpr size_t kSignalStackSize = 16u << 20;
+struct SignalStack {
+  void* p = nullptr;
+  ~SignalStack() {
+    if (!p) return;
+    stack_t ss{};
+    ss.ss_flags = SS_DISABLE;
+    sigaltstack(&ss, nullptr);
+    munmap(p, kSignalStackSize);
+  }
+};
+thread_local SignalStack t_signal_stack;
+}  // namespace
+
 void InstallSignalStack() {
-  constexpr size_t kSize = 16u << 20;
-  void* p = mmap(nullptr, kSize, PROT_READ | PROT_WRITE,
+  if (t_signal_stack.p) return;
+  void* p = mmap(nullptr, kSignalStackSize, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+  if (p == MAP_FAILED) FatalF("cannot map a signal stack");
   stack_t ss{};
   ss.ss_sp = p;
-  ss.ss_size = kSize;
-  sigaltstack(&ss, nullptr);
+  ss.ss_size = kSignalStackSize;
+  if (sigaltstack(&ss, nullptr) != 0) FatalF("sigaltstack failed");
+  t_signal_stack.p = p;
 }
 
 namespace {
@@ -288,8 +327,8 @@ void InstallFaultHandler() {
   // SA_NODEFER: a fault inside a guest exception filter must be
   // deliverable while we are still in the handler for the first one.
   sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
-  sigaction(SIGSEGV, &sa, nullptr);
-  sigaction(SIGBUS, &sa, nullptr);
+  sigaction(SIGSEGV, &sa, &g_prev_segv);
+  sigaction(SIGBUS, &sa, &g_prev_bus);
 }
 }  // namespace
 
