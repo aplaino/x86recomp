@@ -233,7 +233,9 @@ uint32_t ParseDateTime(gaddr utc, const char* s) {
     d.month = uint16_t(m + 1);
     if (*s++ != ' ') return kErrParse;
     if (*s == ' ') {
-      if (s[1] > '9') return kErrParse;  // the library checks only this bound
+      // The library checks only this bound; the end of the string (where
+      // it would read on past the terminator) does not parse.
+      if (s[1] > '9' || !s[1]) return kErrParse;
       d.day = uint16_t(s[1] - '0');
       s += 2;
     } else if ((v = OneOrTwo(s)) >= 0) {
@@ -280,6 +282,9 @@ uint32_t ParseDateTime(gaddr utc, const char* s) {
     }
     if (*s == ' ') {
       const char* z = s + 1;
+      // A space last: no zone, which does not parse (the library reads on
+      // past the terminator).
+      if (!z[0]) return kErrParse;
       if (z[0] == '+' || z[0] == '-') {
         const char* p = z + 1;
         const int hh = Fixed(p, 2), mm = hh < 0 ? -1 : Fixed(p, 2);

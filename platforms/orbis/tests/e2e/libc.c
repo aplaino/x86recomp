@@ -172,6 +172,11 @@ static int rtc_checks(void) {
   unsigned dos = 0;
   sceRtcGetDosTime(&dos_dt, &dos);
   failed += test_check(344, dos, 1482515548);
+  // 480: a string that ends where the parser would read on.
+  failed += test_check(480, (unsigned)sceRtcParseDateTime(&t2, "Mon Jan  ") == 0x80B50007 &&
+                                (unsigned)sceRtcParseDateTime(&t2, "Thu, 29 Feb 2024 12:34:56 ") ==
+                                    0x80B50007,
+                       1);
   return failed;
 }
 
