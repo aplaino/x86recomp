@@ -5,10 +5,10 @@
 // plus any memory result.
 //
 // Everything except the transcendentals must agree bit for bit. For
-// fsin/fcos/fsincos/fptan/fpatan/f2xm1/fyl2x/fyl2xp1 the results may differ
-// by at most 1 ulp (the hardware is not correctly rounded and the model
-// is); C1 may then differ too. The maximum ulp error per instruction is
-// reported.
+// fsin/fcos/fsincos/fptan/fpatan/f2xm1/fyl2x/fyl2xp1 a result the model
+// rounded may differ by at most 1 ulp (the hardware is not correctly
+// rounded and the model is), an exact one not at all; C1 is not compared
+// (see RunCase). The maximum ulp error per instruction is reported.
 //
 // Usage: x87_test [seed] [scale]   (scale multiplies the random counts)
 
@@ -606,15 +606,32 @@ void RunCase(const OpDef& op, const Image& in, const uint8_t* mem_in,
     }
   }
   if (op.kind == Kind::Transcendental) {
+    // The model rounds the exact result once (x87.cpp); the hardware is
+    // within 1 ulp of it (Intel SDM vol. 1, 8.3.10). So a result the model
+    // rounded (it raised PE, found with PE clear on entry) may differ by 1
+    // ulp; an exact one the hardware cannot miss. C1 is left out: the
+    // hardware reports the direction of its own rounding, which differs
+    // from the exact one's now and then even where the results agree.
+    bool rounded = false;
+    if (!regs_same) {
+      Image pi = in, po;
+      alignas(16) uint8_t pm[32];
+      std::memcpy(pm, mem_in, 32);
+      Wr16(pi.b + 4, Sw(in) & ~0x0020);
+      State ps{};
+      recomp::x87::Restore(ps, pi.b);
+      op.model(ps, pm);
+      recomp::x87::Save(ps, po.b);
+      rounded = Sw(po) & 0x0020;
+    }
     if (worst > st.max_ulp) st.max_ulp = worst;
     if (worst == 1) ++st.ulp1;
-    bool words_same = std::memcmp(hi.b, mo.b, 12) == 0;
     uint16_t c1 = 0x0200;
     bool same_but_c1 =
         Rd16(hi.b) == Rd16(mo.b) && Tw(hi) == Tw(mo) &&
         ((Sw(hi) ^ Sw(mo)) & ~c1) == 0;
-    if (!words_same && same_but_c1) ++st.c1_diff;
-    ok = (words_same || same_but_c1) && worst <= 1 &&
+    if ((Sw(hi) ^ Sw(mo)) & c1) ++st.c1_diff;
+    ok = (regs_same || (rounded && worst <= 1)) && same_but_c1 &&
          (!op.out_bytes || std::memcmp(hm, mm, op.out_bytes) == 0);
   }
   if (!ok) {
@@ -1088,7 +1105,7 @@ int main(int argc, char** argv) {
     if (op.kind == Kind::Transcendental) {
       std::printf("%-14s %7" PRIu64 " cases %6" PRIu64
                   " fail  max %" PRIu64 " ulp  (%" PRIu64
-                  " off by 1 ulp, %" PRIu64 " C1-only diffs)\n",
+                  " off by 1 ulp, %" PRIu64 " C1 diffs)\n",
                   op.name, st.cases, st.fails, st.max_ulp == ~0ull ? 999999 : st.max_ulp,
                   st.ulp1, st.c1_diff);
     } else {
