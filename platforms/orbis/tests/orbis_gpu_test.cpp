@@ -1279,6 +1279,48 @@ int main() {
           "an indirect draw starts at its first vertex through the shader's register");
   }
 
+  // Scalar and bitfield results (Sea Islands ISA): s_min/s_max's SCC from
+  // their sources when sdst is one of them; v_bfe of a field past bit 31
+  // is the data shifted right by the offset, width 0 is 0.
+  {
+    static const uint32_t kScalar[] = {
+        0x83810100,              // s_min_u32 s1, s0, s1
+        0x85028081,              // s_cselect_b32 s2, 1, 0
+        0x84050504,              // s_max_i32 s5, s4, s5
+        0x85068081,              // s_cselect_b32 s6, 1, 0
+        0x7E020201,              // v_mov_b32 v1, s1
+        0x7E040202,              // v_mov_b32 v2, s2
+        0x7E080206,              // v_mov_b32 v4, s6
+        0xE0700000, 0x80030100,  // buffer_store_dword v1, off, s[12:15], 0
+        0xE0700004, 0x80030200,  // buffer_store_dword v2, off, s[12:15], 0 offset:4
+        0xE070000C, 0x80030400,  // buffer_store_dword v4, off, s[12:15], 0 offset:12
+        0x7E080208,              // v_mov_b32 v4, s8
+        0xD2900005, 0x02213904,  // v_bfe_u32 v5, v4, 28, 8
+        0xD2920006, 0x02213904,  // v_bfe_i32 v6, v4, 28, 8
+        0xD2920007, 0x027D3F04,  // v_bfe_i32 v7, v4, 31, 31
+        0xD2900008, 0x02010904,  // v_bfe_u32 v8, v4, 4, 0
+        0xE0700010, 0x80030500,  // buffer_store_dword v5, off, s[12:15], 0 offset:16
+        0xE0700014, 0x80030600,  // buffer_store_dword v6, off, s[12:15], 0 offset:20
+        0xE0700018, 0x80030700,  // buffer_store_dword v7, off, s[12:15], 0 offset:24
+        0xE070001C, 0x80030800,  // buffer_store_dword v8, off, s[12:15], 0 offset:28
+        0xBF810000,              // s_endpgm
+    };
+    constexpr gaddr kScalarAt = kCode + 0x1B00, kScalarOut = 0x1D7000;
+    std::memcpy(GPtr(kScalarAt), kScalar, sizeof kScalar);
+    uint32_t user[16] = {3, 5, 0, 0, uint32_t(-2), uint32_t(-7), 0, 0, 0xF0000000u};
+    VSharp(user + 12, kScalarOut, 32);
+    std::memset(GPtr(kScalarOut), 0xEE, 32);
+    Run(kScalarAt, user, 16);
+    const uint32_t want[8] = {3, 1, 0xEEEEEEEEu, 1, 0xF, ~0u, ~0u, 0};
+    bool ok = true;
+    for (uint32_t i = 0; i < 8; i++) {
+      if (Rd32(kScalarOut + 4 * i) != want[i])
+        std::printf("  scalar word %u: %08X, want %08X\n", i, Rd32(kScalarOut + 4 * i), want[i]);
+      ok &= Rd32(kScalarOut + 4 * i) == want[i];
+    }
+    Check(ok, "s_min/s_max SCC and v_bfe past bit 31 follow the ISA");
+  }
+
   // ADD_TID_ENABLE in a stage run in waves (v_readfirstlane): lane t's
   // store through a V# of 4-byte records lands at record t.
   {

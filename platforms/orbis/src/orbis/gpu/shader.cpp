@@ -1278,8 +1278,8 @@ struct Translator {
       case 325: fo("r_cubesc(" + f(0) + ", " + f(1) + ", " + f(2) + ")"); return true;
       case 326: fo("r_cubetc(" + f(0) + ", " + f(1) + ", " + f(2) + ")"); return true;
       case 327: fo("r_cubema(" + f(0) + ", " + f(1) + ", " + f(2) + ")"); return true;
-      case 328: io("bitfieldExtract(" + s[0] + ", int(" + s[1] + " & 31u), int(" + s[2] + " & 31u))"); return true;
-      case 329: io("uint(bitfieldExtract(" + si(0) + ", int(" + s[1] + " & 31u), int(" + s[2] + " & 31u)))"); return true;
+      case 328: io("r_bfe_u(" + s[0] + ", " + s[1] + ", " + s[2] + ")"); return true;
+      case 329: io("r_bfe_i(" + s[0] + ", " + s[1] + ", " + s[2] + ")"); return true;
       case 330: io("(" + s[0] + " & " + s[1] + ") | (~" + s[0] + " & " + s[2] + ")"); return true;
       case 331: fo("fma(" + f(0) + ", " + f(1) + ", " + f(2) + ")"); return true;
       case 334: io("r_alignbit(" + s[0] + ", " + s[1] + ", " + s[2] + ")"); return true;
@@ -2067,10 +2067,12 @@ struct Translator {
           case 2: Line(Dst(d) + " = " + a + " + " + b + ";"); return;
           case 3: Line(Dst(d) + " = " + a + " - " + b + ";"); return;
           case 4: Line("r_t = " + a + " + " + b + " + scc; scc = (r_t < " + a + " || (scc != 0u && r_t == " + a + ")) ? 1u : 0u; " + Dst(d) + " = r_t;"); return;
-          case 6: Line(Dst(d) + " = uint(min(int(" + a + "), int(" + b + "))); scc = int(" + a + ") < int(" + b + ") ? 1u : 0u;"); return;
-          case 7: Line(Dst(d) + " = min(" + a + ", " + b + "); scc = " + a + " < " + b + " ? 1u : 0u;"); return;
-          case 8: Line(Dst(d) + " = uint(max(int(" + a + "), int(" + b + "))); scc = int(" + a + ") > int(" + b + ") ? 1u : 0u;"); return;
-          case 9: Line(Dst(d) + " = max(" + a + ", " + b + "); scc = " + a + " > " + b + " ? 1u : 0u;"); return;
+          // s_min/s_max: SCC from the sources, before sdst (which may be
+          // one of them) is written.
+          case 6: Line("r_t = uint(min(int(" + a + "), int(" + b + "))); scc = int(" + a + ") < int(" + b + ") ? 1u : 0u; " + Dst(d) + " = r_t;"); return;
+          case 7: Line("r_t = min(" + a + ", " + b + "); scc = " + a + " < " + b + " ? 1u : 0u; " + Dst(d) + " = r_t;"); return;
+          case 8: Line("r_t = uint(max(int(" + a + "), int(" + b + "))); scc = int(" + a + ") > int(" + b + ") ? 1u : 0u; " + Dst(d) + " = r_t;"); return;
+          case 9: Line("r_t = max(" + a + ", " + b + "); scc = " + a + " > " + b + " ? 1u : 0u; " + Dst(d) + " = r_t;"); return;
           case 10: Line(Dst(d) + " = scc != 0u ? " + a + " : " + b + ";"); return;
           case 11:
             Line("r_t = scc != 0u ? " + pair(w & 0xFF, 0) + " : " + pair((w >> 8) & 0xFF, 0) + ";");
@@ -2731,6 +2733,13 @@ struct Translator {
          "uint r_mulhi_u(uint a, uint b) { uint hi, lo; umulExtended(a, b, hi, lo); return hi; }\n"
          "uint r_mulhi_i(uint a, uint b) { int hi, lo; imulExtended(int(a), int(b), hi, lo); return uint(hi); }\n"
          "uint r_alignbit(uint a, uint b, uint c) { c &= 31u; return c == 0u ? b : (b >> c) | (a << (32u - c)); }\n"
+         // v_bfe_u32/i32: a field from offset o of width w (5 bits each);
+         // one reaching past bit 31 is v shifted right by o (GLSL leaves
+         // that case undefined).
+         "uint r_bfe_u(uint v, uint o, uint w) {\n  o &= 31u; w &= 31u;\n"
+         "  return w == 0u ? 0u : o + w < 32u ? bitfieldExtract(v, int(o), int(w)) : v >> o;\n}\n"
+         "uint r_bfe_i(uint v, uint o, uint w) {\n  o &= 31u; w &= 31u;\n"
+         "  return w == 0u ? 0u : uint(o + w < 32u ? bitfieldExtract(int(v), int(o), int(w)) : int(v) >> o);\n}\n"
          "float r_cubeid(float x, float y, float z) {\n"
          "  if (abs(z) >= abs(x) && abs(z) >= abs(y)) return z < 0.0 ? 5.0 : 4.0;\n"
          "  if (abs(y) >= abs(x)) return y < 0.0 ? 3.0 : 2.0;\n"
