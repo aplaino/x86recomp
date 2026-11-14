@@ -69,16 +69,19 @@ std::vector<guest::D3DVERTEXELEMENT9> FvfElements(uint32_t fvf) {
   return e;
 }
 
-// Vertices (or indices) a draw of `count` primitives uses.
+// Vertices (or indices) a draw of `count` primitives uses; 0 for an
+// unknown type or more than 32 bits count.
 uint32_t VerticesFor(uint32_t prim, uint32_t count) {
+  uint64_t n;
   switch (prim) {
-    case 1: return count;          // POINTLIST
-    case 2: return count * 2;      // LINELIST
-    case 3: return count + 1;      // LINESTRIP
-    case 4: return count * 3;      // TRIANGLELIST
-    case 5: case 6: return count + 2;  // TRIANGLESTRIP, TRIANGLEFAN
+    case 1: n = count; break;                     // POINTLIST
+    case 2: n = uint64_t(count) * 2; break;       // LINELIST
+    case 3: n = uint64_t(count) + 1; break;       // LINESTRIP
+    case 4: n = uint64_t(count) * 3; break;       // TRIANGLELIST
+    case 5: case 6: n = uint64_t(count) + 2; break;  // TRIANGLESTRIP, TRIANGLEFAN
     default: return 0;
   }
+  return n > UINT32_MAX ? 0 : uint32_t(n);
 }
 
 // A draw's state in gfx::Device's (D3D7's) terms: the render states, the
@@ -141,14 +144,16 @@ void DrawFixed(Device& d, gfx::ShaderDraw& sd, const char* what) {
                      st.stride};
   }
   const gfx::VertexStream& vs = sd.streams[0];
-  uint32_t first = uint32_t(std::max(sd.base_vertex, 0));
-  // Vertices from base_vertex; indexed draws index from there.
-  uint32_t nv = sd.indices ? sd.min_index + sd.vertex_count : sd.vertex_count;
-  if (!vs.stride || uint64_t(first + nv) * vs.stride > vs.size)
+  // Vertex (indexed draws: index) v is the stream's base_vertex + v, which
+  // may be negative; the draw reads those from min_index (0 unindexed) on.
+  uint32_t from = sd.indices ? sd.min_index : 0;
+  int64_t lo = int64_t(sd.base_vertex) + from;
+  if (!vs.stride || lo < 0 || uint64_t(lo + sd.vertex_count) * vs.stride > vs.size)
     FatalF("d3d9: fixed-function %s reads past its vertex buffer", what);
-  gfx::FfDraw fd = gfx::FfInterleaved(sd.prim, d.fvf, vs.data + size_t(first) * vs.stride,
-                                      vs.stride);
-  fd.vertex_count = nv;
+  gfx::FfDraw fd = gfx::FfInterleaved(
+      sd.prim, d.fvf, vs.data + ptrdiff_t(sd.base_vertex) * ptrdiff_t(vs.stride), vs.stride);
+  fd.first_vertex = from;
+  fd.vertex_count = sd.vertex_count;
   if (sd.indices) {
     fd.indices = sd.indices;
     fd.index_count = VerticesFor(sd.prim, sd.primitives);
@@ -278,9 +283,10 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::DrawPrimitiveUP", D3DDev9_DrawPrimitive
   sd.primitives = Arg(c, 2);
   uint32_t stride = Arg(c, 4);
   sd.vertex_count = VerticesFor(sd.prim, sd.primitives);
-  uint32_t bytes = sd.vertex_count * stride;
-  if (!sd.vertex_count || !EnsureReadable(c, Arg(c, 3), bytes)) return D3DERR_INVALIDCALL;
-  sd.streams[0] = {static_cast<const uint8_t*>(GPtr(Arg(c, 3))), bytes, stride};
+  uint64_t bytes = uint64_t(sd.vertex_count) * stride;
+  if (!sd.vertex_count || bytes > UINT32_MAX || !EnsureReadable(c, Arg(c, 3), uint32_t(bytes)))
+    return D3DERR_INVALIDCALL;
+  sd.streams[0] = {static_cast<const uint8_t*>(GPtr(Arg(c, 3))), uint32_t(bytes), stride};
   Draw(*d, sd, "DrawPrimitiveUP");
   Bind(&d->streams[0].buffer, 0);
   d->streams[0].offset = d->streams[0].stride = 0;
@@ -299,12 +305,14 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::DrawIndexedPrimitiveUP", D3DDev9_DrawIn
   sd.primitives = Arg(c, 4);
   sd.index_size = Arg(c, 6) == D3DFMT_INDEX32 ? 4 : 2;
   uint32_t n = VerticesFor(sd.prim, sd.primitives), stride = Arg(c, 8);
-  uint32_t vbytes = (sd.min_index + sd.vertex_count) * stride;
-  if (!n || !EnsureReadable(c, Arg(c, 5), n * sd.index_size) ||
-      !EnsureReadable(c, Arg(c, 7), vbytes))
+  uint64_t ibytes = uint64_t(n) * sd.index_size,
+           vbytes = (uint64_t(sd.min_index) + sd.vertex_count) * stride;
+  if (!n || ibytes > UINT32_MAX || vbytes > UINT32_MAX ||
+      !EnsureReadable(c, Arg(c, 5), uint32_t(ibytes)) ||
+      !EnsureReadable(c, Arg(c, 7), uint32_t(vbytes)))
     return D3DERR_INVALIDCALL;
   sd.indices = GPtr(Arg(c, 5));
-  sd.streams[0] = {static_cast<const uint8_t*>(GPtr(Arg(c, 7))), vbytes, stride};
+  sd.streams[0] = {static_cast<const uint8_t*>(GPtr(Arg(c, 7))), uint32_t(vbytes), stride};
   Draw(*d, sd, "DrawIndexedPrimitiveUP");
   Bind(&d->streams[0].buffer, 0);
   d->streams[0].offset = d->streams[0].stride = 0;
