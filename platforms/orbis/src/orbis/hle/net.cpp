@@ -24,11 +24,13 @@ struct Pool {
   uint64_t size = 0;
 };
 std::map<int, Pool> g_pools;
+// A lock of its own: errors are set with g_mu held.
+std::mutex g_errno_mu;
 std::map<uint32_t, recomp::gaddr> g_errno;  // by guest thread
 
 recomp::gaddr ErrnoLoc() {
   const uint32_t tid = recomp::CurrentThread()->tid;
-  std::lock_guard<std::mutex> l(g_mu);
+  std::lock_guard<std::mutex> l(g_errno_mu);
   recomp::gaddr& a = g_errno[tid];
   if (!a) {
     a = recomp::g_proc->vm.Reserve(0, recomp::GuestMemory::kPageSize);
