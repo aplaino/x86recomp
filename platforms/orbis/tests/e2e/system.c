@@ -161,6 +161,13 @@ static void fiber_b(unsigned long init, unsigned long run) {
   sceFiberReturnToThread(0, &got);
 }
 
+// A fiber that hands the thread init * 10 + run.
+static void fiber_r(unsigned long init, unsigned long run) {
+  unsigned long got;
+  sceFiberReturnToThread(init * 10 + run, &got);
+  for (;;) sceFiberReturnToThread(0, &got);
+}
+
 // ---- a fiber that yields on one thread and is resumed on another: its
 // locals survive, and it sees the thread it runs on, both through fs (the
 // TCB pointer at fs:0, read again in the same function) and through TLS.
@@ -210,6 +217,10 @@ static int fiber_checks(void) {
   failed += test_check(75, (long)ret, 88);
   Fiber* self;
   failed += test_check(76, (unsigned)sceFiberGetSelf(&self), 0x80590005);  // not in a fiber
+  // 475: a block initialised again while its fiber waits to be resumed:
+  // the new fiber starts at its entry.
+  _sceFiberInitializeImpl(&fa, "r", fiber_r, 3, stack_a, sizeof stack_a, 0, 0x3500000);
+  failed += test_check(475, sceFiberRun(&fa, 4, &ret) * 100 + (long)ret, 34);
   failed += test_check(77, sceFiberFinalize(&fa) + sceFiberFinalize(&fb), 0);
   _sceFiberInitializeImpl(&fm, "m", fiber_m, 0, stack_m, sizeof stack_m, 0, 0x3500000);
   for (long i = 1; i <= 2; i++) {

@@ -12,9 +12,11 @@
 // state; the rest of its fields are libSceFiber's own and stay unwritten.
 // Checks and error codes are 11.00's. A fiber made without context memory
 // runs on the stack of the thread that first runs it, below that call's
-// frame, as libSceFiber starts it.
+// frame, as libSceFiber starts it. A host stack has a guard page below it,
+// so running off its end faults instead of writing over other memory.
 
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <map>
@@ -43,12 +45,18 @@ struct Fiber {
   gaddr guest = 0, entry = 0, context = 0;
   uint64_t arg_init = 0, context_size = 0;
   std::string name;
-  void* host_stack = nullptr;
+  void* host_stack = nullptr;  // its guard page first
   platform::Coroutine* co = nullptr;
   Ctx ctx;  // its registers
   std::atomic<int> state{kIdle};  // kIdle, kRunning or kLeaving
   uint64_t arg_in = 0;  // what the switch that resumes it passes
   gaddr stack_top = 0;  // without context memory: where it starts
+
+  ~Fiber() {
+    if (!co) return;
+    platform::FreeCoroutine(co);
+    munmap(host_stack, kHostStack + size_t(sysconf(_SC_PAGESIZE)));
+  }
 };
 
 // The calling thread's fibers: its own context, the running fiber, what
@@ -130,10 +138,12 @@ void SwitchTo(Ctx& c, platform::Coroutine* from, Fiber* leaving, Fiber* to, uint
     to->ctx = c;  // FPU and SSE control as the thread has them
     // Below the frame of the call that starts it (a red zone further).
     if (!to->context) to->stack_top = (c.rsp - 0x100) & ~uint64_t(15);
-    to->host_stack = mmap(nullptr, kHostStack, PROT_READ | PROT_WRITE,
+    const size_t guard = size_t(sysconf(_SC_PAGESIZE));
+    to->host_stack = mmap(nullptr, kHostStack + guard, PROT_READ | PROT_WRITE,
                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    if (to->host_stack == MAP_FAILED) FatalF("fiber %s: no host stack", to->name.c_str());
-    to->co = platform::NewCoroutine(to->host_stack, kHostStack, Start, to);
+    if (to->host_stack == MAP_FAILED || mprotect(to->host_stack, guard, PROT_NONE))
+      FatalF("fiber %s: no host stack", to->name.c_str());
+    to->co = platform::NewCoroutine(static_cast<char*>(to->host_stack) + guard, kHostStack, Start, to);
   }
   to->ctx.fs_base = c.fs_base;
   to->ctx.thread = c.thread;
@@ -167,11 +177,26 @@ ORBIS_HLE("libSceFiber", _sceFiberInitializeImpl, 8) {
   fb->context = context;
   fb->context_size = size;
   fb->name = recomp::GStr(name).substr(0, kNameMax);
+  std::unique_ptr<Fiber> old;
+  {
+    // Initialising a block again drops the fiber it held (once that is
+    // off its host stack), its coroutine and host stack with it; one still
+    // running is not implemented yet.
+    std::lock_guard<std::mutex> l(g_mu);
+    auto it = g_fibers.find(f);
+    if (it != g_fibers.end()) {
+      while (it->second->state == kLeaving) std::this_thread::yield();
+      if (it->second->state == kRunning)
+        recomp::FatalF("_sceFiberInitializeImpl: fiber %s initialised again while running, not "
+                       "implemented yet",
+                       it->second->name.c_str());
+      old = std::move(it->second);
+    }
+    g_fibers[f] = std::move(fb);
+  }
   recomp::Wr32(f, kMagicStart);
   recomp::Wr32(f + 4, kStateIdle);
   recomp::Wr32(f + 0xFC, kMagicEnd);
-  std::lock_guard<std::mutex> l(g_mu);
-  g_fibers[f] = std::move(fb);
   return 0;
 }
 
@@ -180,12 +205,8 @@ ORBIS_HLE("libSceFiber", sceFiberFinalize, 1) {
   if (uint32_t e = Lookup(Arg(c, 0), &f)) return e;
   while (f->state == kLeaving) std::this_thread::yield();
   if (f->state == kRunning) return kErrState;
-  if (f->co) {
-    recomp::platform::FreeCoroutine(f->co);
-    munmap(f->host_stack, kHostStack);
-  }
   std::lock_guard<std::mutex> l(g_mu);
-  g_fibers.erase(Arg(c, 0));
+  g_fibers.erase(Arg(c, 0));  // with its coroutine and host stack
   return 0;
 }
 
