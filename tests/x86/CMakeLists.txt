@@ -47,6 +47,15 @@ target_link_libraries(hle_dup_test PRIVATE recomp_x86)
 add_test(NAME hle_dup COMMAND hle_dup_test)
 set_tests_properties(hle_dup PROPERTIES PASS_REGULAR_EXPRESSION "test.dll!Twice is registered twice")
 
+# runtime_thread_test: guest faults, thread exits and the watchdog (Linux).
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(runtime_thread_test runtime_thread_test.cpp)
+  target_include_directories(runtime_thread_test PRIVATE ${RECOMP_ROOT}/src)
+  target_link_libraries(runtime_thread_test PRIVATE recomp_x86)
+  target_compile_options(runtime_thread_test PRIVATE -fnon-call-exceptions)
+  add_test(NAME runtime_thread COMMAND runtime_thread_test)
+endif()
+
 # fxsave_test: FXSAVE/FXRSTOR of the x87 and SSE models against the host.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
   add_executable(fxsave_test fxsave_test.cpp)
