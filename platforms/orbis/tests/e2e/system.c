@@ -814,6 +814,12 @@ static int ngs2_checks(void) {
   failed += test_check(171, (unsigned)sceNgs2VoiceControl(sv, &to_sampler), 0x804A0305);
   Ngs2Pair loop[2] = {{{16, 16, 2}, 0, 0x3F800000}, {{16, -16, 2}, 0, 0x3F800000}};
   failed += test_check(172, (unsigned)sceNgs2VoiceControl(sv, loop), 0x804A030B);
+  struct {
+    Ngs2Head h;
+    unsigned forward, release;
+    const void* points;
+  } env = {{24, 0, 0x10000006}, 0xFFFFFFFF, 2, ngs2_pcm};  // the counts' sum wraps
+  failed += test_check(481, (unsigned)sceNgs2VoiceControl(sv, &env), 0x804A0152);
 
   unsigned st[12];
   failed += test_check(173, sceNgs2VoiceGetState(sv, st, 4), 0);

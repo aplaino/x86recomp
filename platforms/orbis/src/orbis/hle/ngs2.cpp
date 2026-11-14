@@ -496,7 +496,8 @@ Port& TouchPort(Voice& v, uint32_t port) {
 }
 
 uint32_t SetEnvelope(Voice& v, gaddr p, uint32_t max_points) {
-  const uint32_t fwd = Rd32(p + 8), rel = Rd32(p + 0xc), n = fwd + rel;
+  const uint32_t fwd = Rd32(p + 8), rel = Rd32(p + 0xc);
+  const uint64_t n = uint64_t(fwd) + rel;  // the sum of two counts must not wrap
   const gaddr pts = Rd64(p + 0x10);
   if (!pts && n) return kErrInvalidEnvelopePointAddress;
   if (n > max_points) return kErrInvalidEnvelopePoints;
@@ -578,6 +579,10 @@ uint32_t SamplerParam(Voice& v, const Param& q) {
       }
       if (type == 0x1c) recomp::FatalF("libSceNgs2: VAG waveforms are not implemented yet");
       if (type >= 0x80) recomp::FatalF("libSceNgs2: oscillator waveforms are not implemented yet");
+      // Channels the voice did not decode into are as long as the first, so
+      // the next render takes the same from each (a channel's FIFO is
+      // filled only while it is one of the waveform's).
+      for (uint32_t c = v.wch; c < ch; c++) v.fifo[c].assign(v.fifo[0].size(), 0.0f);
       v.wtype = type, v.wch = ch, v.wrate = rate, v.frame_offset = offset, v.frame_margin = margin;
       v.wave_set = true;
       v.in_ch = v.out_ch = int(ch);
@@ -636,6 +641,8 @@ uint32_t SamplerParam(Voice& v, const Param& q) {
       return 0;
     }
     case 0x10000003:
+      // 11.00 checks only this bound here, not the offset against the
+      // margin as the setup does (DecodeAtrac9).
       if (Rd32(p + 8) >= 0x10000) return kErrInvalidWaveformFrame;
       v.frame_offset = Rd32(p + 8);
       return 0;
@@ -1111,6 +1118,13 @@ void DecodeSuperframe(Voice& v, const uint8_t* src, uint32_t size) {
 // superframe, not after the block's last frame.
 void DecodeAtrac9(Voice& v, uint32_t want) {
   const uint32_t frames = Atrac9Frames(v), bytes = Atrac9Bytes(v), unit = bytes + v.frame_margin;
+  // A frame offset set past the margin alone (the setup refuses one) puts
+  // the superframe's end in the next unit; what 11.00 decodes then is not
+  // measured.
+  if (v.frame_offset > v.frame_margin)
+    recomp::FatalF("libSceNgs2: ATRAC9 frame offset %u past the frame margin %u not implemented "
+                   "yet",
+                   v.frame_offset, v.frame_margin);
   thread_local std::vector<uint8_t> buf;
   v.starved = false;
   uint32_t got = 0;
