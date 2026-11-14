@@ -209,46 +209,28 @@ void Decode(Player& p, std::unique_ptr<Input> in) {
   AVFrame* frame = av_frame_alloc();
   std::vector<int16_t> pcm;
   int64_t audio_pts_ms = 0;
+  // A loop starts the stream's timestamps again: each pass is shifted by
+  // where the ones before it ended, so its frames keep up with the clock.
+  int64_t loop_ms = 0, end_ms = 0;
   bool announced = p.init.auto_start;
-  for (;;) {
-    {
-      std::unique_lock<std::mutex> l(p.mu);
-      p.cv.wait(l, [&] {
-        return p.stop || (p.video.size() < kQueueAhead && p.audio.size() < 4 * kQueueAhead);
-      });
-      if (p.stop) break;
-      if (p.playing && !announced) {
-        announced = true;
-        l.unlock();
-        Event(p, kStatePlay);
-      }
-    }
-    if (av_read_frame(fmt, pkt) < 0) {
-      std::unique_lock<std::mutex> l(p.mu);
-      if (p.looping) {
-        l.unlock();
-        av_seek_frame(fmt, -1, 0, AVSEEK_FLAG_BACKWARD);
-        continue;
-      }
-      p.eof = true;
-      p.cv.notify_all();
-      break;
-    }
-    AVCodecContext* d = pkt->stream_index == vs ? vdec : pkt->stream_index == as ? adec : nullptr;
-    if (!d || avcodec_send_packet(d, pkt) < 0) {
-      av_packet_unref(pkt);
-      continue;
-    }
-    const AVRational tb = fmt->streams[pkt->stream_index]->time_base;
-    av_packet_unref(pkt);
+  // Queues the frames decoder d has ready (its stream's time base tb).
+  auto receive = [&](AVCodecContext* d, AVRational tb) {
     while (avcodec_receive_frame(d, frame) == 0) {
-      const int64_t pts_ms = frame->best_effort_timestamp == AV_NOPTS_VALUE
-                                 ? 0
-                                 : av_rescale_q(frame->best_effort_timestamp, tb, {1, 1000});
+      const int64_t pts_ms = loop_ms + (frame->best_effort_timestamp == AV_NOPTS_VALUE
+                                            ? 0
+                                            : av_rescale_q(frame->best_effort_timestamp, tb, {1, 1000}));
       if (d == vdec) {
         if (frame->format != AV_PIX_FMT_YUV420P && frame->format != AV_PIX_FMT_YUVJ420P)
           recomp::FatalF("sceAvPlayer: video format %s not implemented yet",
                          av_get_pix_fmt_name(AVPixelFormat(frame->format)));
+        end_ms = std::max(end_ms, pts_ms + av_rescale_q(frame->duration, tb, {1, 1000}));
+        {
+          // The game may still show the frame it took last: a texture is
+          // free for this one while all but two of them are not queued.
+          std::unique_lock<std::mutex> l(p.mu);
+          p.cv.wait(l, [&] { return p.stop || p.video.size() + 2 <= p.textures.size(); });
+          if (p.stop) continue;
+        }
         // NV12: the luma plane, then chroma pairs (u, v).
         const gaddr t = p.textures[p.next_texture++ % p.textures.size()];
         uint8_t* y = recomp::GPtr(t);
@@ -266,6 +248,7 @@ void Decode(Player& p, std::unique_ptr<Input> in) {
       } else {
         // To 16-bit interleaved.
         const int n = frame->nb_samples, ch = p.channels;
+        end_ms = std::max(end_ms, pts_ms + int64_t(n) * 1000 / p.rate);
         if (pcm.empty()) audio_pts_ms = pts_ms;
         const size_t at = pcm.size();
         pcm.resize(at + size_t(n) * ch);
@@ -297,6 +280,46 @@ void Decode(Player& p, std::unique_ptr<Input> in) {
         }
       }
     }
+  };
+  for (;;) {
+    {
+      std::unique_lock<std::mutex> l(p.mu);
+      p.cv.wait(l, [&] {
+        return p.stop || (p.video.size() < kQueueAhead && p.audio.size() < 4 * kQueueAhead);
+      });
+      if (p.stop) break;
+      if (p.playing && !announced) {
+        announced = true;
+        l.unlock();
+        Event(p, kStatePlay);
+      }
+    }
+    if (av_read_frame(fmt, pkt) < 0) {
+      // The end: the frames the decoders hold back come out first.
+      for (AVCodecContext* d : {vdec, adec})
+        if (d && avcodec_send_packet(d, nullptr) == 0)
+          receive(d, fmt->streams[d == vdec ? vs : as]->time_base);
+      std::unique_lock<std::mutex> l(p.mu);
+      if (p.looping) {
+        l.unlock();
+        av_seek_frame(fmt, -1, 0, AVSEEK_FLAG_BACKWARD);
+        for (AVCodecContext* d : {vdec, adec})
+          if (d) avcodec_flush_buffers(d);
+        loop_ms = end_ms;
+        continue;
+      }
+      p.eof = true;
+      p.cv.notify_all();
+      break;
+    }
+    AVCodecContext* d = pkt->stream_index == vs ? vdec : pkt->stream_index == as ? adec : nullptr;
+    if (!d || avcodec_send_packet(d, pkt) < 0) {
+      av_packet_unref(pkt);
+      continue;
+    }
+    const AVRational tb = fmt->streams[pkt->stream_index]->time_base;
+    av_packet_unref(pkt);
+    receive(d, tb);
   }
   // The end: wait for the game to take what is left, then stop.
   {
