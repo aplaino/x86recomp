@@ -3254,6 +3254,14 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
   // A replaced function keeps its lifted body under another name, for the
   // replacement to call or be diffed against; every call site still
   // reaches f_X, which the game project defines.
+  if (p_.optnone_x87_over) {
+    uint64_t x87 = 0;
+    for (const auto& [va, in] : f.insns) x87 += in.ok && IsX87(in.d);
+    if (x87 > p_.optnone_x87_over) {
+      o += "LIFT_OPTNONE ";
+      stats->optnone++;
+    }
+  }
   o += "void " + FnName(f.entry) + (p_.replaced.count(f.entry) ? "_lifted" : "") +
        "(::recomp::Ctx& c) {\n  LIFT_ENTER\n";
   const size_t xmm_at = o.size();  // LIFT_XMM_ENTER goes here (32-bit)

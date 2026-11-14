@@ -105,6 +105,7 @@ int main(int argc, char** argv) {
   std::vector<ModuleArgs> mods{{"", "symbols", "lifter.manifest", 0}};
   std::string outdir = "generated";
   uint64_t per_file = 12000;
+  uint64_t optnone_x87_over = 0;
   uint64_t dump = 0;
   std::string x87_test, int_test, sse_test, flags_test;
   std::set<uint64_t> only;
@@ -120,6 +121,7 @@ int main(int argc, char** argv) {
     else if (a == "--base") mods.back().base = std::stoull(val(), nullptr, 16);
     else if (a == "--out") outdir = val();
     else if (a == "--insns-per-file") per_file = std::stoull(val());
+    else if (a == "--optnone-x87-over") optnone_x87_over = std::stoull(val());
     else if (a == "--dump") dump = std::stoull(val(), nullptr, 16);
     else if (a == "--all-flags") all_flags = true;
     else if (a == "--flags-check") flags_check = true;
@@ -164,6 +166,7 @@ int main(int argc, char** argv) {
   }
 
   lifter::Program p;
+  p.optnone_x87_over = optnone_x87_over;
   std::string err;
   for (const ModuleArgs& m : mods) {
     if (m.symdir.empty()) {
@@ -551,5 +554,8 @@ int main(int argc, char** argv) {
   std::printf("instructions: %llu, unimplemented sites: %llu, files: %zu\n",
               (unsigned long long)stats.insns, (unsigned long long)unimpl,
               files.size());
+  if (stats.optnone)
+    std::printf("compiled without optimisation (over %llu x87 instructions): %llu functions\n",
+                (unsigned long long)optnone_x87_over, (unsigned long long)stats.optnone);
   return 0;
 }

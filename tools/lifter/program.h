@@ -70,6 +70,13 @@ struct Program {
     uint8_t frame_reg, frame_off;
   };
   std::map<uint64_t, EhFrame> eh_frames;      // by function entry
+  // --optnone-x87-over N: functions with more than N x87 instructions are
+  // compiled without optimisation (0: none). clang's optimiser is
+  // superlinear on them (x87 runs, each with its host-doubles copy and
+  // re-entry points into the exact path): one with 8,000 took half an hour
+  // to compile, nearly all of it in CorrelatedValuePropagation. Size alone
+  // is no measure; integer code three times as long compiles in seconds.
+  uint64_t optnone_x87_over = 0;
   // Flags live across calls and returns (flags.h); null: spill them all.
   const FlagLiveness* flags = nullptr;
   // --flags-check: check the analysis as the game runs (lifted.h).
