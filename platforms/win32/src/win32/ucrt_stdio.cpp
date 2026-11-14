@@ -6,8 +6,10 @@
 // later), not the host's printf where they differ: %p is 16 uppercase hex
 // digits, NaNs print as nan, nan(ind) or nan(snan).
 
+#include <algorithm>
 #include <cerrno>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -128,9 +130,23 @@ std::string Pad(const std::string& body, int width, bool left) {
 }
 
 // The UCRT's printf (narrow functions: %s and %c are char, %S and %C
-// wchar_t) over a guest format and va_list.
+// wchar_t) over a guest format and va_list. Output the int result cannot
+// count (more than INT_MAX characters) is fatal.
 std::string Format(const std::string& fmt, Args a, bool three_digit_exponents) {
   std::string out;
+  auto too_long = [&](int64_t n) {
+    if (n > INT32_MAX - int64_t(out.size()))
+      FatalF("guest printf: more than INT_MAX characters from \"%s\"", fmt.c_str());
+  };
+  // One conversion through the host's printf, whatever its length.
+  auto host = [&](const std::string& f, auto v) {
+    const int n = std::snprintf(nullptr, 0, f.c_str(), v);
+    if (n < 0) too_long(int64_t(INT32_MAX) + 1);
+    too_long(n);
+    std::string r(size_t(n), '\0');
+    std::snprintf(r.data(), size_t(n) + 1, f.c_str(), v);
+    return r;
+  };
   for (size_t i = 0; i < fmt.size(); i++) {
     if (fmt[i] != '%') {
       out.push_back(fmt[i]);
@@ -139,26 +155,36 @@ std::string Format(const std::string& fmt, Args a, bool three_digit_exponents) {
     size_t start = i++;
     std::string flags;
     while (i < fmt.size() && std::strchr("-+ #0", fmt[i])) flags.push_back(fmt[i++]);
-    int width = -1, prec = -1;
+    // Width and precision: a literal one past INT_MAX is an invalid
+    // format; a negative `*` width left-justifies, except INT_MIN, whose
+    // negation stays negative in the UCRT and pads nothing; a negative `*`
+    // precision is none.
+    int64_t width = -1, prec = -1;
+    auto number = [&](int64_t* v) {
+      *v = 0;
+      while (i < fmt.size() && std::isdigit(uint8_t(fmt[i]))) {
+        *v = *v * 10 + (fmt[i++] - '0');
+        if (*v > INT32_MAX) FatalF("guest printf: a width or precision past INT_MAX in \"%s\"",
+                                   fmt.c_str());
+      }
+    };
     if (i < fmt.size() && fmt[i] == '*') {
       width = int32_t(a.Next());
       if (width < 0) {
         flags.push_back('-');
-        width = -width;
+        width = width == INT32_MIN ? -1 : -width;
       }
       i++;
-    } else {
-      while (i < fmt.size() && std::isdigit(uint8_t(fmt[i])))
-        width = (width < 0 ? 0 : width) * 10 + (fmt[i++] - '0');
+    } else if (i < fmt.size() && std::isdigit(uint8_t(fmt[i]))) {
+      number(&width);
     }
     if (i < fmt.size() && fmt[i] == '.') {
       i++;
-      prec = 0;
       if (i < fmt.size() && fmt[i] == '*') {
         prec = int32_t(a.Next());
         i++;
       } else {
-        while (i < fmt.size() && std::isdigit(uint8_t(fmt[i]))) prec = prec * 10 + (fmt[i++] - '0');
+        number(&prec);
       }
     }
     // Length: hh h l ll L j z t I I32 I64 w.
@@ -210,7 +236,6 @@ std::string Format(const std::string& fmt, Args a, bool three_digit_exponents) {
     char conv = fmt[i];
     std::string spec = "%" + flags + (width >= 0 ? std::to_string(width) : "") +
                        (prec >= 0 ? "." + std::to_string(prec) : "");
-    char buf[512];
     switch (conv) {
       case '%':
         out.push_back('%');
@@ -219,36 +244,50 @@ std::string Format(const std::string& fmt, Args a, bool three_digit_exponents) {
         uint64_t v = a.Next();
         long long s = bits == 64 ? int64_t(v) : bits == 16 ? int16_t(v) : bits == 8 ? int8_t(v)
                                                                              : int32_t(v);
-        std::snprintf(buf, sizeof buf, (spec + "lld").c_str(), s);
-        out += buf;
+        out += host(spec + "lld", s);
         break;
       }
       case 'u': case 'o': case 'x': case 'X': {
         uint64_t v = a.Next();
         unsigned long long u = bits == 64 ? v : bits == 16 ? uint16_t(v) : bits == 8 ? uint8_t(v)
                                                                            : uint32_t(v);
-        std::snprintf(buf, sizeof buf, (spec + "ll" + conv).c_str(), u);
-        out += buf;
+        out += host(spec + "ll" + conv, u);
         break;
       }
       case 'p': {
-        std::snprintf(buf, sizeof buf, "%016llX", (unsigned long long)a.Next());
-        out += Pad(buf, width, flags.find('-') != std::string::npos);
+        too_long(width);
+        out += Pad(host("%016llX", (unsigned long long)a.Next()), int(width),
+                   flags.find('-') != std::string::npos);
         break;
       }
       case 'c': case 'C': {
         uint64_t v = a.Next();
         bool w = conv == 'C' ? !narrow : wide;
         char ch = w ? win32::Narrow(std::u16string(1, char16_t(v)))[0] : char(v);
-        out += Pad(std::string(1, ch), width, flags.find('-') != std::string::npos);
+        too_long(width);
+        out += Pad(std::string(1, ch), int(width), flags.find('-') != std::string::npos);
         break;
       }
       case 's': case 'S': {
+        // With a precision, no more of the string is read than it keeps
+        // (it need not be terminated).
         gaddr p = a.Next();
         bool w = conv == 'S' ? !narrow : wide;
-        std::string s = !p ? "(null)" : w ? win32::Narrow(GWStr(p)) : GStr(p);
+        std::string s;
+        if (!p) {
+          s = "(null)";
+        } else if (prec < 0) {
+          s = w ? win32::Narrow(GWStr(p)) : GStr(p);
+        } else if (w) {
+          std::u16string u;
+          for (gaddr q = p; int64_t(u.size()) < prec && Rd16(q); q += 2) u.push_back(Rd16(q));
+          s = win32::Narrow(u);
+        } else {
+          for (gaddr q = p; int64_t(s.size()) < prec && Rd8(q); q++) s.push_back(char(Rd8(q)));
+        }
         if (prec >= 0 && size_t(prec) < s.size()) s.resize(size_t(prec));
-        out += Pad(s, width, flags.find('-') != std::string::npos);
+        too_long(std::max<int64_t>(width, int64_t(s.size())));
+        out += Pad(s, int(width), flags.find('-') != std::string::npos);
         break;
       }
       case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': case 'a': case 'A': {
@@ -260,13 +299,13 @@ std::string Format(const std::string& fmt, Args a, bool three_digit_exponents) {
                                               (upper ? "INF" : "inf");
           if (!std::signbit(v) && flags.find('+') != std::string::npos) s = "+" + s;
           else if (!std::signbit(v) && flags.find(' ') != std::string::npos) s = " " + s;
-          out += Pad(s, width, flags.find('-') != std::string::npos);
+          too_long(width);
+          out += Pad(s, int(width), flags.find('-') != std::string::npos);
           break;
         }
         if (conv == 'a' || conv == 'A')
           FatalF("guest printf: %%%c is not supported yet", conv);
-        std::snprintf(buf, sizeof buf, (spec + conv).c_str(), v);
-        std::string s = buf;
+        std::string s = host(spec + conv, v);
         if (three_digit_exponents) {  // the legacy e+005: three exponent digits
           size_t e = s.find_first_of("eE");
           if (e != std::string::npos && s.size() - e == 4) s.insert(e + 2, "0");

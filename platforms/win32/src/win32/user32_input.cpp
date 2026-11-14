@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -451,9 +452,14 @@ HLE("user32.dll", wsprintfA, kCdecl) {
     i++;
     while (i < fmt.size() && std::strchr("-#0 +", fmt[i])) spec += fmt[i++];
     while (i < fmt.size() && std::isdigit(uint8_t(fmt[i]))) spec += fmt[i++];
+    size_t prec = SIZE_MAX;
     if (i < fmt.size() && fmt[i] == '.') {
       spec += fmt[i++];
-      while (i < fmt.size() && std::isdigit(uint8_t(fmt[i]))) spec += fmt[i++];
+      prec = 0;
+      while (i < fmt.size() && std::isdigit(uint8_t(fmt[i]))) {
+        if (prec < SIZE_MAX / 10) prec = prec * 10 + size_t(fmt[i] - '0');  // saturates
+        spec += fmt[i++];
+      }
     }
     bool wide = false, longlong = false;
     while (i < fmt.size() && std::strchr("hlwI", fmt[i])) {
@@ -470,7 +476,8 @@ HLE("user32.dll", wsprintfA, kCdecl) {
     }
     if (i >= fmt.size()) break;
     char conv = fmt[i];
-    char buf[512];
+    // Room for all the output can hold (the 1024-character limit below).
+    char buf[1025];
     switch (conv) {
       case '%': r += '%'; break;
       case 'd': case 'i': case 'u': case 'x': case 'X': {
@@ -496,8 +503,19 @@ HLE("user32.dll", wsprintfA, kCdecl) {
         break;
       }
       case 's': case 'S': {
+        // With a precision, no more of the string is read than it keeps
+        // (it need not be terminated).
         uint32_t p = next();
-        std::string s = !p ? "(null)" : (wide || conv == 'S') ? Narrow(GWStr(p)) : GStr(p);
+        std::string s;
+        if (!p) {
+          s = "(null)";
+        } else if (wide || conv == 'S') {
+          std::u16string w;
+          for (gaddr q = p; w.size() < prec && Rd16(q); q += 2) w.push_back(Rd16(q));
+          s = Narrow(w);
+        } else {
+          for (gaddr q = p; s.size() < prec && Rd8(q); q++) s.push_back(char(Rd8(q)));
+        }
         spec += 's';
         std::snprintf(buf, sizeof buf, spec.c_str(), s.c_str());
         r += buf;
