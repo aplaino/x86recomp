@@ -98,6 +98,31 @@ HLE("kernel32.dll", LoadResource, 2) {
 
 HLE("kernel32.dll", LockResource, 1) { return Arg(c, 0); }
 
+// (hInstance, uID, LPWSTR buffer, cchBufferMax). RT_STRING blocks hold 16
+// strings each, block uID/16 + 1, as {WORD length, WCHAR[length]} with no
+// NUL. A zero cchBufferMax returns a read-only pointer to the string in
+// *buffer; otherwise up to cchBufferMax - 1 characters are copied and
+// terminated. Returns the characters copied (0: no such string).
+HLE("user32.dll", LoadStringW, 4) {
+  const uint32_t id = Arg(c, 1), buf = Arg(c, 2), cap = Arg(c, 3);
+  uint32_t str = 0, len = 0;
+  if (IsOwnModule(Arg(c, 0)))
+    if (uint32_t e = FindResourceImpl("#6", "#" + std::to_string(id / 16 + 1), 0)) {
+      uint32_t p = g_proc->img.image_base + Rd32(e);
+      for (uint32_t i = 0; i < id % 16; i++) p += 2 + 2 * Rd16(p);
+      len = Rd16(p);
+      str = p + 2;
+    }
+  if (!cap) {
+    Wr32(buf, len ? str : 0);
+    return len;
+  }
+  const uint32_t n = std::min(len, cap - 1);
+  for (uint32_t i = 0; i < n; i++) Wr16(buf + 2 * i, Rd16(str + 2 * i));
+  Wr16(buf + 2 * n, 0);
+  return n;
+}
+
 // Enumeration callbacks get either an integer id or a guest string.
 uint32_t KeyArg(const std::string& key, uint32_t* tmp) {
   if (key[0] == '#') return uint32_t(std::stoul(key.substr(1)));
