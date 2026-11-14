@@ -25,6 +25,7 @@
 #include "orbis/hle.h"
 #include "orbis/hle/kernel.h"
 #include "runtime/log.h"
+#include "x86/layout.h"
 #include "x86/runtime.h"
 
 namespace recomp::orbis::kernel {
@@ -134,15 +135,18 @@ void Reprotect(gaddr start, uint64_t len, int prot) {
   for (auto it = VmaRange(start, end); it != g_vma.end() && it->first < end; ++it) it->second.prot = prot;
 }
 
-// Unmaps everything in [addr, addr + len), across as many mappings
-// (reservations) as it covers, as FreeBSD's munmap does: the range is free
-// for other mappings afterwards (a fixed one without overwriting included).
+// Unmaps everything in the pages of [addr, addr + len), across as many
+// mappings (reservations) as it covers and the gaps between them, as
+// FreeBSD 9's munmap does: the range is free for other mappings afterwards
+// (a fixed one without overwriting included). False, as munmap's EINVAL,
+// only for an empty or wrapping range.
 bool Unmap(gaddr addr, uint64_t len) {
   GuestAllocator& vm = g_proc->vm;
   GuestAllocator::Region r;
-  if (addr & (kPage - 1) || !vm.Find(addr, &r)) return false;
-  const gaddr end = addr + RoundUp(len);
-  for (gaddr at = addr; at < end;) {
+  const gaddr start = addr & ~(kPage - 1);
+  if (!len || addr + len < addr) return false;
+  const gaddr end = RoundUp(addr + len);
+  for (gaddr at = start; at < end;) {
     if (!vm.Find(at, &r)) {
       uint64_t base = 0, size = 0;
       vm.FreeGap(at, &base, &size);
@@ -182,9 +186,49 @@ void ReleaseDirect(uint64_t start, uint64_t end) {
   }
 }
 
+// Where a mapping without MAP_FIXED goes, aligned to align (a power of
+// two, a page at least): as FreeBSD 9's vm_map_find, the first free range
+// at or above the hint (in the allocator's range); without one, the
+// allocator's first. 0: no room.
+gaddr Place(gaddr hint, uint64_t len, uint64_t align) {
+  GuestAllocator& vm = g_proc->vm;
+  auto up = [&](gaddr a) { return (a + align - 1) & ~(align - 1); };
+  if (!hint) {
+    if (align <= GuestAllocator::kGranularity) return vm.Reserve(0, len);
+    // Room for an aligned start; what is either side of it goes back.
+    const gaddr base = vm.Reserve(0, len + align);
+    if (!base) return 0;
+    const gaddr at = up(base), end = base + RoundUp(len + align);
+    if (at > base) vm.ReleaseRange(base, at - base);
+    if (at + len < end) vm.ReleaseRange(at + len, end - (at + len));
+    return at;
+  }
+  for (gaddr at = up(std::max(hint, kUserLo64)); at + len <= vm.mem().size();) {
+    GuestAllocator::Region r;
+    if (vm.Find(at, &r)) {
+      at = up(r.base + r.size);
+      continue;
+    }
+    uint64_t base = 0, size = 0;
+    vm.FreeGap(at, &base, &size);
+    if (size >= len) {
+      if (vm.ReserveAt(at, len)) return at;
+      continue;  // another thread took part of it meanwhile
+    }
+    at = up(base + size);
+  }
+  // The console has more address space above (process.cpp).
+  recomp::FatalF("mapping of %llX bytes at or above %llX: no room below the modelled address "
+                 "space's end (%llX), not supported",
+                 (unsigned long long)len, (unsigned long long)hint,
+                 (unsigned long long)vm.mem().size());
+}
+
 // Maps len bytes of zeroed memory at addr (fixed: exactly there, unmapping
-// what is mapped; otherwise a hint) and returns the address, or 0.
-gaddr Map(gaddr addr, uint64_t len, int prot, bool fixed, bool no_overwrite) {
+// what is mapped; otherwise a hint) aligned to align, and returns the
+// address, or 0.
+gaddr Map(gaddr addr, uint64_t len, int prot, bool fixed, bool no_overwrite,
+          uint64_t align = kPage) {
   GuestAllocator& vm = g_proc->vm;
   len = RoundUp(len);
   if (!len) return 0;
@@ -198,19 +242,13 @@ gaddr Map(gaddr addr, uint64_t len, int prot, bool fixed, bool no_overwrite) {
   gaddr at = 0;
   if (fixed) {
     if (addr & (kPage - 1)) return 0;
-    GuestAllocator::Region r;
-    if (vm.Find(addr, &r) && addr + len <= r.base + r.size) {
-      if (no_overwrite) return 0;
-      Forget(addr, len);
-      vm.Decommit(addr, len);  // its pages read as zero again
-      at = addr;
-    } else {
-      if (!vm.ReserveAt(addr, len)) return 0;
-      at = addr;
-    }
+    // What the range holds goes first, across mappings (FreeBSD's
+    // vm_map_fixed); without overwriting, anything there fails it.
+    if (!no_overwrite) Unmap(addr, len);
+    if (!vm.ReserveAt(addr, len)) return 0;
+    at = addr;
   } else {
-    if (addr) at = vm.Reserve(addr, len);
-    if (!at || at != addr) at = vm.Reserve(0, len);
+    at = Place(addr, len, align);
     if (!at) return 0;
   }
   if (!vm.Commit(at, len, ToProt(prot))) return 0;
@@ -363,10 +401,19 @@ ORBIS_HLE("libkernel", sceKernelAvailableDirectMemorySize, 5) {
 }
 
 // The mapping of direct memory [off, off + len) at *slot (a hint, or the
-// address with SCE_KERNEL_MAP_FIXED).
+// address with SCE_KERNEL_MAP_FIXED), its address aligned to `align` (0:
+// a page). What the kernel answers for an alignment that is not a power
+// of two times the page, or a fixed address not so aligned, is not
+// measured.
 uint64_t MapDirect(recomp::gaddr slot, uint64_t len, int prot, int flags, uint64_t off,
                    uint64_t align, const std::string& name) {
-  (void)align;  // reservations are 64 KiB aligned already
+  if (!align) align = kPage;
+  if (align & (align - 1) || align & (kPage - 1))
+    recomp::FatalF("direct memory mapping aligned to %llX: not implemented yet",
+                   (unsigned long long)align);
+  if (flags & kMapFixed && recomp::Rd64(slot) & (align - 1))
+    recomp::FatalF("direct memory mapping at %llX aligned to %llX: not implemented yet",
+                   (unsigned long long)recomp::Rd64(slot), (unsigned long long)align);
   std::lock_guard<std::mutex> l(g_direct_mu);
   auto it = g_direct.upper_bound(off);
   if (it == g_direct.begin()) return SceError(kEACCES);
@@ -376,7 +423,7 @@ uint64_t MapDirect(recomp::gaddr slot, uint64_t len, int prot, int flags, uint64
     recomp::FatalF("direct memory %llX mapped twice (aliasing): not supported",
                    (unsigned long long)off);
   const recomp::gaddr a =
-      Map(recomp::Rd64(slot), len, prot, flags & kMapFixed, flags & kMapNoOverwrite);
+      Map(recomp::Rd64(slot), len, prot, flags & kMapFixed, flags & kMapNoOverwrite, align);
   if (!a) return SceError(kENOMEM);
   Record(a, len, {0, true, off, prot, it->second.type, name});
   {

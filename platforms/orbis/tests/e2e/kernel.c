@@ -401,6 +401,23 @@ int kernel_checks(void) {
   failed += test_check(68, r == 0 && vq.start == (unsigned long)f && vq.end == vq.start + 0x8000, 1);
   failed += test_check(69, vq.flags * 100 + vq.prot, 0x11 * 100 + 3);
 
+  // 468-471: anonymous mappings at a hint (exactly there when it is
+  // free, else the first room above it, as FreeBSD's), a fixed one over
+  // two of them, and munmap of what is no longer mapped.
+  char* const hint = (char*)0x3000004000;
+  char* h1 = (char*)mmap(hint, 0x10000, 3, 0x1000 | 2, -1, 0);
+  char* h2 = (char*)mmap(hint, 0x10000, 3, 0x1000 | 2, -1, 0);
+  failed += test_check(468, h1 == hint, 1);
+  failed += test_check(469, h2 == hint + 0x10000, 1);
+  failed += test_check(470, (char*)mmap(hint, 0x20000, 3, 0x1000 | 0x10 | 2, -1, 0) == hint, 1);
+  failed += test_check(471, munmap(hint, 0x20000) * 10 + munmap(hint, 0x20000), 0);
+  // 472: direct memory mapped with an alignment above the allocator's.
+  void* aligned = 0;
+  sceKernelAllocateDirectMemory(0, 0x10000000, 0x10000, 0x10000, 3, &off);
+  r = sceKernelMapDirectMemory(&aligned, 0x10000, 0x33, 0, off, 0x200000);
+  failed += test_check(472, r == 0 && ((unsigned long)aligned & 0x1FFFFF) == 0, 1);
+  sceKernelReleaseDirectMemory(off, 0x10000);
+
   // 60-61: clocks.
   long a[2], b[2];
   unsigned long t0 = sceKernelGetProcessTime();
