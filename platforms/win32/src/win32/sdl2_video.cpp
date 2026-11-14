@@ -473,7 +473,7 @@ HLE64(kDll, SDL_CreateWindow, kCdecl) {
   if (flags & (kFullscreen | kOpenGl))
     FatalF("SDL_CreateWindow: flags %X (fullscreen/OpenGL windows not provided yet)", flags);
   SDL_WindowFlags f = 0;
-  if (flags & kHidden || !(flags & kShown)) f |= SDL_WINDOW_HIDDEN;
+  if (flags & kHidden) f |= SDL_WINDOW_HIDDEN;  // SDL_WINDOW_SHOWN is ignored
   if (flags & kBorderless) f |= SDL_WINDOW_BORDERLESS;
   if (flags & kResizable) f |= SDL_WINDOW_RESIZABLE;
   if (flags & kMinimized) f |= SDL_WINDOW_MINIMIZED;
