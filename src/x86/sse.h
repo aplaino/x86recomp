@@ -167,9 +167,11 @@ inline Xmm Cvtdq2pd(const Xmm& s) {
 // FXSAVE / FXRSTOR (both forms) of the 512-byte area at p (16-byte
 // aligned): the x87 part (x87::FxSave), MXCSR and MXCSR_MASK (0xFFFF:
 // the bits LDMXCSR takes), XMM0-15 from byte 160; bytes 416-511 are left
-// alone. FXRSTOR with reserved MXCSR bits set would #GP: fatal.
-void Fxsave(Ctx& c, uint8_t* p);
-void Fxrstor(Ctx& c, const uint8_t* p, uint64_t va);
+// alone. 32-bit guests have xmm_regs 8: XMM0-7, and bytes 288-511 are
+// left alone, as the CPU does outside 64-bit mode. FXRSTOR with reserved
+// MXCSR bits set would #GP: fatal.
+void Fxsave(Ctx& c, uint8_t* p, int xmm_regs = 16);
+void Fxrstor(Ctx& c, const uint8_t* p, uint64_t va, int xmm_regs = 16);
 
 // LDMXCSR: reserved bits set would #GP: fatal.
 void Ldmxcsr(Ctx& c, uint32_t v, uint64_t va);

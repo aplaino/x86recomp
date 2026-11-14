@@ -3174,9 +3174,10 @@ void InsnEmitter::Emit64() {
   Unimpl();
 }
 
-// x64 instructions whose memory operand is wider than any register: the
+// Instructions whose memory operand is wider than any register: x64's
 // 16-byte compare-exchange and the 512-byte FXSAVE area (both need it
-// 16-byte aligned).
+// 16-byte aligned). A 32-bit guest's FXSAVE area has the same layout
+// (32-bit FPU IP and DP, each with its selector) but holds XMM0-7 only.
 void InsnEmitter::EmitWideMem() {
   if (!PrepareMem()) return Unimpl();
   const std::string va = Hex(in_.va);
@@ -3190,10 +3191,10 @@ void InsnEmitter::EmitWideMem() {
       L("  rax = lo; rdx = hi; }");
       return;
     case ZYDIS_MNEMONIC_FXSAVE: case ZYDIS_MNEMONIC_FXSAVE64:
-      L("::recomp::sse::Fxsave(c, B + m0);");
+      L(X64() ? "::recomp::sse::Fxsave(c, B + m0);" : "::recomp::sse::Fxsave(c, B + m0, 8);");
       return;
     case ZYDIS_MNEMONIC_FXRSTOR: case ZYDIS_MNEMONIC_FXRSTOR64:
-      L(Fmt("::recomp::sse::Fxrstor(c, B + m0, %s);", va.c_str()));
+      L(Fmt("::recomp::sse::Fxrstor(c, B + m0, %s%s);", va.c_str(), X64() ? "" : ", 8"));
       return;
     default:
       return Unimpl();
@@ -3204,9 +3205,9 @@ void InsnEmitter::Emit() {
   const auto m = d_.mnemonic;
   const uint64_t next = in_.next();
 
-  if (X64() && (m == ZYDIS_MNEMONIC_CMPXCHG16B || m == ZYDIS_MNEMONIC_FXSAVE ||
-                m == ZYDIS_MNEMONIC_FXSAVE64 || m == ZYDIS_MNEMONIC_FXRSTOR ||
-                m == ZYDIS_MNEMONIC_FXRSTOR64))
+  if (m == ZYDIS_MNEMONIC_FXSAVE || m == ZYDIS_MNEMONIC_FXRSTOR ||
+      (X64() && (m == ZYDIS_MNEMONIC_CMPXCHG16B || m == ZYDIS_MNEMONIC_FXSAVE64 ||
+                 m == ZYDIS_MNEMONIC_FXRSTOR64)))
     return EmitWideMem();
   if (IsX87(d_)) {
     if (!PrepareMem()) return Unimpl();

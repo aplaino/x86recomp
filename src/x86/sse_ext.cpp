@@ -224,20 +224,20 @@ uint32_t PcmpStrM(const Xmm& a, const Xmm& b, uint8_t imm, bool expl, int64_t la
   return f;
 }
 
-void Fxsave(Ctx& c, uint8_t* p) {
+void Fxsave(Ctx& c, uint8_t* p, int xmm_regs) {
   x87::FxSave(c.fpu, p);
   std::memcpy(p + 24, &c.mxcsr, 4);
   const uint32_t mask = 0xFFFF;
   std::memcpy(p + 28, &mask, 4);
-  for (int i = 0; i < 16; i++) std::memcpy(p + 160 + 16 * i, c.xmm[i].b, 16);
+  for (int i = 0; i < xmm_regs; i++) std::memcpy(p + 160 + 16 * i, c.xmm[i].b, 16);
 }
 
-void Fxrstor(Ctx& c, const uint8_t* p, uint64_t va) {
+void Fxrstor(Ctx& c, const uint8_t* p, uint64_t va, int xmm_regs) {
   uint32_t mxcsr;
   std::memcpy(&mxcsr, p + 24, 4);
   Ldmxcsr(c, mxcsr, va);
   x87::FxRestore(c.fpu, p);
-  for (int i = 0; i < 16; i++) std::memcpy(c.xmm[i].b, p + 160 + 16 * i, 16);
+  for (int i = 0; i < xmm_regs; i++) std::memcpy(c.xmm[i].b, p + 160 + 16 * i, 16);
 }
 
 }  // namespace recomp::sse

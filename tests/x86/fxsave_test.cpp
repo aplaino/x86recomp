@@ -165,6 +165,18 @@ int main() {
         std::memcpy(model + 6, hw + 6, 18);
       }
       if (std::memcmp(hw, model, 512)) Fail(rex_w ? "fxsave64" : "fxsave", t, hw, model, 512);
+      // A 32-bit guest's FXSAVE (outside 64-bit mode the CPU writes bytes
+      // 0-287, with XMM0-7, the same as this form, and leaves 288-511).
+      if (!rex_w) {
+        alignas(16) uint8_t full[512], g32[512];
+        std::memset(full, 0xAA, 512);
+        std::memset(g32, 0xAA, 512);
+        recomp::sse::Fxsave(c, full);
+        recomp::sse::Fxsave(c, g32, 8);
+        checks++;
+        std::memset(full + 288, 0xAA, 512 - 288);
+        if (std::memcmp(full, g32, 512)) Fail("fxsave, 8 XMM registers", t, full, g32, 512);
+      }
     }
 
     // FXRSTOR of a random area: valid MXCSR, a consistent FSW.
@@ -179,7 +191,12 @@ int main() {
     HwRestore(area, hw_img, &hw_out);
     recomp::Ctx c{};
     recomp::x87::Init(c.fpu);
+    recomp::Ctx c32 = c;
     recomp::sse::Fxrstor(c, area, 0);
+    recomp::sse::Fxrstor(c32, area, 0, 8);  // XMM8-15 stay as they were
+    if (std::memcmp(c32.xmm, c.xmm, 8 * sizeof c.xmm[0]) ||
+        std::memcmp(c32.xmm + 8, recomp::Ctx{}.xmm + 8, 8 * sizeof c.xmm[0]))
+      Fail("fxrstor, 8 XMM registers", t, c.xmm[0].b, c32.xmm[0].b, 16);
     recomp::x87::Save(c.fpu, model_img);
     checks++;
     if (!es && always_ptrs) {  // FIP, FOP, FDP and the selectors
