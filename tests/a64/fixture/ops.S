@@ -250,3 +250,27 @@ ops_mem:
   .word 0
   .cfi_endproc
   .size ops_mem, . - ops_mem
+
+  // u64 cross_loop(u64 n), u64 cross_mid(u64 n), n > 0: a loop whose back
+  // edge crosses function starts. cross_mid enters it in its middle, so the
+  // lifter starts a function at 8: (a branch out of cross_mid's range) and
+  // one at 9: (the back edge, out of 8:'s): each iteration is two tail
+  // calls, which must not grow the host stack. No sizes and no FDEs: a
+  // sized function's range would hold the loop.
+  .global cross_loop
+  .type cross_loop, %function
+cross_loop:
+  mov x1, x0
+  mov x0, #0
+9:add x0, x0, #3
+8:ror x0, x0, #63
+  eor x0, x0, #0x5555555555555555
+  subs x1, x1, #1
+  b.ne 9b
+  ret
+
+  .global cross_mid
+  .type cross_mid, %function
+cross_mid:
+  mov x1, x0
+  b 8b

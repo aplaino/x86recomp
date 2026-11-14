@@ -21,6 +21,8 @@ u64 ops_bits(u64 a, u64 b);
 u64 ops_tpidr(u64 v);
 u64 ops_atomics(void* p, u64 v);
 u64 ops_mem(void* p);
+u64 cross_loop(u64 n);
+u64 cross_mid(u64 n);
 
 // The compiler may emit calls to these for loops and struct copies.
 void* memcpy(void* d, const void* s, size_t n) {
@@ -365,6 +367,8 @@ static u64 calls(void) {
   }
   h = mix(h, sum_va(3, 1ull, 2ull, h));
   h = mix(h, sum_va(11, 1ull, 2ull, 3ull, 4ull, 5ull, 6ull, 7ull, 8ull, 9ull, 10ull, h));
+  h = mix(h, cross_loop(1000000));
+  h = mix(h, cross_mid(500000));
   return h;
 }
 

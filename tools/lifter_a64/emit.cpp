@@ -100,12 +100,13 @@ class Emitter {
     return s;
   }
 
-  // Control transfer to `t` from the instruction at `va`.
+  // Control transfer to `t` from the instruction at `va`: a label in this
+  // function, or a guaranteed tail call.
   std::string Branch(uint64_t va, uint64_t t) {
     if (f_ && f_->insns.count(t)) return "goto " + Label(t) + ";";
     if (p_.functions().count(t)) {
       callees_.insert(t);
-      return "{ " + Spill() + FunctionName(t) + "(c); return; }";
+      return "{ " + Spill() + "LIFT_MUSTTAIL return " + FunctionName(t) + "(c); }";
     }
     return "{ " + Spill() + "BadJump(c, " + Hex(va) + ", " + Hex(t) + "); }";
   }
