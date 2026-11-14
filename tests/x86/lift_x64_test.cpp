@@ -350,7 +350,11 @@ int main(int argc, char** argv) {
       // bt* bit offsets of either sign, a few bytes around the operand.
       if (is_bt)
         for (int r = 0; r < 16; r++) in.r[r] = uint64_t(int64_t(int8_t(in.r[r])));
-      if (f.base >= 0) in.r[f.base] = kBuf + 0x1000;
+      // Every fourth trial the memory operand is misaligned: forms that need
+      // alignment fault natively (and are skipped), the others must not
+      // fault lifted either.
+      const uint32_t mo = 0x1000 + (g() % 4 == 0 ? uint32_t(g() % 16) : 0);
+      if (f.base >= 0) in.r[f.base] = kBuf + mo;
       if (is_string) {
         in.r[6] = kBuf + 0x1000;  // rsi
         in.r[7] = kBuf + 0x2000;  // rdi
@@ -374,8 +378,8 @@ int main(int argc, char** argv) {
       // Compare-exchange forms: every other trial the memory operand holds
       // the accumulator (rdx:rax for cmpxchg16b), so both outcomes run.
       if (is_cas && t % 2) {
-        std::memcpy(&init[0x1000], &in.r[0], 8);
-        std::memcpy(&init[0x1008], &in.r[2], 8);
+        std::memcpy(&init[mo], &in.r[0], 8);
+        std::memcpy(&init[mo + 8], &in.r[2], 8);
       }
 
       Regs hw = in;
@@ -448,7 +452,7 @@ int main(int argc, char** argv) {
             std::printf("   ymm%-2d hi in %s hw %s lift %s\n", i, Hex16(in.ymm_hi[i]).c_str(),
                         Hex16(hw.ymm_hi[i]).c_str(), Hex16(c.ymm_hi[i].b).c_str());
 #endif
-        if (f.base >= 0) std::printf("   mem in %s\n", Hex16(&init[0x1000]).c_str());
+        if (f.base >= 0) std::printf("   mem in %s\n", Hex16(&init[mo]).c_str());
       }
     }
     if (fails) {

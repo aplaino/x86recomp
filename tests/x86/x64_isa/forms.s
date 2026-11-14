@@ -764,6 +764,7 @@ pcmpistrm xmm1, xmm2, 0x1a
 pcmpestrm xmm1, xmm2, 0x5d
 pcmpistrm xmm1, xmm2, 0x5d
 pcmpistrm xmm1, xmmword ptr [rsi], 0x40
+pcmpestrm xmm1, xmmword ptr [rsi], 0x44
 vpcmpestrm xmm1, xmm2, 0x4c
 vpcmpistrm xmm3, xmm2, 0x08
 vphaddsw xmm1, xmm2, xmm3

@@ -737,6 +737,7 @@ f2 4c 0f 38 f1 0e                                # crc32 r9, qword ptr [rsi]
 66 0f 3a 60 ca 5d                                # pcmpestrm xmm1, xmm2, 0x5d
 66 0f 3a 62 ca 5d                                # pcmpistrm xmm1, xmm2, 0x5d
 66 0f 3a 62 0e 40                                # pcmpistrm xmm1, xmmword ptr [rsi], 0x40
+66 0f 3a 60 0e 44                                # pcmpestrm xmm1, xmmword ptr [rsi], 0x44
 c4 e3 79 60 ca 4c                                # vpcmpestrm xmm1, xmm2, 0x4c
 c4 e3 79 62 da 08                                # vpcmpistrm xmm3, xmm2, 0x08
 c4 e2 69 03 cb                                   # vphaddsw xmm1, xmm2, xmm3

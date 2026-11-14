@@ -2232,7 +2232,9 @@ void InsnEmitter::EmitSse() {
       const bool w = (d_.attributes & ZYDIS_ATTRIB_HAS_REX) ? d_.raw.rex.W
                      : (d_.attributes & ZYDIS_ATTRIB_HAS_VEX) ? d_.raw.vex.W
                                                               : false;
-      std::string s = XmmSrc(1, aligned);
+      // Unlike other legacy-SSE m128 operands, theirs need no alignment
+      // (SDM vol. 2, their "Other Exceptions"; the CPU does not #GP).
+      std::string s = XmmSrc(1, false);
       L(Fmt("%s const uint32_t f = ::recomp::sse::PcmpStr%s(%s, %s, %s, %s, %s, %s, %s);",
             to_mask ? "::recomp::Xmm mk;" : "uint32_t ix;", to_mask ? "M" : "I",
             XmmRef(0).c_str(), s.c_str(), imm8(2).c_str(), b(expl),
