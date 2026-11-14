@@ -2,8 +2,9 @@
 // guest faults and thread exits: guest access violations handled by an
 // exception (the fault handler's nesting count), the fault handler of a
 // host library installed before the runtime's, a finished guest thread's
-// stack, signal stacks of exited threads, and the watchdog's list of
-// threads. Linux hosts (the fault path that throws through the signal
+// stack, signal stacks of exited threads, the watchdog's list of
+// threads, and Threads freed once both the platform and the host thread
+// running them have let go (in either order, or never started). Linux hosts (the fault path that throws through the signal
 // frame; /proc for the mappings).
 
 #include <dirent.h>
@@ -12,6 +13,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -19,6 +21,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "x86/layout.h"
 #include "x86/lifted.h"
@@ -27,6 +30,7 @@
 
 namespace recomp {
 void InstallSignalStack();
+size_t GuestThreadCount();
 }  // namespace recomp
 
 using namespace recomp;
@@ -160,6 +164,82 @@ int main() {
   std::this_thread::sleep_for(std::chrono::seconds(1));  // let the dump finish
   dumped = DumpedThreads(hangs);
   Check(dumped == 1, "the hang dump lists the live guest thread only");
+
+  // Threads freed when the last of their owners lets go: the platform's
+  // ReleaseThread before or after the thread has finished, and one that
+  // never started. The thread_free hook runs once for each.
+  static std::atomic<int> freed{0};
+  p.thread_free = [](Thread*) { freed++; };
+  const size_t live = GuestThreadCount();  // the main thread, still held
+  auto stack_gone = [&](gaddr lo) { return !p.vm.Find(lo, &r); };
+  auto settle = [&](size_t want) {
+    for (int i = 0; i < 1000 && GuestThreadCount() != want; i++)
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    return GuestThreadCount() == want;
+  };
+  constexpr int kThreads = 64;
+  {
+    Thread* never = CreateGuestThread(0);
+    const gaddr lo = never->stack_lo;
+    Check(GuestThreadCount() == live + 1, "a created thread is counted");
+    ReleaseThread(never);
+    Check(GuestThreadCount() == live && freed == 1 && stack_gone(lo),
+          "a thread that never started is freed by ReleaseThread, with its stack");
+  }
+  {
+    // Released while running: freed when its host thread lets go.
+    std::atomic<int> go{0};
+    std::vector<gaddr> stacks;
+    for (int i = 0; i < kThreads; i++) {
+      Thread* u = CreateGuestThread(0);
+      stacks.push_back(u->stack_lo);
+      StartServiceThread(u, [&go, u] {
+        while (!go.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        Check(CurrentThread() == u, "a running thread released by the platform stays");
+      });
+      ReleaseThread(u);
+    }
+    Check(GuestThreadCount() == live + kThreads, "running threads stay after ReleaseThread");
+    go = 1;
+    Check(settle(live), "threads released while running are freed when they finish");
+    bool gone = true;
+    for (gaddr lo : stacks) gone = gone && stack_gone(lo);
+    Check(gone && freed == 1 + kThreads, "their stacks and the platform's state go with them");
+  }
+  {
+    // Released after finishing: kept until then.
+    std::atomic<int> finished{0};
+    std::vector<Thread*> threads;
+    for (int i = 0; i < kThreads; i++) {
+      Thread* u = CreateGuestThread(0);
+      threads.push_back(u);
+      StartServiceThread(u, [&finished] { finished++; });
+    }
+    while (finished.load() < kThreads) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));  // their host threads let go
+    Check(GuestThreadCount() == live + kThreads && freed == 1 + kThreads,
+          "finished threads stay while the platform holds them");
+    for (Thread* u : threads) ReleaseThread(u);
+    Check(settle(live) && freed == 1 + 2 * kThreads, "finished threads are freed by ReleaseThread");
+  }
+  {
+    // A guest thread run to its end (RunGuestThread): released by the
+    // platform during the run, or after it.
+    Thread* u = CreateGuestThread(0);
+    RunMainThread(u, [&](Ctx&) -> uint64_t {
+      ReleaseThread(u);
+      Check(GuestThreadCount() == live + 1, "the running thread is held by its runner");
+      return 0;
+    });
+    Check(CurrentThread() == nullptr && GuestThreadCount() == live,
+          "a guest thread released during its run is freed when it ends");
+    u = CreateGuestThread(0);
+    RunMainThread(u, [](Ctx&) -> uint64_t { return 0; });
+    Check(GuestThreadCount() == live + 1, "a finished guest thread stays while held");
+    ReleaseThread(u);
+    Check(GuestThreadCount() == live && freed == 3 + 2 * kThreads,
+          "a finished guest thread is freed by ReleaseThread");
+  }
 
   std::printf("%s\n", failures ? "runtime_thread: FAILED" : "runtime_thread: ok");
   std::fflush(stdout);

@@ -55,6 +55,10 @@ struct Process {
   // A guest thread's start routine returned or exited (GuestThreadExit),
   // on that thread: whoever waits for it may go on.
   void (*thread_exit)(Thread* t, uint32_t code) = nullptr;
+  // The Thread is being freed (ReleaseThread), on whichever thread let it
+  // go last: what thread_init set up for it that thread_exit has not
+  // freed (thread_exit never runs for a thread that never started).
+  void (*thread_free)(Thread* t) = nullptr;
   // A fault in guest memory that is not the runtime's own (lazy_mem.h),
   // in 32-bit guest code: the platform's exception dispatch (Win32's SEH
   // chain). Returns true to retry the faulting instruction; may throw
@@ -84,7 +88,8 @@ struct GuestThreadExit {
 // message boxes with their default button.
 bool Background();
 
-// Per-host-thread pointer to the guest thread running on it.
+// Per-host-thread pointer to the guest thread running on it (null once it
+// has finished).
 Thread* CurrentThread();
 
 // Guest memory helpers for HLE code.
@@ -123,8 +128,15 @@ uint64_t CallGuest(Ctx& c, gaddr va, std::initializer_list<uint64_t> args);
 void Dispatch(Ctx& c, uint64_t target, uint64_t va);
 
 // Creates a guest thread (its stack, the platform's thread_init) and
-// initialises its Ctx. Does not start it.
+// initialises its Ctx. Does not start it. The Thread has two owners: the
+// platform, from here until it calls ReleaseThread (once its handles to
+// the thread are gone), and the host thread that runs it (StartHostThread,
+// StartServiceThread, RunMainThread*), until it has finished with it.
+// Whichever lets go last frees it, with its guest stack if that is still
+// there and the platform's thread_free; one that never started is freed
+// by ReleaseThread alone.
 Thread* CreateGuestThread(uint64_t stack_size);
+void ReleaseThread(Thread* t);
 
 // A platform's process bring-up (Win32's RunProcess, a console platform's
 // loader). StartProcess creates g_proc with its arena (an x64 one of

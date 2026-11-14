@@ -36,8 +36,28 @@ Process* g_proc = nullptr;
 namespace {
 
 thread_local Thread* t_current = nullptr;
+
+// Every guest thread not yet freed, by tid, with how many of its owners
+// (runtime.h, CreateGuestThread) hold it.
+struct OwnedThread {
+  std::unique_ptr<Thread> t;
+  int owners = 1;
+  bool stack = true;  // its guest stack is still reserved
+};
 std::mutex g_threads_mu;
-std::map<uint32_t, std::unique_ptr<Thread>> g_threads;  // by tid
+std::map<uint32_t, OwnedThread> g_threads;
+
+OwnedThread& Owned(const Thread* t) {
+  auto it = g_threads.find(t->tid);
+  if (it == g_threads.end()) FatalF("guest thread %04X used after it was freed", t->tid);
+  return it->second;
+}
+
+// The host thread about to run t becomes its second owner.
+void HoldThread(Thread* t) {
+  std::lock_guard<std::mutex> l(g_threads_mu);
+  Owned(t).owners++;
+}
 
 // Host stack for each guest thread. Guest call depth maps 1:1 onto host
 // call depth, and lifted frames are larger than the originals, so be
@@ -194,8 +214,28 @@ Thread* CreateGuestThread(uint64_t stack_size) {
 
   Thread* raw_t = t.get();
   std::lock_guard<std::mutex> l(g_threads_mu);
-  g_threads[raw_t->tid] = std::move(t);
+  g_threads[raw_t->tid].t = std::move(t);
   return raw_t;
+}
+
+void ReleaseThread(Thread* t) {
+  OwnedThread last;
+  {
+    std::lock_guard<std::mutex> l(g_threads_mu);
+    auto it = g_threads.find(t->tid);
+    if (it == g_threads.end()) FatalF("guest thread %04X released twice", t->tid);
+    if (--it->second.owners) return;
+    last = std::move(it->second);
+    g_threads.erase(it);
+  }
+  if (g_proc->thread_free) g_proc->thread_free(t);
+  if (last.stack) g_proc->vm.Release(t->stack_lo);
+}
+
+// Guest threads not yet freed (tests).
+size_t GuestThreadCount() {
+  std::lock_guard<std::mutex> l(g_threads_mu);
+  return g_threads.size();
 }
 
 // The x87 model's host-double paths need the default floating-point
@@ -227,10 +267,16 @@ static uint32_t RunGuestThread(Thread* t, const std::function<uint64_t(Ctx&)>& b
   }
   if (g_proc->thread_exit) g_proc->thread_exit(t, r);
   // Its guest stack goes back, as Windows and FreeBSD free a finished
-  // thread's stack; the Thread (Ctx, stack bounds) stays for the platform's
-  // handles to it.
+  // thread's stack; the Thread (Ctx, stack bounds) stays while the
+  // platform's handles to it do.
   g_proc->vm.Release(t->stack_lo);
+  {
+    std::lock_guard<std::mutex> l(g_threads_mu);
+    Owned(t).stack = false;
+  }
   GuestSyncFence();
+  t_current = nullptr;
+  ReleaseThread(t);
   return r;
 }
 
@@ -258,6 +304,7 @@ static void* GuestThreadMain(void* arg) {
 }
 
 void StartHostThread(Thread* t, gaddr entry, uint64_t param) {
+  HoldThread(t);
   SpawnHostThread(GuestThreadMain, new ThreadStart{t, entry, param});
 }
 
@@ -278,10 +325,13 @@ static void* ServiceThreadMain(void* arg) {
   RegisterGuestHostThread("service", s->t->tid);
   hle::t_hle_depth = 1;
   s->fn();
+  t_current = nullptr;
+  ReleaseThread(s->t);
   return nullptr;
 }
 
 void StartServiceThread(Thread* t, std::function<void()> fn) {
+  HoldThread(t);
   SpawnHostThread(ServiceThreadMain, new ServiceStart{t, std::move(fn)});
 }
 
@@ -301,6 +351,7 @@ uint32_t RunMainThread(Thread* t, const std::function<uint64_t(Ctx&)>& body) {
   void* stack = mmap(nullptr, kHostStack, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
   if (stack == MAP_FAILED) FatalF("cannot allocate the main guest stack");
+  HoldThread(t);
   g_main_thread = t;
   g_main_body = &body;
   platform::RunOnStack(stack, kHostStack, GuestMainTrampoline);
@@ -327,6 +378,7 @@ void* BesideMain(void* arg) {
 uint32_t RunMainThreadBeside(Thread* t, const std::function<uint64_t(Ctx&)>& body,
                              const std::function<void(const std::atomic<bool>&)>& host_loop) {
   BesideStart s{t, &body};
+  HoldThread(t);
   SpawnHostThread(BesideMain, &s);
   host_loop(s.done);
   if (!s.done.load(std::memory_order_acquire)) FatalF("host loop returned before the guest main thread");
