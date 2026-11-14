@@ -1251,6 +1251,7 @@ void Context::TexImage2D(Enum target, int level, Enum internal, int w, int h, in
   if (type != UNSIGNED_BYTE) return Unsupported("glTexImage2D type", type);
   BaseFormat base = BaseOf(internal);
   if (!base.ok) return Unsupported("glTexImage2D internal format", internal);
+  if (level < 0 || w < 0 || h < 0) return Error(INVALID_VALUE, "glTexImage2D level size");
   Texture* t = Bound(active_unit_);
   if (level == 0 && (t->w != w || t->h != h || t->compressed || !t->id)) {
     if (t->id) dev_->DestroyTexture(t->id);
@@ -1283,9 +1284,12 @@ void Context::TexSubImage2D(Enum target, int level, int x, int y, int w, int h,
   Changed();
   if (target != TEXTURE_2D) return Unsupported("glTexSubImage2D target", target);
   if (type != UNSIGNED_BYTE) return Unsupported("glTexSubImage2D type", type);
+  if (level < 0 || w < 0 || h < 0) return Error(INVALID_VALUE, "glTexSubImage2D level size");
   Texture* t = Bound(active_unit_);
   if (!t->id || t->compressed || level >= t->levels || !t->defined[size_t(level)])
     return Error(INVALID_OPERATION, "glTexSubImage2D");
+  if (x < 0 || y < 0 || w > std::max(1, t->w >> level) - x || h > std::max(1, t->h >> level) - y)
+    return Error(INVALID_VALUE, "glTexSubImage2D region");
   // The base format of the existing image decides what is kept.
   Enum internal = t->has_color ? (t->has_alpha ? RGBA : RGB) : ALPHA;
   std::vector<uint8_t> argb;
@@ -1308,6 +1312,8 @@ void Context::CompressedTexImage2D(Enum target, int level, Enum internal, int w,
     case COMPRESSED_RGBA_S3TC_DXT5: fmt = gfx::Format::DXT5; break;
     default: return Unsupported("glCompressedTexImage2D format", internal);
   }
+  if (level < 0 || w < 0 || h < 0 || size < 0)
+    return Error(INVALID_VALUE, "glCompressedTexImage2D level size");
   Texture* t = Bound(active_unit_);
   if (level == 0 && (t->w != w || t->h != h || t->fmt != fmt || !t->id)) {
     if (t->id) dev_->DestroyTexture(t->id);

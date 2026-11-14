@@ -615,6 +615,36 @@ int main() {
     }
   }
 
+  // Texture images at negative levels and sub-images outside their level
+  // are INVALID_VALUE and change nothing.
+  {
+    gl.ActiveTexture(g::TEXTURE0);
+    gl.BindTexture(g::TEXTURE_2D, names[0]);
+    gl.GetError();
+    const uint32_t four[4] = {white, white, white, white};
+    const uint8_t block[8] = {};
+    gl.TexImage2D(g::TEXTURE_2D, -1, g::RGBA, 2, 2, 0, g::RGBA, g::UNSIGNED_BYTE, four);
+    const g::Enum image = gl.GetError();
+    gl.TexSubImage2D(g::TEXTURE_2D, -1, 0, 0, 1, 1, g::RGBA, g::UNSIGNED_BYTE, &white);
+    const g::Enum sub_level = gl.GetError();
+    gl.TexSubImage2D(g::TEXTURE_2D, 0, 0, 0, 2, 1, g::RGBA, g::UNSIGNED_BYTE, four);
+    const g::Enum sub_wide = gl.GetError();
+    gl.TexSubImage2D(g::TEXTURE_2D, 0, -1, 0, 1, 1, g::RGBA, g::UNSIGNED_BYTE, &white);
+    const g::Enum sub_left = gl.GetError();
+    gl.TexSubImage2D(g::TEXTURE_2D, 0, 0, 0, 1, 1, g::RGBA, g::UNSIGNED_BYTE, &white);
+    const g::Enum sub_ok = gl.GetError();
+    gl.CompressedTexImage2D(g::TEXTURE_2D, -2, g::COMPRESSED_RGBA_S3TC_DXT1, 4, 4, 0,
+                            int(sizeof block), block);
+    const g::Enum compressed = gl.GetError();
+    if (image != g::INVALID_VALUE || sub_level != g::INVALID_VALUE ||
+        sub_wide != g::INVALID_VALUE || sub_left != g::INVALID_VALUE || sub_ok != g::NO_ERROR ||
+        compressed != g::INVALID_VALUE) {
+      std::printf("texture levels: errors %x %x %x %x %x %x\n", image, sub_level, sub_wide,
+                  sub_left, sub_ok, compressed);
+      g_failures++;
+    }
+  }
+
   // glLockArraysEXT: the vertex and normal streams as set at the lock
   // are locked, until either changes or the unlock; others never are.
   {
