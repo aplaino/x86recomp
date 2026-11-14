@@ -4,13 +4,38 @@
 # same code bare metal on qemu-system-ppc64, a PowerPC 970 in 32-bit mode
 # (oracle/qemu_run.py).
 
-if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
-  message(STATUS "ppc: the PowerPC lifter tests build a PowerPC fixture with clang; skipped")
-  return()
-endif()
+# What the test programs' build (clang, ld.lld) and the oracle runs
+# (qemu-system-ppc64, RECOMP_PYTHON) need: each one missing fails
+# ppc_prerequisites, which names it, unless RECOMP_ALLOW_MISSING_TEST_TOOLS
+# says this host cannot run those tests.
+option(RECOMP_ALLOW_MISSING_TEST_TOOLS "Leave out the tests whose tools are missing instead of failing" OFF)
 find_program(RECOMP_LD_LLD ld.lld)
+find_program(RECOMP_QEMU_PPC64 qemu-system-ppc64)
+set(RECOMP_PYTHON "${RECOMP_ROOT}/.venv/bin/python" CACHE FILEPATH
+    "Python for the oracle tests' scripts")
+set(_missing)
+if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+  list(APPEND _missing "clang as the C compiler")
+endif()
 if(NOT RECOMP_LD_LLD)
-  message(STATUS "ppc: ld.lld not found; the PowerPC lifter tests are skipped")
+  list(APPEND _missing ld.lld)
+endif()
+if(NOT RECOMP_QEMU_PPC64)
+  list(APPEND _missing qemu-system-ppc64)
+endif()
+if(NOT EXISTS "${RECOMP_PYTHON}")
+  list(APPEND _missing "RECOMP_PYTHON (${RECOMP_PYTHON})")
+endif()
+if(_missing)
+  string(JOIN ", " _missing ${_missing})
+  message(STATUS "ppc: missing ${_missing}; the tests that need them are left out")
+  if(NOT RECOMP_ALLOW_MISSING_TEST_TOOLS)
+    add_test(NAME ppc_prerequisites COMMAND "${CMAKE_COMMAND}" -E echo
+             "missing ${_missing} (RECOMP_ALLOW_MISSING_TEST_TOOLS=ON leaves their tests out)")
+    set_tests_properties(ppc_prerequisites PROPERTIES FAIL_REGULAR_EXPRESSION .)
+  endif()
+endif()
+if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang" OR NOT RECOMP_LD_LLD)
   return()
 endif()
 
@@ -126,15 +151,7 @@ foreach(_m 0 ${_vmx128_mutations})
 endforeach()
 
 # --- tests against the oracle ----------------------------------------------
-find_program(RECOMP_QEMU_PPC64 qemu-system-ppc64)
-if(NOT RECOMP_QEMU_PPC64)
-  message(STATUS "ppc: qemu-system-ppc64 not found; the PowerPC oracle tests are skipped")
-  return()
-endif()
-set(RECOMP_PYTHON "${RECOMP_ROOT}/.venv/bin/python" CACHE FILEPATH
-    "Python for the oracle tests' scripts")
-if(NOT EXISTS "${RECOMP_PYTHON}")
-  message(STATUS "ppc: ${RECOMP_PYTHON} missing; the PowerPC oracle tests are skipped")
+if(NOT RECOMP_QEMU_PPC64 OR NOT EXISTS "${RECOMP_PYTHON}")
   return()
 endif()
 set(_run "${RECOMP_PYTHON}" "${_src}/oracle/qemu_run.py" --qemu "${RECOMP_QEMU_PPC64}"
