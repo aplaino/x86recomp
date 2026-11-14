@@ -488,3 +488,7 @@
   fldcw word ptr [edi]
   fnclex
   fnop
+  # FXSAVE and FXRSTOR read and write the whole x87 state: a lifted x87
+  # run ends at them.
+  fxsave [ebx]
+  fxrstor [esi + 0x10]

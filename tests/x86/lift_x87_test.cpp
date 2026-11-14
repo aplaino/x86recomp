@@ -5,7 +5,7 @@
 // aimed at as in lift_form_mem.h). Results must match bit for bit:
 // control/status/tag words, all registers, memory, and for fcomi/fnstsw
 // the integer side effects. Built with LIFT_X87_X64 it runs the forms of
-// x64 code (with FXSAVE and FXRSTOR, which the lifter has only there).
+// x64 code.
 // x86-64 hosts only; dev-time.
 //
 // Transcendentals (fsin, fptan, ...) are known to differ from hardware in

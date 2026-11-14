@@ -3,7 +3,7 @@
 # instruction forms of 64-bit code, built like forms.s (clang for x86-64,
 # LLD, flat code) and run by lift_x64_test.cpp and lift_x87_test.cpp.
 # Besides the common forms it has what x64 code addresses differently:
-# RIP-relative operands, fs: and gs: (with RIP too),
+# RIP- and EIP-relative operands, fs: and gs: (with RIP too),
 # address-size prefixes on string instructions and XLAT, push and pop of
 # 64- and 16-bit operands, and FXSAVE/FXRSTOR among x87 instructions.
 
@@ -38,6 +38,9 @@
   mov ecx, dword ptr fs:[rbx + 8]
   mov rdx, qword ptr gs:[rip + 0x10]
   mov qword ptr fs:[rdi*2 + 0x20], rsi
+  mov eax, dword ptr [eip + 0x40]
+  add dword ptr [eip - 0x10], ecx
+  mov rdx, qword ptr gs:[eip + 0x18]
   mov ecx, dword ptr [ebx + esi*4]
   movabs rax, qword ptr [0x201000]
   movsxd rax, ecx
@@ -113,6 +116,7 @@
   cvtsi2sd xmm3, rax
   cvttsd2si r9, xmm4
   cvtsd2si rax, qword ptr [rip + 0x18]
+  cvtsd2si rcx, qword ptr [eip + 0x18]
   pxor xmm13, xmmword ptr [rsi]
   movq rax, xmm5
   movq xmm6, rcx
