@@ -330,6 +330,34 @@ lifter is tractable (rexglue-style: one C++ function per guest function).
   found in a game EXE is run lifted and natively from the same random
   state (tests/lift_*_test.cpp, `recomp_add_lift_tests`).
 
+### Control flow through the stack (`--stack-flow`)
+Code protectors write jumps, calls and branches with the stack: `push X;
+ret` jumps to X, `push X; jmp F` calls F and goes on at X, a cmov picks
+which pushed address a `ret` goes to, and `lea esp, [esp+4]; jmp
+[esp-4]` is a return. Lifted as written, each such `ret` would return
+on the host to the caller and skip what the guest meant to run. With
+`--stack-flow` (32-bit guests):
+- Every function keeps R, the return address it was entered for: the
+  dword at esp on entry, or Ctx::ret_hint when it continues another
+  activation (set just before entering it, taken at once).
+- Tail calls hand R on, so a chain of jumps between functions is one
+  activation.
+- `ret` to R is a host return. A `ret` to one of the function's own
+  addresses that appears in it as an immediate is a goto (loops written
+  with push/ret keep the host stack flat). Any other target, and every
+  indirect tail jump, goes through Flow(t, R): a jump to R is the
+  return; an import thunk is run in place and execution goes on where its
+  handler returned; lifted code is dispatched with R in ret_hint.
+- Hence the host returns exactly when the guest returns to R, and the
+  host stack still mirrors the guest's activations. A continuation nests
+  one host frame until its activation returns.
+- Every flag is spilled: the flags analysis assumes that returns go to
+  their call sites.
+- Protectors also place decoy prologues whose last instruction covers a
+  real function's first bytes. A relocated pointer in .rdata (a vtable
+  slot) is an address the image uses, so with `--stack-flow` its target
+  stays an entry even inside another function's instruction.
+
 ### Multiple modules
 Games that ship their logic in DLLs they LoadLibrary themselves (e.g.
 separate game, client-game and UI modules) have every module lifted:

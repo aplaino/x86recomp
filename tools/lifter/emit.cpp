@@ -19,6 +19,9 @@ thread_local bool t_in_try = false;
 // loop that crosses function entries would otherwise recurse per
 // iteration).
 const char* TailAttr() { return t_in_try ? "" : "LIFT_MUSTTAIL "; }
+// --stack-flow: a tail call continues this activation, so the callee takes
+// its return address R from here (Program::stack_flow).
+const char* HandOn(const lifter::Program& p) { return p.stack_flow ? "c.ret_hint = R; " : ""; }
 
 __attribute__((format(printf, 1, 2))) std::string Fmt(const char* f, ...) {
   char buf[512];
@@ -646,8 +649,8 @@ class InsnEmitter {
   // ---- control flow -------------------------------------------------------
   std::string TailCall(uint64_t t) {
     refs_.insert(t);
-    return Fmt("{ %s; %sreturn %s(c); }", Spill(p_, ReadsOf(p_, t)).c_str(), TailAttr(),
-               FnName(t).c_str());
+    return Fmt("{ %s; %s%sreturn %s(c); }", Spill(p_, ReadsOf(p_, t)).c_str(), HandOn(p_),
+               TailAttr(), FnName(t).c_str());
   }
   std::string GotoOrTail(uint64_t t) {
     if (IsOtherEntry(p_, f_, t)) return TailCall(t);
@@ -2923,13 +2926,28 @@ void InsnEmitter::Emit() {
         if (p_.flags && !p_.flags_iat.count(slot))
           spill = Spill(p_, p_.iat.count(slot) ? p_.flags->Ret(f_.entry)
                                                  : p_.flags->IndirectTail(f_.entry));
-        L(Fmt("%s; ::recomp::Dispatch(c, t, %s); return;", spill.c_str(),
-              Hex(in_.va).c_str()));
+        if (p_.stack_flow)
+          L(Fmt("%s; ::recomp::Flow(c, t, R, %s); return;", spill.c_str(), Hex(in_.va).c_str()));
+        else
+          L(Fmt("%s; ::recomp::Dispatch(c, t, %s); return;", spill.c_str(),
+                Hex(in_.va).c_str()));
       }
       return;
     }
     case ZYDIS_MNEMONIC_RET: {
       uint32_t extra = Nvis() ? static_cast<uint32_t>(Op(0).imm.value.u) : 0;
+      if (p_.stack_flow) {
+        // A return to anything but R goes on in this activation: at one of
+        // this function's own addresses that it computes (a loop written
+        // with push/ret), as a goto, so the host stack does not grow; else
+        // through Flow.
+        L("const uint32_t t = ::recomp::lift::Rd<uint32_t>(B, esp);");
+        L(Fmt("esp += %uu;", 4 + extra));
+        L("if (t == R) { LIFT_SPILL; return; }");
+        for (uint64_t a : f_.code_consts) L(Fmt("if (t == %s) goto L_%08llX;", Hex(a).c_str(), U(a)));
+        L(Fmt("LIFT_SPILL; ::recomp::Flow(c, t, R, %s); return;", Hex(in_.va).c_str()));
+        return;
+      }
       L(Fmt("esp += %uu; %s; return;", 4 + extra,
             p_.flags ? Spill(p_, p_.flags->Ret(f_.entry)).c_str() : "LIFT_SPILL"));
       return;
@@ -3264,6 +3282,9 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
   }
   o += "void " + FnName(f.entry) + (p_.replaced.count(f.entry) ? "_lifted" : "") +
        "(::recomp::Ctx& c) {\n  LIFT_ENTER\n";
+  if (p_.stack_flow)
+    o += "  const uint32_t R = c.ret_hint ? std::exchange(c.ret_hint, 0u)"
+         " : ::recomp::lift::Rd<uint32_t>(B, esp);\n";
   const size_t xmm_at = o.size();  // LIFT_XMM_ENTER goes here (32-bit)
   // Functions that register an SEH frame (write fs:[0]) can be resumed into
   // by their __except blocks, and setjmp callers by longjmp; see
@@ -3410,8 +3431,8 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
       auto ni = std::next(it);
       if (IsOtherEntry(p_, f, nx)) {
         refs->insert(nx);
-        o += Fmt("  { %s; %sreturn %s(c); }\n", Spill(p_, ReadsOf(p_, nx)).c_str(),
-                 TailAttr(), FnName(nx).c_str());
+        o += Fmt("  { %s; %s%sreturn %s(c); }\n", Spill(p_, ReadsOf(p_, nx)).c_str(),
+                 HandOn(p_), TailAttr(), FnName(nx).c_str());
       } else if (ni == f.insns.end() || ni->first != nx) {
         o += f.insns.count(nx)
                  ? Fmt("  goto L_%08llX;\n", U(nx))

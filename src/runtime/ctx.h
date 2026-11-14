@@ -63,6 +63,10 @@ struct Ctx {
   // recomp_lift --flags-check builds only: the arithmetic flags in eflags
   // that the last spill really meant to keep (lifted.h).
   uint32_t flags_valid = 0x8D5u;
+  // recomp_lift --stack-flow builds only: the return address the function
+  // entered next continues an activation for (Flow), 0 when it is entered
+  // by a call and its return address is the dword at esp.
+  uint32_t ret_hint = 0;
   Thread* thread;    // runtime-owned per-thread data
 };
 

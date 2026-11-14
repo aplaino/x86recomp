@@ -379,6 +379,24 @@ void Dispatch(Ctx& c, uint32_t target, uint32_t va) {
          "(add it to the manifest as a function entry)", target, va);
 }
 
+// A jump to `ret` is the activation's return written as a jump
+// (lea esp, [esp+4]; jmp [esp-4]). An import's handler returns to the
+// dword at esp and pops it, so a thunk reached this way is run here and
+// execution goes on where it returned. Lifted code is dispatched with the
+// activation's return address in c.ret_hint, which the entered function
+// takes as its own.
+void Flow(Ctx& c, uint32_t t, uint32_t ret, uint32_t va) {
+  if (t == ret) return;
+  while (t - kThunkBase < kThunkRegionSize) {
+    const uint32_t to = Rd32(c.esp);
+    hle::CallThunk(c, t);
+    if (to == ret) return;
+    t = to;
+  }
+  c.ret_hint = ret;
+  Dispatch(c, t, va);
+}
+
 // The continuation runs in the owning function's catch handler, where a
 // second throw would leave that function's try block: catch it here.
 void Resume(Ctx& c, GuestResume r) {

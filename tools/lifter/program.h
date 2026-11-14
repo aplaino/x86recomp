@@ -85,6 +85,15 @@ struct Program {
   // to compile, nearly all of it in CorrelatedValuePropagation. Size alone
   // is no measure; integer code three times as long compiles in seconds.
   uint64_t optnone_x87_over = 0;
+  // --stack-flow: control flow through the stack, as code protectors
+  // obfuscate it (push X; ret to jump, push X; jmp F to call F and go on at
+  // X, an address chosen by cmov before a ret). Each function keeps the
+  // return address it was entered for, R; a ret to another address and an
+  // indirect tail jump continue in the same activation (Flow), and tail
+  // calls hand R on, so the host returns exactly when the guest returns to
+  // R. 32-bit guests; every flag is spilled (the flags analysis assumes
+  // returns go to their call sites).
+  bool stack_flow = false;
   // Flags live across calls and returns (flags.h); null: spill them all.
   const FlagLiveness* flags = nullptr;
   // --flags-check: check the analysis as the game runs (lifted.h).
