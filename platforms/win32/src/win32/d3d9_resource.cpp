@@ -129,6 +129,18 @@ void UploadLevel(Texture& t, uint32_t face, uint32_t level, gfx::Rect r) {
     g->UpdateTexture(t.tex, int(level), r, GPtr(l.mem + off), l.pitch);
 }
 
+// A lock rectangle of a w x h image: inside it and not empty; compressed
+// formats lock whole blocks (a partial one only at the right or bottom
+// edge).
+bool LockRectValid(const gfx::Rect& r, uint32_t w, uint32_t h, gfx::Format f) {
+  if (r.left < 0 || r.top < 0 || r.left >= r.right || r.top >= r.bottom ||
+      uint32_t(r.right) > w || uint32_t(r.bottom) > h)
+    return false;
+  if (!gfx::IsCompressed(f)) return true;
+  return r.left % 4 == 0 && r.top % 4 == 0 && (r.right % 4 == 0 || uint32_t(r.right) == w) &&
+         (r.bottom % 4 == 0 || uint32_t(r.bottom) == h);
+}
+
 // Locks a level of texture memory: rect (null = all), pitch and pointer.
 uint32_t LockLevel(Texture& t, uint32_t face, uint32_t level, uint32_t out, uint32_t rect,
                    uint32_t flags) {
@@ -137,9 +149,10 @@ uint32_t LockLevel(Texture& t, uint32_t face, uint32_t level, uint32_t out, uint
   if (l.locked) return D3DERR_INVALIDCALL;
   if ((t.usage & D3DUSAGE_RENDERTARGET) && t.pool == D3DPOOL_DEFAULT)
     return D3DERR_INVALIDCALL;  // GPU-only
-  if (!l.mem) l.mem = HeapAllocProcess(l.size, true);
   gfx::Rect r{0, 0, int32_t(l.w), int32_t(l.h)};
   if (rect) r = *G<gfx::Rect>(rect);
+  if (!LockRectValid(r, l.w, l.h, t.fmt)) return D3DERR_INVALIDCALL;
+  if (!l.mem) l.mem = HeapAllocProcess(l.size, true);
   uint32_t off;
   if (gfx::IsCompressed(t.fmt))
     off = uint32_t(r.top / 4) * l.pitch + uint32_t(r.left / 4) * gfx::RowPitch(t.fmt, 4);
@@ -783,6 +796,7 @@ HLE_NAMED("d3d9.dll", "IDirect3DSurface9::LockRect", D3DSurf9_LockRect, 4) {
   gfx::Format f = FormatFromD3D(s->desc.Format);
   gfx::Rect r{0, 0, int32_t(s->desc.Width), int32_t(s->desc.Height)};
   if (Arg(c, 2)) r = *G<gfx::Rect>(Arg(c, 2));
+  if (!LockRectValid(r, s->desc.Width, s->desc.Height, f)) return D3DERR_INVALIDCALL;
   uint32_t off = gfx::IsCompressed(f)
                      ? uint32_t(r.top / 4) * s->pitch + uint32_t(r.left / 4) * gfx::RowPitch(f, 4)
                      : uint32_t(r.top) * s->pitch + uint32_t(r.left) * gfx::BitsPerPixel(f) / 8;
