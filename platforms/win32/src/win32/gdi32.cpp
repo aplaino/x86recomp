@@ -60,13 +60,13 @@ HLE("gdi32.dll", GetTextMetricsA, 2) {
   Wr32(tm + 20, 7);   // tmAveCharWidth
   Wr32(tm + 24, 14);  // tmMaxCharWidth
   Wr32(tm + 28, 400); // tmWeight
-  Wr32(tm + 40, 96);  // tmDigitizedAspectX
-  Wr32(tm + 44, 96);
-  Wr8(tm + 48, 0x20); // tmFirstChar
-  Wr8(tm + 49, 0xFF); // tmLastChar
-  Wr8(tm + 50, '?');  // tmDefaultChar
-  Wr8(tm + 51, ' ');  // tmBreakChar
-  Wr8(tm + 55, 0x26); // tmPitchAndFamily: variable pitch, TrueType, swiss
+  Wr32(tm + 36, 96);  // tmDigitizedAspectX
+  Wr32(tm + 40, 96);  // tmDigitizedAspectY
+  Wr8(tm + 44, 0x20); // tmFirstChar
+  Wr8(tm + 45, 0xFF); // tmLastChar
+  Wr8(tm + 46, '?');  // tmDefaultChar
+  Wr8(tm + 47, ' ');  // tmBreakChar
+  Wr8(tm + 51, 0x26); // tmPitchAndFamily: variable pitch, TrueType, swiss
   return 1;
 }
 
