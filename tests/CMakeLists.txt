@@ -65,6 +65,13 @@ target_compile_features(guest_alloc_test PRIVATE cxx_std_20)
 target_link_libraries(guest_alloc_test PRIVATE Threads::Threads)
 add_test(NAME guest_alloc COMMAND guest_alloc_test)
 
+# audio_source_test: raw sample decoding; needs the audio library.
+if(TARGET recomp_audio)
+  add_executable(audio_source_test audio_source_test.cpp)
+  target_link_libraries(audio_source_test PRIVATE recomp_audio)
+  add_test(NAME audio_source COMMAND audio_source_test)
+endif()
+
 # write_watch_test: write watches through real page faults; portable.
 add_executable(write_watch_test write_watch_test.cpp
                ${PROJECT_SOURCE_DIR}/src/runtime/write_watch.cpp

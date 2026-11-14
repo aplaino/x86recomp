@@ -288,8 +288,12 @@ void DecodeImaBlock(const uint8_t* b, size_t len, int ch, std::vector<float>* ou
     st[c].pred = int16_t(Le16(b + 4 * c));
     st[c].index = std::clamp<int>(b[4 * c + 2], 0, 88);
   }
-  size_t data = len - 4 * size_t(ch);
-  size_t per_ch = data * 2 / size_t(ch);  // samples per channel after the header
+  // Samples per channel after the header: whole groups, then what a
+  // truncated final block still holds for its last channel (the others'
+  // extra nibbles have no frame to go in).
+  const size_t data = len - 4 * size_t(ch), group_bytes = 4 * size_t(ch);
+  const size_t rem = data % group_bytes, last = 4 * size_t(ch - 1);
+  const size_t per_ch = data / group_bytes * 8 + (rem > last ? (rem - last) * 2 : 0);
   size_t base = out->size();
   out->resize(base + (per_ch + 1) * size_t(ch));
   float* o = out->data() + base;
@@ -297,12 +301,11 @@ void DecodeImaBlock(const uint8_t* b, size_t len, int ch, std::vector<float>* ou
   const uint8_t* p = b + 4 * ch;
   for (size_t group = 0; group * 8 < per_ch; group++)
     for (int c = 0; c < ch; c++)
-      for (int k = 0; k < 4; k++) {
-        uint8_t byte = p[(group * size_t(ch) + size_t(c)) * 4 + size_t(k)];
-        for (int half = 0; half < 2; half++) {
-          size_t i = group * 8 + size_t(k) * 2 + size_t(half);  // sample index
-          int v = st[c].Decode(half ? byte >> 4 : byte & 0xF);
-          if (i < per_ch) o[(1 + i) * size_t(ch) + size_t(c)] = v / 32768.0f;
+      for (size_t k = 0; k < 4 && group * 8 + k * 2 < per_ch; k++) {
+        uint8_t byte = p[group * group_bytes + size_t(c) * 4 + k];
+        for (size_t half = 0; half < 2; half++) {
+          size_t i = group * 8 + k * 2 + half;  // sample index
+          o[(1 + i) * size_t(ch) + size_t(c)] = st[c].Decode(half ? byte >> 4 : byte & 0xF) / 32768.0f;
         }
       }
 }
