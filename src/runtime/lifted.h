@@ -57,6 +57,10 @@ void Resume(Ctx& c, GuestResume r);
 [[noreturn]] void BadJump(Ctx& c, uint32_t va, uint32_t target);
 [[noreturn]] void Unreachable(Ctx& c, uint32_t va);
 void Trap(Ctx& c, uint32_t va);                // int3 / int n
+// recomp_lift --stack-flow: ICEBP (int1) raises EXCEPTION_SINGLE_STEP
+// through the SEH chain; a handler continues at `next` (the instruction
+// after it), fatal otherwise.
+void SingleStep(Ctx& c, uint32_t next);
 void RaiseDivideError(Ctx& c, uint32_t va);    // #DE from div/idiv
 void Probe(Ctx& c, uint32_t va, const char* name);  // manifest probes
 // recomp_lift --stack-flow: guest execution goes on at t inside the
