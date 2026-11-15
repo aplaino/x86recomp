@@ -44,9 +44,14 @@ gaddr Interface(const std::string& name) {
 constexpr gaddr kCallbackFlags = 4, kCallbackId = 8;
 constexpr uint8_t kCallbackRegistered = 0x01;
 
+// The game's app id, as it passes it to SteamAPI_RestartAppIfNecessary
+// (Steam's own client knows it from the launch; 0 until then).
+uint32_t g_app_id = 0;
+
 }  // namespace
 
 HLE(kDll, SteamAPI_RestartAppIfNecessary, kCdecl) {
+  g_app_id = uint32_t(Arg(c, 0));
   RECOMP_TRACE("  steam: RestartAppIfNecessary(%u): no\n", unsigned(Arg(c, 0)));
   return 0;
 }
@@ -78,6 +83,12 @@ HLE(kDll, SteamAPI_UnregisterCallResult, kCdecl) { return 0; }
 // (ISteamClient012 and later): nothing ever warns.
 HLE_NAMED(kDll, "ISteamClient::#21", SteamClientSetWarningMessageHook, 1) { return 0; }
 
+// ISteamUtils [9] GetAppID() (ISteamUtils005 and later).
+HLE_NAMED(kDll, "ISteamUtils::#9", SteamUtilsGetAppID, 0) {
+  if (!g_app_id) FatalF("steam_api: GetAppID before SteamAPI_RestartAppIfNecessary named the app");
+  return g_app_id;
+}
+
 // ISteamUtils [10] SetOverlayNotificationPosition(ENotificationPosition)
 // (ISteamUtils005 and later): there is no overlay.
 HLE_NAMED(kDll, "ISteamUtils::#10", SteamUtilsSetOverlayNotificationPosition, 1) { return 0; }
@@ -96,6 +107,17 @@ HLE_NAMED(kDll, "ISteamUser::#2", SteamUserGetSteamID, 1) {
   Wr32(out, uint32_t(kSteamId));
   Wr32(out + 4, uint32_t(kSteamId >> 32));
   return out;
+}
+
+// ISteamApps [4] GetCurrentGameLanguage() -> const char* (ISteamApps003
+// and later): the language Steam would launch the game in.
+HLE_NAMED(kDll, "ISteamApps::#4", SteamAppsGetCurrentGameLanguage, 0) {
+  static const gaddr lang = [] {
+    const gaddr s = HeapAllocProcess(8, true);
+    PutStr(s, "english");
+    return s;
+  }();
+  return lang;
 }
 
 // ISteamFriends [0] GetPersonaName() -> const char* (every version): a
