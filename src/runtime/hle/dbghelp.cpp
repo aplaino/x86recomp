@@ -129,6 +129,22 @@ HLE("dbghelp.dll", StackWalk, 9) { return 0; }  // no frames: report ends
 HLE("dbghelp.dll", SymGetSymFromAddr, 4) { return 0; }
 HLE("dbghelp.dll", SymGetLineFromAddr, 4) { return 0; }
 HLE("dbghelp.dll", SymGetModuleInfo, 3) { return 0; }
+// The 64-bit-address forms (a DWORD64 takes two stack slots; one as the
+// result is edx:eax). No symbols, lines or frames, as above.
+HLE("dbghelp.dll", SymRefreshModuleList, 1) { return 1; }
+HLE("dbghelp.dll", SymFromAddr, 5) { return 0; }  // (hProcess, DWORD64, PDWORD64, PSYMBOL_INFO)
+HLE("dbghelp.dll", SymGetLineFromAddr64, 5) { return 0; }  // (hProcess, DWORD64, PDWORD, PIMAGEHLP_LINE64)
+HLE("dbghelp.dll", SymFunctionTableAccess64, 3) {  // (hProcess, DWORD64 AddrBase)
+  c.edx = 0;
+  return 0;
+}
+HLE("dbghelp.dll", SymGetModuleBase64, 3) {  // (hProcess, DWORD64 qwAddr)
+  const uint64_t a = Arg(c, 1) | uint64_t(Arg(c, 2)) << 32;
+  const PeImage& img = g_proc->img;
+  c.edx = 0;
+  return a >= img.image_base && a < img.image_base + img.image_size ? img.image_base : 0;
+}
+HLE("dbghelp.dll", StackWalk64, 9) { return 0; }
 HLE("dbghelp.dll", MiniDumpWriteDump, 7) {
   WarnF("MiniDumpWriteDump: not supported\n");
   return 0;
