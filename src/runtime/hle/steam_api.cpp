@@ -93,6 +93,11 @@ HLE_NAMED(kDll, "ISteamUtils::#9", SteamUtilsGetAppID, 0) {
 // (ISteamUtils005 and later): there is no overlay.
 HLE_NAMED(kDll, "ISteamUtils::#10", SteamUtilsSetOverlayNotificationPosition, 1) { return 0; }
 
+// ISteamUtils [17] IsOverlayEnabled() (ISteamUtils005 and later): there is
+// no overlay, so games use their own text entry rather than the overlay's
+// gamepad keyboard.
+HLE_NAMED(kDll, "ISteamUtils::#17", SteamUtilsIsOverlayEnabled, 0) { return 0; }
+
 // ISteamUser [1] BLoggedOn() (every version): not connected to the Steam
 // servers, as with Steam in offline mode.
 HLE_NAMED(kDll, "ISteamUser::#1", SteamUserBLoggedOn, 0) { return 0; }
