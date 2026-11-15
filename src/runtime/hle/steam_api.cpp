@@ -120,6 +120,17 @@ HLE_NAMED(kDll, "ISteamApps::#4", SteamAppsGetCurrentGameLanguage, 0) {
   return lang;
 }
 
+// ISteamApps [6] BIsSubscribedApp(AppId_t), [7] BIsDlcInstalled(AppId_t)
+// (ISteamApps003 and later), asked about DLC: GameConfig::steam_owns_dlc.
+HLE_NAMED(kDll, "ISteamApps::#6", SteamAppsBIsSubscribedApp, 1) {
+  RECOMP_TRACE("  steam: BIsSubscribedApp(%u)\n", unsigned(Arg(c, 0)));
+  return g_proc->game.steam_owns_dlc ? 1 : 0;
+}
+HLE_NAMED(kDll, "ISteamApps::#7", SteamAppsBIsDlcInstalled, 1) {
+  RECOMP_TRACE("  steam: BIsDlcInstalled(%u)\n", unsigned(Arg(c, 0)));
+  return g_proc->game.steam_owns_dlc ? 1 : 0;
+}
+
 // ISteamFriends [0] GetPersonaName() -> const char* (every version): a
 // string the client owns, the same name as the GFWL profile's.
 HLE_NAMED(kDll, "ISteamFriends::#0", SteamFriendsGetPersonaName, 0) {

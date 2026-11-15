@@ -70,6 +70,10 @@ struct GameConfig {
   // pad connected later (over Bluetooth) still works. Games that switch
   // their button prompts to a gamepad's when one is listed turn this off.
   bool pad_slot_without_pad = true;
+  // Steamworks (offline): whether the player owns the game's DLC, which the
+  // DLC queries answer for every DLC (a game's install tells whether its
+  // DLC is there).
+  bool steam_owns_dlc = false;
   // Games that never confine the cursor (ClipCursor) but steer the camera
   // with the mouse: while the window has focus, its client area is treated
   // as clipped, so the pointer is grabbed and cannot leave it.
