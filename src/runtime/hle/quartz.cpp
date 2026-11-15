@@ -50,6 +50,8 @@ enum Iface { kBuilder, kControl, kEvent, kSeeking, kAudio, kIfaces };
 struct Graph;
 struct Facade : com::Object {
   std::shared_ptr<Graph> graph;
+  Iface iface = kBuilder;
+  ~Facade() override;
 };
 
 struct Graph : std::enable_shared_from_this<Graph> {
@@ -61,6 +63,13 @@ struct Graph : std::enable_shared_from_this<Graph> {
   long volume = 0;     // IBasicAudio, in 1/100 dB (0 = full)
   long balance = 0;
 };
+
+// The graph's cached pointer goes with the object (Release destroys host
+// objects outside the COM table's lock, so this may take the graph's).
+Facade::~Facade() {
+  std::lock_guard<std::mutex> l(graph->mu);
+  if (graph->objs[iface] == guest) graph->objs[iface] = 0;
+}
 
 uint32_t VtableFor(Iface i) {
   static const char* const kDispatch[] = {"GetTypeInfoCount", "GetTypeInfo", "GetIDsOfNames",
@@ -108,12 +117,19 @@ uint32_t VtableFor(Iface i) {
 // caller.
 uint32_t Get(const std::shared_ptr<Graph>& g, Iface i) {
   std::lock_guard<std::mutex> l(g->mu);
+  // Only while it is still this graph's live object: once released, its
+  // guest block may hold another object.
   if (g->objs[i]) {
-    com::AddRef(g->objs[i]);
-    return g->objs[i];
+    auto* f = com::As<Facade>(g->objs[i]);
+    if (f && f->graph == g && f->iface == i) {
+      com::AddRef(g->objs[i]);
+      return g->objs[i];
+    }
+    g->objs[i] = 0;
   }
   auto f = std::make_shared<Facade>();
   f->graph = g;
+  f->iface = i;
   return g->objs[i] = com::Publish(f, VtableFor(i));
 }
 
@@ -175,13 +191,21 @@ struct Source : com::Object {
   std::u16string name;  // as AddSourceFilter named it
   uint32_t pin = 0;     // the output pin's guest pointer (the filter holds it)
 };
+// The pin and enumerators may outlive the filter (it owns the pin, not
+// the other way round): they reach it through a weak reference.
 struct Pin : com::Object {
-  uint32_t filter = 0;  // the source's guest pointer (no reference: the filter owns the pin)
+  std::weak_ptr<Source> filter;
 };
 struct PinEnum : com::Object {
-  uint32_t pin = 0;
+  std::weak_ptr<Source> filter;
   bool done = false;
 };
+
+// The live source behind a weak reference, or null once it is released.
+std::shared_ptr<Source> Live(const std::weak_ptr<Source>& w) {
+  auto s = w.lock();
+  return s && com::Find(s->guest) == s.get() ? s : nullptr;
+}
 
 uint32_t SourceVtable() {
   return com::Vtable(kDll, "IBaseFilter",
@@ -277,7 +301,7 @@ HLE_NAMED(kDll, "IGraphBuilder::AddSourceFilter", Gb_AddSourceFilter, 4) {
   if (Arg(c, 2)) s->name = GWStr(Arg(c, 2));
   const uint32_t filter = com::Publish(s, SourceVtable());
   auto p = std::make_shared<Pin>();
-  p->filter = filter;
+  p->filter = s;
   s->pin = com::Publish(p, PinVtable());
   Wr32(out, filter);
   return S_OK;
@@ -315,7 +339,7 @@ HLE_NAMED(kDll, "IBaseFilter::EnumPins", Sf_EnumPins, 2) {
   Source* s = SelfAs<Source>(c, "IBaseFilter");
   if (!Arg(c, 1)) return E_POINTER;
   auto e = std::make_shared<PinEnum>();
-  e->pin = s->pin;
+  e->filter = std::static_pointer_cast<Source>(com::Lookup(s->guest));
   Wr32(Arg(c, 1), com::Publish(e, PinEnumVtable()));
   return S_OK;
 }
@@ -344,9 +368,10 @@ HLE_NAMED(kDll, "IEnumPins::Next", Ep_Next, 4) {
   const uint32_t n = Arg(c, 1), pins = Arg(c, 2), fetched = Arg(c, 3);
   if (!pins || (n > 1 && !fetched)) return E_POINTER;
   uint32_t got = 0;
-  if (n && !e->done) {
-    com::AddRef(e->pin);
-    Wr32(pins, e->pin);
+  auto s = Live(e->filter);
+  if (n && !e->done && s) {
+    com::AddRef(s->pin);
+    Wr32(pins, s->pin);
     e->done = true;
     got = 1;
   }
@@ -366,8 +391,10 @@ HLE_NAMED(kDll, "IPin::QueryPinInfo", Pn_QueryPinInfo, 2) {
   Pin* p = SelfAs<Pin>(c, "IPin");
   const uint32_t info = Arg(c, 1);
   if (!info) return E_POINTER;
-  com::AddRef(p->filter);
-  Wr32(info, p->filter);
+  // A pin whose filter is gone has none (PIN_INFO allows a null filter).
+  auto s = Live(p->filter);
+  if (s) com::AddRef(s->guest);
+  Wr32(info, s ? s->guest : 0);
   Wr32(info + 4, PINDIR_OUTPUT);
   for (size_t i = 0; i < 128; i++)
     Wr16(info + 8 + 2 * uint32_t(i), i < std::size(kOutputPin) ? uint16_t(kOutputPin[i]) : 0);
