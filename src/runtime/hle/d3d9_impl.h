@@ -186,6 +186,7 @@ struct Shader final : com::Tagged<com::TagOf("d3d9.Shader")> {
 struct Query final : com::Tagged<com::TagOf("d3d9.Query")> {
   uint32_t device = 0;
   uint32_t type = 0;
+  uint64_t timestamp = 0;  // TIMESTAMP: the clock at its last END
 };
 
 // The implicit swap chain (GetSwapChain(0)): methods act on its device.

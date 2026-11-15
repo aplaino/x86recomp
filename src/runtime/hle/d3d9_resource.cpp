@@ -22,6 +22,7 @@
 #include "runtime/hle/hle.h"
 #include "runtime/hle/kernel32_state.h"
 #include "runtime/log.h"
+#include "runtime/platform.h"
 
 namespace recomp::d3d9 {
 
@@ -107,7 +108,11 @@ constexpr GUID kIID_IDirect3DVertexBuffer9 = {0xB64BB1B5, 0xFD70, 0x4DF6, {0xBF,
 constexpr GUID kIID_IDirect3DIndexBuffer9 = {0x7C9DD65E, 0xD3F7, 0x4529, {0xAC, 0xEE, 0x78, 0x58, 0x30, 0xAC, 0xDE, 0x35}};
 
 // D3DQUERYTYPE
-constexpr uint32_t D3DQUERYTYPE_EVENT = 8, D3DQUERYTYPE_OCCLUSION = 9;
+constexpr uint32_t D3DQUERYTYPE_EVENT = 8, D3DQUERYTYPE_OCCLUSION = 9,
+                   D3DQUERYTYPE_TIMESTAMP = 10, D3DQUERYTYPE_TIMESTAMPDISJOINT = 11,
+                   D3DQUERYTYPE_TIMESTAMPFREQ = 12;
+// Timestamp queries count nanoseconds of the host's monotonic clock.
+constexpr uint64_t kTimestampFrequency = 1000000000;
 constexpr uint32_t D3DISSUE_END = 0x1, D3DISSUE_BEGIN = 0x2;
 
 uint32_t SurfaceVtable() {
@@ -854,13 +859,15 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetRenderTargetData", D3DDev9_GetRender
 }
 
 // (Type, ppQuery): null ppQuery only asks whether the type is supported.
-// EVENT and OCCLUSION so far, answered at once (draws are not tracked): an
-// event is signalled, an occlusion query finds its draws fully visible.
-// Games take occlusion support for granted (every D3D9 GPU has it) and
-// keep the query without checking the result.
+// EVENT, OCCLUSION and the timestamp queries, answered at once (draws are
+// not tracked): an event is signalled, an occlusion query finds its draws
+// fully visible, a TIMESTAMP is the CPU clock when it was issued (so GPU
+// timings a game measures are the CPU's), never disjoint. Games take
+// occlusion and timestamp support for granted (every D3D9 GPU has them)
+// and keep the query without checking the result.
 HLE_NAMED("d3d9.dll", "IDirect3DDevice9::CreateQuery", D3DDev9_CreateQuery, 3) {
   uint32_t type = Arg(c, 1), out = Arg(c, 2);
-  if (type != D3DQUERYTYPE_EVENT && type != D3DQUERYTYPE_OCCLUSION) {
+  if (type < D3DQUERYTYPE_EVENT || type > D3DQUERYTYPE_TIMESTAMPFREQ) {
     RECOMP_TRACE("  CreateQuery type %u: not available\n", type);
     if (out) Wr32(out, 0);
     return D3DERR_NOTAVAILABLE;
@@ -1426,22 +1433,41 @@ HLE_NAMED("d3d9.dll", "IDirect3DQuery9::Release", D3DQuery9_Release, 1) { return
 HLE_NAMED("d3d9.dll", "IDirect3DQuery9::GetType", D3DQuery9_GetType, 1) {
   return Obj<Query>(c, "IDirect3DQuery9")->type;
 }
-HLE_NAMED("d3d9.dll", "IDirect3DQuery9::GetDataSize", D3DQuery9_GetDataSize, 1) {
-  return 4;  // EVENT: BOOL; OCCLUSION: DWORD
+// EVENT, TIMESTAMPDISJOINT: BOOL; OCCLUSION: DWORD; TIMESTAMP(FREQ): UINT64.
+uint32_t QueryDataSize(uint32_t type) {
+  return type == D3DQUERYTYPE_TIMESTAMP || type == D3DQUERYTYPE_TIMESTAMPFREQ ? 8 : 4;
 }
-// An occlusion query is bracketed by BEGIN and END; an event takes END only.
+HLE_NAMED("d3d9.dll", "IDirect3DQuery9::GetDataSize", D3DQuery9_GetDataSize, 1) {
+  return QueryDataSize(Obj<Query>(c, "IDirect3DQuery9")->type);
+}
+// OCCLUSION and TIMESTAMPDISJOINT are bracketed by BEGIN and END; the others
+// take END only.
 HLE_NAMED("d3d9.dll", "IDirect3DQuery9::Issue", D3DQuery9_Issue, 2) {
+  Query* q = Obj<Query>(c, "IDirect3DQuery9");
   const uint32_t flags = Arg(c, 1);
-  if (flags == D3DISSUE_END) return D3D_OK;
-  if (flags == D3DISSUE_BEGIN && Obj<Query>(c, "IDirect3DQuery9")->type == D3DQUERYTYPE_OCCLUSION)
+  if (flags == D3DISSUE_END) {
+    if (q->type == D3DQUERYTYPE_TIMESTAMP) q->timestamp = platform::MonotonicNs();
+    return D3D_OK;
+  }
+  if (flags == D3DISSUE_BEGIN &&
+      (q->type == D3DQUERYTYPE_OCCLUSION || q->type == D3DQUERYTYPE_TIMESTAMPDISJOINT))
     return D3D_OK;
   return D3DERR_INVALIDCALL;
 }
 // (pData, dwSize, dwGetDataFlags): an EVENT is always signalled; an
-// OCCLUSION query reports its draws visible (a count no draw reaches).
+// OCCLUSION query reports its draws visible (a count no draw reaches); a
+// disjoint query reports none.
 HLE_NAMED("d3d9.dll", "IDirect3DQuery9::GetData", D3DQuery9_GetData, 4) {
-  const bool occlusion = Obj<Query>(c, "IDirect3DQuery9")->type == D3DQUERYTYPE_OCCLUSION;
-  if (Arg(c, 1) && Arg(c, 2) >= 4) Wr32(Arg(c, 1), occlusion ? 0x7FFFFFFF : 1);
+  const Query* q = Obj<Query>(c, "IDirect3DQuery9");
+  const uint32_t data = Arg(c, 1), size = Arg(c, 2);
+  if (!data || size < QueryDataSize(q->type)) return D3D_OK;
+  switch (q->type) {
+    case D3DQUERYTYPE_OCCLUSION: Wr32(data, 0x7FFFFFFF); break;
+    case D3DQUERYTYPE_TIMESTAMP: Wr64(data, q->timestamp); break;
+    case D3DQUERYTYPE_TIMESTAMPDISJOINT: Wr32(data, 0); break;
+    case D3DQUERYTYPE_TIMESTAMPFREQ: Wr64(data, kTimestampFrequency); break;
+    default: Wr32(data, 1); break;  // EVENT
+  }
   return D3D_OK;
 }
 
