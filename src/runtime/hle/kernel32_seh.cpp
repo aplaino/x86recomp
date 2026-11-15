@@ -58,10 +58,11 @@ void FillContext(uint32_t ctx, const Ctx& c, uint32_t eip, uint32_t esp) {
 // continue execution, false if no handler took it. A handler that runs an
 // __except block never returns here (GuestResume unwinds past us). The
 // CONTEXT's Esp is `ctx_esp`, or (0) that after RaiseException returns;
-// `with_eax` takes Eax back from it too (RaiseException returns its own).
+// `with_eax` takes Eax back from it too (RaiseException returns its own). A
+// handler may continue only at `resume` (0: eip, the address reported).
 bool DispatchException(Ctx& c, uint32_t code, uint32_t flags, uint32_t nparams,
                        const uint32_t* params, uint32_t eip, uint32_t ctx_esp = 0,
-                       bool with_eax = false) {
+                       bool with_eax = false, uint32_t resume = 0) {
   uint32_t teb = c.fs_base;
   uint32_t saved_esp = c.esp;
   // Scratch space for the records below the current stack.
@@ -89,8 +90,8 @@ bool DispatchException(Ctx& c, uint32_t code, uint32_t flags, uint32_t nparams,
       if (flags & kExceptionNoncontinuable)
         FatalF("handler %08X continued a noncontinuable exception %08X",
                handler, code);
-      if (Rd32(ctx + 0xB8) != eip)
-        FatalF("handler %08X changed EIP to %08X: not supported", handler,
+      if (Rd32(ctx + 0xB8) != (resume ? resume : eip))
+        FatalF("handler %08X continued exception %08X at %08X: not supported", handler, code,
                Rd32(ctx + 0xB8));
       // Resume after RaiseException with the (possibly edited) registers.
       c.edi = Rd32(ctx + 0x9C);
@@ -233,6 +234,29 @@ bool RaiseAccessViolation(Ctx& c, bool write, uint32_t addr) {
 // write to. Code that raises it on purpose checks for a debugger.
 bool RaiseSingleStep(Ctx& c, uint32_t next) {
   return DispatchException(c, 0x80000004, 0, 0, nullptr, next, c.esp, true);
+}
+
+// EXCEPTION_BREAKPOINT, one parameter (BREAKPOINT_BREAK), the guest's own
+// stack in the CONTEXT: for int3 reported at the int3 itself (Windows
+// reports the EIP before it) and continued past it, for int 2d reported and
+// continued after it.
+bool RaiseBreakpoint(Ctx& c, uint32_t reported, uint32_t resume) {
+  const uint32_t params[1] = {0};
+  return DispatchException(c, 0x80000003, 0, 1, params, reported, c.esp, true, resume);
+}
+
+// ud2: EXCEPTION_ILLEGAL_INSTRUCTION (a fault: reported at the ud2), the
+// guest's own stack in the CONTEXT, continued after it.
+bool RaiseIllegalInstruction(Ctx& c, uint32_t va, uint32_t next) {
+  return DispatchException(c, 0xC000001D, 0, 0, nullptr, va, c.esp, true, next);
+}
+
+// int n from user mode (a gate only the kernel may use): the #GP is an
+// EXCEPTION_ACCESS_VIOLATION reported at the instruction with parameters
+// {0, 0xFFFFFFFF} (no address), continued after it.
+bool RaiseProtectionFault(Ctx& c, uint32_t va, uint32_t next) {
+  const uint32_t params[2] = {0, 0xFFFFFFFF};
+  return DispatchException(c, 0xC0000005, 0, 2, params, va, c.esp, true, next);
 }
 
 bool EnsureReadable(Ctx& c, gaddr va, uint64_t len) {

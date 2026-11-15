@@ -2978,11 +2978,50 @@ void InsnEmitter::Emit() {
       // continuing at the next instruction (a protector's debugger check).
       L(Fmt("LIFT_SPILL; ::recomp::SingleStep(c, %s); LIFT_RELOAD;", Hex(next).c_str()));
       return;
-    case ZYDIS_MNEMONIC_INT3:
+    case ZYDIS_MNEMONIC_INT3: {
+      uint64_t t;
+      if (Classify(p_, f_, in_, &t) == Flow::Fall) {
+        // EXCEPTION_BREAKPOINT through the SEH chain (Flow::Fall only with
+        // --stack-flow), its handler continuing at the next instruction.
+        L(Fmt("LIFT_SPILL; ::recomp::Breakpoint(c, %s, %s); LIFT_RELOAD;", Hex(in_.va).c_str(),
+              Hex(next).c_str()));
+        return;
+      }
+      L(Fmt("LIFT_SPILL; ::recomp::Trap(c, %s); LIFT_RELOAD;", Hex(in_.va).c_str()));
+      return;
+    }
     case ZYDIS_MNEMONIC_INT:
+      if (p_.stack_flow && Op(0).imm.value.u == 0x2D) {
+        // The kernel debugger service: without a debugger, EXCEPTION_BREAKPOINT
+        // reported after it, which a protector's handler continues there.
+        L(Fmt("LIFT_SPILL; ::recomp::Breakpoint(c, %s, %s); LIFT_RELOAD;", Hex(next).c_str(),
+              Hex(next).c_str()));
+        return;
+      }
+      if (p_.stack_flow) {
+        // Any other int n from user mode: #GP (the IDT gate is the
+        // kernel's), EXCEPTION_ACCESS_VIOLATION at it; protectors check
+        // for a debugger with it and continue after it.
+        L(Fmt("LIFT_SPILL; ::recomp::ProtectionFault(c, %s, %s); LIFT_RELOAD;", Hex(in_.va).c_str(),
+              Hex(next).c_str()));
+        return;
+      }
+      L(Fmt("LIFT_SPILL; ::recomp::Trap(c, %s); LIFT_RELOAD;", Hex(in_.va).c_str()));
+      return;
+    case ZYDIS_MNEMONIC_UD2: {
+      uint64_t t;
+      if (Classify(p_, f_, in_, &t) == Flow::Fall) {
+        // EXCEPTION_ILLEGAL_INSTRUCTION at the ud2 (Flow::Fall only with
+        // --stack-flow), its handler continuing at the next instruction.
+        L(Fmt("LIFT_SPILL; ::recomp::IllegalInstruction(c, %s, %s); LIFT_RELOAD;",
+              Hex(in_.va).c_str(), Hex(next).c_str()));
+        return;
+      }
+      L(Fmt("LIFT_SPILL; ::recomp::Trap(c, %s); LIFT_RELOAD;", Hex(in_.va).c_str()));
+      return;
+    }
     case ZYDIS_MNEMONIC_INTO:
     case ZYDIS_MNEMONIC_HLT:
-    case ZYDIS_MNEMONIC_UD2:
       L(Fmt("LIFT_SPILL; ::recomp::Trap(c, %s); LIFT_RELOAD;", Hex(in_.va).c_str()));
       return;
     default:
@@ -3054,9 +3093,12 @@ void InsnEmitter::Emit() {
     case ZYDIS_MNEMONIC_POP: {
       // A memory destination's address uses ESP after the increment, so
       // recompute it here instead of using the pre-computed m0.
-      L("const uint32_t v = ::recomp::lift::Rd<uint32_t>(B, esp); esp += 4;");
+      const bool word = d_.operand_width == 16;
+      L(word ? "const uint32_t v = ::recomp::lift::Rd<uint16_t>(B, esp); esp += 2;"
+             : "const uint32_t v = ::recomp::lift::Rd<uint32_t>(B, esp); esp += 4;");
       if (IsMem(0))
-        L(Fmt("::recomp::lift::Wr<uint32_t>(B, %s, v);", AddrExpr(0).c_str()));
+        L(Fmt("::recomp::lift::Wr<%s>(B, %s, v);", word ? "uint16_t" : "uint32_t",
+              AddrExpr(0).c_str()));
       else
         L(Write(0, "v"));
       return;

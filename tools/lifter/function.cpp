@@ -83,8 +83,17 @@ Flow Classify(const Program& p, const Function& f, const Insn& in,
       // exception handler (InsnEmitter: SingleStep).
       return p.stack_flow ? Flow::Fall : Flow::Stop;
     case ZYDIS_MNEMONIC_INT3:
-    case ZYDIS_MNEMONIC_HLT:
+      // --stack-flow: a lone int3 is a protector's debugger check (runs of
+      // them are padding), continued after by its exception handler
+      // (InsnEmitter: Breakpoint).
+      if (p.stack_flow && p.InText(in.next()) && *p.Bytes(in.next()) != 0xCC) return Flow::Fall;
+      return Flow::Stop;
     case ZYDIS_MNEMONIC_UD2:
+      // --stack-flow: one followed by code (not padding) is a protector's
+      // debugger check, continued after by its exception handler.
+      if (p.stack_flow && p.InText(in.next()) && *p.Bytes(in.next()) != 0xCC) return Flow::Fall;
+      return Flow::Stop;
+    case ZYDIS_MNEMONIC_HLT:
     case ZYDIS_MNEMONIC_INT:
     case ZYDIS_MNEMONIC_INTO:
       return d.mnemonic == ZYDIS_MNEMONIC_INT ? Flow::Fall : Flow::Stop;

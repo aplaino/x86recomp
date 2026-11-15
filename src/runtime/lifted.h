@@ -61,6 +61,17 @@ void Trap(Ctx& c, uint32_t va);                // int3 / int n
 // through the SEH chain; a handler continues at `next` (the instruction
 // after it), fatal otherwise.
 void SingleStep(Ctx& c, uint32_t next);
+// recomp_lift --stack-flow: int3 (reported at its address) and int 2d (after
+// it) raise EXCEPTION_BREAKPOINT; a handler continues at `resume`, the next
+// instruction, fatal otherwise.
+void Breakpoint(Ctx& c, uint32_t reported, uint32_t resume);
+// recomp_lift --stack-flow: ud2 followed by code raises
+// EXCEPTION_ILLEGAL_INSTRUCTION at va; a handler continues at `next`.
+void IllegalInstruction(Ctx& c, uint32_t va, uint32_t next);
+// recomp_lift --stack-flow: int n (other than 2d) raises
+// EXCEPTION_ACCESS_VIOLATION at va, as the #GP it causes does on Windows;
+// a handler continues at `next`.
+void ProtectionFault(Ctx& c, uint32_t va, uint32_t next);
 void RaiseDivideError(Ctx& c, uint32_t va);    // #DE from div/idiv
 void Probe(Ctx& c, uint32_t va, const char* name);  // manifest probes
 // recomp_lift --stack-flow: guest execution goes on at t inside the

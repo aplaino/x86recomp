@@ -183,6 +183,9 @@ const bool kFatalReportSet = (g_fatal_report = FatalReport, true);
 namespace hle {
 bool RaiseAccessViolation(Ctx& c, bool write, uint32_t addr);
 bool RaiseSingleStep(Ctx& c, uint32_t next);
+bool RaiseBreakpoint(Ctx& c, uint32_t reported, uint32_t resume);
+bool RaiseIllegalInstruction(Ctx& c, uint32_t va, uint32_t next);
+bool RaiseProtectionFault(Ctx& c, uint32_t va, uint32_t next);
 extern thread_local int t_hle_depth;
 }
 
@@ -472,6 +475,22 @@ void Trap(Ctx& c, uint32_t va) {
 void SingleStep(Ctx& c, uint32_t next) {
   if (!hle::RaiseSingleStep(c, next))
     FatalF("single-step exception (ICEBP) before %08X: no handler continued it", next);
+}
+
+void Breakpoint(Ctx& c, uint32_t reported, uint32_t resume) {
+  if (!hle::RaiseBreakpoint(c, reported, resume))
+    FatalF("breakpoint exception at %08X: no handler continued it at %08X", reported, resume);
+}
+
+void IllegalInstruction(Ctx& c, uint32_t va, uint32_t next) {
+  if (!hle::RaiseIllegalInstruction(c, va, next))
+    FatalF("illegal-instruction exception (ud2) at %08X: no handler continued it at %08X", va,
+           next);
+}
+
+void ProtectionFault(Ctx& c, uint32_t va, uint32_t next) {
+  if (!hle::RaiseProtectionFault(c, va, next))
+    FatalF("protection fault (int n) at %08X: no handler continued it at %08X", va, next);
 }
 
 void RaiseDivideError(Ctx& c, uint32_t va) {
