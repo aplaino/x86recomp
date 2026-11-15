@@ -56,9 +56,12 @@ void FillContext(uint32_t ctx, const Ctx& c, uint32_t eip, uint32_t esp) {
 
 // Walks the SEH chain for an exception. Returns true if a handler asked to
 // continue execution, false if no handler took it. A handler that runs an
-// __except block never returns here (GuestResume unwinds past us).
+// __except block never returns here (GuestResume unwinds past us). The
+// CONTEXT's Esp is `ctx_esp`, or (0) that after RaiseException returns;
+// `with_eax` takes Eax back from it too (RaiseException returns its own).
 bool DispatchException(Ctx& c, uint32_t code, uint32_t flags, uint32_t nparams,
-                       const uint32_t* params, uint32_t eip) {
+                       const uint32_t* params, uint32_t eip, uint32_t ctx_esp = 0,
+                       bool with_eax = false) {
   uint32_t teb = c.fs_base;
   uint32_t saved_esp = c.esp;
   // Scratch space for the records below the current stack.
@@ -72,7 +75,7 @@ bool DispatchException(Ctx& c, uint32_t code, uint32_t flags, uint32_t nparams,
   nparams = std::min<uint32_t>(nparams, 15);
   Wr32(rec + 0x10, nparams);
   for (uint32_t i = 0; i < nparams; i++) Wr32(rec + 0x14 + 4 * i, params[i]);
-  FillContext(ctx, c, eip, saved_esp + 4 + 16);
+  FillContext(ctx, c, eip, ctx_esp ? ctx_esp : saved_esp + 4 + 16);
 
   RECOMP_TRACE("  exception %08X at %08X (params %u: %08X %08X), walking SEH chain\n",
             code, eip, nparams, nparams > 0 ? params[0] : 0,
@@ -96,6 +99,7 @@ bool DispatchException(Ctx& c, uint32_t code, uint32_t flags, uint32_t nparams,
       c.edx = Rd32(ctx + 0xA8);
       c.ecx = Rd32(ctx + 0xAC);
       c.ebp = Rd32(ctx + 0xB4);
+      if (with_eax) c.eax = Rd32(ctx + 0xB0);
       c.esp = saved_esp;
       return true;
     }
@@ -222,6 +226,13 @@ bool RaiseAccessViolation(Ctx& c, bool write, uint32_t addr) {
   if (cont) CompleteHostPage(c, addr);
   c.esp = saved_esp;
   return cont;
+}
+
+// ICEBP: the #DB trap, reported (EXCEPTION_SINGLE_STEP) at the instruction
+// after it with the guest's own stack in the CONTEXT, which a handler may
+// write to. Code that raises it on purpose checks for a debugger.
+bool RaiseSingleStep(Ctx& c, uint32_t next) {
+  return DispatchException(c, 0x80000004, 0, 0, nullptr, next, c.esp, true);
 }
 
 bool EnsureReadable(Ctx& c, gaddr va, uint64_t len) {

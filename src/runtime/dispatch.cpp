@@ -182,6 +182,7 @@ const bool kFatalReportSet = (g_fatal_report = FatalReport, true);
 // functions are named f_<guest va>) and exits.
 namespace hle {
 bool RaiseAccessViolation(Ctx& c, bool write, uint32_t addr);
+bool RaiseSingleStep(Ctx& c, uint32_t next);
 extern thread_local int t_hle_depth;
 }
 
@@ -466,6 +467,11 @@ void Trap(Ctx& c, uint32_t va) {
   // int3 in shipped code is an assert/DebugBreak. EXCEPTION_BREAKPOINT
   // is not raised through SEH (no game path has needed it); stop loudly.
   FatalF("breakpoint/trap instruction at %08X", va);
+}
+
+void SingleStep(Ctx& c, uint32_t next) {
+  if (!hle::RaiseSingleStep(c, next))
+    FatalF("single-step exception (ICEBP) before %08X: no handler continued it", next);
 }
 
 void RaiseDivideError(Ctx& c, uint32_t va) {

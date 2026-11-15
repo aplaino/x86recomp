@@ -78,12 +78,15 @@ Flow Classify(const Program& p, const Function& f, const Insn& in,
     case ZYDIS_MNEMONIC_IRET:
     case ZYDIS_MNEMONIC_IRETD:
       return Flow::Return;
+    case ZYDIS_MNEMONIC_INT1:
+      // --stack-flow: a protector's debugger check, continued after by its
+      // exception handler (InsnEmitter: SingleStep).
+      return p.stack_flow ? Flow::Fall : Flow::Stop;
     case ZYDIS_MNEMONIC_INT3:
     case ZYDIS_MNEMONIC_HLT:
     case ZYDIS_MNEMONIC_UD2:
     case ZYDIS_MNEMONIC_INT:
     case ZYDIS_MNEMONIC_INTO:
-    case ZYDIS_MNEMONIC_INT1:
       return d.mnemonic == ZYDIS_MNEMONIC_INT ? Flow::Fall : Flow::Stop;
     case ZYDIS_MNEMONIC_JMP:
       if (op0.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {

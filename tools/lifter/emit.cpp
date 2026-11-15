@@ -2969,9 +2969,17 @@ void InsnEmitter::Emit() {
       L(Fmt("ecx -= 1; if (ecx != 0 && !F.zf) %s",
             GotoOrTail(RelTarget(in_)).c_str()));
       return;
+    case ZYDIS_MNEMONIC_INT1:
+      if (!p_.stack_flow) {
+        L(Fmt("LIFT_SPILL; ::recomp::Trap(c, %s); LIFT_RELOAD;", Hex(in_.va).c_str()));
+        return;
+      }
+      // ICEBP: EXCEPTION_SINGLE_STEP through the SEH chain, its handler
+      // continuing at the next instruction (a protector's debugger check).
+      L(Fmt("LIFT_SPILL; ::recomp::SingleStep(c, %s); LIFT_RELOAD;", Hex(next).c_str()));
+      return;
     case ZYDIS_MNEMONIC_INT3:
     case ZYDIS_MNEMONIC_INT:
-    case ZYDIS_MNEMONIC_INT1:
     case ZYDIS_MNEMONIC_INTO:
     case ZYDIS_MNEMONIC_HLT:
     case ZYDIS_MNEMONIC_UD2:
