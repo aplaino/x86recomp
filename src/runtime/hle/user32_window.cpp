@@ -2771,6 +2771,7 @@ HLE("user32.dll", PostMessageW, 4) { return hle_PostMessageA(c); }
 HLE("user32.dll", GetMessageW, 4) { return hle_GetMessageA(c); }
 HLE("user32.dll", PeekMessageW, 5) { return hle_PeekMessageA(c); }
 HLE("user32.dll", SetWindowLongW, 3) { return hle_SetWindowLongA(c); }
+HLE("user32.dll", GetWindowLongW, 2) { return hle_GetWindowLongA(c); }
 
 HLE("user32.dll", PostThreadMessageW, 4) {
   PostTo(CurrentThread()->tid,
