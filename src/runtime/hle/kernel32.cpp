@@ -66,6 +66,63 @@ uint32_t TickCount() {
   return uint32_t(duration_cast<milliseconds>(steady_clock::now() - g_start).count());
 }
 
+// The PF_* features of the CPUID model (an SSE2-class CPU).
+bool ProcessorFeature(uint32_t pf) {
+  switch (pf) {
+    case 3: return true;   // PF_MMX_INSTRUCTIONS_AVAILABLE
+    case 6: return true;   // PF_XMMI_INSTRUCTIONS_AVAILABLE (SSE)
+    case 8: return true;   // PF_RDTSC_INSTRUCTION_AVAILABLE
+    case 10: return true;  // PF_XMMI64_INSTRUCTIONS_AVAILABLE (SSE2)
+    default: return false;
+  }
+}
+
+// KUSER_SHARED_DATA (32-bit guests): the page Windows maps at 0x7FFE0000 in
+// every process, which code reads for the time without a call (protectors
+// among others). Its clocks are GetTickCount's (TickCount, with a multiplier
+// of 2^24: one tick per millisecond), QueryPerformanceCounter's
+// (InterruptTime, 100 ns since start) and GetSystemTimeAsFileTime's
+// (SystemTime); a host thread refreshes them every millisecond, as Windows
+// does at each timer tick under timeBeginPeriod(1). A KSYSTEM_TIME
+// {LowPart, High1Time, High2Time} is written in the kernel's order,
+// High2Time, LowPart, High1Time, so a reader seeing High1Time == High2Time
+// has a consistent value. Version and processor features are the PEB's and
+// IsProcessorFeaturePresent's. On Windows the page is read-only; here it is
+// writable, as the refreshing thread writes it through guest memory.
+void StoreSystemTime(gaddr at, uint64_t v) {
+  auto* w = reinterpret_cast<uint32_t*>(GPtr(at));
+  __atomic_store_n(w + 2, uint32_t(v >> 32), __ATOMIC_RELEASE);
+  __atomic_store_n(w + 0, uint32_t(v), __ATOMIC_RELEASE);
+  __atomic_store_n(w + 1, uint32_t(v >> 32), __ATOMIC_RELEASE);
+}
+
+void RefreshSharedUserData() {
+  using namespace std::chrono;
+  const gaddr k = kSharedUserDataVa;
+  const uint32_t ticks = TickCount();
+  __atomic_store_n(reinterpret_cast<uint32_t*>(GPtr(k + 0x000)), ticks, __ATOMIC_RELEASE);
+  StoreSystemTime(k + 0x008, PerfCounter());  // InterruptTime
+  const auto ns = duration_cast<nanoseconds>(system_clock::now().time_since_epoch()).count();
+  StoreSystemTime(k + 0x014, uint64_t(ns / 100) + kFileTimeUnixEpoch);  // SystemTime
+  StoreSystemTime(k + 0x320, ticks);  // TickCount
+}
+
+void StartSharedUserData() {
+  const gaddr k = kSharedUserDataVa;
+  if (!g_proc->mem.Commit(k, 0x1000, Prot::RW)) FatalF("cannot commit KUSER_SHARED_DATA");
+  Wr32(k + 0x004, 0x01000000);  // TickCountMultiplier
+  Wr32(k + 0x26C, Rd32(kPebVa + 0xA4));  // NtMajorVersion
+  Wr32(k + 0x270, Rd32(kPebVa + 0xA8));  // NtMinorVersion
+  for (uint32_t pf = 0; pf < 64; pf++) Wr8(k + 0x274 + pf, ProcessorFeature(pf));
+  RefreshSharedUserData();
+  std::thread([] {
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      RefreshSharedUserData();
+    }
+  }).detach();
+}
+
 void WriteSystemTime(uint32_t st, const std::tm& t, int ms) {
   Wr16(st + 0, uint16_t(t.tm_year + 1900));
   Wr16(st + 2, uint16_t(t.tm_mon + 1));
@@ -87,6 +144,7 @@ void SetEnvironmentBlock(const std::vector<std::string>& vars);
 
 void InitKernel32State() {
   Process& p = *g_proc;
+  if (!p.x64) StartSharedUserData();
   g_process_heap = NewHeap(1u << 20, 0);
   if (!g_process_heap) FatalF("cannot create the process heap");
   p.process_heap = g_process_heap->handle();
@@ -601,15 +659,7 @@ HLE("kernel32.dll", SetHandleCount, 1) { return Arg(c, 0); }
 
 // Looked up dynamically by the CRT (Pentium FDIV check). Matches the CPU
 // that Cpuid() reports: MMX yes, no SSE/3DNow!, no FDIV erratum.
-HLE64("kernel32.dll", IsProcessorFeaturePresent, 1) {
-  switch (Arg(c, 0)) {
-    case 3: return 1;   // PF_MMX_INSTRUCTIONS_AVAILABLE
-    case 6: return 1;   // PF_XMMI_INSTRUCTIONS_AVAILABLE (SSE)
-    case 8: return 1;   // PF_RDTSC_INSTRUCTION_AVAILABLE
-    case 10: return 1;  // PF_XMMI64_INSTRUCTIONS_AVAILABLE (SSE2)
-    default: return 0;
-  }
-}
+HLE64("kernel32.dll", IsProcessorFeaturePresent, 1) { return ProcessorFeature(uint32_t(Arg(c, 0))); }
 
 // x64 guests: SYSTEM_INFO's pointer-sized fields, an AMD64 processor (the
 // CPUID model's family 16h) and the address range guest allocations use.

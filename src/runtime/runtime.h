@@ -180,6 +180,7 @@ uint32_t GuestProcessorCount();
 
 // Fixed guest layout (see ARCHITECTURE.md). TEBs grow down from kTebTop.
 inline constexpr uint32_t kPebVa = 0x7FFDF000;
+inline constexpr uint32_t kSharedUserDataVa = 0x7FFE0000;  // KUSER_SHARED_DATA
 inline constexpr uint32_t kTebTop = 0x7FFDE000;
 inline constexpr uint32_t kTebStride = 0x1000;
 // Return address pushed when the host calls into guest code; reaching it
