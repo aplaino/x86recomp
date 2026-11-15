@@ -194,10 +194,34 @@ void CallThunk(Ctx& c, gaddr thunk) {
            "x64 guests (HLE64) (return address %08llX)",
            s->dll.c_str(), s->name.c_str(), ret);
   const Def& d = *s->def;
-  // <ID>_TRACE_FILTER=mss32 (substring of "dll!name") narrows the trace.
-  static const char* filter = Env("TRACE_FILTER");
-  const bool trace = g_trace && (!filter || (s->dll + "!" + s->name).find(filter) !=
-                                                std::string::npos);
+  // <ID>_TRACE_FILTER narrows the trace: comma-separated substrings of
+  // "dll!name"; a call is traced if it matches one without a leading '-'
+  // (or there is none) and none with one ("mss32", "-TlsGetValue,-Critical").
+  static const std::vector<std::string> filter = [] {
+    std::vector<std::string> f;
+    if (const char* e = Env("TRACE_FILTER"))
+      for (std::string item, all = e; !all.empty();) {
+        const size_t comma = all.find(',');
+        item = all.substr(0, comma);
+        all = comma == std::string::npos ? "" : all.substr(comma + 1);
+        if (!item.empty()) f.push_back(item);
+      }
+    return f;
+  }();
+  bool trace = g_trace;
+  if (trace && !filter.empty()) {
+    const std::string name = s->dll + "!" + s->name;
+    bool include = false, any_include = false;
+    for (const std::string& f : filter) {
+      if (f[0] == '-') {
+        if (name.find(f.substr(1)) != std::string::npos) trace = false;
+      } else {
+        any_include = true;
+        include |= name.find(f) != std::string::npos;
+      }
+    }
+    if (any_include && !include) trace = false;
+  }
   if (trace) {
     std::string args;
     for (int i = 0; i < std::max(d.nargs, 0) && i < 8; i++) {
