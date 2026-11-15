@@ -82,6 +82,33 @@ HLE_NAMED(kDll, "ISteamClient::#21", SteamClientSetWarningMessageHook, 1) { retu
 // (ISteamUtils005 and later): there is no overlay.
 HLE_NAMED(kDll, "ISteamUtils::#10", SteamUtilsSetOverlayNotificationPosition, 1) { return 0; }
 
+// ISteamUser [1] BLoggedOn() (every version): not connected to the Steam
+// servers, as with Steam in offline mode.
+HLE_NAMED(kDll, "ISteamUser::#1", SteamUserBLoggedOn, 0) { return 0; }
+
+// ISteamUser [2] GetSteamID() (ISteamUser010 and later): MSVC returns the
+// CSteamID class through a hidden pointer, the only stack argument. Always
+// the same individual account of the public universe, so what a game keys
+// by it (save folders) stays put.
+constexpr uint64_t kSteamId = 0x0110000100000001ull;
+HLE_NAMED(kDll, "ISteamUser::#2", SteamUserGetSteamID, 1) {
+  const gaddr out = Arg(c, 0);
+  Wr32(out, uint32_t(kSteamId));
+  Wr32(out + 4, uint32_t(kSteamId >> 32));
+  return out;
+}
+
+// ISteamFriends [0] GetPersonaName() -> const char* (every version): a
+// string the client owns, the same name as the GFWL profile's.
+HLE_NAMED(kDll, "ISteamFriends::#0", SteamFriendsGetPersonaName, 0) {
+  static const gaddr name = [] {
+    const gaddr s = HeapAllocProcess(8, true);
+    PutStr(s, "Player");
+    return s;
+  }();
+  return name;
+}
+
 #define RECOMP_STEAM_ACCESSOR(fn, iface) \
   HLE(kDll, fn, kCdecl) { return Interface(#iface); }
 RECOMP_STEAM_ACCESSOR(SteamClient, ISteamClient)
