@@ -370,6 +370,10 @@ target_link_libraries(recomp_xlive PUBLIC recomp_runtime)
 add_library(recomp_sdl2 SHARED src/runtime/hle/sdl2.cpp src/runtime/hle/sdl2_video.cpp)
 target_link_libraries(recomp_sdl2 PUBLIC recomp_runtime SDL3::SDL3)
 
+# DirectShow's filter graph manager, for movies played through it.
+add_library(recomp_quartz SHARED src/runtime/hle/quartz.cpp)
+target_link_libraries(recomp_quartz PUBLIC recomp_runtime)
+
 add_library(recomp_dbghelp SHARED src/runtime/hle/dbghelp.cpp)
 if(RECOMP_IOS)
   # The host's libLLVMDemangle.a is built for macOS: its sources (the same
