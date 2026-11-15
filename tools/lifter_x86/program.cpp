@@ -53,8 +53,15 @@ bool Program::Load(const std::string& path, const std::string& symdir,
     *err = "cannot open " + path;
     return false;
   }
-  for (const ImageReader& r : Readers())
-    if (r.Match(path, &image_x64)) reader = &r;
+  // Each reader answers for itself: one that does not match may still
+  // have written its flag.
+  for (const ImageReader& r : Readers()) {
+    bool r_x64 = false;
+    if (r.Match(path, &r_x64)) {
+      reader = &r;
+      image_x64 = r_x64;
+    }
+  }
   if (!reader) {
     *err = path + ": no enabled platform reads its format";
     return false;
