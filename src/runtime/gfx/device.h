@@ -94,6 +94,7 @@ using ShaderId = uint32_t;   // 0: none
 struct ColorTarget {
   TextureId tex = 0;
   int level = 0;
+  int face = 0;  // of a cube texture (D3D's order, as CreateCubeTexture's)
 };
 
 // ---- the programmable pipeline (Direct3D 9 shaders translated from HLSL)
@@ -226,8 +227,11 @@ class Device {
   virtual void UpdateTexture(TextureId t, int level, const Rect& r,
                              const void* src, uint32_t pitch) = 0;
   // A cube texture: six square faces in D3D's order (+X, -X, +Y, -Y, +Z,
-  // -Z), filled with UpdateCubeTexture and freed with DestroyTexture.
-  virtual TextureId CreateCubeTexture(int size, int levels, Format fmt) = 0;
+  // -Z), filled with UpdateCubeTexture and freed with DestroyTexture. A
+  // render target's faces are drawn to as ColorTarget{tex, level, face};
+  // backends without cube targets return 0 for one.
+  virtual TextureId CreateCubeTexture(int size, int levels, Format fmt,
+                                      bool render_target) = 0;
   virtual void UpdateCubeTexture(TextureId t, int face, int level, const Rect& r,
                                  const void* src, uint32_t pitch) = 0;
   // A volume texture (w x h x d texels at the top level, each level halving

@@ -868,7 +868,7 @@ class MetalDevice final : public Device {
     auto it = textures_.find(tid);
     if (it == textures_.end()) return;
     bool bound = current_color_ == tid;
-    if (current_color_ == tid) current_color_ = 0, current_level_ = 0;
+    if (current_color_ == tid) current_color_ = 0, current_level_ = 0, current_face_ = 0;
     for (ColorTarget& e : current_extra_)
       if (e.tex == tid) e = {}, bound = true;
     if (const DepthId z = it->second.depth) {  // a depth texture: its depth entry too
@@ -901,7 +901,7 @@ class MetalDevice final : public Device {
     Update(tid, 0, level, r, src, pitch);
   }
 
-  TextureId CreateCubeTexture(int size, int levels, Format fmt) override {
+  TextureId CreateCubeTexture(int size, int levels, Format fmt, bool rt) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     if (size <= 0) return 0;
     if (levels <= 0) {
@@ -913,8 +913,9 @@ class MetalDevice final : public Device {
     t.levels = levels;
     t.fmt = fmt;
     t.cube = true;
-    t.opaque = fmt == Format::X8R8G8B8;
-    t.tex = NewTexture(MTLTextureTypeCube, TexFormat(fmt), size, size, levels, false, t.opaque);
+    t.rt = rt;
+    t.opaque = !rt && fmt == Format::X8R8G8B8;
+    t.tex = NewTexture(MTLTextureTypeCube, TexFormat(fmt), size, size, levels, rt, t.opaque);
     if (perf_) pc_.textures++;
     if (!t.tex) {
       WarnF("gfx: CreateCubeTexture %d x%d fmt %u failed\n", size, levels, unsigned(fmt));
@@ -1030,6 +1031,7 @@ class MetalDevice final : public Device {
     std::lock_guard<std::recursive_mutex> l(mu_);
     current_color_ = color;
     current_level_ = 0;
+    current_face_ = 0;
     current_extra_.fill({});
     current_depth_ = depth;
     BindTarget();
@@ -1039,6 +1041,7 @@ class MetalDevice final : public Device {
     std::lock_guard<std::recursive_mutex> l(mu_);
     current_color_ = color[0].tex;
     current_level_ = color[0].tex ? color[0].level : 0;
+    current_face_ = color[0].tex ? color[0].face : 0;
     for (int i = 0; i < 3; i++) current_extra_[i] = color[i + 1];
     current_depth_ = depth;
     BindTarget();
@@ -1072,20 +1075,26 @@ class MetalDevice final : public Device {
       Settle();
       EnsureFrame();
       const int sl = src.tex ? src.level : 0, dl = dst.tex ? dst.level : 0;
+      const int ss = src.tex ? src.face : 0, ds = dst.tex ? dst.face : 0;
       const bool copy = a.right - a.left == b.right - b.left &&
                         a.bottom - a.top == b.bottom - b.top && s.pixelFormat == d.pixelFormat;
+      // The quad samples a 2D texture: a cube face is only copied from.
+      if (!copy && st && st->cube) {
+        WarnOnce(8, "StretchRect from a cube face with scaling or conversion");
+        return;
+      }
       __unsafe_unretained id<MTLTexture> su = s, du = d;
       Rec([=, this] {
         if (copy) {
           id<MTLBlitCommandEncoder> bl = [cmd_ blitCommandEncoder];
           [bl copyFromTexture:su
-                   sourceSlice:0
+                   sourceSlice:NSUInteger(ss)
                    sourceLevel:NSUInteger(sl)
                   sourceOrigin:MTLOriginMake(NSUInteger(a.left), NSUInteger(a.top), 0)
                     sourceSize:MTLSizeMake(NSUInteger(a.right - a.left),
                                            NSUInteger(a.bottom - a.top), 1)
                      toTexture:du
-              destinationSlice:0
+              destinationSlice:NSUInteger(ds)
               destinationLevel:NSUInteger(dl)
              destinationOrigin:MTLOriginMake(NSUInteger(b.left), NSUInteger(b.top), 0)];
           [bl endEncoding];
@@ -1094,6 +1103,7 @@ class MetalDevice final : public Device {
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = du;
         rp.colorAttachments[0].level = NSUInteger(dl);
+        rp.colorAttachments[0].slice = NSUInteger(ds);
         rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
         rp.colorAttachments[0].storeAction = MTLStoreActionStore;
         id<MTLRenderCommandEncoder> e = [cmd_ renderCommandEncoderWithDescriptor:rp];
@@ -2643,6 +2653,7 @@ void main() {
   struct Pass {
     id<MTLTexture> color[4] = {};
     int level[4] = {};
+    int slice[4] = {};  // a cube target's face
     MTLPixelFormat fmt[4] = {};
     TextureId ids[4] = {};
     int targets = 0;
@@ -2661,7 +2672,7 @@ void main() {
     DepthId depth_id = 0;
     bool Same(const Pass& o) const {
       for (int i = 0; i < 4; i++)
-        if (color[i] != o.color[i] || level[i] != o.level[i]) return false;
+        if (color[i] != o.color[i] || level[i] != o.level[i] || slice[i] != o.slice[i]) return false;
       return depth == o.depth && proxy == o.proxy;
     }
   };
@@ -3256,7 +3267,9 @@ void main() {
       return backbuffer_;
     }
     Tex* e = FindTex(t.tex);
-    if (!e || !e->rt || t.level < 0 || t.level >= e->levels) return nil;
+    if (!e || !e->rt || t.level < 0 || t.level >= e->levels || t.face < 0 ||
+        t.face >= (e->cube ? 6 : 1))
+      return nil;
     *w = std::max(1, e->w >> t.level);
     *h = std::max(1, e->h >> t.level);
     *tex = e;
@@ -3268,7 +3281,7 @@ void main() {
     Pass p{};
     Tex* t0 = nullptr;
     int w = 0, h = 0;
-    id<MTLTexture> c0 = Target({current_color_, current_level_}, &w, &h, &t0);
+    id<MTLTexture> c0 = Target({current_color_, current_level_, current_face_}, &w, &h, &t0);
     if (!c0) c0 = backbuffer_, w = bb_w_, h = bb_h_, t0 = nullptr;
     if (!t0 && c0 == backbuffer_ && upscaler_ != Upscaler::Off && upscaler_ != Upscaler::Smaa &&
         frame_scene_ && !composited_) {
@@ -3291,6 +3304,7 @@ void main() {
     }
     p.color[0] = c0;
     p.level[0] = t0 ? current_level_ : 0;
+    p.slice[0] = t0 ? current_face_ : 0;
     p.fmt[0] = c0 ? c0.pixelFormat : MTLPixelFormatInvalid;
     p.ids[0] = t0 ? current_color_ : 0;
     p.alpha = t0 ? HasAlpha(t0->fmt) : back_buffer_alpha_;
@@ -3306,6 +3320,7 @@ void main() {
       if (!c) break;
       p.color[i + 1] = c;
       p.level[i + 1] = e.level;
+      p.slice[i + 1] = e.face;
       p.fmt[i + 1] = c.pixelFormat;
       p.ids[i + 1] = e.tex;
       p.targets = i + 2;
@@ -3369,6 +3384,7 @@ void main() {
   struct PassDesc {
     __unsafe_unretained id<MTLTexture> color[4];
     int level[4];
+    int slice[4];
     int targets;
     __unsafe_unretained id<MTLTexture> depth;
     bool stencil;
@@ -3390,6 +3406,7 @@ void main() {
     for (int i = 0; i < pass_.targets; i++) {
       pd.color[i] = pass_.color[i];
       pd.level[i] = pass_.level[i];
+      pd.slice[i] = pass_.slice[i];
       if (pass_.ids[i]) {
         if (Tex* t = FindTex(pass_.ids[i])) t->used = serial_;
       }
@@ -3413,6 +3430,7 @@ void main() {
         MTLRenderPassColorAttachmentDescriptor* a = rp.colorAttachments[NSUInteger(i)];
         a.texture = pd.color[i];
         a.level = NSUInteger(pd.level[i]);
+        a.slice = NSUInteger(pd.slice[i]);
         // A clear clears every target, as D3D9's does.
         a.loadAction = (pd.clear & 1) ? MTLLoadActionClear : MTLLoadActionLoad;
         a.clearColor = pd.clear_color;
@@ -4679,6 +4697,7 @@ void main() {
   uint32_t next_id_ = 1;
   TextureId current_color_ = 0;
   int current_level_ = 0;
+  int current_face_ = 0;  // of a cube target
   std::array<ColorTarget, 3> current_extra_{};
   DepthId current_depth_ = 0;
   std::unordered_map<PipeKey, id<MTLRenderPipelineState>, BytesHash<PipeKey>> pipelines_;
