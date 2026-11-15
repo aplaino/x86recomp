@@ -107,6 +107,14 @@ HLE("kernel32.dll", LoadResource, 2) {
 
 HLE("kernel32.dll", LockResource, 1) { return Arg(c, 0); }
 
+// (FramesToSkip, FramesToCapture, BackTrace, BackTraceHash): no frames,
+// as dbghelp's StackWalk finds none (lifted code keeps no x86 return
+// addresses to walk in general).
+HLE("kernel32.dll", RtlCaptureStackBackTrace, 4) {
+  if (Arg(c, 3)) Wr32(Arg(c, 3), 0);
+  return 0;
+}
+
 // (hInstance, name): the RT_ACCELERATOR resource's data as the handle (0
 // if there is none). Keystrokes are never translated into commands here.
 HLE("user32.dll", LoadAcceleratorsW, 2) {
