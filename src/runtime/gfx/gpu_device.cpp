@@ -628,8 +628,12 @@ class GpuDevice final : public Device {
     Update(id, 0, level, r, src, pitch);
   }
 
-  TextureId CreateCubeTexture(int size, int levels, Format fmt) override {
+  TextureId CreateCubeTexture(int size, int levels, Format fmt, bool render_target) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
+    if (render_target) {
+      WarnF("gfx: cube render targets are not supported by this backend\n");
+      return 0;
+    }
     if (size <= 0) return 0;
     if (levels <= 0) {
       levels = 1;

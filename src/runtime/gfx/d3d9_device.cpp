@@ -210,7 +210,11 @@ class D3D9Device final : public Device {
     targets_.erase(id);
   }
 
-  TextureId CreateCubeTexture(int size, int levels, Format fmt) override {
+  TextureId CreateCubeTexture(int size, int levels, Format fmt, bool render_target) override {
+    if (render_target) {
+      WarnF("gfx: cube render targets are not supported by this backend\n");
+      return 0;
+    }
     IDirect3DCubeTexture9* t = nullptr;
     HRESULT hr = dev_->CreateCubeTexture(UINT(size), UINT(levels), 0, ToD3D(fmt),
                                          D3DPOOL_MANAGED, &t, nullptr);

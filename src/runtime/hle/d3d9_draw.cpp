@@ -797,8 +797,8 @@ gfx::ColorTarget StretchTarget(Surface* s, const char* which) {
     case Surface::Kind::RenderTarget:
       return {s->tex, 0};
     case Surface::Kind::TextureLevel:
-      if (!s->texture->cube && (s->texture->usage & D3DUSAGE_RENDERTARGET))
-        return {s->texture->tex, int(s->level)};
+      if (s->texture->usage & D3DUSAGE_RENDERTARGET)
+        return {s->texture->tex, int(s->level), s->face};
       break;
     default:
       break;
