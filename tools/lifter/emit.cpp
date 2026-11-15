@@ -3040,9 +3040,11 @@ void InsnEmitter::Emit() {
     case ZYDIS_MNEMONIC_LEA:
       L(Write(0, AddrExpr(1, false)));
       return;
+    // The operand size (an operand-size prefix: 16) is the instruction's,
+    // not an immediate's, which is its encoded width.
     case ZYDIS_MNEMONIC_PUSH: {
       L("const uint32_t v = " + Read(0, 4) + ";");
-      if (Bytes(0) == 2 && !IsImm(0)) {
+      if (d_.operand_width == 16) {
         L("esp -= 2; ::recomp::lift::Wr<uint16_t>(B, esp, uint16_t(v));");
       } else {
         Push32("v");
@@ -3096,6 +3098,17 @@ void InsnEmitter::Emit() {
     case ZYDIS_MNEMONIC_POPFD:
       L("{ const uint32_t v = ::recomp::lift::Rd<uint32_t>(B, esp); esp += 4;");
       L("  ::recomp::UnpackEFlags(F, v); c.eflags = (c.eflags & ~0x240400u) | (v & 0x240400u); }");
+      return;
+    // The 16-bit forms (operand-size prefix): FLAGS, the low half of EFLAGS
+    // (AC and ID, above it, are kept).
+    case ZYDIS_MNEMONIC_PUSHF:
+      L("esp -= 2; ::recomp::lift::Wr<uint16_t>(B, esp, "
+        "uint16_t(::recomp::lift::MergeEFlags(c.eflags, F, 0x8D5u)));");
+      return;
+    case ZYDIS_MNEMONIC_POPF:
+      L("{ const uint32_t v = ::recomp::lift::Rd<uint16_t>(B, esp); esp += 2;");
+      L("  ::recomp::UnpackEFlags(F, (::recomp::lift::MergeEFlags(c.eflags, F, 0x8D5u) & 0xFFFF0000u) | v);");
+      L("  c.eflags = (c.eflags & ~0x400u) | (v & 0x400u); }");
       return;
     case ZYDIS_MNEMONIC_XCHG:
       if (IsMem(0) || IsMem(1)) {
