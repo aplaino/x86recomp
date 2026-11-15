@@ -262,7 +262,8 @@ int main(int argc, char** argv) {
   // in .rdata (a vtable slot) is an address the image really uses, so its
   // target is kept even inside another function's instruction; so is that
   // of a pointer the protector keeps in code padding and reads with an
-  // absolute memory operand.
+  // absolute memory operand, and a code address that a function from the
+  // symbols (not one found by a pointer scan) has as an immediate.
   std::set<uint64_t> table_ptrs;
   if (p.stack_flow)
     for (const auto& m : p.modules)
@@ -273,6 +274,17 @@ int main(int argc, char** argv) {
           table_ptrs.insert(p.mem.read<uint32_t>(at));
       }
   const std::set<uint64_t> entries0 = p.entries, weak0 = p.weak;
+  // A switch indexes a table; a jump through the stack ([esp+n]: a
+  // protector's return written as a jump) has no table, whatever single
+  // target Ghidra saw for it. Such jumps stay indirect (Dispatch, Flow).
+  for (auto it = p.jumptables.begin(); it != p.jumptables.end();) {
+    lifter::Insn in;
+    const bool stack = dec.Decode(p, it->first, &in) && in.d.mnemonic == ZYDIS_MNEMONIC_JMP &&
+                       in.ops[0].type == ZYDIS_OPERAND_TYPE_MEMORY &&
+                       (in.ops[0].mem.base == ZYDIS_REGISTER_ESP ||
+                        in.ops[0].mem.base == ZYDIS_REGISTER_RSP);
+    it = stack ? p.jumptables.erase(it) : std::next(it);
+  }
   const auto tables0 = p.jumptables;
   for (;;) {
     p.entries = entries0;
@@ -358,9 +370,11 @@ int main(int argc, char** argv) {
           if (!in.ok) continue;
           for (int i = 0; i < in.d.operand_count_visible; i++) {
             const auto& o = in.ops[i];
-            if (o.type == ZYDIS_OPERAND_TYPE_IMMEDIATE && !o.imm.is_relative)
-              candidate(fm, p.x64 ? o.imm.value.u : static_cast<uint32_t>(o.imm.value.u),
-                        &from_code_ptrs);
+            if (o.type == ZYDIS_OPERAND_TYPE_IMMEDIATE && !o.imm.is_relative) {
+              const uint64_t t = p.x64 ? o.imm.value.u : static_cast<uint32_t>(o.imm.value.u);
+              if (p.stack_flow && !p.weak.count(e)) table_ptrs.insert(t);
+              candidate(fm, t, &from_code_ptrs);
+            }
             if (p.stack_flow && o.type == ZYDIS_OPERAND_TYPE_MEMORY &&
                 o.mem.base == ZYDIS_REGISTER_NONE && o.mem.index == ZYDIS_REGISTER_NONE &&
                 p.InText(uint32_t(o.mem.disp.value))) {

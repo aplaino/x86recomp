@@ -356,7 +356,20 @@ on the host to the caller and skip what the guest meant to run. With
 - Protectors also place decoy prologues whose last instruction covers a
   real function's first bytes. A relocated pointer in .rdata (a vtable
   slot) is an address the image uses, so with `--stack-flow` its target
-  stays an entry even inside another function's instruction.
+  stays an entry even inside another function's instruction; so does a
+  code pointer kept in code padding and read with an absolute operand,
+  and a code address that a function from the symbols has as an
+  immediate. Jump tables Ghidra reports on `jmp [esp+n]` are dropped (a
+  return written as a jump has none).
+- Debugger checks: an instruction that raises an exception under an SEH
+  handler the protector installed just before, which sets a flag and
+  continues after it (with a debugger, the exception is swallowed). Each
+  raises what Windows raises, with the guest's own stack in the CONTEXT,
+  and the handler must continue at the next instruction (anything else is
+  fatal): ICEBP (int1) EXCEPTION_SINGLE_STEP after it; a lone int3 (not
+  padding) EXCEPTION_BREAKPOINT at it; int 2d EXCEPTION_BREAKPOINT after
+  it; ud2 followed by code EXCEPTION_ILLEGAL_INSTRUCTION at it; any other
+  int n the #GP's EXCEPTION_ACCESS_VIOLATION at it.
 
 ### Multiple modules
 Games that ship their logic in DLLs they LoadLibrary themselves (e.g.
