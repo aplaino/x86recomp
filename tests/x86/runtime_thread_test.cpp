@@ -51,9 +51,13 @@ struct Handled {};
 // Inside the 32-bit arena, never committed: every access faults.
 constexpr gaddr kUnmapped = 0x07000000;
 
-__attribute__((noinline)) uint8_t Touch(gaddr a) {
+__attribute__((noinline)) uint8_t TouchFn(gaddr a) {
   return *reinterpret_cast<volatile uint8_t*>(g_guest_base + a);
 }
+// Called through a pointer the compiler cannot see through: clang does
+// not honour -fnon-call-exceptions, and at -O2 it would prove a direct
+// call to TouchFn nounwind and drop the catch around it.
+uint8_t (*volatile Touch)(gaddr) = TouchFn;
 
 // A host page whose faults a handler installed before the runtime's owns.
 uint8_t* g_host_page = nullptr;
