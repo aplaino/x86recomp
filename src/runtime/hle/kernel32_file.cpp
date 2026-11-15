@@ -858,8 +858,18 @@ uint32_t SetCurrentDirectory(const std::string& path) {
 HLE("kernel32.dll", SetCurrentDirectoryA, 1) { return SetCurrentDirectory(GStr(Arg(c, 0))); }
 HLE("kernel32.dll", SetCurrentDirectoryW, 1) { return SetCurrentDirectory(WidePath(Arg(c, 0))); }
 
+// GetFullPathName's result: AbsGuest, keeping a trailing separator as
+// Windows does ("C:\\dir\\" stays a directory path, to which games append
+// file names).
+std::string FullPath(const std::string& in) {
+  std::string full = AbsGuest(in);
+  if (!in.empty() && (in.back() == '\\' || in.back() == '/') && full.back() != '\\') full += '\\';
+  return full;
+}
+
+// lpFilePart: after the last separator, null when the path ends in one.
 HLE("kernel32.dll", GetFullPathNameA, 4) {
-  std::string full = AbsGuest(GStr(Arg(c, 0)));
+  std::string full = FullPath(GStr(Arg(c, 0)));
   uint32_t size = Arg(c, 1), buf = Arg(c, 2), filepart = Arg(c, 3);
   uint32_t r = CopyOut(buf, size, full);
   if (r == full.size() && filepart) {
@@ -872,7 +882,8 @@ HLE("kernel32.dll", GetFullPathNameA, 4) {
 }
 
 HLE("kernel32.dll", GetFullPathNameW, 4) {
-  std::string full = AbsGuest(WidePath(Arg(c, 0)));
+  std::string full = FullPath(WidePath(Arg(c, 0)));
+  RECOMP_TRACE("  GetFullPathName(%s) -> %s\n", WidePath(Arg(c, 0)).c_str(), full.c_str());
   uint32_t size = Arg(c, 1), buf = Arg(c, 2), filepart = Arg(c, 3);
   // CopyOutW-ish: write UTF-16
   std::u16string w = Widen(full);
@@ -881,8 +892,8 @@ HLE("kernel32.dll", GetFullPathNameW, 4) {
     for (uint32_t k = 0; k < n; k++) Wr16(buf + k*2, w[k]);
     Wr16(buf + n*2, 0);
     if (filepart) {
-      size_t sl = full.find_last_of('\\');
-      Wr32(filepart, sl == std::string::npos || sl + 1 == full.size() ? buf : buf + uint32_t((sl + 1) * 2));
+      size_t sl = w.find_last_of(u'\\');
+      Wr32(filepart, sl == std::u16string::npos || sl + 1 == w.size() ? 0 : buf + uint32_t((sl + 1) * 2));
     }
     return n < (uint32_t)w.size() ? (uint32_t)w.size() + 1 : n;
   }
