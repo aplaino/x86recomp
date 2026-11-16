@@ -722,6 +722,33 @@ API front ends:
   (D3D9's sampler states and transform numbers mapped to D3D7's). Mixing
   a shader with the fixed-function pipeline, fixed-function draws with a
   vertex declaration, and instancing are not done yet (fatal and named).
+- Direct3D 11 / DXGI (recomp_d3d11, x64 guests): on gfx::Device's
+  programs (GLSL stages with buffers read as words, combined textures,
+  SPIR-V for Vulkan and MSL for Metal). Resources, views and states are
+  records; a resource's contents are a reference-counted block of guest
+  memory (Map hands out a pointer into it), and its GPU copy (image,
+  depth target, GPU buffer) is made when a draw, clear or copy first
+  needs it, in the format it is drawn with (gfx has no views), and
+  brought up to date from the guest's writes before each use. GPU
+  writes come back to guest memory only when the guest maps or copies
+  the resource on the CPU. Static vertex, index and shader resource
+  buffers are read in place on the GPU; constant and dynamic buffers
+  are copied by each draw (vertex buffers only for the vertices it
+  reads), so refilling one between draws costs no GPU wait. Map with
+  WRITE_DISCARD renames: a fresh block whenever something recorded
+  still holds the current one. Deferred contexts record what they are
+  given as operations (each of their Maps with a block of its own,
+  installed where the map was recorded) and ExecuteCommandList replays
+  them on the immediate context, as Windows' runtime does for drivers
+  without command lists. A draw's program comes from LinkProgram, the
+  interface the DXBC translator fills in (d3d11_impl.h: the binding
+  plan, the vertex fetch the layer builds from the input layout, the
+  vertex stage's uniforms); a draw without one is skipped and counted
+  in the per-frame trace line. Present shows the back buffer's image.
+  Not done: multisampling (one sample), geometry and tessellation
+  stages, more than four render targets, views of part of a texture's
+  levels or of another format than the one it was made in, border
+  colours, reading back depth targets and buffers the GPU wrote.
 
 ### Shaders: HLSL translated from source
 Games that build HLSL at run time and compile it with D3DXCompileShader
