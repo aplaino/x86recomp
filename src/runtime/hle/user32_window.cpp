@@ -951,6 +951,7 @@ void InjectTestFocus() {
 //   <t> click [left|right]
 //   <t> key <SDL scancode name> [seconds]   e.g. Escape, Return, Space, A;
 //                         held for that long (default 0.08)
+//   <t> quit              the host asks the game to quit (as Cmd+Q does)
 // '#' starts a comment.
 struct TestEvent {
   double t;
@@ -1066,6 +1067,10 @@ void InjectTestInput() {
         q.push_back({t, e});
       } else if (c == "move" && n == 4) {
         q.push_back(motion(t, std::atof(a), std::atof(b)));
+      } else if (c == "quit") {
+        SDL_Event e{};
+        e.type = SDL_EVENT_QUIT;
+        q.push_back({t, e});
       } else if (c == "click") {
         bool right = n >= 3 && std::string(a) == "right";
         SDL_Event e{};
