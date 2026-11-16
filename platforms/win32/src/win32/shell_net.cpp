@@ -21,7 +21,23 @@
 namespace recomp::hle {
 namespace {
 
+// x64 guests see Windows 10 (C:\Users\Player), 32-bit ones Windows XP.
 std::string FolderFor(uint32_t csidl) {
+  if (g_proc->x64) {
+    const std::string user = "C:\\Users\\Player";
+    switch (csidl & 0xFF) {
+      case 0x05: return user + "\\Documents";            // CSIDL_PERSONAL
+      case 0x1A: return user + "\\AppData\\Roaming";    // CSIDL_APPDATA
+      case 0x1C: return user + "\\AppData\\Local";      // CSIDL_LOCAL_APPDATA
+      case 0x23: return "C:\\ProgramData";              // CSIDL_COMMON_APPDATA
+      case 0x2E: return "C:\\Users\\Public\\Documents";  // CSIDL_COMMON_DOCUMENTS
+      case 0x26: return "C:\\Program Files";
+      case 0x24: return "C:\\Windows";
+      case 0x25: return "C:\\Windows\\system32";
+      case 0x10: return user + "\\Desktop";
+      default: return {};
+    }
+  }
   const std::string user = "C:\\Documents and Settings\\Player";
   switch (csidl & 0xFF) {
     case 0x05: return user + "\\My Documents";               // CSIDL_PERSONAL
@@ -59,8 +75,9 @@ HLE_NAMED("shell32.dll", "SHGetFolderPathA", Shell32GetFolderPathA, 5) {
   return GetFolderPathA(c);
 }
 
-HLE("shfolder.dll", SHGetFolderPathW, 5) {
-  uint32_t csidl = Arg(c, 1), out = Arg(c, 4);
+uint32_t GetFolderPathW(Ctx& c) {
+  uint32_t csidl = uint32_t(Arg(c, 1));
+  gaddr out = Arg(c, 4);
   std::string p = FolderFor(csidl);
   if (p.empty()) {
     WarnF("SHGetFolderPathW(CSIDL %X): unknown folder\n", csidl);
@@ -70,6 +87,14 @@ HLE("shfolder.dll", SHGetFolderPathW, 5) {
   PutWStr(out, p);
   return 0;
 }
+HLE64("shfolder.dll", SHGetFolderPathW, 5) { return GetFolderPathW(c); }
+HLE_NAMED_X("shell32.dll", "SHGetFolderPathW", Shell32GetFolderPathW, 5, true) {
+  return GetFolderPathW(c);
+}
+
+// SHCreateDirectoryExW(hwnd, path, security): as SHCreateDirectoryExA.
+uint32_t CreateDirectoryTree(const std::string& g);
+HLE64("shell32.dll", SHCreateDirectoryExW, 3) { return CreateDirectoryTree(NarrowPath(GWStr(Arg(c, 1)))); }
 
 // SHGetKnownFolderPath(id, flags, token, &path): Vista and later, so the
 // layout is Windows 10's (C:\Users\<user>). The path is CoTaskMemAlloc'd.
@@ -83,6 +108,15 @@ HLE64("shell32.dll", SHGetKnownFolderPath, 4) {
       {{0xFF, 0x32, 0x5C, 0x4C, 0x9D, 0xBB, 0xB0, 0x43, 0xB5, 0xB4, 0x2D, 0x72, 0xE5, 0x4E,
         0xAA, 0xA4},
        "C:\\Users\\Player\\Saved Games"},  // FOLDERID_SavedGames
+      {{0x85, 0x27, 0xB3, 0xF1, 0xBA, 0x6F, 0xCF, 0x4F, 0x9D, 0x55, 0x7B, 0x8E, 0x7F, 0x15,
+        0x70, 0x91},
+       "C:\\Users\\Player\\AppData\\Local"},  // FOLDERID_LocalAppData
+      {{0xDB, 0x85, 0xB6, 0x3E, 0xF9, 0x65, 0xF6, 0x4C, 0xA0, 0x3A, 0xE3, 0xEF, 0x65, 0x72,
+        0x9F, 0x3D},
+       "C:\\Users\\Player\\AppData\\Roaming"},  // FOLDERID_RoamingAppData
+      {{0xD0, 0x9A, 0xD3, 0xFD, 0x8F, 0x23, 0xAF, 0x46, 0xAD, 0xB4, 0x6C, 0x85, 0x48, 0x03,
+        0x69, 0xC7},
+       "C:\\Users\\Player\\Documents"},  // FOLDERID_Documents
   };
   gaddr id = Arg(c, 0), out = Arg(c, 3);
   WrPtr(out, 0);
@@ -100,8 +134,7 @@ HLE64("shell32.dll", SHGetKnownFolderPath, 4) {
 
 // SHCreateDirectoryExA(hwnd, path, security): the directory and any missing
 // parents. Returns a Win32 error code, not a BOOL.
-HLE("shell32.dll", SHCreateDirectoryExA, 3) {
-  std::string g = GStr(Arg(c, 1));
+uint32_t CreateDirectoryTree(const std::string& g) {
   bool absolute = (g.size() > 2 && g[1] == ':' && (g[2] == '\\' || g[2] == '/')) ||
                   g.rfind("\\\\", 0) == 0;
   if (!absolute) return 161;  // ERROR_BAD_PATHNAME
@@ -112,6 +145,7 @@ HLE("shell32.dll", SHCreateDirectoryExA, 3) {
   MakeDirs(HostPath(g, PathAccess::kWrite));
   return win32::kErrorSuccess;
 }
+HLE("shell32.dll", SHCreateDirectoryExA, 3) { return CreateDirectoryTree(GStr(Arg(c, 1))); }
 
 // ---- wsock32 ------------------------------------------------------------------------
 
