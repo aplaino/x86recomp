@@ -64,6 +64,10 @@ struct Process {
   // chain). Returns true to retry the faulting instruction; may throw
   // GuestResume to continue elsewhere. Without it the fault is fatal.
   bool (*guest_fault)(Ctx& c, bool write, gaddr addr) = nullptr;
+  // A breakpoint or trap instruction at va in x64 guest code (int3, ud2,
+  // ...): the platform's exception dispatch. Returns true when a handler
+  // continued after the instruction; without it, or on false, it is fatal.
+  bool (*guest_trap)(Ctx& c, gaddr va) = nullptr;
   // Services the host's window system for the guest (Win32: SDL events to
   // window messages), after each presented frame (x86/present.h).
   void (*pump_events)() = nullptr;

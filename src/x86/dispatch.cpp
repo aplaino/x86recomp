@@ -468,7 +468,7 @@ void Unreachable(Ctx& c, uint64_t va) {
   FatalF("returned from a no-return call at %08llX", (unsigned long long)va);
 }
 void Trap(Ctx& c, uint64_t va) {
-  (void)c;
+  if (g_proc->guest_trap && g_proc->guest_trap(c, va)) return;
   FatalF("breakpoint/trap instruction at %08llX", (unsigned long long)va);
 }
 void RaiseDivideError(Ctx& c, uint64_t va) {
