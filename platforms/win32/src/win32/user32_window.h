@@ -57,6 +57,10 @@ void SetHostEventSink(void (*sink)(const SDL_Event&));
 // behind a fullscreen exclusive surface on Windows. w = 0 ends it.
 void SetExclusiveMode(uint32_t hwnd, int w, int h);
 
+// hwnd's client area resized to w x h, its frame added as AdjustWindowRect
+// does, as SetWindowPos would (WM_SIZE when the size changes).
+void ResizeClientArea(uint32_t hwnd, int w, int h);
+
 // Shows hwnd without activating it, as SetWindowPos with SWP_SHOWWINDOW |
 // SWP_NOACTIVATE does. Direct3D 9 does this to the device window when it
 // goes fullscreen; games may leave that window hidden until then.
