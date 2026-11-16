@@ -310,6 +310,24 @@ HLE64("kernel32.dll", ResetEvent, 1) {
   return 1;
 }
 
+// Winsock's event objects are these events: manual-reset, made unsignalled.
+HLE64("ws2_32.dll", WSACreateEvent, 0) {
+  return HandleRet(NewHandle(std::make_shared<EventObject>(true, false)));
+}
+HLE64("ws2_32.dll", WSASetEvent, 1) {
+  GuestSyncPoint sync;
+  return SignalEventHandle(uint32_t(Arg(c, 0)), false) ? 1 : 0;
+}
+HLE64("ws2_32.dll", WSAResetEvent, 1) {
+  GuestSyncPoint sync;
+  auto e = std::dynamic_pointer_cast<EventObject>(GetHandle(Arg(c, 0)));
+  if (!e) return 0;
+  std::lock_guard<std::mutex> l(g_wait_mu);
+  e->signalled = false;
+  return 1;
+}
+HLE64("ws2_32.dll", WSACloseEvent, 1) { return CloseHandleValue(uint32_t(Arg(c, 0))) ? 1 : 0; }
+
 // ---- mutexes ----------------------------------------------------------------
 
 // bInitialOwner applies only to a mutex this call creates: one that
@@ -422,6 +440,23 @@ HLE64("kernel32.dll", WaitForMultipleObjects, 4) {
     objs.push_back(w);
   }
   return WaitObjects(objs, Arg(c, 2) != 0, Arg(c, 3));
+}
+// WSAWaitForMultipleEvents(count, events, wait all, timeout, alertable): as
+// WaitForMultipleObjects (WSA_WAIT_EVENT_0 and WSA_WAIT_TIMEOUT are its
+// values).
+HLE64("ws2_32.dll", WSAWaitForMultipleEvents, 5) {
+  GuestSyncPoint sync;
+  const uint32_t n = uint32_t(Arg(c, 0));
+  std::vector<std::shared_ptr<Waitable>> objs;
+  for (uint32_t i = 0; i < n; i++) {
+    auto w = AsWaitable(uint32_t(RdPtr(Arg(c, 1) + (g_proc->x64 ? 8 : 4) * i)));
+    if (!w) {
+      SetLastError(kErrorInvalidHandle);
+      return kWaitFailed;
+    }
+    objs.push_back(w);
+  }
+  return WaitObjects(objs, Arg(c, 2) != 0, uint32_t(Arg(c, 3)));
 }
 
 // ---- slim reader/writer locks and condition variables ------------------------
@@ -590,6 +625,21 @@ uint32_t NewThread(uint64_t stack, gaddr entry, uint64_t param, bool suspended, 
                suspended ? " (suspended)" : "");
   if (!suspended) RunThreadObject(to);
   return h;
+}
+
+// OpenThread(access, inherit, tid): a new handle to a thread still running.
+HLE64("kernel32.dll", OpenThread, 3) {
+  std::shared_ptr<ThreadObject> to;
+  {
+    std::lock_guard<std::mutex> l(g_wait_mu);
+    auto it = g_thread_objs.find(uint32_t(Arg(c, 2)));
+    if (it != g_thread_objs.end()) to = it->second;
+  }
+  if (!to) {
+    SetLastError(kErrorInvalidParameter);
+    return 0;
+  }
+  return HandleRet(NewHandle(to));
 }
 
 bool JoinThread(uint32_t h, uint32_t* exit_code) {
