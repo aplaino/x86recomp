@@ -173,6 +173,40 @@ inline void HostArith(Op op, int lanes, Xmm& d, const Xmm& s) {
   d = r;
 }
 
+// RECOMP_SSE_HOST with FTZ (and DAZ if `daz`), inline: HostArith when no
+// operand lane is denormal under DAZ and every result lane is above the
+// smallest normal in magnitude, or a zero that is exact (any sum or
+// difference: a nonzero one is at least the smallest denormal; a product
+// with a zero operand; a quotient of zero, or by infinity). Otherwise
+// false, d unchanged, and ArithFtzDaz decides (a denormal result, the
+// smallest-normal edge, an underflow to zero).
+template <bool D>
+[[gnu::always_inline]] inline bool HostArithFtz(Op op, int lanes, Xmm& d, const Xmm& s,
+                                                bool daz) {
+  using B = Bits<D>;
+  using U = typename B::U;
+  constexpr U kMag = B::kExp | B::kFrac, kMinNormal = B::kFrac + 1;
+  if (daz)
+    for (int i = 0; i < lanes; i++) {
+      const U x = Lane<U>(d, i), y = Lane<U>(s, i);
+      if (((x & B::kExp) == 0 && (x & B::kFrac)) || ((y & B::kExp) == 0 && (y & B::kFrac)))
+        return false;
+    }
+  Xmm r = d;
+  HostArith<D>(op, lanes, r, s);
+  for (int i = 0; i < lanes; i++) {
+    const U m = Lane<U>(r, i) & kMag;
+    if (m > kMinNormal) [[likely]] continue;
+    if (m != 0) return false;
+    if (op == kAdd || op == kSub) continue;
+    const U xm = Lane<U>(d, i) & kMag, ym = Lane<U>(s, i) & kMag;
+    if (xm == 0 || (op == kMul ? ym == 0 : ym == B::kExp)) continue;
+    return false;
+  }
+  d = r;
+  return true;
+}
+
 // RECOMP_SSE_HOST: CMPPS/PD/SS/SD by the host's compares (pred < 8).
 template <bool D>
 inline void HostCmp(int lanes, Xmm& d, const Xmm& s, uint8_t pred) {
@@ -295,7 +329,13 @@ bool CvtFloatFtzDaz(Ctx& c, bool to_dbl, int lanes, Xmm& d, const Xmm& s);
       (dbl ? fast::Arith<true>(op, lanes, d, s) : fast::Arith<false>(op, lanes, d, s)))
     [[likely]] return;
 #ifdef RECOMP_SSE_HOST
-  if (fast::FtzDazMxcsr(c.mxcsr) && ArithFtzDaz(c, op, dbl, lanes, d, s)) return;
+  if (fast::FtzDazMxcsr(c.mxcsr)) {
+    const bool daz = c.mxcsr & 0x40u;
+    if (dbl ? fast::HostArithFtz<true>(op, lanes, d, s, daz)
+            : fast::HostArithFtz<false>(op, lanes, d, s, daz))
+      [[likely]] return;
+    if (ArithFtzDaz(c, op, dbl, lanes, d, s)) return;
+  }
 #endif
   d = ArithModel(c, op, dbl, lanes, d, s, va);
 }
