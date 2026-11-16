@@ -429,6 +429,9 @@ HLE("d3d9.dll", Direct3DCreate9, 1) {
   return com::Publish(std::make_shared<Direct3D>(), Direct3DVtable());
 }
 
+// Whether PIX is profiling the process: never. Direct3D 11 games ask too.
+HLE64("d3d9.dll", D3DPERF_GetStatus, 0) { return 0; }
+
 // The PIX event markers: the nesting level the event starts / ends in.
 HLE("d3d9.dll", D3DPERF_BeginEvent, 2) { return uint32_t(g_perf_level++); }
 HLE("d3d9.dll", D3DPERF_EndEvent, 0) {

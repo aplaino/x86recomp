@@ -77,10 +77,11 @@ struct View : Child {
   uint32_t format = 0, view_dim = 0;
   uint32_t first_mip = 0, mips = 1, first_slice = 0, slices = 1;
   uint32_t first_element = 0, elements = 0, flags = 0;  // buffer views
+  std::vector<uint8_t> desc;  // its description, as given or as Windows fills it in
 };
 
 struct Shader : Child {
-  uint32_t stage = 0;  // 0 vs, 1 ps, 2 cs (the shader type in the DXBC)
+  uint32_t stage = 0;  // 0 vs, 1 ps, 2 cs; 3 hs, 4 ds, 5 gs (kept, not drawn with)
   std::vector<uint8_t> dxbc;
   uint64_t hash = 0;
 };
