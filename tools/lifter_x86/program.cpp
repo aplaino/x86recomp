@@ -86,15 +86,15 @@ bool Program::Load(const std::string& path, const std::string& symdir,
     if (modules.size() > 1) *err += " (give the module another --base)";
     return false;
   }
-  if (!m.text_hi) {
-    *err = "no .text section";
+  if (m.text.empty()) {
+    *err = "no executable section";
     return false;
   }
   if (symdir.empty()) return true;
   // Symbol files hold VAs at the preferred base; a moved module's are
   // shifted by the same delta as its relocations.
   const uint64_t delta = m.base - m.preferred_base;
-  auto in_text = [&](uint64_t va) { return va >= m.text_lo && va < m.text_hi; };
+  auto in_text = [&](uint64_t va) { return m.TextEnd(va) != 0; };
 
   // Ghidra's function list: entry, min, max, chunks, thunk, noreturn,
   // callconv, name.

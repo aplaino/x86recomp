@@ -8,6 +8,8 @@
 //            [--module <game.dll> --symbols DIR [--manifest FILE]
 //             [--base HEX]]...
 //            [--only VA[,VA...]]   (just these functions and their callees)
+//            [--stack-flow]  (returns and tail jumps that are not what they
+//                             seem, as protectors write them; see program.h)
 //   recomp_lift (--forms LIST | --code BIN) [--x64]
 //               (--x87-test | --int-test | --sse-test) OUT.cpp
 //
@@ -107,6 +109,7 @@ int main(int argc, char** argv) {
   uint64_t per_file = 12000;
   uint64_t dump = 0;
   std::string x87_test, int_test, sse_test, forms, code;
+  bool stack_flow = false;
   bool forms_x64 = false;
   std::set<uint64_t> only;
   for (int i = 1; i < argc; i++) {
@@ -126,6 +129,7 @@ int main(int argc, char** argv) {
     else if (a == "--forms") forms = val();
     else if (a == "--code") code = val();
     else if (a == "--x64") forms_x64 = true;
+    else if (a == "--stack-flow") stack_flow = true;
     else if (a == "--only") {
       std::string list = val();
       for (size_t pos = 0; pos < list.size();) {
@@ -163,6 +167,7 @@ int main(int argc, char** argv) {
   }
 
   lifter::Program p;
+  p.stack_flow = stack_flow;
   std::string err;
   for (const ModuleArgs& m : mods) {
     if (!p.Load(m.path, m.symdir, m.base, &err)) {

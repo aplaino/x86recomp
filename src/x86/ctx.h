@@ -54,6 +54,10 @@ struct Ctx {
   Xmm xmm[16];
   Xmm ymm_hi[16];
   uint32_t mxcsr;
+  // recomp_lift --stack-flow builds only: the return address the function
+  // entered next continues an activation for (Flow), 0 when it is entered
+  // by a call and its return address is on the stack.
+  uint64_t ret_hint = 0;
   Thread* thread;    // runtime-owned per-thread data
 };
 

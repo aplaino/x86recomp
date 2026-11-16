@@ -16,6 +16,9 @@ thread_local bool t_in_try = false;
 // loop that crosses function entries would otherwise recurse per
 // iteration).
 const char* TailAttr() { return t_in_try ? "" : "LIFT_MUSTTAIL "; }
+// --stack-flow: a tail call continues this activation, so the callee takes
+// its return address R from here (Program::stack_flow).
+const char* HandOn(const lifter::Program& p) { return p.stack_flow ? "c.ret_hint = R; " : ""; }
 
 __attribute__((format(printf, 1, 2))) std::string Fmt(const char* f, ...) {
   char buf[512];
@@ -585,7 +588,7 @@ class InsnEmitter {
   // ---- control flow -------------------------------------------------------
   std::string TailCall(uint64_t t) {
     refs_.insert(t);
-    return Fmt("{ LIFT_SPILL; %sreturn %s(c); }", TailAttr(), FnName(t).c_str());
+    return Fmt("{ LIFT_SPILL; %s%sreturn %s(c); }", HandOn(p_), TailAttr(), FnName(t).c_str());
   }
   std::string GotoOrTail(uint64_t t) {
     if (IsOtherEntry(p_, f_, t)) return TailCall(t);
@@ -2829,6 +2832,8 @@ void InsnEmitter::Emit64() {
           L(Fmt("  case %s: %s", Hex(tgt).c_str(), GotoOrTail(tgt).c_str()));
         L(Fmt("  default: LIFT_SPILL; ::recomp::BadJump(c, %s, t);", va.c_str()));
         L("}");
+      } else if (p_.stack_flow) {
+        L(Fmt("LIFT_SPILL; ::recomp::Flow(c, t, R, %s); return;", va.c_str()));
       } else {
         L(Fmt("LIFT_SPILL; ::recomp::Dispatch(c, t, %s); return;", va.c_str()));
       }
@@ -2836,6 +2841,18 @@ void InsnEmitter::Emit64() {
     }
     case ZYDIS_MNEMONIC_RET: {
       uint64_t extra = Nvis() ? Op(0).imm.value.u : 0;
+      if (p_.stack_flow) {
+        // A return to anything but R goes on in this activation: at one of
+        // this function's own addresses that it computes (a loop written
+        // with push/ret), as a goto, so the host stack does not grow; else
+        // through Flow.
+        L("const uint64_t t = ::recomp::lift::Rd<uint64_t>(B, rsp);");
+        L(Fmt("rsp += %lluu;", U(8 + extra)));
+        L("if (t == R) { LIFT_SPILL; return; }");
+        for (uint64_t a : f_.code_consts) L(Fmt("if (t == %s) goto L_%08llX;", Hex(a).c_str(), U(a)));
+        L(Fmt("LIFT_SPILL; ::recomp::Flow(c, t, R, %s); return;", va.c_str()));
+        return;
+      }
       L(Fmt("rsp += %lluu; LIFT_SPILL; return;", U(8 + extra)));
       return;
     }
@@ -3290,6 +3307,8 @@ void InsnEmitter::Emit() {
         L(Fmt("  default: LIFT_SPILL; ::recomp::BadJump(c, %s, t);",
               Hex(in_.va).c_str()));
         L("}");
+      } else if (p_.stack_flow) {
+        L(Fmt("LIFT_SPILL; ::recomp::Flow(c, t, R, %s); return;", Hex(in_.va).c_str()));
       } else {
         L(Fmt("LIFT_SPILL; ::recomp::Dispatch(c, t, %s); return;",
               Hex(in_.va).c_str()));
@@ -3298,6 +3317,14 @@ void InsnEmitter::Emit() {
     }
     case ZYDIS_MNEMONIC_RET: {
       uint32_t extra = Nvis() ? static_cast<uint32_t>(Op(0).imm.value.u) : 0;
+      if (p_.stack_flow) {
+        L("const uint32_t t = ::recomp::lift::Rd<uint32_t>(B, esp);");
+        L(Fmt("esp += %uu;", 4 + extra));
+        L("if (t == R) { LIFT_SPILL; return; }");
+        for (uint64_t a : f_.code_consts) L(Fmt("if (t == %s) goto L_%08llX;", Hex(a).c_str(), U(a)));
+        L(Fmt("LIFT_SPILL; ::recomp::Flow(c, t, R, %s); return;", Hex(in_.va).c_str()));
+        return;
+      }
       L(Fmt("esp += %uu; LIFT_SPILL; return;", 4 + extra));
       return;
     }
@@ -3626,6 +3653,11 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
   }
   o += "void " + FnName(f.entry) + (p_.replaced.count(f.entry) ? "_lifted" : "") +
        "(::recomp::Ctx& c) {\n  LIFT_ENTER\n";
+  if (p_.stack_flow)
+    o += p_.x64 ? "  const uint64_t R = c.ret_hint ? std::exchange(c.ret_hint, uint64_t(0))"
+                  " : ::recomp::lift::Rd<uint64_t>(B, rsp);\n"
+                : "  const uint32_t R = c.ret_hint ? uint32_t(std::exchange(c.ret_hint, uint64_t(0)))"
+                  " : ::recomp::lift::Rd<uint32_t>(B, esp);\n";
   // Functions that register an SEH frame (32-bit: write fs:[0]) can be
   // resumed into by their __except blocks, and setjmp callers by longjmp;
   // see GuestResume.
@@ -3716,7 +3748,7 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
       auto ni = std::next(it);
       if (IsOtherEntry(p_, f, nx)) {
         refs->insert(nx);
-        o += Fmt("  { LIFT_SPILL; %sreturn %s(c); }\n", TailAttr(),
+        o += Fmt("  { LIFT_SPILL; %s%sreturn %s(c); }\n", HandOn(p_), TailAttr(),
                  FnName(nx).c_str());
       } else if (ni == f.insns.end() || ni->first != nx) {
         o += f.insns.count(nx)
