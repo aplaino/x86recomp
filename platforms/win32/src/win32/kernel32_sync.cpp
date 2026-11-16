@@ -694,11 +694,6 @@ HLE64("kernel32.dll", SetThreadAffinityMask, 2) {
   return ProcessAffinityMask();
 }
 
-HLE64("kernel32.dll", GetThreadContext, 2) {
-  // Only used by the crash reporter to sample other threads.
-  SetLastError(kErrorAccessDenied);
-  return 0;
-}
 
 HLE("kernel32.dll", OpenProcess, 3) {
   SetLastError(kErrorAccessDenied);
