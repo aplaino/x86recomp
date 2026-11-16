@@ -1,6 +1,7 @@
 // VCRUNTIME140's exception handling for x64 guests: _CxxThrowException,
 // __CxxFrameHandler4 (the compressed C++ EH metadata of MSVC 2019 and
-// later), __C_specific_handler (__try/__except/__finally scope tables) and
+// later) and __CxxFrameHandler3 (the plain FuncInfo of earlier
+// compilers), __C_specific_handler (__try/__except/__finally scope tables) and
 // __current_exception. Dispatch and unwinding are win32/seh64.h's.
 // The metadata's format follows MSVC's as Wine's handler4.c documents it
 // (reference only).
@@ -356,6 +357,132 @@ HLE64("vcruntime140_1.dll", __CxxFrameHandler4, kCdecl) {
   }
   if ((fi.header & kNoExcept) && !(fi.header & kIsCatch) && cxx)
     FatalF("guest C++: an exception left a noexcept function");
+  return seh64::kContinueSearch;
+}
+
+// __CxxFrameHandler3(record, frame, context, dispatcher_context): the
+// handler data is the RVA of a FuncInfo {magic, maxState, unwind map,
+// try blocks, try block map, IP-to-state count, map, unwind help, ES type
+// list, EH flags}, every field 32 bits. Unwind map entries are {toState,
+// action}; try blocks {tryLow, tryHigh, catchHigh, catches, handlers};
+// handlers {adjectives, type, catch object offset, funclet, frame
+// offset}; IP-to-state entries {ip, state}, ascending.
+namespace {
+constexpr uint32_t kFh3Ehs = 1;  // FuncInfo EH flags: /EHs, C++ exceptions only
+
+struct FuncInfo3 {
+  gaddr image;
+  int32_t max_state;
+  gaddr unwind_map, try_map, ip_map;
+  uint32_t try_count, ip_count, eh_flags;
+};
+
+FuncInfo3 ReadFuncInfo3(gaddr image, gaddr fi) {
+  const uint32_t magic = Rd32(fi) & 0x1FFFFFFF;
+  return {image,
+          int32_t(Rd32(fi + 4)),
+          Rd32(fi + 8) ? image + Rd32(fi + 8) : 0,
+          Rd32(fi + 16) ? image + Rd32(fi + 16) : 0,
+          Rd32(fi + 24) ? image + Rd32(fi + 24) : 0,
+          Rd32(fi + 12),
+          Rd32(fi + 20),
+          magic >= 0x19930522 ? Rd32(fi + 36) : 0};
+}
+
+int StateAt3(const FuncInfo3& fi, gaddr pc) {
+  int state = -1;
+  for (uint32_t i = 0; i < fi.ip_count; i++) {
+    gaddr e = fi.ip_map + 8 * i;
+    if (fi.image + Rd32(e) > pc) break;
+    state = int32_t(Rd32(e + 4));
+  }
+  return state;
+}
+
+// Runs the unwind actions from state `from` down to (not including) `to`;
+// each is a funclet called (itself, the frame).
+void LocalUnwind3(Ctx& c, const FuncInfo3& fi, gaddr frame, int from, int to) {
+  for (int s = from; s > to && s < fi.max_state;) {
+    gaddr e = fi.unwind_map + 8 * uint32_t(s);
+    if (uint32_t action = Rd32(e + 4)) CallGuest(c, fi.image + action, {fi.image + action, frame});
+    s = int32_t(Rd32(e));
+  }
+}
+
+// The frame whose objects the code at pc belongs to: a catch funclet's
+// parent frame is stored in the funclet's frame at its handler's frame
+// offset.
+gaddr ParentFrame3(const FuncInfo3& fi, gaddr seg_begin, gaddr frame) {
+  for (uint32_t i = 0; i < fi.try_count; i++) {
+    gaddr tb = fi.try_map + 20 * i;
+    uint32_t n = Rd32(tb + 12);
+    gaddr handlers = fi.image + Rd32(tb + 16);
+    for (uint32_t j = 0; j < n; j++) {
+      gaddr h = handlers + 20 * j;
+      if (fi.image + Rd32(h + 12) == seg_begin) return Rd64(frame + int32_t(Rd32(h + 16)));
+    }
+  }
+  return frame;
+}
+}  // namespace
+
+HLE64("vcruntime140.dll", __CxxFrameHandler3, kCdecl) {
+  gaddr rec = Arg(c, 0), frame = Arg(c, 1), dc = Arg(c, 3);
+  const gaddr image = Rd64(dc + seh64::kDcImageBase);
+  const gaddr seg_begin = image + Rd32(Rd64(dc + seh64::kDcFunctionEntry));
+  const gaddr pc = Rd64(dc + seh64::kDcControlPc);
+  const uint32_t code = Rd32(rec), flags = Rd32(rec + 4);
+  const FuncInfo3 fi = ReadFuncInfo3(image, image + Rd32(Rd64(dc + seh64::kDcHandlerData)));
+  const gaddr orig = ParentFrame3(fi, seg_begin, frame);
+  const int state = StateAt3(fi, pc);
+
+  if (flags & (seh64::kUnwinding | seh64::kExitUnwind)) {
+    LocalUnwind3(c, fi, orig, state, -1);
+    return seh64::kContinueSearch;
+  }
+  if ((fi.eh_flags & kFh3Ehs) && code != kCxxException) return seh64::kContinueSearch;
+
+  const bool cxx = code == kCxxException && Rd32(rec + 0x18) >= 3 &&
+                   Rd64(rec + 0x20) == kCxxMagic;
+  const gaddr obj = cxx ? Rd64(rec + 0x28) : 0, ti = cxx ? Rd64(rec + 0x30) : 0;
+  const gaddr exc_base = cxx && Rd32(rec + 0x18) >= 4 ? Rd64(rec + 0x38) : 0;
+
+  for (uint32_t i = 0; i < fi.try_count; i++) {
+    gaddr tb = fi.try_map + 20 * i;
+    int low = int32_t(Rd32(tb)), high = int32_t(Rd32(tb + 4));
+    if (state < low || state > high) continue;
+    uint32_t n = Rd32(tb + 12);
+    gaddr handlers = image + Rd32(tb + 16);
+    for (uint32_t j = 0; j < n; j++) {
+      gaddr h = handlers + 20 * j;
+      uint32_t adj = Rd32(h);
+      gaddr td = Rd32(h + 4) && !(adj & 0x40) ? image + Rd32(h + 4) : 0;
+      int32_t offset = int32_t(Rd32(h + 8));
+      gaddr handler = image + Rd32(h + 12);
+
+      gaddr ct = 0;
+      if (cxx) {
+        ct = FindCaught(ti, exc_base, td, adj);
+        if (!ct) continue;
+      } else if (td) {
+        continue;  // only catch(...) takes a non-C++ exception
+      }
+
+      RECOMP_TRACE("  C++ exception caught by the catch block at %08llX\n",
+                   (unsigned long long)handler);
+      unwind::Regs inside = seh64::UnwindBelow(c, rec, frame);
+      LocalUnwind3(c, fi, orig, state, low);
+      if (ct && ct != ~0ull && td && Rd8(td + 16) && offset)
+        CopyException(c, obj, orig + offset, adj, ct, exc_base);
+      Wr64(CurrentSlots(), rec);
+      Wr64(CurrentSlots() + 8, seh64::Current()->context);
+      gaddr cont = CallGuest(c, handler, {handler, orig, 0x100});
+      if (cxx) DestroyException(c, rec);
+      Wr64(CurrentSlots(), 0);
+      Wr64(CurrentSlots() + 8, 0);
+      seh64::ContinueAt(c, inside, frame, cont, 0);
+    }
+  }
   return seh64::kContinueSearch;
 }
 

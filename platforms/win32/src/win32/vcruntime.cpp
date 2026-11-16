@@ -60,6 +60,36 @@ HLE64("vcruntime140.dll", strstr, kCdecl) {
   return r ? Arg(c, 0) + gaddr(r - p) : 0;
 }
 
+// Wide strings: wchar_t is 16 bits on Windows.
+const uint16_t* W(gaddr p) { return g_proc->mem.ptr<const uint16_t>(p); }
+
+HLE64("vcruntime140.dll", wcschr, kCdecl) {
+  const uint16_t ch = uint16_t(Arg(c, 1));
+  for (gaddr p = Arg(c, 0);; p += 2) {
+    const uint16_t w = Rd16(p);
+    if (w == ch) return p;
+    if (!w) return 0;
+  }
+}
+HLE64("vcruntime140.dll", wcsrchr, kCdecl) {
+  const uint16_t ch = uint16_t(Arg(c, 1));
+  gaddr last = 0;
+  for (gaddr p = Arg(c, 0);; p += 2) {
+    const uint16_t w = Rd16(p);
+    if (w == ch) last = p;
+    if (!w) return last;
+  }
+}
+HLE64("vcruntime140.dll", wcsstr, kCdecl) {
+  const gaddr hay = Arg(c, 0), needle = Arg(c, 1);
+  size_t n = 0;
+  while (W(needle)[n]) n++;
+  for (gaddr p = hay;; p += 2) {
+    if (!std::memcmp(W(p), W(needle), 2 * n)) return p;
+    if (!Rd16(p)) return 0;
+  }
+}
+
 // ---- type_info ----------------------------------------------------------------
 // __std_type_info_data {const char* _UndecoratedName; char _DecoratedName[];}
 // (after type_info's vtable pointer). Types are equal when their decorated
@@ -102,6 +132,67 @@ HLE64("vcruntime140.dll", __std_exception_destroy, kCdecl) {
   Wr64(data, 0);
   Wr8(data + 8, 0);
   return 0;
+}
+
+// ---- RTTI -----------------------------------------------------------------------
+// MSVC's x64 RTTI: a vtable's slot -1 is the RTTICompleteObjectLocator
+// {signature (1), offset, cdOffset, type descriptor, class hierarchy
+// descriptor, self}, the last three RVAs (self gives the image base). The
+// hierarchy descriptor {signature, attributes, base count, base class
+// array} lists base class descriptors {type descriptor, contained bases,
+// PMD {mdisp, pdisp, vdisp}, attributes, hierarchy descriptor}, the
+// complete class first. TypeDescriptor {vftable, spare, name}.
+
+constexpr uint32_t kChdMultiple = 1, kChdVirtual = 2;
+constexpr uint32_t kBcdNotVisible = 1, kBcdAmbiguous = 2;
+
+bool SameType(gaddr a, gaddr b) { return a == b || !std::strcmp(S(a + 16), S(b + 16)); }
+
+int64_t PmdOffset(gaddr obj, gaddr pmd) {
+  int64_t off = 0;
+  const int32_t mdisp = int32_t(Rd32(pmd)), pdisp = int32_t(Rd32(pmd + 4)),
+                vdisp = int32_t(Rd32(pmd + 8));
+  if (pdisp >= 0) off = pdisp + int32_t(Rd32(Rd64(obj + pdisp) + vdisp));
+  return off + mdisp;
+}
+
+// __RTDynamicCast(inptr, VfDelta, SrcType, TargetType, isReference): the
+// target subobject, found among the complete object's bases; the first
+// visible, unambiguous match.
+HLE64("vcruntime140.dll", __RTDynamicCast, kCdecl) {
+  gaddr in = Arg(c, 0);
+  const gaddr target = Arg(c, 3);
+  const bool ref = uint32_t(Arg(c, 4)) != 0;
+  if (!in) return 0;
+  gaddr col = Rd64(Rd64(in) - 8);
+  gaddr obj = in - Rd32(col + 4);
+  if (uint32_t cd = Rd32(col + 8)) obj -= int32_t(Rd32(in - cd));
+  const gaddr image = col - Rd32(col + 20);
+  const gaddr chd = image + Rd32(col + 16);
+  const uint32_t attrs = Rd32(chd + 4), n = Rd32(chd + 8);
+  const gaddr bases = image + Rd32(chd + 12);
+  for (uint32_t i = 0; i < n; i++) {
+    gaddr bcd = image + Rd32(bases + 4 * i);
+    if (!SameType(image + Rd32(bcd), target)) continue;
+    if ((attrs & (kChdMultiple | kChdVirtual)) && (Rd32(bcd + 20) & (kBcdNotVisible | kBcdAmbiguous)))
+      continue;
+    return obj + PmdOffset(obj, bcd + 8);
+  }
+  if (ref) FatalF("guest C++: dynamic_cast to a reference failed (std::bad_cast is not thrown yet)");
+  return 0;
+}
+
+// ---- setjmp -----------------------------------------------------------------------
+// setjmp itself returns 0 the first time; a longjmp back would need the
+// caller to be resumable (a lifter `setjmp` line for the import).
+HLE64("vcruntime140.dll", __intrinsic_setjmp, kCdecl) { return 0; }
+HLE64("vcruntime140.dll", longjmp, kCdecl) {
+  FatalF("guest longjmp: setjmp through the import is not resumable yet");
+}
+
+HLE64("vcruntime140.dll", __vcrt_InitializeCriticalSectionEx, kCdecl) {
+  InitCs(Arg(c, 0), uint32_t(Arg(c, 1)));
+  return 1;
 }
 
 HLE64("vcruntime140.dll", __std_terminate, kCdecl) { FatalF("guest called std::terminate()"); }
