@@ -12,6 +12,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <ctime>
 #include <string>
 
 #include "runtime/log.h"
@@ -55,11 +56,11 @@ std::string VersionAt(gaddr p) {
 }
 
 // ISteamClient's GetISteam*(... , version): the version string is the last
-// argument, the fourth (hUser, hPipe, version) or, for GetISteamUtils, the
-// third (hPipe, version).
-uint64_t GetInterface(Ctx& c) {
-  std::string v = VersionAt(Arg(c, 3));
-  if (v.empty()) v = VersionAt(Arg(c, 2));
+// argument, `at`: the fourth (hUser, hPipe, version) or, for GetISteamUtils,
+// the third (hPipe, version). Only that one is read: the registers after
+// it hold whatever the caller left there.
+uint64_t GetInterface(Ctx& c, int at) {
+  std::string v = VersionAt(Arg(c, at));
   if (v.empty()) FatalF("steam_api64: an ISteamClient getter without a version string");
   return Interface(v);
 }
@@ -119,32 +120,88 @@ HLE64(kDll, SteamInternal_ContextInit, kCdecl) {
 }
 
 // ISteamClient (SteamClient017): the interface getters by slot.
-#define RECOMP_STEAM_GETTER(slot)                                                     \
+#define RECOMP_STEAM_GETTER(slot, at)                                                 \
   HLE_NAMED_X(kDll, "SteamClient017::#" #slot, SteamClientGet##slot, kCdecl, true) { \
-    return GetInterface(c);                                                           \
+    return GetInterface(c, at);                                                       \
   }
-RECOMP_STEAM_GETTER(5)   // GetISteamUser
-RECOMP_STEAM_GETTER(6)   // GetISteamGameServer
-RECOMP_STEAM_GETTER(8)   // GetISteamFriends
-RECOMP_STEAM_GETTER(9)   // GetISteamUtils
-RECOMP_STEAM_GETTER(10)  // GetISteamMatchmaking
-RECOMP_STEAM_GETTER(11)  // GetISteamMatchmakingServers
-RECOMP_STEAM_GETTER(12)  // GetISteamGenericInterface
-RECOMP_STEAM_GETTER(13)  // GetISteamUserStats
-RECOMP_STEAM_GETTER(14)  // GetISteamGameServerStats
-RECOMP_STEAM_GETTER(15)  // GetISteamApps
-RECOMP_STEAM_GETTER(16)  // GetISteamNetworking
-RECOMP_STEAM_GETTER(17)  // GetISteamRemoteStorage
-RECOMP_STEAM_GETTER(18)  // GetISteamScreenshots
-RECOMP_STEAM_GETTER(23)  // GetISteamHTTP
-RECOMP_STEAM_GETTER(25)  // GetISteamController
-RECOMP_STEAM_GETTER(26)  // GetISteamUGC
-RECOMP_STEAM_GETTER(27)  // GetISteamAppList
-RECOMP_STEAM_GETTER(28)  // GetISteamMusic
-RECOMP_STEAM_GETTER(29)  // GetISteamMusicRemote
-RECOMP_STEAM_GETTER(30)  // GetISteamHTMLSurface
-RECOMP_STEAM_GETTER(35)  // GetISteamInventory
-RECOMP_STEAM_GETTER(36)  // GetISteamVideo
+RECOMP_STEAM_GETTER(5, 3)   // GetISteamUser
+RECOMP_STEAM_GETTER(6, 3)   // GetISteamGameServer
+RECOMP_STEAM_GETTER(8, 3)   // GetISteamFriends
+RECOMP_STEAM_GETTER(9, 2)   // GetISteamUtils
+RECOMP_STEAM_GETTER(10, 3)  // GetISteamMatchmaking
+RECOMP_STEAM_GETTER(11, 3)  // GetISteamMatchmakingServers
+RECOMP_STEAM_GETTER(12, 3)  // GetISteamGenericInterface
+RECOMP_STEAM_GETTER(13, 3)  // GetISteamUserStats
+RECOMP_STEAM_GETTER(14, 3)  // GetISteamGameServerStats
+RECOMP_STEAM_GETTER(15, 3)  // GetISteamApps
+RECOMP_STEAM_GETTER(16, 3)  // GetISteamNetworking
+RECOMP_STEAM_GETTER(17, 3)  // GetISteamRemoteStorage
+RECOMP_STEAM_GETTER(18, 3)  // GetISteamScreenshots
+RECOMP_STEAM_GETTER(23, 3)  // GetISteamHTTP
+RECOMP_STEAM_GETTER(24, 3)  // GetISteamUnifiedMessages
+RECOMP_STEAM_GETTER(25, 3)  // GetISteamController
+RECOMP_STEAM_GETTER(26, 3)  // GetISteamUGC
+RECOMP_STEAM_GETTER(27, 3)  // GetISteamAppList
+RECOMP_STEAM_GETTER(28, 3)  // GetISteamMusic
+RECOMP_STEAM_GETTER(29, 3)  // GetISteamMusicRemote
+RECOMP_STEAM_GETTER(30, 3)  // GetISteamHTMLSurface
+// Past 30 the slots moved between SDKs (deprecated methods kept in
+// place); each is taken as a getter only when its fourth argument is a
+// version string, else GetInterface is fatal.
+RECOMP_STEAM_GETTER(31, 3)
+RECOMP_STEAM_GETTER(32, 3)
+RECOMP_STEAM_GETTER(33, 3)
+RECOMP_STEAM_GETTER(34, 3)  // GetISteamInventory
+RECOMP_STEAM_GETTER(35, 3)  // GetISteamVideo
+RECOMP_STEAM_GETTER(36, 3)
+RECOMP_STEAM_GETTER(37, 3)
 #undef RECOMP_STEAM_GETTER
+
+// ISteamApps (STEAMAPPS_INTERFACE_VERSION008): the player owns the game
+// they run, and its DLC, in English; no cybercafe, ban or free weekend.
+#define RECOMP_STEAM_APPS(slot, ident, value)                                        \
+  HLE_NAMED_X(kDll, "STEAMAPPS_INTERFACE_VERSION008::#" #slot, ident, kCdecl, true) { \
+    return value;                                                                     \
+  }
+RECOMP_STEAM_APPS(0, SteamAppsBIsSubscribed, 1)
+RECOMP_STEAM_APPS(1, SteamAppsBIsLowViolence, 0)
+RECOMP_STEAM_APPS(2, SteamAppsBIsCybercafe, 0)
+RECOMP_STEAM_APPS(3, SteamAppsBIsVACBanned, 0)
+RECOMP_STEAM_APPS(6, SteamAppsBIsSubscribedApp, 1)
+RECOMP_STEAM_APPS(7, SteamAppsBIsDlcInstalled, 1)
+RECOMP_STEAM_APPS(9, SteamAppsBIsSubscribedFromFreeWeekend, 0)
+#undef RECOMP_STEAM_APPS
+HLE_NAMED_X(kDll, "STEAMAPPS_INTERFACE_VERSION008::#4", SteamAppsGetCurrentGameLanguage, kCdecl,
+            true) {
+  static gaddr s = [] {
+    gaddr p = HeapAllocProcess(8, true);
+    PutStr(p, "english");
+    return p;
+  }();
+  return s;
+}
+
+// ISteamUtils (SteamUtils009): no overlay, the public universe, the host's
+// clock; warning hooks and notification placement are accepted.
+HLE_NAMED_X(kDll, "SteamUtils009::#2", SteamUtilsGetConnectedUniverse, kCdecl, true) {
+  return 1;  // k_EUniversePublic
+}
+HLE_NAMED_X(kDll, "SteamUtils009::#3", SteamUtilsGetServerRealTime, kCdecl, true) {
+  return uint32_t(std::time(nullptr));
+}
+HLE_NAMED_X(kDll, "SteamUtils009::#10", SteamUtilsSetOverlayNotificationPosition, kCdecl, true) {
+  return 0;
+}
+HLE_NAMED_X(kDll, "SteamUtils009::#16", SteamUtilsSetWarningMessageHook, kCdecl, true) { return 0; }
+HLE_NAMED_X(kDll, "SteamUtils009::#17", SteamUtilsIsOverlayEnabled, kCdecl, true) { return 0; }
+HLE_NAMED_X(kDll, "SteamUtils009::#18", SteamUtilsBOverlayNeedsPresent, kCdecl, true) { return 0; }
+HLE_NAMED_X(kDll, "SteamUtils009::#23", SteamUtilsGetSteamUILanguage, kCdecl, true) {
+  static gaddr s = [] {
+    gaddr p = HeapAllocProcess(8, true);
+    PutStr(p, "english");
+    return p;
+  }();
+  return s;
+}
 
 }  // namespace recomp::hle
