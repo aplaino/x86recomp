@@ -157,6 +157,9 @@ uint32_t RunMainThreadBeside(Thread* t, const std::function<uint64_t(Ctx&)>& bod
 // Whether va is the entry of a lifted function in Process::code (once
 // InitDispatch has run).
 bool IsLifted(gaddr va);
+// Whether any lifted function lies in [lo, lo + size) (usable before
+// InitDispatch: a platform deciding which ranges are code).
+bool HasLiftedCode(gaddr lo, uint64_t size);
 
 // Per-user data directory: $XDG_DATA_HOME/<id>, else ~/.local/share/<id>
 // (~/Library/Application Support/<id> on macOS) (settings, saves, the guest's C: drive, crash and hang reports).
