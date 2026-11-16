@@ -203,9 +203,31 @@ using namespace win32;
 
 // ---- process / module ----------------------------------------------------
 
-HLE("kernel32.dll", GetVersion, 0) {
-  return 0x0A280105;  // Windows XP: build 2600, 5.1, NT platform
+// x64 guests see Windows 10 22H2 (as the PEB says), 32-bit ones Windows XP.
+HLE64("kernel32.dll", GetVersion, 0) {
+  return g_proc->x64 ? 0x4A65000A   // build 19045, 10.0
+                     : 0x0A280105;  // build 2600, 5.1, NT platform
 }
+
+// GetVersionExW(&info): OSVERSIONINFO(EX)W {size, major, minor, build,
+// platform, szCSDVersion[128], then (EX) service pack, suite mask,
+// product type @282}.
+HLE64("kernel32.dll", GetVersionExW, 1) {
+  const gaddr vi = Arg(c, 0);
+  const uint32_t size = Rd32(vi);
+  std::memset(GPtr(vi + 4), 0, size - 4);
+  Wr32(vi + 4, g_proc->x64 ? 10 : 5);
+  Wr32(vi + 8, g_proc->x64 ? 0 : 1);
+  Wr32(vi + 12, g_proc->x64 ? 19045 : 2600);
+  Wr32(vi + 16, 2);                    // VER_PLATFORM_WIN32_NT
+  if (size >= 284) Wr8(vi + 282, 1);  // VER_NT_WORKSTATION
+  return 1;
+}
+
+// EncodePointer/DecodePointer: the identity; callers only need
+// Decode(Encode(p)) == p.
+HLE64("kernel32.dll", EncodePointer, 1) { return Arg(c, 0); }
+HLE64("kernel32.dll", DecodePointer, 1) { return Arg(c, 0); }
 
 HLE("kernel32.dll", GetVersionExA, 1) {
   uint32_t vi = Arg(c, 0);
@@ -382,9 +404,9 @@ HLE64("kernel32.dll", GetStartupInfoA, 1) { return StartupInfo(Arg(c, 0)); }
 HLE64("kernel32.dll", GetStartupInfoW, 1) { return StartupInfo(Arg(c, 0)); }
 
 HLE("kernel32.dll", GetEnvironmentStrings, 0) { return g_win32->environ_a; }
-HLE("kernel32.dll", GetEnvironmentStringsW, 0) { return g_win32->environ_w; }
+HLE64("kernel32.dll", GetEnvironmentStringsW, 0) { return g_win32->environ_w; }
 HLE("kernel32.dll", FreeEnvironmentStringsA, 1) { return 1; }
-HLE("kernel32.dll", FreeEnvironmentStringsW, 1) { return 1; }
+HLE64("kernel32.dll", FreeEnvironmentStringsW, 1) { return 1; }
 
 HLE("kernel32.dll", GetEnvironmentVariableA, 3) {
   std::string name = GStr(Arg(c, 0));
@@ -655,17 +677,17 @@ HLE64("kernel32.dll", HeapFree, 3) {
   return 1;
 }
 
-HLE("kernel32.dll", HeapReAlloc, 4) {
+HLE64("kernel32.dll", HeapReAlloc, 4) {
   GuestHeap* h = FindHeap(Arg(c, 0));
-  uint32_t flags = Arg(c, 1);
+  uint32_t flags = uint32_t(Arg(c, 1));
   if (!h) return 0;
   return h->ReAlloc(Arg(c, 2), Arg(c, 3), flags & kHeapZeroMemory,
                     flags & kHeapReallocInPlaceOnly);
 }
 
-HLE("kernel32.dll", HeapSize, 3) {
+HLE64("kernel32.dll", HeapSize, 3) {
   GuestHeap* h = FindHeap(Arg(c, 0));
-  return h ? h->Size(Arg(c, 2)) : 0xFFFFFFFF;
+  return h ? h->Size(Arg(c, 2)) : ~0ull;
 }
 
 HLE("kernel32.dll", GlobalAlloc, 2) {
@@ -1098,7 +1120,7 @@ HLE("kernel32.dll", InterlockedExchange, 2) {
 
 // ---- time ----------------------------------------------------------------
 
-HLE("kernel32.dll", GetTickCount, 0) { return TickCount(); }
+HLE64("kernel32.dll", GetTickCount, 0) { return TickCount(); }
 
 HLE64("kernel32.dll", QueryPerformanceFrequency, 1) {
   Wr64(Arg(c, 0), 10000000);
@@ -1188,15 +1210,15 @@ HLE64("kernel32.dll", SleepEx, 2) {
 
 // ---- code pages and locale -----------------------------------------------
 
-HLE("kernel32.dll", GetACP, 0) { return 1252; }
-HLE("kernel32.dll", GetOEMCP, 0) { return 437; }
-HLE("kernel32.dll", IsValidCodePage, 1) {
-  uint32_t cp = Arg(c, 0);
+HLE64("kernel32.dll", GetACP, 0) { return 1252; }
+HLE64("kernel32.dll", GetOEMCP, 0) { return 437; }
+HLE64("kernel32.dll", IsValidCodePage, 1) {
+  uint32_t cp = uint32_t(Arg(c, 0));
   return cp == 1252 || cp == 437 || cp == 0 ? 1 : 0;
 }
 
-HLE("kernel32.dll", GetCPInfo, 2) {
-  uint32_t info = Arg(c, 1);
+HLE64("kernel32.dll", GetCPInfo, 2) {
+  gaddr info = Arg(c, 1);
   std::memset(GPtr(info), 0, 20);
   Wr32(info, 1);       // MaxCharSize
   Wr8(info + 4, '?');  // DefaultChar
@@ -1271,8 +1293,9 @@ HLE64("kernel32.dll", WideCharToMultiByte, 8) {
   return s.size();
 }
 
-HLE("kernel32.dll", GetStringTypeW, 4) {
-  uint32_t type = Arg(c, 0), src = Arg(c, 1), out = Arg(c, 3);
+HLE64("kernel32.dll", GetStringTypeW, 4) {
+  uint32_t type = uint32_t(Arg(c, 0));
+  gaddr src = Arg(c, 1), out = Arg(c, 3);
   int32_t n = int32_t(Arg(c, 2));
   if (type != kCtCtype1) return 0;
   if (n < 0) n = int32_t(GWStr(src).size() + 1);
@@ -1291,8 +1314,9 @@ HLE("kernel32.dll", GetStringTypeA, 5) {
   return 1;
 }
 
-HLE("kernel32.dll", LCMapStringW, 6) {
-  uint32_t flags = Arg(c, 1), src = Arg(c, 2), dst = Arg(c, 4);
+HLE64("kernel32.dll", LCMapStringW, 6) {
+  uint32_t flags = uint32_t(Arg(c, 1));
+  gaddr src = Arg(c, 2), dst = Arg(c, 4);
   int32_t n = int32_t(Arg(c, 3)), cap = int32_t(Arg(c, 5));
   if (n < 0) n = int32_t(GWStr(src).size() + 1);
   if (!cap) return uint32_t(n);
@@ -1321,7 +1345,7 @@ HLE64("kernel32.dll", GetUserDefaultLCID, 0) { return 0x0409; }
 HLE64("kernel32.dll", GetSystemDefaultLCID, 0) { return 0x0409; }
 HLE64("kernel32.dll", GetSystemDefaultLangID, 0) { return 0x0409; }
 HLE64("kernel32.dll", GetUserDefaultLangID, 0) { return 0x0409; }
-HLE("kernel32.dll", IsValidLocale, 2) { return Arg(c, 0) == 0x0409 ? 1 : 0; }
+HLE64("kernel32.dll", IsValidLocale, 2) { return uint32_t(Arg(c, 0)) == 0x0409 ? 1 : 0; }
 
 HLE("kernel32.dll", EnumSystemLocalesA, 2) {
   uint32_t buf = HeapAllocProcess(16, true);
@@ -1379,7 +1403,7 @@ uint32_t LocaleInfo(Ctx& c, bool wide) {
 }
 
 HLE64("kernel32.dll", GetLocaleInfoA, 4) { return LocaleInfo(c, false); }
-HLE("kernel32.dll", GetLocaleInfoW, 4) { return LocaleInfo(c, true); }
+HLE64("kernel32.dll", GetLocaleInfoW, 4) { return LocaleInfo(c, true); }
 
 }  // namespace
 }  // namespace hle

@@ -291,9 +291,9 @@ HLE64("kernel32.dll", GetStdHandle, 1) {
   return HandleRet(g_std_handles[idx]);
 }
 
-HLE("kernel32.dll", SetStdHandle, 2) { return 1; }
+HLE64("kernel32.dll", SetStdHandle, 2) { return 1; }
 
-HLE("kernel32.dll", GetFileType, 1) {
+HLE64("kernel32.dll", GetFileType, 1) {
   auto o = GetHandle(Arg(c, 0));
   if (!o || (o->type != KObject::Type::File && o->type != KObject::Type::StdIo)) {
     SetLastError(kErrorInvalidHandle);
