@@ -358,6 +358,12 @@ void InitDispatch() {
   }
 }
 
+bool HasLiftedCode(gaddr lo, uint64_t size) {
+  for (uint32_t i = 0; i < g_lifted_count; i++)
+    if (g_lifted[i].va - lo < size) return true;
+  return false;
+}
+
 bool IsLifted(gaddr va) {
   const CodeRange* r = CodeAt(va);
   return r && r->table[va - r->lo];

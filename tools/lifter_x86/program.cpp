@@ -160,6 +160,15 @@ bool Program::LoadManifest(const std::string& path, std::string* err) {
       entries.insert(va);
       setjmps.insert(va);
       if (!name.empty()) names[va] = name;
+    } else if (kind == "code") {
+      // code <va> <end>: [va, end) of a section not marked executable holds
+      // code (protectors put some there and make the section executable at
+      // run time); it is decoded like an executable section.
+      if (name.empty()) {
+        *err = path + ":" + std::to_string(no) + ": code needs an end address";
+        return false;
+      }
+      modules.back().text.emplace_back(va, Hex(name) + (mod.base - mod.preferred_base));
     } else if (kind == "probe") {
       entries.insert(va);
       probes[va] = name.empty() ? "probe" : name;

@@ -36,10 +36,13 @@ std::set<gaddr> g_live_tebs;
 
 // The image's .text, where its lifted functions are.
 // Each executable section of img (.text; a protected image adds the
-// protector's own), as code ranges for dispatch.
+// protector's own), as code ranges for dispatch, and any other section
+// holding lifted code (a manifest `code` range: protectors put code in
+// data sections and make them executable at run time).
 void AddCode(Process& p, const PeImage& img) {
   for (const auto& s : img.sections)
-    if (s.characteristics & kScnMemExecute) p.code.push_back({s.va, s.vsize});
+    if ((s.characteristics & kScnMemExecute) || HasLiftedCode(s.va, s.vsize))
+      p.code.push_back({s.va, s.vsize});
 }
 
 // Process::thread_init: the thread's TEB and TLS array, in the layout of
