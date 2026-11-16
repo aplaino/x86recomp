@@ -56,6 +56,10 @@ if(FFMPEG_FOUND)
   add_library(recomp_dsound SHARED src/win32/dsound.cpp)
   target_link_libraries(recomp_dsound PUBLIC recomp_win32 recomp_audio)
 
+  # winmm's waveOut on the same software mixer.
+  add_library(recomp_winmm SHARED src/win32/winmm_wave.cpp)
+  target_link_libraries(recomp_winmm PUBLIC recomp_win32 recomp_audio)
+
   # Bink video (binkw32) on ffmpeg; audio through the Miles mixer.
   add_library(recomp_bink SHARED src/win32/binkw32.cpp)
   target_link_libraries(recomp_bink PUBLIC recomp_mss32)
