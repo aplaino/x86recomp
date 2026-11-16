@@ -7,6 +7,8 @@
 // digits, NaNs print as nan, nan(ind) or nan(snan).
 
 #include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
@@ -132,7 +134,10 @@ std::string Pad(const std::string& body, int width, bool left) {
 // The UCRT's printf (narrow functions: %s and %c are char, %S and %C
 // wchar_t) over a guest format and va_list. Output the int result cannot
 // count (more than INT_MAX characters) is fatal.
-std::string Format(const std::string& fmt, Args a, bool three_digit_exponents) {
+// wide_fn: a wide function (swprintf...), where %s and %c are wchar_t and
+// %S and %C char.
+std::string Format(const std::string& fmt, Args a, bool three_digit_exponents,
+                   bool wide_fn = false) {
   std::string out;
   auto too_long = [&](int64_t n) {
     if (n > INT32_MAX - int64_t(out.size()))
@@ -262,7 +267,7 @@ std::string Format(const std::string& fmt, Args a, bool three_digit_exponents) {
       }
       case 'c': case 'C': {
         uint64_t v = a.Next();
-        bool w = conv == 'C' ? !narrow : wide;
+        bool w = (conv == 'C') != wide_fn ? !narrow : wide;
         char ch = w ? win32::Narrow(std::u16string(1, char16_t(v)))[0] : char(v);
         too_long(width);
         out += Pad(std::string(1, ch), int(width), flags.find('-') != std::string::npos);
@@ -272,7 +277,7 @@ std::string Format(const std::string& fmt, Args a, bool three_digit_exponents) {
         // With a precision, no more of the string is read than it keeps
         // (it need not be terminated).
         gaddr p = a.Next();
-        bool w = conv == 'S' ? !narrow : wide;
+        bool w = (conv == 'S') != wide_fn ? !narrow : wide;
         std::string s;
         if (!p) {
           s = "(null)";
@@ -565,6 +570,308 @@ HLE64("ucrtbase.dll", rewind, kCdecl) {
   Stream& s = Must(Arg(c, 0), "rewind");
   std::lock_guard<std::recursive_mutex> l(g_streams_mu);
   std::rewind(s.f);
+  return 0;
+}
+
+
+// __stdio_common_vswprintf(options, buffer, count, format, locale, va_list):
+// the narrow formatter over the format as Windows-1252, the result widened.
+HLE64("ucrtbase.dll", __stdio_common_vswprintf, kCdecl) {
+  uint64_t opt = Arg(c, 0);
+  std::string s = Format(win32::Narrow(GWStr(Arg(c, 3))), Args{Arg(c, 5)},
+                         opt & kThreeDigitExponents, true);
+  std::u16string w = win32::Widen(s);
+  gaddr buf = Arg(c, 1);
+  uint64_t count = Arg(c, 2), n = w.size();
+  if (!buf) return uint32_t(int32_t(n));
+  auto put = [&](uint64_t k) {
+    for (uint64_t i = 0; i < k; i++) Wr16(buf + 2 * i, w[i]);
+  };
+  if (opt & kStandardSnprintf) {
+    if (count) {
+      uint64_t k = std::min(n, count - 1);
+      put(k);
+      Wr16(buf + 2 * k, 0);
+    }
+    return uint32_t(int32_t(n));
+  }
+  uint64_t k = std::min(n, count);
+  put(k);
+  if (n < count) Wr16(buf + 2 * n, 0);
+  return n <= count ? uint32_t(int32_t(n)) : uint32_t(-1);
+}
+
+// ---- scanf ---------------------------------------------------------------------
+
+namespace {
+// The UCRT's scanf over the text `in`: each conversion is matched by the
+// host's sscanf (one conversion and %n at a time), and its result written
+// to the guest pointer in the next va_list slot. Wide functions read their
+// strings as Windows-1252 and store %s and %c as wchar_t. Returns the count
+// of assignments, or EOF for input that ends before the first conversion.
+int Scan(const std::string& in, const std::string& fmt, Args a, bool wide_fn) {
+  size_t at = 0;
+  int assigned = 0;
+  bool any_conversion = false;
+  for (size_t i = 0; i < fmt.size(); i++) {
+    char f = fmt[i];
+    if (std::isspace(uint8_t(f))) {
+      while (at < in.size() && std::isspace(uint8_t(in[at]))) at++;
+      continue;
+    }
+    if (f != '%' || (i + 1 < fmt.size() && fmt[i + 1] == '%')) {
+      if (f == '%') i++;
+      if (at >= in.size()) return any_conversion ? assigned : EOF;
+      if (in[at] != fmt[i]) return assigned;
+      at++;
+      continue;
+    }
+    // %[*][width][length]conversion
+    size_t j = i + 1;
+    bool suppress = j < fmt.size() && fmt[j] == '*';
+    if (suppress) j++;
+    std::string width;
+    while (j < fmt.size() && std::isdigit(uint8_t(fmt[j]))) width.push_back(fmt[j++]);
+    int bits = 32;
+    bool lng = false, shrt = false;
+    for (;;) {
+      if (fmt.compare(j, 3, "I64") == 0) { bits = 64; j += 3; }
+      else if (fmt.compare(j, 3, "I32") == 0) { bits = 32; j += 3; }
+      else if (fmt.compare(j, 2, "ll") == 0) { bits = 64; j += 2; }
+      else if (fmt.compare(j, 2, "hh") == 0) { bits = 8; j += 2; }
+      else if (j < fmt.size() && fmt[j] == 'h') { bits = 16; shrt = true; j++; }
+      else if (j < fmt.size() && (fmt[j] == 'l' || fmt[j] == 'w')) { lng = true; j++; }
+      else if (j < fmt.size() && (fmt[j] == 'L' || fmt[j] == 'z' || fmt[j] == 'j' || fmt[j] == 't' || fmt[j] == 'I')) {
+        if (fmt[j] != 'L') bits = 64;
+        j++;
+      }
+      else break;
+    }
+    if (j >= fmt.size()) break;
+    char conv = fmt[j];
+    std::string set;
+    if (conv == '[') {
+      size_t k = j + 1;
+      if (k < fmt.size() && fmt[k] == '^') k++;
+      if (k < fmt.size() && fmt[k] == ']') k++;
+      while (k < fmt.size() && fmt[k] != ']') k++;
+      set = fmt.substr(j, k + 1 - j);
+      j = k;
+    }
+    i = j;
+    if (conv == 'n') {
+      if (!suppress) Wr32(a.Next(), uint32_t(at));
+      continue;
+    }
+    any_conversion = true;
+    if (conv != 'c' && conv != '[')
+      while (at < in.size() && std::isspace(uint8_t(in[at]))) at++;
+    if (at >= in.size()) return assigned ? assigned : EOF;
+    const char* src = in.c_str() + at;
+    int used = 0;
+    bool ok = false;
+    const std::string w = width;
+    switch (conv) {
+      case 'd': case 'i': case 'u': case 'x': case 'X': case 'o': case 'p': {
+        long long v = 0;
+        unsigned long long u = 0;
+        const bool sgn = conv == 'd' || conv == 'i';
+        std::string hf = "%" + w + (sgn ? "lld" : conv == 'u' ? "llu" : conv == 'o' ? "llo" : "llx") + "%n";
+        if (conv == 'i') hf = "%" + w + "lli%n";
+        ok = (sgn ? std::sscanf(src, hf.c_str(), &v, &used) : std::sscanf(src, hf.c_str(), &u, &used)) == 1;
+        if (ok && !suppress) {
+          uint64_t val = sgn ? uint64_t(v) : u;
+          gaddr out = a.Next();
+          if (conv == 'p' || bits == 64) Wr64(out, val);
+          else if (bits == 16) Wr16(out, uint16_t(val));
+          else if (bits == 8) Wr8(out, uint8_t(val));
+          else Wr32(out, uint32_t(val));
+        }
+        break;
+      }
+      case 'f': case 'e': case 'g': case 'E': case 'G': case 'a': case 'A': {
+        double v = 0;
+        ok = std::sscanf(src, ("%" + w + "lf%n").c_str(), &v, &used) == 1;
+        if (ok && !suppress) {
+          gaddr out = a.Next();
+          if (lng) {
+            uint64_t b;
+            std::memcpy(&b, &v, 8);
+            Wr64(out, b);
+          } else {
+            float fv = float(v);
+            uint32_t b;
+            std::memcpy(&b, &fv, 4);
+            Wr32(out, b);
+          }
+        }
+        break;
+      }
+      case 's': case 'c': case '[': case 'S': case 'C': {
+        std::string buf(in.size() - at + 1, '\0');
+        std::string hf = "%" + (w.empty() && (conv == 'c' || conv == 'C') ? std::string("1") : w) +
+                         (conv == '[' ? set : std::string(1, char(std::tolower(uint8_t(conv))))) + "%n";
+        if (conv == 'c' || conv == 'C') {
+          size_t n = w.empty() ? 1 : size_t(std::stoul(w));
+          ok = at + n <= in.size();
+          if (ok) {
+            buf = in.substr(at, n);
+            used = int(n);
+          }
+        } else {
+          ok = std::sscanf(src, hf.c_str(), buf.data(), &used) == 1;
+          buf.resize(std::strlen(buf.c_str()));
+        }
+        if (ok && !suppress) {
+          const bool wide = (conv == 'S' || conv == 'C') != wide_fn ? !shrt : lng;
+          gaddr out = a.Next();
+          const bool term = conv != 'c' && conv != 'C';
+          if (wide) {
+            std::u16string u = win32::Widen(buf);
+            for (size_t k = 0; k < u.size(); k++) Wr16(out + 2 * k, u[k]);
+            if (term) Wr16(out + 2 * u.size(), 0);
+          } else {
+            std::memcpy(GPtr(out), buf.data(), buf.size());
+            if (term) Wr8(out + buf.size(), 0);
+          }
+        }
+        break;
+      }
+      default:
+        FatalF("guest scanf: conversion %%%c not supported (\"%s\")", conv, fmt.c_str());
+    }
+    if (!ok) return assigned;
+    at += size_t(used);
+    if (!suppress) assigned++;
+  }
+  return assigned;
+}
+}  // namespace
+
+// __stdio_common_vsscanf(options, buffer, count, format, locale, va_list)
+HLE64("ucrtbase.dll", __stdio_common_vsscanf, kCdecl) {
+  gaddr buf = Arg(c, 1);
+  uint64_t count = Arg(c, 2);
+  std::string in;
+  for (gaddr p = buf; (count == ~uint64_t(0) || p - buf < count) && Rd8(p); p++)
+    in.push_back(char(Rd8(p)));
+  return uint32_t(Scan(in, GStr(Arg(c, 3)), Args{Arg(c, 5)}, false));
+}
+HLE64("ucrtbase.dll", __stdio_common_vswscanf, kCdecl) {
+  gaddr buf = Arg(c, 1);
+  uint64_t count = Arg(c, 2);
+  std::u16string in;
+  for (gaddr p = buf; (count == ~uint64_t(0) || (p - buf) / 2 < count) && Rd16(p); p += 2)
+    in.push_back(char16_t(Rd16(p)));
+  return uint32_t(Scan(win32::Narrow(in), win32::Narrow(GWStr(Arg(c, 3))), Args{Arg(c, 5)}, true));
+}
+// __stdio_common_vfscanf(options, stream, format, locale, va_list): the
+// stream's next line, scanned. Reading past one line in one call (a format
+// that spans lines) is not supported.
+HLE64("ucrtbase.dll", __stdio_common_vfscanf, kCdecl) {
+  Stream& s = Must(Arg(c, 1), "fscanf");
+  std::lock_guard<std::recursive_mutex> l(g_streams_mu);
+  std::string line;
+  for (int ch; (ch = GetC(s)) != EOF;) {
+    line.push_back(char(ch));
+    if (ch == '\n') break;
+  }
+  if (line.empty()) return uint32_t(EOF);
+  return uint32_t(Scan(line, GStr(Arg(c, 2)), Args{Arg(c, 4)}, false));
+}
+
+// ---- more streams ------------------------------------------------------------
+
+HLE64("ucrtbase.dll", feof, kCdecl) { return std::feof(Must(Arg(c, 0), "feof").f) != 0; }
+uint64_t GetCImpl(gaddr fp, const char* api) {
+  Stream& s = Must(fp, api);
+  std::lock_guard<std::recursive_mutex> l(g_streams_mu);
+  int ch = GetC(s);
+  return ch == EOF ? uint32_t(EOF) : uint32_t(uint8_t(ch));
+}
+HLE64("ucrtbase.dll", fgetc, kCdecl) { return GetCImpl(Arg(c, 0), "fgetc"); }
+HLE64("ucrtbase.dll", getc, kCdecl) { return GetCImpl(Arg(c, 0), "getc"); }
+HLE64("ucrtbase.dll", ungetc, kCdecl) {
+  Stream& s = Must(Arg(c, 1), "ungetc");
+  std::lock_guard<std::recursive_mutex> l(g_streams_mu);
+  int ch = int32_t(Arg(c, 0));
+  return ch == EOF ? uint32_t(EOF) : uint32_t(std::ungetc(ch, s.f));
+}
+// fgetws: a text stream's bytes as Windows-1252 characters (no BOM or
+// UTF-16 handling: files are opened without a ccs).
+HLE64("ucrtbase.dll", fgetws, kCdecl) {
+  gaddr buf = Arg(c, 0);
+  int n = int32_t(Arg(c, 1));
+  Stream& s = Must(Arg(c, 2), "fgetws");
+  std::lock_guard<std::recursive_mutex> l(g_streams_mu);
+  if (n <= 0) return 0;
+  std::string line;
+  while (int(line.size()) < n - 1) {
+    int ch = GetC(s);
+    if (ch == EOF) break;
+    line.push_back(char(ch));
+    if (ch == '\n') break;
+  }
+  if (line.empty()) return 0;
+  std::u16string w = win32::Widen(line);
+  for (size_t i = 0; i < w.size(); i++) Wr16(buf + 2 * i, w[i]);
+  Wr16(buf + 2 * w.size(), 0);
+  return buf;
+}
+// fpos_t is a 64-bit offset.
+HLE64("ucrtbase.dll", fgetpos, kCdecl) {
+  Stream& s = Must(Arg(c, 0), "fgetpos");
+  std::lock_guard<std::recursive_mutex> l(g_streams_mu);
+  off_t p = ftello(s.f);
+  if (p < 0) return uint32_t(-1);
+  Wr64(Arg(c, 1), uint64_t(p));
+  return 0;
+}
+HLE64("ucrtbase.dll", fsetpos, kCdecl) {
+  Stream& s = Must(Arg(c, 0), "fsetpos");
+  std::lock_guard<std::recursive_mutex> l(g_streams_mu);
+  return uint32_t(fseeko(s.f, off_t(Rd64(Arg(c, 1))), SEEK_SET));
+}
+// Buffering is the host stream's own; the guest's buffer is not used.
+HLE64("ucrtbase.dll", setvbuf, kCdecl) {
+  Must(Arg(c, 0), "setvbuf");
+  return 0;
+}
+// The lock is the streams' lock, held by every operation already.
+HLE64("ucrtbase.dll", _lock_file, kCdecl) { return 0; }
+HLE64("ucrtbase.dll", _unlock_file, kCdecl) { return 0; }
+HLE64("ucrtbase.dll", tmpfile, kCdecl) {
+  FILE* f = std::tmpfile();
+  return f ? NewStream(f, false, true) : 0;
+}
+namespace {
+// Unique names in C:\TEMP (the overlay's TEMP directory).
+std::string TempName(const std::string& dir, const std::string& prefix) {
+  static std::atomic<uint32_t> n{0};
+  return dir + (dir.empty() || dir.back() == '\\' ? "" : "\\") + prefix +
+         std::to_string(++n) + ".tmp";
+}
+}  // namespace
+HLE64("ucrtbase.dll", tmpnam, kCdecl) {
+  static gaddr buf = HeapAllocProcess(260, true);
+  gaddr out = Arg(c, 0) ? Arg(c, 0) : buf;
+  PutStr(out, TempName("C:\\TEMP", "s"));
+  return out;
+}
+HLE64("ucrtbase.dll", _tempnam, kCdecl) {
+  std::string dir = Arg(c, 0) ? GStr(Arg(c, 0)) : "C:\\TEMP";
+  std::string name = TempName(dir, Arg(c, 1) ? GStr(Arg(c, 1)) : "");
+  gaddr p = HeapAllocProcess(name.size() + 1, false);
+  PutStr(p, name);
+  return p;
+}
+// _get_stream_buffer_pointers(stream, &base, &ptr, &count): the guest
+// cannot see the host stream's buffer; all three point at an empty one.
+HLE64("ucrtbase.dll", _get_stream_buffer_pointers, kCdecl) {
+  Must(Arg(c, 0), "_get_stream_buffer_pointers");
+  static gaddr empty = HeapAllocProcess(16, true);
+  for (int i = 1; i <= 3; i++)
+    if (gaddr out = Arg(c, i)) Wr64(out, i == 3 ? empty + 8 : empty);
   return 0;
 }
 

@@ -519,9 +519,14 @@ HLE64("ucrtbase.dll", mbstowcs, kCdecl) {
 
 // ---- utility ---------------------------------------------------------------
 
-// rand: the UCRT's per-thread linear congruential generator (seed 1).
-HLE64("ucrtbase.dll", rand, kCdecl) {
+// rand: the UCRT's per-thread linear congruential generator (seed 1;
+// srand sets it).
+uint32_t& RandSeed() {
   static thread_local uint32_t seed = 1;
+  return seed;
+}
+HLE64("ucrtbase.dll", rand, kCdecl) {
+  uint32_t& seed = RandSeed();
   seed = seed * 214013u + 2531011u;
   return (seed >> 16) & 0x7FFF;
 }
@@ -635,9 +640,11 @@ HLE64("ucrtbase.dll", getenv, kCdecl) {
 extern "C" {
 float cr_acosf(float), cr_asinf(float), cr_atanf(float), cr_atan2f(float, float),
     cr_cosf(float), cr_logf(float), cr_log2f(float), cr_log10f(float),
-    cr_powf(float, float), cr_sinf(float), cr_tanf(float);
-double cr_atan(double), cr_cos(double), cr_exp(double), cr_log(double),
-    cr_pow(double, double), cr_sin(double);
+    cr_powf(float, float), cr_sinf(float), cr_tanf(float), cr_expf(float), cr_coshf(float),
+    cr_sinhf(float), cr_tanhf(float);
+double cr_acos(double), cr_asin(double), cr_atan(double), cr_atan2(double, double),
+    cr_cos(double), cr_exp(double), cr_log(double), cr_log10(double), cr_pow(double, double),
+    cr_sin(double), cr_tan(double);
 }
 
 namespace {
@@ -672,10 +679,21 @@ RECOMP_CR_D1(cos)
 RECOMP_CR_D1(exp)
 RECOMP_CR_D1(log)
 RECOMP_CR_D1(sin)
+RECOMP_CR_F1(expf)
+RECOMP_CR_F1(coshf)
+RECOMP_CR_F1(sinhf)
+RECOMP_CR_F1(tanhf)
+RECOMP_CR_D1(acos)
+RECOMP_CR_D1(asin)
+RECOMP_CR_D1(log10)
+RECOMP_CR_D1(tan)
 #undef RECOMP_CR_F1
 #undef RECOMP_CR_D1
 HLE64("ucrtbase.dll", atan2f, kCdecl) {
   return RetF(c, WithErrno<float>([&] { return cr_atan2f(ArgF(c, 0), ArgF(c, 1)); }));
+}
+HLE64("ucrtbase.dll", atan2, kCdecl) {
+  return RetD(c, WithErrno<double>([&] { return cr_atan2(ArgD(c, 0), ArgD(c, 1)); }));
 }
 HLE64("ucrtbase.dll", powf, kCdecl) {
   return RetF(c, WithErrno<float>([&] { return cr_powf(ArgF(c, 0), ArgF(c, 1)); }));
@@ -727,5 +745,327 @@ HLE64("ucrtbase.dll", _dclass, kCdecl) { return Class(ArgD(c, 0)); }
 HLE64("ucrtbase.dll", _ldclass, kCdecl) { return Class(ArgD(c, 0)); }
 HLE64("ucrtbase.dll", _fdclass, kCdecl) { return Class(ArgF(c, 0)); }
 HLE64("ucrtbase.dll", _dsign, kCdecl) { return std::signbit(ArgD(c, 0)) ? 0x8000 : 0; }
+
+
+// ---- more of the CRT, "C" locale ----------------------------------------------
+
+namespace {
+const uint16_t* W16(gaddr p) { return g_proc->mem.ptr<const uint16_t>(p); }
+std::u16string WStr(gaddr p) { return std::u16string(reinterpret_cast<const char16_t*>(W16(p))); }
+uint16_t WLower(uint16_t ch) { return ch >= 'A' && ch <= 'Z' ? ch + 32 : ch; }
+int WCmp(gaddr a, gaddr b, size_t n, bool fold) {
+  for (size_t i = 0; i < n; i++) {
+    uint16_t x = Rd16(a + 2 * i), y = Rd16(b + 2 * i);
+    if (fold) x = WLower(x), y = WLower(y);
+    if (x != y) return x < y ? -1 : 1;
+    if (!x) break;
+  }
+  return 0;
+}
+}  // namespace
+
+HLE64("ucrtbase.dll", isalnum, kCdecl) { return InC(CArg(c, 0)) && std::isalnum(CArg(c, 0)); }
+HLE64("ucrtbase.dll", isalpha, kCdecl) { return InC(CArg(c, 0)) && std::isalpha(CArg(c, 0)); }
+HLE64("ucrtbase.dll", islower, kCdecl) { return InC(CArg(c, 0)) && std::islower(CArg(c, 0)); }
+HLE64("ucrtbase.dll", ispunct, kCdecl) { return InC(CArg(c, 0)) && std::ispunct(CArg(c, 0)); }
+HLE64("ucrtbase.dll", towlower, kCdecl) { return WLower(uint16_t(Arg(c, 0))); }
+// No multibyte code page: no byte leads a two-byte character.
+HLE64("ucrtbase.dll", _ismbblead, kCdecl) { return 0; }
+
+HLE64("ucrtbase.dll", strpbrk, kCdecl) {
+  const char* p = S(Arg(c, 0));
+  const char* r = std::strpbrk(p, S(Arg(c, 1)));
+  return r ? Arg(c, 0) + gaddr(r - p) : 0;
+}
+HLE64("ucrtbase.dll", strncat, kCdecl) {
+  gaddr d = Arg(c, 0), src = Arg(c, 1);
+  uint64_t n = Arg(c, 2);
+  gaddr e = d + std::strlen(S(d));
+  uint64_t i = 0;
+  for (; i < n && Rd8(src + i); i++) Wr8(e + i, Rd8(src + i));
+  Wr8(e + i, 0);
+  return d;
+}
+// In the "C" locale strings collate by their bytes.
+HLE64("ucrtbase.dll", strcoll, kCdecl) { return uint32_t(Sign(std::strcmp(S(Arg(c, 0)), S(Arg(c, 1))))); }
+
+// strcpy_s / strcat_s / strncpy_s: 0, or EINVAL / ERANGE with the
+// destination emptied (the invalid-parameter handler returns).
+namespace {
+uint64_t CopyS(gaddr d, uint64_t size, const std::string& src, gaddr dst_from) {
+  if (!d || !size) return EINVAL;
+  if (dst_from - d + src.size() + 1 > size) {
+    Wr8(d, 0);
+    SetErrno(ERANGE);
+    return ERANGE;
+  }
+  std::memcpy(GPtr(dst_from), src.c_str(), src.size() + 1);
+  return 0;
+}
+}  // namespace
+HLE64("ucrtbase.dll", strcpy_s, kCdecl) {
+  gaddr d = Arg(c, 0);
+  if (!Arg(c, 2)) return d && Arg(c, 1) ? (Wr8(d, 0), EINVAL) : EINVAL;
+  return CopyS(d, Arg(c, 1), S(Arg(c, 2)), d);
+}
+HLE64("ucrtbase.dll", strcat_s, kCdecl) {
+  gaddr d = Arg(c, 0);
+  if (!d || !Arg(c, 2)) return EINVAL;
+  return CopyS(d, Arg(c, 1), S(Arg(c, 2)), d + std::strlen(S(d)));
+}
+// strncpy_s(dst, size, src, count): count _TRUNCATE ((size_t)-1) truncates
+// to the buffer and returns STRUNCATE (80).
+HLE64("ucrtbase.dll", strncpy_s, kCdecl) {
+  gaddr d = Arg(c, 0), src = Arg(c, 2);
+  uint64_t size = Arg(c, 1), count = Arg(c, 3);
+  if (!d || !size) return EINVAL;
+  if (!src) {
+    Wr8(d, 0);
+    return count ? EINVAL : 0;
+  }
+  std::string s;
+  for (gaddr q = src; s.size() < count && Rd8(q); q++) s.push_back(char(Rd8(q)));
+  if (count == ~uint64_t(0) && s.size() >= size) {
+    s.resize(size - 1);
+    std::memcpy(GPtr(d), s.c_str(), s.size() + 1);
+    return 80;
+  }
+  return CopyS(d, size, s, d);
+}
+
+HLE64("ucrtbase.dll", wcsncmp, kCdecl) { return uint32_t(WCmp(Arg(c, 0), Arg(c, 1), Arg(c, 2), false)); }
+HLE64("ucrtbase.dll", _wcsicmp, kCdecl) { return uint32_t(WCmp(Arg(c, 0), Arg(c, 1), SIZE_MAX, true)); }
+HLE64("ucrtbase.dll", _wcsnicmp, kCdecl) { return uint32_t(WCmp(Arg(c, 0), Arg(c, 1), Arg(c, 2), true)); }
+HLE64("ucrtbase.dll", wcsncpy, kCdecl) {
+  gaddr d = Arg(c, 0), src = Arg(c, 1);
+  uint64_t n = Arg(c, 2), i = 0;
+  for (; i < n && Rd16(src + 2 * i); i++) Wr16(d + 2 * i, Rd16(src + 2 * i));
+  for (; i < n; i++) Wr16(d + 2 * i, 0);
+  return d;
+}
+HLE64("ucrtbase.dll", wcsspn, kCdecl) {
+  std::u16string s = WStr(Arg(c, 0)), set = WStr(Arg(c, 1));
+  size_t i = 0;
+  while (i < s.size() && set.find(s[i]) != std::u16string::npos) i++;
+  return i;
+}
+HLE64("ucrtbase.dll", wcspbrk, kCdecl) {
+  std::u16string s = WStr(Arg(c, 0)), set = WStr(Arg(c, 1));
+  size_t i = s.find_first_of(set);
+  return i == std::u16string::npos ? 0 : Arg(c, 0) + 2 * i;
+}
+
+// The wide and 64-bit conversions, on the narrow ones (ASCII digits).
+HLE64("ucrtbase.dll", _atoi64, kCdecl) { return uint64_t(std::strtoll(S(Arg(c, 0)), nullptr, 10)); }
+HLE64("ucrtbase.dll", _wtoi64, kCdecl) {
+  return uint64_t(std::strtoll(win32::Narrow(WStr(Arg(c, 0))).c_str(), nullptr, 10));
+}
+HLE64("ucrtbase.dll", _wtol, kCdecl) {
+  long long v = std::strtoll(win32::Narrow(WStr(Arg(c, 0))).c_str(), nullptr, 10);
+  return uint32_t(int32_t(v > INT32_MAX ? INT32_MAX : v < INT32_MIN ? INT32_MIN : v));
+}
+HLE64("ucrtbase.dll", _wtof, kCdecl) {
+  return RetD(c, std::strtod(win32::Narrow(WStr(Arg(c, 0))).c_str(), nullptr));
+}
+// The _l forms take a locale, which is always "C" here.
+HLE64("ucrtbase.dll", _strtod_l, kCdecl) {
+  return RetD(c, StrTo<double>(Arg(c, 0), Arg(c, 1),
+                               [](const char* p, char** e) { return std::strtod(p, e); }));
+}
+HLE64("ucrtbase.dll", _strtoi64_l, kCdecl) {
+  int base = int(Arg(c, 2));
+  return uint64_t(StrTo<long long>(Arg(c, 0), Arg(c, 1), [&](const char* p, char** e) {
+    return std::strtoll(p, e, base);
+  }));
+}
+HLE64("ucrtbase.dll", _strtoui64_l, kCdecl) {
+  int base = int(Arg(c, 2));
+  return StrTo<unsigned long long>(Arg(c, 0), Arg(c, 1), [&](const char* p, char** e) {
+    return std::strtoull(p, e, base);
+  });
+}
+// _ui64toa_s(value, buffer, size, radix): 0, or EINVAL / ERANGE.
+HLE64("ucrtbase.dll", _ui64toa_s, kCdecl) {
+  uint64_t v = Arg(c, 0), size = Arg(c, 2);
+  gaddr buf = Arg(c, 1);
+  int radix = int(Arg(c, 3));
+  if (!buf || !size || radix < 2 || radix > 36) return EINVAL;
+  std::string s;
+  do {
+    int d = int(v % uint64_t(radix));
+    s.insert(s.begin(), char(d < 10 ? '0' + d : 'a' + d - 10));
+    v /= uint64_t(radix);
+  } while (v);
+  if (s.size() + 1 > size) {
+    Wr8(buf, 0);
+    return ERANGE;
+  }
+  PutStr(buf, s);
+  return 0;
+}
+
+HLE64("ucrtbase.dll", frexp, kCdecl) {
+  int e = 0;
+  double m = std::frexp(ArgD(c, 0), &e);
+  Wr32(Arg(c, 1), uint32_t(e));
+  return RetD(c, m);
+}
+HLE64("ucrtbase.dll", _finite, kCdecl) { return std::isfinite(ArgD(c, 0)) ? 1 : 0; }
+HLE64("ucrtbase.dll", _isnan, kCdecl) { return std::isnan(ArgD(c, 0)) ? 1 : 0; }
+// _fdtest(float*): _NANCODE 2, _INFCODE 1, 0 for zero, _DENORM -2,
+// _FINITE -1.
+HLE64("ucrtbase.dll", _fdtest, kCdecl) {
+  float v;
+  uint32_t b = Rd32(Arg(c, 0));
+  std::memcpy(&v, &b, 4);
+  int r = std::isnan(v) ? 2 : std::isinf(v) ? 1 : v == 0 ? 0 : std::fpclassify(v) == FP_SUBNORMAL ? -2 : -1;
+  return uint32_t(int16_t(r)) & 0xFFFF;
+}
+// ldiv(numer, denom): ldiv_t {quot, rem} of 32-bit longs, returned in rax.
+HLE64("ucrtbase.dll", ldiv, kCdecl) {
+  int32_t n = int32_t(Arg(c, 0)), d = int32_t(Arg(c, 1));
+  return uint64_t(uint32_t(n / d)) | uint64_t(uint32_t(n % d)) << 32;
+}
+// rand's seed (the generator is the UCRT's: see rand).
+HLE64("ucrtbase.dll", srand, kCdecl) {
+  RandSeed() = uint32_t(Arg(c, 0));
+  return 0;
+}
+
+// setlocale: only "C" (and "", which is "C" too) exists; the result is
+// the locale's name. A query (null) answers "C".
+HLE64("ucrtbase.dll", setlocale, kCdecl) {
+  static gaddr name = [] {
+    gaddr p = HeapAllocProcess(2, true);
+    PutStr(p, "C");
+    return p;
+  }();
+  gaddr l = Arg(c, 1);
+  if (!l) return name;
+  std::string want = GStr(l);
+  return want.empty() || want == "C" ? name : 0;
+}
+// _create_locale(category, name): a _locale_t the _l functions take and
+// ignore; the "C" locale's only.
+HLE64("ucrtbase.dll", _create_locale, kCdecl) {
+  std::string want = Arg(c, 1) ? GStr(Arg(c, 1)) : "";
+  if (!want.empty() && want != "C") return 0;
+  static gaddr loc = HeapAllocProcess(16, true);
+  return loc;
+}
+
+HLE64("ucrtbase.dll", _aligned_realloc, kCdecl) {
+  gaddr p = Arg(c, 0);
+  uint64_t n = Arg(c, 1), align = std::max<uint64_t>(Arg(c, 2), 8);
+  if (align & (align - 1)) return 0;
+  if (p && !n) {
+    HeapFreeProcess(Rd64(p - 8));
+    return 0;
+  }
+  gaddr block = HeapAllocProcess(n + align + 8, false);
+  if (!block) return 0;
+  gaddr q = (block + 8 + align - 1) & ~(align - 1);
+  Wr64(q - 8, block);
+  if (p) {
+    gaddr old = Rd64(p - 8);
+    uint64_t have = HeapSizeProcess(old) - (p - old);
+    std::memcpy(GPtr(q), GPtr(p), std::min(have, n));
+    HeapFreeProcess(old);
+  }
+  return q;
+}
+
+// at_quick_exit handlers never run: quick_exit is not provided.
+HLE64("ucrtbase.dll", _crt_at_quick_exit, kCdecl) { return 0; }
+HLE64("ucrtbase.dll", _endthreadex, kCdecl) {
+  GuestSyncFence();
+  throw GuestThreadExit{uint32_t(Arg(c, 0))};
+}
+HLE64("ucrtbase.dll", _invalid_parameter_noinfo, kCdecl) {
+  FatalF("guest CRT: invalid parameter (return address %08llX)", (unsigned long long)Rd64(c.rsp));
+}
+HLE64("ucrtbase.dll", abort, kCdecl) { FatalF("guest called abort()"); }
+HLE64("ucrtbase.dll", raise, kCdecl) { FatalF("guest raised signal %d", int(int32_t(Arg(c, 0)))); }
+// No command processor: system(NULL) says so, and a command fails.
+HLE64("ucrtbase.dll", system, kCdecl) {
+  if (Arg(c, 0)) SetErrno(ENOENT);
+  return Arg(c, 0) ? uint32_t(-1) : 0;
+}
+HLE64("ucrtbase.dll", strerror, kCdecl) {
+  static gaddr buf = HeapAllocProcess(96, true);
+  PutStr(buf, std::string(std::strerror(int(int32_t(Arg(c, 0))))).substr(0, 94));
+  return buf;
+}
+
+// ---- paths ----------------------------------------------------------------------
+
+// _fullpath(buffer, path, size): with a null buffer, a malloc'd one.
+HLE64("ucrtbase.dll", _fullpath, kCdecl) {
+  std::string full = GuestFullPath(GStr(Arg(c, 1)));
+  gaddr buf = Arg(c, 0);
+  if (!buf) buf = HeapAllocProcess(full.size() + 1, false);
+  else if (full.size() + 1 > Arg(c, 2)) {
+    SetErrno(ERANGE);
+    return 0;
+  }
+  PutStr(buf, full);
+  return buf;
+}
+HLE64("ucrtbase.dll", _wgetcwd, kCdecl) {
+  std::string d = GuestCurrentDir();
+  gaddr buf = Arg(c, 0);
+  if (!buf) buf = HeapAllocProcess(2 * (d.size() + 1), false);
+  else if (d.size() + 1 > uint64_t(int32_t(Arg(c, 1)))) {
+    SetErrno(ERANGE);
+    return 0;
+  }
+  PutWStr(buf, d);
+  return buf;
+}
+namespace {
+// _splitpath's parts of p: drive "C:", directory up to its last
+// separator, file name, extension from the last dot.
+void SplitPath(const std::string& p, std::string* drive, std::string* dir, std::string* name,
+               std::string* ext) {
+  size_t at = 0;
+  *drive = p.size() >= 2 && p[1] == ':' ? p.substr(0, 2) : "";
+  at = drive->size();
+  size_t slash = p.find_last_of("\\/");
+  *dir = slash == std::string::npos || slash < at ? "" : p.substr(at, slash + 1 - at);
+  std::string file = p.substr(slash == std::string::npos ? at : std::max(slash + 1, at));
+  size_t dot = file.find_last_of('.');
+  *name = dot == std::string::npos ? file : file.substr(0, dot);
+  *ext = dot == std::string::npos ? "" : file.substr(dot);
+}
+}  // namespace
+HLE64("ucrtbase.dll", _splitpath, kCdecl) {
+  std::string parts[4];
+  SplitPath(GStr(Arg(c, 0)), &parts[0], &parts[1], &parts[2], &parts[3]);
+  for (int i = 0; i < 4; i++)
+    if (gaddr out = Arg(c, 1 + i)) PutStr(out, parts[i]);
+  return 0;
+}
+HLE64("ucrtbase.dll", _wsplitpath, kCdecl) {
+  std::string parts[4];
+  SplitPath(win32::Narrow(WStr(Arg(c, 0))), &parts[0], &parts[1], &parts[2], &parts[3]);
+  for (int i = 0; i < 4; i++)
+    if (gaddr out = Arg(c, 1 + i)) PutWStr(out, parts[i]);
+  return 0;
+}
+HLE64("ucrtbase.dll", remove, kCdecl) {
+  if (std::remove(HostPath(GStr(Arg(c, 0)), PathAccess::kWrite).c_str()) != 0) {
+    SetErrno(uint32_t(errno));
+    return uint32_t(-1);
+  }
+  return 0;
+}
+HLE64("ucrtbase.dll", rename, kCdecl) {
+  if (std::rename(HostPath(GStr(Arg(c, 0)), PathAccess::kUpdate).c_str(),
+                  HostPath(GStr(Arg(c, 1)), PathAccess::kWrite).c_str()) != 0) {
+    SetErrno(uint32_t(errno));
+    return uint32_t(-1);
+  }
+  return 0;
+}
 
 }  // namespace recomp::hle

@@ -147,6 +147,54 @@ HLE64("ucrtbase.dll", _mkgmtime64, kCdecl) {
   return uint64_t(r);
 }
 
+HLE64("ucrtbase.dll", _gmtime64, kCdecl) {
+  int64_t t = int64_t(Rd64(Arg(c, 0)));
+  if (t < 0 || t > kMaxTime64) {
+    Fail(EINVAL);
+    return 0;
+  }
+  PutTm(TmBuffer(), Utc(t));
+  return TmBuffer();
+}
+
+// _localtime64_s(tm*, const __time64_t*): 0 or EINVAL (the tm then all -1).
+HLE64("ucrtbase.dll", _localtime64_s, kCdecl) {
+  gaddr out = Arg(c, 0), tp = Arg(c, 1);
+  if (!out) {
+    Fail(EINVAL);
+    return EINVAL;
+  }
+  int64_t t = tp ? int64_t(Rd64(tp)) : -1;
+  if (!tp || t < 0 || t > kMaxTime64) {
+    for (int i = 0; i < 9; i++) Wr32(out + 4 * i, 0xFFFFFFFF);
+    Fail(EINVAL);
+    return EINVAL;
+  }
+  PutTm(out, Local(t));
+  return 0;
+}
+
+// _mktime64(tm*): the tm as local time (the fixed offset Local uses, no
+// daylight saving), normalised in place; -1 out of range.
+HLE64("ucrtbase.dll", _mktime64, kCdecl) {
+  gaddr p = Arg(c, 0);
+  std::tm t = GetTm(p);
+  int64_t r = int64_t(timegm(&t)) - LocalOffset();
+  if (r < 0 || r > kMaxTime64) {
+    Fail(EINVAL);
+    return uint64_t(-1);
+  }
+  PutTm(p, Local(r));
+  return uint64_t(r);
+}
+
+HLE64("ucrtbase.dll", _difftime64, kCdecl) {
+  return RetD(c, double(int64_t(Arg(c, 0)) - int64_t(Arg(c, 1))));
+}
+
+// clock(): CLOCKS_PER_SEC (1000) ticks since the process started.
+HLE64("ucrtbase.dll", clock, kCdecl) { return uint32_t(TickCount()); }
+
 HLE64("ucrtbase.dll", _ctime64, kCdecl) {
   int64_t t = int64_t(Rd64(Arg(c, 0)));
   char s[26];
