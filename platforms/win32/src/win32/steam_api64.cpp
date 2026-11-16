@@ -235,78 +235,87 @@ HLE64(kDll, SteamUserStats, kCdecl) { return Accessor("STEAMUSERSTATS_INTERFACE_
 // it runs as it is.
 HLE64(kDll, SteamAPI_RestartAppIfNecessary, kCdecl) { return 0; }
 
-// ISteamApps (STEAMAPPS_INTERFACE_VERSION008): the player owns the game
-// they run, and its DLC, in English; no cybercafe, ban or free weekend.
-#define RECOMP_STEAM_APPS(slot, ident, value)                                        \
-  HLE_NAMED_X(kDll, "STEAMAPPS_INTERFACE_VERSION008::#" #slot, ident, kCdecl, true) { \
-    return value;                                                                     \
-  }
-RECOMP_STEAM_APPS(0, SteamAppsBIsSubscribed, 1)
-RECOMP_STEAM_APPS(1, SteamAppsBIsLowViolence, 0)
-RECOMP_STEAM_APPS(2, SteamAppsBIsCybercafe, 0)
-RECOMP_STEAM_APPS(3, SteamAppsBIsVACBanned, 0)
-RECOMP_STEAM_APPS(6, SteamAppsBIsSubscribedApp, 1)
-RECOMP_STEAM_APPS(7, SteamAppsBIsDlcInstalled, 1)
-RECOMP_STEAM_APPS(9, SteamAppsBIsSubscribedFromFreeWeekend, 0)
-#undef RECOMP_STEAM_APPS
-HLE_NAMED_X(kDll, "STEAMAPPS_INTERFACE_VERSION008::#4", SteamAppsGetCurrentGameLanguage, kCdecl,
-            true) {
-  static gaddr s = [] {
-    gaddr p = HeapAllocProcess(8, true);
-    PutStr(p, "english");
-    return p;
-  }();
-  return s;
+// One method under an older and a newer interface version. Steamworks
+// appends methods, so an older version's slots are the newer one's first
+// ones: SDKs before 1.37 and later ones reach the same handler.
+#define RECOMP_STEAM_METHOD(old_version, new_version, slot, ident)                            \
+  uint64_t ident(Ctx& c);                                                                     \
+  HLE_NAMED_X(kDll, old_version "::#" #slot, ident##Old, kCdecl, true) { return ident(c); }  \
+  HLE_NAMED_X(kDll, new_version "::#" #slot, ident##New, kCdecl, true) { return ident(c); }  \
+  uint64_t ident([[maybe_unused]] Ctx& c)
+
+namespace {
+gaddr GuestString(const char* s) {
+  gaddr p = HeapAllocProcess(std::strlen(s) + 1, true);
+  PutStr(p, s);
+  return p;
+}
+}  // namespace
+
+// ISteamClient (SteamClient012 and 017): no IPC to run, no warnings to
+// report.
+RECOMP_STEAM_METHOD("SteamClient012", "SteamClient017", 19, SteamClientRunFrame) { return 0; }
+RECOMP_STEAM_METHOD("SteamClient012", "SteamClient017", 20, SteamClientGetIPCCallCount) { return 0; }
+RECOMP_STEAM_METHOD("SteamClient012", "SteamClient017", 21, SteamClientSetWarningMessageHook) {
+  return 0;
 }
 
-// ISteamUtils (SteamUtils009): no overlay, the public universe, the host's
-// clock; warning hooks and notification placement are accepted.
-HLE_NAMED_X(kDll, "SteamUtils009::#2", SteamUtilsGetConnectedUniverse, kCdecl, true) {
-  return 1;  // k_EUniversePublic
+// ISteamApps (STEAMAPPS_INTERFACE_VERSION005 and 008): the player owns the
+// game they run, and its DLC, in English; no cybercafe, ban or free
+// weekend.
+#define RECOMP_STEAM_APPS(slot, ident) \
+  RECOMP_STEAM_METHOD("STEAMAPPS_INTERFACE_VERSION005", "STEAMAPPS_INTERFACE_VERSION008", slot, ident)
+RECOMP_STEAM_APPS(0, SteamAppsBIsSubscribed) { return 1; }
+RECOMP_STEAM_APPS(1, SteamAppsBIsLowViolence) { return 0; }
+RECOMP_STEAM_APPS(2, SteamAppsBIsCybercafe) { return 0; }
+RECOMP_STEAM_APPS(3, SteamAppsBIsVACBanned) { return 0; }
+RECOMP_STEAM_APPS(4, SteamAppsGetCurrentGameLanguage) {
+  static gaddr s = GuestString("english");
+  return s;
 }
-HLE_NAMED_X(kDll, "SteamUtils009::#3", SteamUtilsGetServerRealTime, kCdecl, true) {
-  return uint32_t(std::time(nullptr));
-}
-HLE_NAMED_X(kDll, "SteamUtils009::#9", SteamUtilsGetAppID, kCdecl, true) {
+RECOMP_STEAM_APPS(6, SteamAppsBIsSubscribedApp) { return 1; }
+RECOMP_STEAM_APPS(7, SteamAppsBIsDlcInstalled) { return 1; }
+RECOMP_STEAM_APPS(9, SteamAppsBIsSubscribedFromFreeWeekend) { return 0; }
+#undef RECOMP_STEAM_APPS
+
+// ISteamUtils (SteamUtils005 and 009): no overlay, the public universe,
+// the host's clock; warning hooks and notification placement are accepted.
+#define RECOMP_STEAM_UTILS(slot, ident) RECOMP_STEAM_METHOD("SteamUtils005", "SteamUtils009", slot, ident)
+RECOMP_STEAM_UTILS(2, SteamUtilsGetConnectedUniverse) { return 1; }  // k_EUniversePublic
+RECOMP_STEAM_UTILS(3, SteamUtilsGetServerRealTime) { return uint32_t(std::time(nullptr)); }
+RECOMP_STEAM_UTILS(9, SteamUtilsGetAppID) {
   if (!Game().steam_app_id) FatalF("steam_api64: GetAppID, but GameConfig::steam_app_id is not set");
   return Game().steam_app_id;
 }
-HLE_NAMED_X(kDll, "SteamUtils009::#10", SteamUtilsSetOverlayNotificationPosition, kCdecl, true) {
-  return 0;
-}
-HLE_NAMED_X(kDll, "SteamUtils009::#16", SteamUtilsSetWarningMessageHook, kCdecl, true) { return 0; }
-HLE_NAMED_X(kDll, "SteamUtils009::#17", SteamUtilsIsOverlayEnabled, kCdecl, true) { return 0; }
-HLE_NAMED_X(kDll, "SteamUtils009::#18", SteamUtilsBOverlayNeedsPresent, kCdecl, true) { return 0; }
-HLE_NAMED_X(kDll, "SteamUtils009::#23", SteamUtilsGetSteamUILanguage, kCdecl, true) {
-  static gaddr s = [] {
-    gaddr p = HeapAllocProcess(8, true);
-    PutStr(p, "english");
-    return p;
-  }();
+RECOMP_STEAM_UTILS(10, SteamUtilsSetOverlayNotificationPosition) { return 0; }
+RECOMP_STEAM_UTILS(16, SteamUtilsSetWarningMessageHook) { return 0; }
+RECOMP_STEAM_UTILS(17, SteamUtilsIsOverlayEnabled) { return 0; }
+RECOMP_STEAM_UTILS(18, SteamUtilsBOverlayNeedsPresent) { return 0; }
+RECOMP_STEAM_UTILS(23, SteamUtilsGetSteamUILanguage) {
+  static gaddr s = GuestString("english");
   return s;
 }
+#undef RECOMP_STEAM_UTILS
 
-// ISteamUser (SteamUser019): not connected to the Steam servers, as with
-// Steam in offline mode. GetSteamID returns the CSteamID class through a
-// hidden pointer (after `this` on x64): always the same individual account
-// of the public universe, so what a game keys by it (save folders) stays
-// put.
-HLE_NAMED_X(kDll, "SteamUser019::#1", SteamUserBLoggedOn, kCdecl, true) { return 0; }
-HLE_NAMED_X(kDll, "SteamUser019::#2", SteamUserGetSteamID, kCdecl, true) {
+// ISteamUser (SteamUser016 and 019): not connected to the Steam servers,
+// as with Steam in offline mode. GetSteamID returns the CSteamID class
+// through a hidden pointer (after `this` on x64): always the same
+// individual account of the public universe, so what a game keys by it
+// (save folders) stays put.
+RECOMP_STEAM_METHOD("SteamUser016", "SteamUser019", 1, SteamUserBLoggedOn) { return 0; }
+RECOMP_STEAM_METHOD("SteamUser016", "SteamUser019", 2, SteamUserGetSteamID) {
   constexpr uint64_t kSteamId = 0x0110000100000001ull;
   const gaddr out = Arg(c, 1);
   Wr64(out, kSteamId);
   return out;
 }
 
-// ISteamFriends (SteamFriends015): the player's name.
-HLE_NAMED_X(kDll, "SteamFriends015::#0", SteamFriendsGetPersonaName, kCdecl, true) {
-  static gaddr s = [] {
-    gaddr p = HeapAllocProcess(8, true);
-    PutStr(p, "Player");
-    return p;
-  }();
+// ISteamFriends (SteamFriends013 and 015): the player's name.
+RECOMP_STEAM_METHOD("SteamFriends013", "SteamFriends015", 0, SteamFriendsGetPersonaName) {
+  static gaddr s = GuestString("Player");
   return s;
 }
+
+#undef RECOMP_STEAM_METHOD
 
 }  // namespace recomp::hle
