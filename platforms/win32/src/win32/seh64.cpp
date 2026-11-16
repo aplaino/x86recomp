@@ -234,6 +234,22 @@ void UnwindTo(Ctx& c, gaddr record, gaddr target_frame, gaddr target_ip, uint64_
 
 // ---- the Rtl* unwind functions ------------------------------------------------
 
+// RtlUnwindEx(target_frame, target_ip, record, value, context, history):
+// from a language handler while its exception is dispatched (a statically
+// linked C++ runtime's frame handler), which is what UnwindTo does.
+HLE64("kernel32.dll", RtlUnwindEx, 6) {
+  if (!Arg(c, 2)) FatalF("RtlUnwindEx without an exception record: not supported");
+  UnwindTo(c, Arg(c, 2), Arg(c, 0), Arg(c, 1), Arg(c, 3));
+}
+
+// RtlPcToFileHeader(pc, &image_base): the image holding pc.
+HLE64("kernel32.dll", RtlPcToFileHeader, 2) {
+  const PeImage* img = ImageAt(Arg(c, 0));
+  const gaddr base = img ? img->image_base : 0;
+  Wr64(Arg(c, 1), base);
+  return base;
+}
+
 // RtlCaptureContext(ctx): the caller's state at the call.
 HLE64("kernel32.dll", RtlCaptureContext, 1) {
   WriteContext(Arg(c, 0), AtReturn(c), c);
