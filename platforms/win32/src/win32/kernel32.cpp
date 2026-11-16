@@ -215,6 +215,10 @@ HLE64("kernel32.dll", GetVersion, 0) {
 HLE64("kernel32.dll", GetVersionExW, 1) {
   const gaddr vi = Arg(c, 0);
   const uint32_t size = Rd32(vi);
+  if (size != 276 && size != 284) {  // OSVERSIONINFOW, OSVERSIONINFOEXW
+    SetLastError(kErrorInsufficientBuffer);
+    return 0;
+  }
   std::memset(GPtr(vi + 4), 0, size - 4);
   Wr32(vi + 4, g_proc->x64 ? 10 : 5);
   Wr32(vi + 8, g_proc->x64 ? 0 : 1);
@@ -232,6 +236,10 @@ HLE64("kernel32.dll", DecodePointer, 1) { return Arg(c, 0); }
 HLE64("kernel32.dll", GetVersionExA, 1) {
   gaddr vi = Arg(c, 0);
   uint32_t size = Rd32(vi);
+  if (size != 148 && size != 156) {  // OSVERSIONINFOA, OSVERSIONINFOEXA
+    SetLastError(kErrorInsufficientBuffer);
+    return 0;
+  }
   if (g_proc->x64) {  // Windows 10, as GetVersionExW and the PEB say
     std::memset(GPtr(vi + 4), 0, size - 4);
     Wr32(vi + 4, 10);
@@ -363,6 +371,10 @@ HLE64("kernel32.dll", GetModuleHandleA, 1) { return ModuleHandleOf(Arg(c, 0), fa
 // finds the image holding the address; references are not counted (lifted
 // DLLs loaded at startup stay mapped).
 HLE64("kernel32.dll", GetModuleHandleExW, 3) {
+  if (!Arg(c, 2)) {
+    SetLastError(kErrorInvalidParameter);
+    return 0;
+  }
   gaddr h = 0;
   if (Arg(c, 0) & 4) {
     if (const PeImage* img = ImageAt(Arg(c, 1))) h = img->image_base;

@@ -68,17 +68,22 @@ bool Chunks(const uint8_t* p, uint64_t size, std::initializer_list<const char*> 
   return true;
 }
 
-std::vector<uint8_t> Container(const std::vector<std::pair<const uint8_t*, uint32_t>>& chunks) {
-  const uint32_t head = 32 + 4 * uint32_t(chunks.size());
-  uint32_t total = head;
-  for (const auto& ch : chunks) total += ch.second;
+// A container of the chunks; empty if it would be bigger than `limit` (a
+// part is never bigger than its source).
+std::vector<uint8_t> Container(const std::vector<std::pair<const uint8_t*, uint32_t>>& chunks,
+                               uint64_t limit) {
+  const uint64_t head = 32 + 4 * uint64_t(chunks.size());
+  uint64_t sum = head;
+  for (const auto& ch : chunks) sum += ch.second;
+  if (sum > limit) return {};
+  const uint32_t total = uint32_t(sum);
   std::vector<uint8_t> out(total);
   std::memcpy(out.data(), "DXBC", 4);
   const uint32_t one = 1, count = uint32_t(chunks.size());
   std::memcpy(out.data() + 20, &one, 4);
   std::memcpy(out.data() + 24, &total, 4);
   std::memcpy(out.data() + 28, &count, 4);
-  uint32_t at = head;
+  uint32_t at = uint32_t(head);
   for (uint32_t i = 0; i < count; i++) {
     std::memcpy(out.data() + 32 + 4 * i, &at, 4);
     std::memcpy(out.data() + at, chunks[i].first, chunks[i].second);
@@ -127,8 +132,9 @@ HLE64(kDll, D3DGetBlobPart, 5) {
   }
   std::vector<std::pair<const uint8_t*, uint32_t>> chunks;
   if (!Chunks(GPtr(Arg(c, 0)), Arg(c, 1), want, &chunks)) return kE_INVALIDARG;
-  if (chunks.empty()) return kE_FAIL;
-  Wr64(out, NewBlob(Container(chunks)));
+  std::vector<uint8_t> bytes = chunks.empty() ? std::vector<uint8_t>() : Container(chunks, Arg(c, 1));
+  if (bytes.empty()) return kE_FAIL;
+  Wr64(out, NewBlob(bytes));
   return kS_OK;
 }
 

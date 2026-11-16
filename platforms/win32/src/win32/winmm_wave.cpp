@@ -95,7 +95,7 @@ bool ReadFormat(gaddr f, int* channels, int* rate, int* bits, int* block, bool* 
   *block = Rd16(f + 12);
   *bits = Rd16(f + 14);
   *is_float = tag == 3;
-  if (*channels < 1 || *rate <= 0 || *block <= 0) return false;
+  if (*channels < 1 || *rate <= 0 || *bits % 8 || *block != *channels * (*bits / 8)) return false;
   if (tag == 1) return *bits == 8 || *bits == 16;
   return tag == 3 && *bits == 32;
 }
