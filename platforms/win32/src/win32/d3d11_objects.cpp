@@ -349,12 +349,59 @@ void ReadViewDesc(View& v, gaddr d) {
   v.slices = arrayed ? Rd32(u + 8) : 1;
 }
 
+// The description bytes of a view (RTV and UAV 20, SRV and DSV 24).
+uint32_t ViewDescSize(ViewKind k) {
+  return k == ViewKind::ShaderResource || k == ViewKind::DepthStencil ? 24 : 20;
+}
+
+// The description of a view of the whole resource, as Windows fills it in
+// for a null one: the dimension from the resource (arrays, cubes,
+// multisampling), every mip for a shader resource view, mip 0 otherwise,
+// and every slice.
+void WholeDesc(View& v) {
+  const Resource& r = *v.res;
+  const bool srv = v.kind == ViewKind::ShaderResource, dsv = v.kind == ViewKind::DepthStencil;
+  const bool ms = r.samples > 1, cube = srv && (r.misc & kMiscTextureCube);
+  switch (r.dim) {
+    case Dim::Buffer: v.view_dim = 1; break;
+    case Dim::Texture1D: v.view_dim = dsv ? (r.array > 1 ? 2 : 1) : (r.array > 1 ? 3 : 2); break;
+    case Dim::Texture3D: v.view_dim = 8; break;
+    default:
+      if (cube) v.view_dim = r.array > 6 ? 10 : 9;
+      else if (dsv) v.view_dim = ms ? (r.array > 1 ? 6 : 5) : (r.array > 1 ? 4 : 3);
+      else v.view_dim = ms ? (r.array > 1 ? 7 : 6) : (r.array > 1 ? 5 : 4);
+  }
+  v.desc.assign(ViewDescSize(v.kind), 0);
+  auto put = [&](uint32_t at, uint32_t x) { std::memcpy(v.desc.data() + at, &x, 4); };
+  put(0, v.format);
+  put(4, v.view_dim);
+  const uint32_t u = dsv ? 12 : 8;
+  if (r.dim == Dim::Buffer) {
+    put(u, 0);
+    put(u + 4, v.elements);
+  } else if (srv) {
+    put(u, 0);
+    put(u + 4, r.mips);
+    if (cube && v.view_dim == 10) put(u + 12, r.array / 6);  // {.., First2DArrayFace, NumCubes}
+    else if (v.view_dim == 3 || v.view_dim == 5 || v.view_dim == 7) put(u + 12, r.array);
+  } else {
+    const bool arrayed = v.view_dim == (dsv ? 2u : 3u) || v.view_dim == (dsv ? 4u : 5u) ||
+                         v.view_dim == (dsv ? 6u : 7u) || v.view_dim == 8;
+    if (arrayed) put(u + 8, v.view_dim == 8 ? r.depth : r.array);
+  }
+}
+
 uint64_t CreateView(Ctx& c, ViewKind kind) {
   auto v = std::make_shared<View>();
   v->kind = kind;
   v->res = ResourceAt(Arg(c, 1));
   WholeResource(*v);
-  if (gaddr d = Arg(c, 2)) ReadViewDesc(*v, d);
+  if (gaddr d = Arg(c, 2)) {
+    ReadViewDesc(*v, d);
+    v->desc.assign(GPtr(d), GPtr(d) + ViewDescSize(kind));
+  } else {
+    WholeDesc(*v);
+  }
   if (gaddr out = Arg(c, 3)) {
     Wr64(out, com::Publish(v, VtableFor(ViewIface(kind), {"GetResource", "GetDesc"})));
     return kS_OK;
@@ -395,6 +442,11 @@ uint64_t CreateShader(Ctx& c, uint32_t stage, const char* iface) {
 D3D11_METHOD(ID3D11Device, CreateVertexShader) { return CreateShader(c, 0, "ID3D11VertexShader"); }
 D3D11_METHOD(ID3D11Device, CreatePixelShader) { return CreateShader(c, 1, "ID3D11PixelShader"); }
 D3D11_METHOD(ID3D11Device, CreateComputeShader) { return CreateShader(c, 2, "ID3D11ComputeShader"); }
+// The tessellation and geometry stages: their shaders are made and kept;
+// binding one for a draw is not supported yet (the context's setters).
+D3D11_METHOD(ID3D11Device, CreateHullShader) { return CreateShader(c, 3, "ID3D11HullShader"); }
+D3D11_METHOD(ID3D11Device, CreateDomainShader) { return CreateShader(c, 4, "ID3D11DomainShader"); }
+D3D11_METHOD(ID3D11Device, CreateGeometryShader) { return CreateShader(c, 5, "ID3D11GeometryShader"); }
 
 // CreateInputLayout(elements, count, VS bytecode, length, &layout):
 // D3D11_INPUT_ELEMENT_DESC {SemanticName, SemanticIndex, Format, InputSlot,
@@ -455,16 +507,20 @@ D3D11_METHOD(ID3D11Device, CreateRasterizerState) { return CreateState(c, StateK
 D3D11_METHOD(ID3D11Device, CreateSamplerState) { return CreateState(c, StateKind::Sampler, 52); }
 
 // CreateQuery(D3D11_QUERY_DESC {Query, MiscFlags}, &query).
-D3D11_METHOD(ID3D11Device, CreateQuery) {
+// CreateQuery/CreatePredicate(D3D11_QUERY_DESC {Query, MiscFlags}, &out):
+// a predicate is an occlusion query of its own interface.
+uint64_t CreateQuery(Ctx& c, const char* iface) {
   auto q = std::make_shared<Query>();
   q->type = Rd32(Arg(c, 1));
   q->misc = Rd32(Arg(c, 1) + 4);
   if (gaddr out = Arg(c, 2)) {
-    Wr64(out, com::Publish(q, VtableFor("ID3D11Query", {"GetDataSize", "GetDesc"})));
+    Wr64(out, com::Publish(q, VtableFor(iface, {"GetDataSize", "GetDesc"})));
     return kS_OK;
   }
   return kS_FALSE;
 }
+D3D11_METHOD(ID3D11Device, CreateQuery) { return CreateQuery(c, "ID3D11Query"); }
+D3D11_METHOD(ID3D11Device, CreatePredicate) { return CreateQuery(c, "ID3D11Predicate"); }
 
 // ---- capabilities ---------------------------------------------------------------------
 
@@ -472,6 +528,7 @@ D3D11_METHOD(ID3D11Device, CreateQuery) {
 // supports everything a feature level 11_0 device must.
 D3D11_METHOD(ID3D11Device, CheckFormatSupport) {
   bool block;
+  RECOMP_TRACE("  d3d11: CheckFormatSupport(%u)\n", uint32_t(Arg(c, 1)));
   if (!FormatBytes(uint32_t(Arg(c, 1)), &block)) {
     Wr32(Arg(c, 2), 0);
     return kE_FAIL;
@@ -614,12 +671,16 @@ D3D11_CHILD(ID3D11UnorderedAccessView)
 D3D11_CHILD(ID3D11VertexShader)
 D3D11_CHILD(ID3D11PixelShader)
 D3D11_CHILD(ID3D11ComputeShader)
+D3D11_CHILD(ID3D11HullShader)
+D3D11_CHILD(ID3D11DomainShader)
+D3D11_CHILD(ID3D11GeometryShader)
 D3D11_CHILD(ID3D11InputLayout)
 D3D11_CHILD(ID3D11BlendState)
 D3D11_CHILD(ID3D11DepthStencilState)
 D3D11_CHILD(ID3D11RasterizerState)
 D3D11_CHILD(ID3D11SamplerState)
 D3D11_CHILD(ID3D11Query)
+D3D11_CHILD(ID3D11Predicate)
 #undef D3D11_CHILD
 
 // ---- resources: GetType, eviction, GetDesc ------------------------------------------------
@@ -692,8 +753,34 @@ D3D11_VIEW(ID3D11DepthStencilView)
 D3D11_VIEW(ID3D11UnorderedAccessView)
 #undef D3D11_VIEW
 
+#define D3D11_VIEW_DESC(iface)                                                \
+  D3D11_METHOD(iface, GetDesc) {                                              \
+    const View* v = com::As<View>(Arg(c, 0));                                 \
+    std::memcpy(GPtr(Arg(c, 1)), v->desc.data(), v->desc.size());            \
+    return 0;                                                                 \
+  }
+D3D11_VIEW_DESC(ID3D11ShaderResourceView)
+D3D11_VIEW_DESC(ID3D11RenderTargetView)
+D3D11_VIEW_DESC(ID3D11DepthStencilView)
+D3D11_VIEW_DESC(ID3D11UnorderedAccessView)
+#undef D3D11_VIEW_DESC
+
+// ---- states: GetDesc gives back the description they were made with ----------------------
+
+#define D3D11_STATE(iface)                                                     \
+  D3D11_METHOD(iface, GetDesc) {                                               \
+    const State* st = com::As<State>(Arg(c, 0));                               \
+    std::memcpy(GPtr(Arg(c, 1)), st->desc.data(), st->desc.size());            \
+    return 0;                                                                  \
+  }
+D3D11_STATE(ID3D11BlendState)
+D3D11_STATE(ID3D11DepthStencilState)
+D3D11_STATE(ID3D11RasterizerState)
+D3D11_STATE(ID3D11SamplerState)
+#undef D3D11_STATE
+
 // ID3D11Query::GetDataSize: what GetData writes for the query's type.
-D3D11_METHOD(ID3D11Query, GetDataSize) {
+uint64_t QueryDataSize(Ctx& c) {
   switch (com::As<Query>(Arg(c, 0))->type) {
     case 0: return 4;    // EVENT: BOOL
     case 1: return 8;    // OCCLUSION: UINT64
@@ -704,5 +791,19 @@ D3D11_METHOD(ID3D11Query, GetDataSize) {
     default: return 0;
   }
 }
+uint64_t QueryDesc(Ctx& c) {
+  const Query* q = com::As<Query>(Arg(c, 0));
+  Wr32(Arg(c, 1), q->type);
+  Wr32(Arg(c, 1) + 4, q->misc);
+  return 0;
+}
+D3D11_METHOD(ID3D11Query, GetDataSize) { return QueryDataSize(c); }
+D3D11_METHOD(ID3D11Query, GetDesc) { return QueryDesc(c); }
+D3D11_METHOD(ID3D11Predicate, GetDataSize) { return QueryDataSize(c); }
+D3D11_METHOD(ID3D11Predicate, GetDesc) { return QueryDesc(c); }
+
+// SetPredication(predicate, value): occlusion queries here say everything
+// was visible, so drawing never depends on one; the predicate is accepted.
+D3D11_METHOD(ID3D11DeviceContext, SetPredication) { return 0; }
 
 }  // namespace recomp::hle::d3d11

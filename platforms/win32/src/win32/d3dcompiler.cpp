@@ -75,7 +75,7 @@ std::vector<uint8_t> Container(const std::vector<std::pair<const uint8_t*, uint3
   const uint64_t head = 32 + 4 * uint64_t(chunks.size());
   uint64_t sum = head;
   for (const auto& ch : chunks) sum += ch.second;
-  if (sum > limit) return {};
+  if (sum > limit || sum > UINT32_MAX) return {};
   const uint32_t total = uint32_t(sum);
   std::vector<uint8_t> out(total);
   std::memcpy(out.data(), "DXBC", 4);
