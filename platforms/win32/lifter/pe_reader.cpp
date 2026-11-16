@@ -50,13 +50,10 @@ bool Load(Program& p, Module& m, const std::string& path, uint64_t base, std::st
   m.base = img.image_base;
   m.preferred_base = img.preferred_base;
   for (const auto& s : img.sections) {
-    if (s.name == ".text") {
-      m.text_lo = s.va;
-      m.text_hi = s.va + s.vsize;
-    }
+    if (s.characteristics & recomp::kScnMemExecute) m.text.emplace_back(s.va, s.va + s.vsize);
     if (s.name == ".rdata" || s.name == ".data") m.data.push_back({s.va, s.va + s.vsize});
   }
-  auto in_text = [&](uint64_t va) { return va >= m.text_lo && va < m.text_hi; };
+  auto in_text = [&](uint64_t va) { return m.TextEnd(va) != 0; };
 
   // x64: every .pdata entry that is not a chained fragment starts a
   // function (ARCHITECTURE.md, "64-bit guests"); those with a language
