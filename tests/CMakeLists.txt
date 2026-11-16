@@ -138,6 +138,7 @@ add_test(NAME hlsl_bytecode COMMAND hlsl_bytecode_test ${RECOMP_GLSLANG}
 
 # gfx_program_test: gfx::Device's programs (the console GPUs' path) on
 # SDL_GPU; needs a Vulkan device (lavapipe will do), skipped without one.
+# On macOS it runs on Metal by hand: SDL_GPU_DRIVER=metal gfx_program_test.
 if(RECOMP_HOST)
   add_executable(gfx_program_test gfx_program_test.cpp)
   target_link_libraries(gfx_program_test PRIVATE recomp_gfx recomp_log)
