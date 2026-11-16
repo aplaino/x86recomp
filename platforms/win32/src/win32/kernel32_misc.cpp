@@ -472,9 +472,9 @@ HLE("version.dll", VerQueryValueA, 4) {
 // A profile path without a directory is in the Windows directory, as on
 // Windows; sections and keys compare without case.
 
-std::string ProfileHostPath(const std::string& file) {
+std::string ProfileHostPath(const std::string& file, PathAccess access = PathAccess::kRead) {
   std::string g = file.find_first_of("\\/") == std::string::npos ? "C:\\Windows\\" + file : file;
-  return HostPath(GuestFullPath(g));
+  return HostPath(GuestFullPath(g), access);
 }
 
 std::string LowerAscii(std::string s) {
@@ -526,7 +526,7 @@ HLE64("kernel32.dll", GetPrivateProfileIntW, 4) { return GetProfileInt(c, true);
 // WritePrivateProfileSectionW(section, "key=value\0...\0\0", file): the
 // section's lines replaced by the given ones (added at the end if new).
 HLE64("kernel32.dll", WritePrivateProfileSectionW, 3) {
-  const std::string section = Narrow(GWStr(Arg(c, 0))), path = ProfileHostPath(Narrow(GWStr(Arg(c, 2))));
+  const std::string section = Narrow(GWStr(Arg(c, 0))), path = ProfileHostPath(Narrow(GWStr(Arg(c, 2))), PathAccess::kUpdate);
   std::vector<std::string> pairs;
   for (gaddr p = Arg(c, 1); Rd16(p);) {
     std::u16string w = GWStr(p);
