@@ -1,5 +1,6 @@
-// steam_api64.dll (Steamworks, the SteamInternal_* accessors of SDKs 1.37
-// and later) for x64 guests, answering as a Steam client that is running
+// steam_api64.dll (Steamworks: the SteamInternal_* accessors of SDKs 1.37
+// and later, and the plain SteamUser()-style ones of the SDKs before) for
+// x64 guests, answering as a Steam client that is running
 // but offline: SteamAPI_Init succeeds and no callback is ever posted.
 // Interfaces come from ISteamClient's GetISteam* methods, by the version
 // string the game asks for, as guest objects whose vtables are thunks named
@@ -9,7 +10,10 @@
 
 #include <strings.h>
 
+#include <cctype>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <ctime>
@@ -156,6 +160,80 @@ RECOMP_STEAM_GETTER(35, 3)  // GetISteamVideo
 RECOMP_STEAM_GETTER(36, 3)
 RECOMP_STEAM_GETTER(37, 3)
 #undef RECOMP_STEAM_GETTER
+
+// ISteamClient012 (SDKs before 1.37): the same getters at the same slots,
+// up to GetISteamUGC, its last.
+#define RECOMP_STEAM_GETTER(slot, at)                                                    \
+  HLE_NAMED_X(kDll, "SteamClient012::#" #slot, SteamClient012Get##slot, kCdecl, true) { \
+    return GetInterface(c, at);                                                          \
+  }
+RECOMP_STEAM_GETTER(5, 3)
+RECOMP_STEAM_GETTER(6, 3)
+RECOMP_STEAM_GETTER(8, 3)
+RECOMP_STEAM_GETTER(9, 2)
+RECOMP_STEAM_GETTER(10, 3)
+RECOMP_STEAM_GETTER(11, 3)
+RECOMP_STEAM_GETTER(12, 3)
+RECOMP_STEAM_GETTER(13, 3)
+RECOMP_STEAM_GETTER(14, 3)
+RECOMP_STEAM_GETTER(15, 3)
+RECOMP_STEAM_GETTER(16, 3)
+RECOMP_STEAM_GETTER(17, 3)
+RECOMP_STEAM_GETTER(18, 3)
+RECOMP_STEAM_GETTER(23, 3)
+RECOMP_STEAM_GETTER(24, 3)
+RECOMP_STEAM_GETTER(25, 3)
+RECOMP_STEAM_GETTER(26, 3)
+#undef RECOMP_STEAM_GETTER
+
+// The accessors of SDKs before 1.37 (SteamUser(), SteamApps(), ...): the
+// interfaces steam_api64.dll keeps from SteamAPI_Init on, of the versions
+// that DLL was built with. Those are read from the game's own
+// steam_api64.dll, which holds each as the string it passes to
+// ISteamClient.
+namespace {
+
+// The game's steam_api64.dll's version string that starts with `prefix`
+// and goes on with digits only ("SteamUser0" -> "SteamUser016"); empty if
+// it has none.
+std::string DllVersion(const std::string& prefix) {
+  static std::mutex mu;
+  static std::string bytes;
+  static bool read = false;
+  std::lock_guard<std::mutex> l(mu);
+  if (!read) {
+    read = true;
+    std::ifstream f(HostPath(GuestGameDir() + "\\steam_api64.dll"), std::ios::binary);
+    bytes.assign(std::istreambuf_iterator<char>(f), {});
+  }
+  for (size_t at = bytes.find(prefix); at != std::string::npos; at = bytes.find(prefix, at + 1)) {
+    size_t end = at + prefix.size();
+    while (end < bytes.size() && std::isdigit(uint8_t(bytes[end]))) end++;
+    if (end < bytes.size() && bytes[end] == '\0') return bytes.substr(at, end - at);
+  }
+  return {};
+}
+
+uint64_t Accessor(const char* prefix) {
+  std::string v = DllVersion(prefix);
+  if (v.empty()) FatalF("steam_api64: the game's steam_api64.dll names no %s... interface", prefix);
+  return Interface(v);
+}
+
+}  // namespace
+
+HLE64(kDll, SteamClient, kCdecl) { return Accessor("SteamClient0"); }
+HLE64(kDll, SteamUser, kCdecl) { return Accessor("SteamUser0"); }
+HLE64(kDll, SteamFriends, kCdecl) { return Accessor("SteamFriends0"); }
+HLE64(kDll, SteamUtils, kCdecl) { return Accessor("SteamUtils0"); }
+HLE64(kDll, SteamApps, kCdecl) { return Accessor("STEAMAPPS_INTERFACE_VERSION0"); }
+HLE64(kDll, SteamMatchmaking, kCdecl) { return Accessor("SteamMatchMaking0"); }
+HLE64(kDll, SteamNetworking, kCdecl) { return Accessor("SteamNetworking0"); }
+HLE64(kDll, SteamUserStats, kCdecl) { return Accessor("STEAMUSERSTATS_INTERFACE_VERSION0"); }
+
+// SteamAPI_RestartAppIfNecessary(app id): Steam need not start the game;
+// it runs as it is.
+HLE64(kDll, SteamAPI_RestartAppIfNecessary, kCdecl) { return 0; }
 
 // ISteamApps (STEAMAPPS_INTERFACE_VERSION008): the player owns the game
 // they run, and its DLC, in English; no cybercafe, ban or free weekend.
