@@ -21,6 +21,7 @@
 // Graph, as com.h has one guest pointer per interface; QueryInterface on
 // any of them returns the graph's object for the requested one.
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -756,26 +757,49 @@ bool Connect(Ctx&, Graph&) { return false; }
 void Pump(Ctx&, Graph&) {}
 #endif
 
-// Stops the renderer and the decoding, and lets go of the game's objects.
+// Stops the renderer and the decoding. The pins stay connected, as in
+// DirectShow: the game's renderer keeps what it made for the connection
+// (its textures) until the graph goes.
 void StopPlayback(Ctx& c, Graph& g) {
-  if (g.in_pin) {
+  if (g.in_pin && g.playing) {
     Call(c, g.renderer, kFilterStop);
     Call(c, g.allocator, kAllocDecommit);
-    Call(c, g.in_pin, kPinDisconnect);
   }
   g.movie.reset();
   g.playing = false;
+}
+
+// The graph going (the game released its last interface): the pins are
+// disconnected and the game's objects let go, as the graph manager does.
+void Teardown(Ctx& c, Graph& g) {
+  StopPlayback(c, g);
+  if (g.in_pin) Call(c, g.in_pin, kPinDisconnect);
   ReleaseGuest(c, g);
 }
 
 }  // namespace
+
+// The last of a graph's interfaces released: the graph goes.
+uint32_t ReleaseFacade(Ctx& c, const char* iface) {
+  auto g = Self(c, iface);
+  const uint32_t left = com::Release(Arg(c, 0));
+  if (!left) {
+    bool any;
+    {
+      std::lock_guard<std::mutex> l(g->mu);
+      any = std::any_of(g->objs.begin(), g->objs.end(), [](uint32_t o) { return o != 0; });
+    }
+    if (!any) Teardown(c, *g);
+  }
+  return left;
+}
 
 #define RECOMP_QUARTZ_UNKNOWN(iface, prefix)                                                  \
   HLE_NAMED(kDll, #iface "::QueryInterface", prefix##_QueryInterface, 3) {                    \
     return QueryInterface(c, #iface);                                                         \
   }                                                                                           \
   HLE_NAMED(kDll, #iface "::AddRef", prefix##_AddRef, 1) { return com::AddRef(Arg(c, 0)); }   \
-  HLE_NAMED(kDll, #iface "::Release", prefix##_Release, 1) { return com::Release(Arg(c, 0)); }
+  HLE_NAMED(kDll, #iface "::Release", prefix##_Release, 1) { return ReleaseFacade(c, #iface); }
 RECOMP_QUARTZ_UNKNOWN(IGraphBuilder, Gb)
 RECOMP_QUARTZ_UNKNOWN(IMediaControl, Mc)
 RECOMP_QUARTZ_UNKNOWN(IMediaEventEx, Me)
