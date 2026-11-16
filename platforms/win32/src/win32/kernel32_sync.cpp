@@ -594,6 +594,22 @@ HLE64("kernel32.dll", CreateThread, 6) {
   return HandleRet(h);
 }
 
+// STILL_ACTIVE (259) while the thread runs, then its exit code.
+HLE64("kernel32.dll", GetExitCodeThread, 2) {
+  auto to = std::dynamic_pointer_cast<ThreadObject>(GetHandle(Arg(c, 0)));
+  if (!to) {
+    SetLastError(kErrorInvalidHandle);
+    return 0;
+  }
+  std::lock_guard<std::mutex> l(g_wait_mu);
+  Wr32(Arg(c, 1), to->finished ? to->exit_code : 259);
+  return 1;
+}
+
+// Ideal processors are hints, not applied (as affinity is not): the
+// previous one is reported as processor 0.
+HLE64("kernel32.dll", SetThreadIdealProcessor, 2) { return 0; }
+
 HLE64("kernel32.dll", ResumeThread, 1) {
   GuestSyncPoint sync;
   auto to = std::dynamic_pointer_cast<ThreadObject>(GetHandle(Arg(c, 0)));
