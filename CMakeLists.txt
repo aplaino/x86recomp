@@ -373,6 +373,11 @@ target_link_libraries(recomp_sdl2 PUBLIC recomp_runtime SDL3::SDL3)
 # DirectShow's filter graph manager, for movies played through it.
 add_library(recomp_quartz SHARED src/runtime/hle/quartz.cpp)
 target_link_libraries(recomp_quartz PUBLIC recomp_runtime)
+if(FFMPEG_FOUND)
+  # Playback: the file decoded by ffmpeg, its sound on the audio mixer.
+  target_link_libraries(recomp_quartz PUBLIC recomp_audio)
+  target_compile_definitions(recomp_quartz PRIVATE RECOMP_QUARTZ_VIDEO)
+endif()
 
 add_library(recomp_dbghelp SHARED src/runtime/hle/dbghelp.cpp)
 if(RECOMP_IOS)
