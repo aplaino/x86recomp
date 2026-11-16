@@ -1418,13 +1418,17 @@ HLE("winmm.dll", midiInClose, 1) { return 5; }
 
 uint32_t (*g_sleep_filter)(uint32_t) = nullptr;  // SetSleepFilter
 namespace {
-// Sleep(0) gives up the rest of the time slice, as on Windows.
+// Sleep(0) gives up the rest of the time slice, as on Windows. Sleep(n)
+// wakes within a fraction of a millisecond of n, as Windows does once a
+// game has set a 1 ms timer period: a plain host sleep gets the
+// timeshare timer's coalescing leeway (5 ms asked for is 7.5 slept), and
+// frame limiters that sleep most of the remaining frame then miss it.
 void GuestSleep(uint32_t ms) {
   if (g_sleep_filter) ms = g_sleep_filter(ms);
   if (ms == 0)
     std::this_thread::yield();
   else
-    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    platform::SleepUntilNs(platform::MonotonicNs() + uint64_t(ms) * 1000000u);
 }
 }  // namespace
 
