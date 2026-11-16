@@ -20,7 +20,15 @@ struct Module {
   std::string name;  // file name without extension, e.g. "game"
   // Where it is mapped, and the base its symbol files and manifest use.
   uint64_t base = 0, preferred_base = 0;
-  uint64_t text_lo = 0, text_hi = 0;  // [lo, hi) of .text
+  // [lo, hi) of each executable section (.text; a protected image adds
+  // the protector's own).
+  std::vector<std::pair<uint64_t, uint64_t>> text;
+  // The section's end if va is in one, else 0.
+  uint64_t TextEnd(uint64_t va) const {
+    for (const auto& [lo, hi] : text)
+      if (va >= lo && va < hi) return hi;
+    return 0;
+  }
   // Initialised data scanned for code pointers, as [lo, hi) ranges.
   std::vector<std::pair<uint64_t, uint64_t>> data;
   // Read-only data outside .text that may hold switch tables (an ELF's
@@ -58,6 +66,14 @@ struct Program {
   recomp::GuestMemory mem;
   std::vector<Module> modules;  // [0] is the EXE
   bool x64 = false;  // x64 images (all modules are one or the other)
+  // --stack-flow: control flow through the stack, as code protectors
+  // obfuscate it (push X; ret to jump, push X; jmp F to call F and go on at
+  // X, an address chosen by cmov before a ret). Each function keeps the
+  // return address it was entered for, R; a ret to another address and an
+  // indirect tail jump continue in the same activation (Flow), and tail
+  // calls hand R on, so the host returns exactly when the guest returns to
+  // R (ARCHITECTURE.md, "Control flow through the stack").
+  bool stack_flow = false;
 
   std::set<uint64_t> entries;                 // function entry points
   // Entries known only from pointer scans (a dword in data or an
@@ -119,15 +135,15 @@ struct Program {
   // resume/replace/host/setjmp lines, VAs at its preferred base).
   bool LoadManifest(const std::string& path, std::string* err);
 
-  // The module whose .text contains va, or null.
+  // The module whose code contains va, or null.
   const Module* TextOf(uint64_t va) const {
     for (const auto& m : modules)
-      if (va >= m.text_lo && va < m.text_hi) return &m;
+      if (m.TextEnd(va)) return &m;
     return nullptr;
   }
   bool InText(uint64_t va) const { return TextOf(va) != nullptr; }
   const uint8_t* Bytes(uint64_t va) const { return mem.ptr<uint8_t>(va); }
-  size_t BytesLeft(uint64_t va) const { return TextOf(va)->text_hi - va; }
+  size_t BytesLeft(uint64_t va) const { return TextOf(va)->TextEnd(va) - va; }
 };
 
 }  // namespace lifter

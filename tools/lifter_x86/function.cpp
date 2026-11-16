@@ -612,6 +612,28 @@ void BuildFunction(const Program& p, const Decoder& dec, uint64_t entry,
         break;
     }
   }
+  // --stack-flow: addresses of this function's own instructions that it
+  // computes (an immediate, a RIP-relative lea), where a ret may go
+  // (push X; ret, or X put in a register for a cmov).
+  if (p.stack_flow)
+    for (const auto& [va, in] : f.insns) {
+      if (!in.ok) continue;
+      for (int i = 0; i < in.d.operand_count_visible; i++) {
+        const auto& op = in.ops[i];
+        uint64_t v;
+        if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE)
+          v = p.x64 ? op.imm.value.u : uint32_t(op.imm.value.u);
+        else if (in.d.mnemonic == ZYDIS_MNEMONIC_LEA && op.type == ZYDIS_OPERAND_TYPE_MEMORY &&
+                 op.mem.base == ZYDIS_REGISTER_RIP)
+          v = in.next() + op.mem.disp.value;
+        else
+          continue;
+        if (f.insns.count(v)) {
+          f.code_consts.insert(v);
+          f.labels.insert(v);
+        }
+      }
+    }
 }
 
 }  // namespace lifter

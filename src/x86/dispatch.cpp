@@ -279,6 +279,11 @@ void FaultHandler(int sig, siginfo_t* si, void* uc) {
   n = std::snprintf(buf, sizeof buf, "  thread '%s', pc %p, caller:\n", name,
                     reinterpret_cast<void*>(fc.pc));
   (void)!write(2, buf, size_t(n));
+  // The faulting function by name (lifted code's f_<VA> when exported).
+  if (fc.pc) {
+    void* pc = reinterpret_cast<void*>(fc.pc);
+    backtrace_symbols_fd(&pc, 1, 2);
+  }
   // A call through a null pointer leaves pc 0: the caller (the return
   // address in [sp] or the link register) still shows where it was.
   if (fc.caller) {
@@ -380,6 +385,30 @@ void Dispatch(Ctx& c, uint64_t target, uint64_t va) {
          "(add it to the manifest as a function entry)",
          (unsigned long long)target, (unsigned long long)va);
 }
+
+// A jump to `ret` is the activation's return written as a jump
+// (lea rsp, [rsp+8]; jmp [rsp-8]). An import's handler returns to the
+// address on the stack and pops it, so a thunk reached this way is run
+// here and execution goes on where it returned. Lifted code is dispatched
+// with the activation's return address in c.ret_hint, which the entered
+// function takes as its own.
+void Flow(Ctx& c, uint64_t t, uint64_t ret, uint64_t va) {
+  const bool x64 = g_proc->x64;
+  const uint64_t thunks = x64 ? kThunkBase64 : kThunkBase;
+  if (t == ret) return;
+  while (t - thunks < kThunkRegionSize) {
+    const uint64_t to = x64 ? Rd64(c.rsp) : Rd32(c.esp);
+    hle::CallThunk(c, t);
+    if (to == ret) return;
+    t = to;
+  }
+  c.ret_hint = ret;
+  if (x64)
+    Dispatch(c, t, va);
+  else
+    Dispatch(c, uint32_t(t), uint32_t(va));
+}
+void Flow(Ctx& c, uint32_t t, uint32_t ret, uint32_t va) { Flow(c, uint64_t(t), uint64_t(ret), uint64_t(va)); }
 
 void Dispatch(Ctx& c, uint32_t target, uint32_t va) {
   const CodeRange* r = &g_exe;

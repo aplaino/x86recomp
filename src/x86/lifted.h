@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <utility>
 
 #include "x86/ctx.h"
 #include "x86/sse.h"
@@ -58,6 +59,10 @@ void Resume(Ctx& c, GuestResume r);
 void Trap(Ctx& c, uint32_t va);                // int3 / int n
 void RaiseDivideError(Ctx& c, uint32_t va);    // #DE from div/idiv
 void Probe(Ctx& c, uint32_t va, const char* name);  // manifest probes
+// recomp_lift --stack-flow: guest execution goes on at t inside the
+// activation that returns to `ret` (a ret to another address, an indirect
+// tail jump); returns once the guest returns to `ret`.
+void Flow(Ctx& c, uint32_t t, uint32_t ret, uint32_t va);
 #else
 void Dispatch(Ctx& c, uint64_t target, uint64_t va);
 [[noreturn]] void Unimplemented(Ctx& c, uint64_t va, const char* what);
@@ -66,6 +71,7 @@ void Dispatch(Ctx& c, uint64_t target, uint64_t va);
 void Trap(Ctx& c, uint64_t va);
 void RaiseDivideError(Ctx& c, uint64_t va);
 void Probe(Ctx& c, uint64_t va, const char* name);
+void Flow(Ctx& c, uint64_t t, uint64_t ret, uint64_t va);
 void Xgetbv(Ctx& c);                           // ecx in, edx:eax out
 #endif
 void Cpuid(Ctx& c);                            // eax/ecx in, eax..edx out

@@ -20,12 +20,11 @@ bool Load(Program& p, Module& m, const std::string& path, uint64_t base, std::st
   if (!img.Load(path, p.mem, err, base)) return false;
   m.base = img.image_base + img.link_base;
   m.preferred_base = img.link_base;
-  m.text_lo = img.text_lo;
-  m.text_hi = img.text_hi;
+  m.text.emplace_back(img.text_lo, img.text_hi);
   m.rodata = img.rodata;
   for (const auto& s : img.segments)
     if (!(s.flags & 1)) m.data.push_back({s.va, s.va + s.size});
-  auto in_text = [&](uint64_t va) { return va >= m.text_lo && va < m.text_hi; };
+  auto in_text = [&](uint64_t va) { return m.TextEnd(va) != 0; };
   for (const auto& fn : img.functions)
     if (in_text(fn.begin)) p.entries.insert(fn.begin);
   for (const auto& e : img.exports)
