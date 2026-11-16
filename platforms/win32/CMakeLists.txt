@@ -99,6 +99,10 @@ add_library(recomp_d3d11 SHARED src/win32/d3d11.cpp src/win32/d3d11_objects.cpp
             src/win32/dxgi.cpp)
 target_link_libraries(recomp_d3d11 PUBLIC recomp_win32 recomp_gfx)
 
+# d3dcompiler (shader blobs and their parts) for x64 guests.
+add_library(recomp_d3dcompiler SHARED src/win32/d3dcompiler.cpp)
+target_link_libraries(recomp_d3dcompiler PUBLIC recomp_win32)
+
 # OpenGL 1.x (opengl32, wgl, gdi32 pixel formats) over gfx::Device.
 add_library(recomp_opengl SHARED
   ${RECOMP_ROOT}/src/runtime/gl/context.cpp
