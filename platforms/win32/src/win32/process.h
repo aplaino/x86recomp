@@ -74,7 +74,7 @@ struct GameConfig : recomp::GameConfig {
   // are read from guest_dir (the host game directory) by file name.
   struct LiftedDll {
     std::string name;   // file name, e.g. "game.dll"
-    uint32_t base = 0;  // the lifter's --base for it; 0 = preferred base
+    uint64_t base = 0;  // the lifter's --base for it; 0 = preferred base
   };
   std::vector<LiftedDll> lifted_dlls;
 

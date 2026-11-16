@@ -159,11 +159,12 @@ HLE("kernel32.dll", RtlUnwind, 4) {
   return retval;
 }
 
-HLE("kernel32.dll", UnhandledExceptionFilter, 1) {
-  uint32_t ptrs = Arg(c, 0);
-  uint32_t rec = Rd32(ptrs);
-  FatalF("UnhandledExceptionFilter: exception %08X at %08X", Rd32(rec),
-         Rd32(rec + 0x0C));
+// EXCEPTION_POINTERS {record, context}; the record's ExceptionAddress is at
+// +0x0C (32-bit) or +0x10 (x64).
+HLE64("kernel32.dll", UnhandledExceptionFilter, 1) {
+  const gaddr rec = RdPtr(Arg(c, 0));
+  FatalF("UnhandledExceptionFilter: exception %08X at %08llX", Rd32(rec),
+         (unsigned long long)(g_proc->x64 ? Rd64(rec + 0x10) : Rd32(rec + 0x0C)));
 }
 
 // Host pages larger than the guest's 4 KiB (16 KiB on Apple Silicon) are
