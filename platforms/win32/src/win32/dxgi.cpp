@@ -72,21 +72,27 @@ gaddr OutputVtable() {
                       "GetDisplaySurfaceData", "GetFrameStatistics"});
 }
 
-// One of each, made once and kept: every EnumAdapters/EnumOutputs hands
-// out the same object with a reference added.
+// One of each, kept: every EnumAdapters/EnumOutputs hands out the same
+// object with a reference added, until the guest has released it for good;
+// the next one is new.
 std::shared_ptr<Factory> g_factory;
 std::shared_ptr<Adapter> g_adapter;
 std::shared_ptr<Output> g_output;
 
+template <typename T>
+bool Alive(const std::shared_ptr<T>& o) {
+  return o && com::Lookup(o->guest).get() == o.get();
+}
+
 gaddr TheAdapter() {
-  if (!g_adapter) {
+  if (!Alive(g_adapter)) {
     g_adapter = std::make_shared<Adapter>();
     com::Publish(g_adapter, AdapterVtable());
   }
   return g_adapter->guest;
 }
 gaddr TheOutput() {
-  if (!g_output) {
+  if (!Alive(g_output)) {
     g_output = std::make_shared<Output>();
     com::Publish(g_output, OutputVtable());
   }
@@ -148,7 +154,7 @@ constexpr guest::GUID kIID_ID3D11Device = {
     0xdb6f6ddb, 0xac77, 0x4e88, {0x82, 0x53, 0x81, 0x9d, 0xf9, 0xbb, 0xf1, 0x40}};
 
 gaddr DxgiDeviceOf(Device& d) {
-  if (!d.dxgi) {
+  if (!Alive(d.dxgi)) {
     auto x = std::make_shared<DxgiDevice>();
     x->device = &d;
     com::Publish(x, com::Vtable(kDll, "IDXGIDevice1",
@@ -172,7 +178,7 @@ uint64_t CreateFactory(gaddr iid, gaddr out) {
     Wr64(out, 0);
     return com::kE_NOINTERFACE;
   }
-  if (!g_factory) {
+  if (!Alive(g_factory)) {
     g_factory = std::make_shared<Factory>();
     com::Publish(g_factory, FactoryVtable());
   } else {
