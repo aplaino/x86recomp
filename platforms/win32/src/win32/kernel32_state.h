@@ -26,6 +26,8 @@ namespace hle {
 // (for the condition variables that release and retake one).
 void EnterCs(gaddr cs);
 void LeaveCs(gaddr cs);
+// Initialises the CRITICAL_SECTION at cs (InitializeCriticalSectionAndSpinCount).
+void InitCs(gaddr cs, uint32_t spin);
 // A new guest thread running entry(param) (CreateThread, _beginthreadex):
 // its handle, and its id in *tid. stack 0 is the EXE's default.
 uint32_t NewThread(uint64_t stack, gaddr entry, uint64_t param, bool suspended, uint32_t* tid);
@@ -42,7 +44,7 @@ uint64_t PerfCounter();
 std::vector<std::string> EnvironmentVars();
 
 // SYSTEMTIME at guest address st from a broken-down time and milliseconds.
-void WriteSystemTime(uint32_t st, const std::tm& t, int ms);
+void WriteSystemTime(gaddr st, const std::tm& t, int ms);
 
 gaddr HeapAllocProcess(uint64_t size, bool zero);
 void HeapFreeProcess(gaddr p);

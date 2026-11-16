@@ -197,7 +197,7 @@ HLE("kernel32.dll", EnumResourceLanguagesA, 5) {
 // ---- time --------------------------------------------------------------------------
 
 // SYSTEMTIME at st as a broken-down time (milliseconds dropped).
-std::tm ReadSystemTime(uint32_t st) {
+std::tm ReadSystemTime(gaddr st) {
   std::tm t{};
   t.tm_year = Rd16(st) - 1900;
   t.tm_mon = Rd16(st + 2) - 1;
@@ -238,7 +238,7 @@ HLE64("kernel32.dll", FileTimeToDosDateTime, 3) {
   return 1;
 }
 
-HLE("kernel32.dll", FileTimeToSystemTime, 2) {
+HLE64("kernel32.dll", FileTimeToSystemTime, 2) {
   uint64_t ft = Rd64(Arg(c, 0));
   if (ft < kFileTimeUnixEpoch) return 0;
   time_t secs = time_t((ft - kFileTimeUnixEpoch) / 10000000);
@@ -248,8 +248,8 @@ HLE("kernel32.dll", FileTimeToSystemTime, 2) {
   return 1;
 }
 
-HLE("kernel32.dll", SystemTimeToFileTime, 2) {
-  uint32_t st = Arg(c, 0);
+HLE64("kernel32.dll", SystemTimeToFileTime, 2) {
+  gaddr st = Arg(c, 0);
   std::tm t = ReadSystemTime(st);
   time_t secs = timegm(&t);
   Wr64(Arg(c, 1),
