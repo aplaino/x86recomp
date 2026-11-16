@@ -5,6 +5,7 @@
 #include <SDL3/SDL.h>
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -24,6 +25,15 @@ bool OnMainThread();
 
 // Ensures SDL video is initialised (main thread only).
 void EnsureSdlVideo();
+
+// Runs fn on the main thread and waits for it: window and view calls on
+// macOS must be made there, and some games create and drive their window
+// from another thread. Once a thread has asked, the main thread serves
+// such calls (and pumps host events) while it is blocked in a guest wait.
+void RunOnUiThread(const std::function<void()>& fn);
+// Whether the main thread should pump while it waits (RunOnUiThread was
+// used).
+bool PumpInWaits();
 
 // Pumps SDL events into the guest message queues. Main thread only;
 // called from PeekMessage/GetMessage and long waits.

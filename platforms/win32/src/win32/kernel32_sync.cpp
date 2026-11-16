@@ -28,6 +28,7 @@
 #include "runtime/log.h"
 #include "win32/hle.h"
 #include "win32/kernel32_state.h"
+#include "win32/user32_window.h"
 #include "win32/win32.h"
 
 namespace recomp {
@@ -181,6 +182,19 @@ uint32_t WaitObjects(const std::vector<std::shared_ptr<Waitable>>& objs,
           return (objs[i]->Acquire(tid) ? kWaitAbandoned0 : kWaitObject0) + uint32_t(i);
     }
     if (timeout_ms == 0) return kWaitTimeout;
+    if (OnMainThread() && PumpInWaits()) {
+      // Another thread drives a window: run its window calls and post its
+      // events from here, in slices, until the wait is satisfied.
+      auto slice = std::chrono::steady_clock::now() + std::chrono::milliseconds(10);
+      if (timeout_ms != kInfinite && deadline < slice) slice = deadline;
+      g_wait_cv.wait_until(l, slice);
+      l.unlock();
+      PumpHostEvents();
+      l.lock();
+      if (timeout_ms != kInfinite && std::chrono::steady_clock::now() >= deadline)
+        return kWaitTimeout;
+      continue;
+    }
     if (timeout_ms == kInfinite) {
       g_wait_cv.wait(l);
     } else if (g_wait_cv.wait_until(l, deadline) == std::cv_status::timeout) {
@@ -205,6 +219,8 @@ std::shared_ptr<KObject> PseudoHandle(uint32_t h) {
   }
   return nullptr;
 }
+
+void hle::WakeWaiters() { SignalChanged(); }
 
 bool SignalEventHandle(uint32_t h, bool pulse) {
   auto e = std::dynamic_pointer_cast<EventObject>(GetHandle(h));
