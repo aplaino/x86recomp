@@ -77,6 +77,12 @@ bool Load(Program& p, Module& m, const std::string& path, uint64_t base, std::st
     p.names.emplace(img.entry, img.dll ? "_DllMainCRTStartup" : "WinMainCRTStartup");
   }
 
+  // Exported code is reached from other modules: every export in an
+  // executable section is an entry (a DLL's leaf functions have no .pdata
+  // entry). Exports elsewhere are variables.
+  for (const auto& e : img.exports)
+    if (in_text(e.va)) p.entries.insert(e.va);
+
   // Imports that never return; a call through their IAT slot ends a block.
   for (const auto& imp : img.imports)
     if (imp.name == "ExitProcess" || imp.name == "ExitThread")
