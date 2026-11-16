@@ -232,16 +232,23 @@ HLE64("ole32.dll", CoTaskMemFree, 1) {
 // REGDB_E_CLASSNOTREG reads as "not installed", as on a system without
 // them: DirectPlay8 (multiplayer), the Zone update object and the Game
 // Explorer (VerifyAccess: access is then not denied).
-HLE("ole32.dll", CoCreateInstance, 5) {
-  uint32_t clsid = Arg(c, 0), out = Arg(c, 4);
+HLE64("ole32.dll", CoCreateInstance, 5) {
+  gaddr clsid = Arg(c, 0), out = Arg(c, 4);
+  auto put = [&](gaddr v) {
+    if (!out) return;
+    if (g_proc->x64)
+      Wr64(out, v);
+    else
+      Wr32(out, uint32_t(v));
+  };
   if (com::CreateFn create = com::FindCoClass(clsid)) {
-    uint32_t obj = 0;
+    gaddr obj = 0;
     uint32_t hr = create(Arg(c, 3), &obj);
-    if (out) Wr32(out, obj);
+    put(obj);
     return hr;
   }
   WarnF("CoCreateInstance({%08X-...}): class not available\n", Rd32(clsid));
-  if (out) Wr32(out, 0);
+  put(0);
   return 0x80040154;
 }
 

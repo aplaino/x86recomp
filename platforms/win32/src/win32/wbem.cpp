@@ -110,7 +110,7 @@ bool EqualsIgnoreCase(const std::u16string& a, const char* b) {
   return true;
 }
 
-uint32_t CreateLocator(uint32_t iid, uint32_t* out) {
+uint32_t CreateLocator(gaddr iid, gaddr* out) {
   if (!com::GuidEq(iid, kIID_IWbemLocator) && !com::GuidEq(iid, kIID_IUnknown)) {
     *out = 0;
     return E_NOINTERFACE;

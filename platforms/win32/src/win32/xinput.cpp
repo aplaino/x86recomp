@@ -110,9 +110,9 @@ void ReadGamepad(SDL_Gamepad* gp, uint8_t out[12]) {
 
 // XInputGetState(dwUserIndex, pState): XINPUT_STATE {dwPacketNumber,
 // XINPUT_GAMEPAD}; the packet number changes when the state does.
-HLE_NAMED("xinput1_3.dll", "#2", XInputGetState, 2) {
+HLE_NAMED_X("xinput1_3.dll", "#2", XInputGetState, 2, true) {
   std::lock_guard<std::mutex> l(g_mu);
-  Pad* p = PadAt(Arg(c, 0));
+  Pad* p = PadAt(uint32_t(Arg(c, 0)));
   if (!p) return ERROR_DEVICE_NOT_CONNECTED;
   if (!Arg(c, 1)) return ERROR_BAD_ARGUMENTS;
   uint8_t g[12];
@@ -128,9 +128,9 @@ HLE_NAMED("xinput1_3.dll", "#2", XInputGetState, 2) {
 
 // XInputSetState(dwUserIndex, pVibration): XINPUT_VIBRATION
 // {wLeftMotorSpeed, wRightMotorSpeed}; held until changed.
-HLE_NAMED("xinput1_3.dll", "#3", XInputSetState, 2) {
+HLE_NAMED_X("xinput1_3.dll", "#3", XInputSetState, 2, true) {
   std::lock_guard<std::mutex> l(g_mu);
-  Pad* p = PadAt(Arg(c, 0));
+  Pad* p = PadAt(uint32_t(Arg(c, 0)));
   if (!p) return ERROR_DEVICE_NOT_CONNECTED;
   if (!Arg(c, 1)) return ERROR_BAD_ARGUMENTS;
   uint32_t v = Rd32(Arg(c, 1));
@@ -141,9 +141,9 @@ HLE_NAMED("xinput1_3.dll", "#3", XInputSetState, 2) {
 // XInputGetCapabilities(dwUserIndex, dwFlags, pCapabilities):
 // XINPUT_CAPABILITIES {Type, SubType, Flags, Gamepad, Vibration}: a
 // gamepad with every control and both motors.
-HLE_NAMED("xinput1_3.dll", "#4", XInputGetCapabilities, 3) {
+HLE_NAMED_X("xinput1_3.dll", "#4", XInputGetCapabilities, 3, true) {
   std::lock_guard<std::mutex> l(g_mu);
-  Pad* p = PadAt(Arg(c, 0));
+  Pad* p = PadAt(uint32_t(Arg(c, 0)));
   if (!p) return ERROR_DEVICE_NOT_CONNECTED;
   uint32_t out = Arg(c, 2);
   if (!out || Arg(c, 1) > 1) return ERROR_BAD_ARGUMENTS;
