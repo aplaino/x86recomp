@@ -63,8 +63,13 @@ bool Load(Program& p, Module& m, const std::string& path, uint64_t base, std::st
     if (fn.chained() || !in_text(fn.begin)) continue;
     p.entries.insert(fn.begin);
     recomp::unwind::Info u = recomp::unwind::Read(p.mem, img.image_base, fn.unwind);
-    if (u.flags & (recomp::unwind::kEHandler | recomp::unwind::kUHandler))
+    if (u.flags & (recomp::unwind::kEHandler | recomp::unwind::kUHandler)) {
       p.eh_frames[fn.begin] = {fn.begin + u.prolog, u.frame_reg, u.frame_off};
+      // The language handler, which the exception dispatcher calls: often
+      // a jump stub through the import of the CRT's handler, which nothing
+      // else calls.
+      if (in_text(u.handler)) p.entries.insert(u.handler);
+    }
   }
 
   if (img.entry) {
