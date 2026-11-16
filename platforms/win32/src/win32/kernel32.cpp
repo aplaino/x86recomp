@@ -63,7 +63,74 @@ uint32_t TickCount() {
   return uint32_t(duration_cast<milliseconds>(steady_clock::now() - g_start).count());
 }
 
-void WriteSystemTime(uint32_t st, const std::tm& t, int ms) {
+// The PF_* features of the CPUID model.
+bool ProcessorFeature(uint32_t pf) {
+  switch (pf) {
+    case 3: return true;   // PF_MMX_INSTRUCTIONS_AVAILABLE
+    case 6: return true;   // PF_XMMI_INSTRUCTIONS_AVAILABLE (SSE)
+    case 8: return true;   // PF_RDTSC_INSTRUCTION_AVAILABLE
+    case 10: return true;  // PF_XMMI64_INSTRUCTIONS_AVAILABLE (SSE2)
+    // x64 guests: the extensions their CPUID model claims (dispatch.cpp).
+    case 13:  // PF_SSE3_INSTRUCTIONS_AVAILABLE
+    case 14:  // PF_COMPARE_EXCHANGE128
+    case 36:  // PF_SSSE3_INSTRUCTIONS_AVAILABLE
+    case 37:  // PF_SSE4_1_INSTRUCTIONS_AVAILABLE
+    case 38:  // PF_SSE4_2_INSTRUCTIONS_AVAILABLE
+      return g_proc->x64;
+    default: return false;
+  }
+}
+
+// KUSER_SHARED_DATA: the page Windows maps at 0x7FFE0000 in every process,
+// 32-bit or x64, which code reads for the time without a call (protectors
+// among others). Its clocks are GetTickCount's (TickCount, with a
+// multiplier of 2^24: one tick per millisecond), QueryPerformanceCounter's
+// (InterruptTime, 100 ns since start) and GetSystemTimeAsFileTime's
+// (SystemTime); a host thread refreshes them every millisecond, as Windows
+// does at each timer tick under timeBeginPeriod(1). A KSYSTEM_TIME
+// {LowPart, High1Time, High2Time} is written in the kernel's order,
+// High2Time, LowPart, High1Time, so a reader seeing High1Time == High2Time
+// has a consistent value. Version and processor features are the PEB's and
+// IsProcessorFeaturePresent's. On Windows the page is read-only; here it is
+// writable, as the refreshing thread writes it through guest memory. It is
+// the one page x64 guests have below 4 GiB, as on Windows.
+constexpr gaddr kSharedUserDataVa = 0x7FFE0000;
+
+void StoreSystemTime(gaddr at, uint64_t v) {
+  auto* w = reinterpret_cast<uint32_t*>(GPtr(at));
+  __atomic_store_n(w + 2, uint32_t(v >> 32), __ATOMIC_RELEASE);
+  __atomic_store_n(w + 0, uint32_t(v), __ATOMIC_RELEASE);
+  __atomic_store_n(w + 1, uint32_t(v >> 32), __ATOMIC_RELEASE);
+}
+
+void RefreshSharedUserData() {
+  using namespace std::chrono;
+  const gaddr k = kSharedUserDataVa;
+  const uint32_t ticks = TickCount();
+  __atomic_store_n(reinterpret_cast<uint32_t*>(GPtr(k + 0x000)), ticks, __ATOMIC_RELEASE);
+  StoreSystemTime(k + 0x008, PerfCounter());  // InterruptTime
+  const auto ns = duration_cast<nanoseconds>(system_clock::now().time_since_epoch()).count();
+  StoreSystemTime(k + 0x014, uint64_t(ns / 100) + kFileTimeUnixEpoch);  // SystemTime
+  StoreSystemTime(k + 0x320, ticks);  // TickCount
+}
+
+void StartSharedUserData() {
+  const gaddr k = kSharedUserDataVa;
+  if (!g_proc->mem.Commit(k, 0x1000, Prot::RW)) FatalF("cannot commit KUSER_SHARED_DATA");
+  Wr32(k + 0x004, 0x01000000);  // TickCountMultiplier
+  Wr32(k + 0x26C, g_proc->x64 ? Rd32(kPebVa64 + 0x118) : Rd32(kPebVa + 0xA4));  // NtMajorVersion
+  Wr32(k + 0x270, g_proc->x64 ? Rd32(kPebVa64 + 0x11C) : Rd32(kPebVa + 0xA8));  // NtMinorVersion
+  for (uint32_t pf = 0; pf < 64; pf++) Wr8(k + 0x274 + pf, ProcessorFeature(pf));
+  RefreshSharedUserData();
+  std::thread([] {
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      RefreshSharedUserData();
+    }
+  }).detach();
+}
+
+void WriteSystemTime(gaddr st, const std::tm& t, int ms) {
   Wr16(st + 0, uint16_t(t.tm_year + 1900));
   Wr16(st + 2, uint16_t(t.tm_mon + 1));
   Wr16(st + 4, uint16_t(t.tm_wday));
@@ -84,6 +151,7 @@ void SetEnvironmentBlock(const std::vector<std::string>& vars);
 
 void InitKernel32State() {
   Win32Process& p = *g_win32;
+  StartSharedUserData();
   g_process_heap = NewHeap(1u << 20, 0);
   if (!g_process_heap) FatalF("cannot create the process heap");
   p.process_heap = g_process_heap->handle();
@@ -361,9 +429,9 @@ HLE("kernel32.dll", ExpandEnvironmentStringsA, 3) {
   return uint32_t(s.size() + 1);
 }
 
-HLE("kernel32.dll", SetErrorMode, 1) {
+HLE64("kernel32.dll", SetErrorMode, 1) {
   static std::atomic<uint32_t> mode{0};
-  return mode.exchange(Arg(c, 0));
+  return mode.exchange(uint32_t(Arg(c, 0)));
 }
 
 // Power requests (keep the display on) have no effect here; the previous
@@ -378,8 +446,8 @@ HLE("kernel32.dll", SetThreadExecutionState, 1) {
 // terminal's signals end the process directly. Registration succeeds.
 HLE("kernel32.dll", SetConsoleCtrlHandler, 2) { return 1; }
 
-HLE("kernel32.dll", GetSystemDirectoryA, 2) {
-  return CopyOut(Arg(c, 0), Arg(c, 1), "C:\\WINDOWS\\system32");
+HLE64("kernel32.dll", GetSystemDirectoryA, 2) {
+  return CopyOut(Arg(c, 0), uint32_t(Arg(c, 1)), "C:\\WINDOWS\\system32");
 }
 
 HLE64("kernel32.dll", GetCurrentProcess, 0) { return HandleRet(0xFFFFFFFF); }
@@ -430,22 +498,7 @@ HLE("kernel32.dll", SetHandleCount, 1) { return Arg(c, 0); }
 
 // Looked up dynamically by the CRT (Pentium FDIV check). Matches the CPU
 // that Cpuid() reports: MMX yes, no SSE/3DNow!, no FDIV erratum.
-HLE64("kernel32.dll", IsProcessorFeaturePresent, 1) {
-  switch (Arg(c, 0)) {
-    case 3: return 1;   // PF_MMX_INSTRUCTIONS_AVAILABLE
-    case 6: return 1;   // PF_XMMI_INSTRUCTIONS_AVAILABLE (SSE)
-    case 8: return 1;   // PF_RDTSC_INSTRUCTION_AVAILABLE
-    case 10: return 1;  // PF_XMMI64_INSTRUCTIONS_AVAILABLE (SSE2)
-    // x64 guests: the extensions their CPUID model claims (dispatch.cpp).
-    case 13:  // PF_SSE3_INSTRUCTIONS_AVAILABLE
-    case 14:  // PF_COMPARE_EXCHANGE128
-    case 36:  // PF_SSSE3_INSTRUCTIONS_AVAILABLE
-    case 37:  // PF_SSE4_1_INSTRUCTIONS_AVAILABLE
-    case 38:  // PF_SSE4_2_INSTRUCTIONS_AVAILABLE
-      return g_proc->x64 ? 1 : 0;
-    default: return 0;
-  }
-}
+HLE64("kernel32.dll", IsProcessorFeaturePresent, 1) { return ProcessorFeature(uint32_t(Arg(c, 0))); }
 
 // x64 guests: SYSTEM_INFO's pointer-sized fields, an AMD64 processor (the
 // CPUID model's family 16h) and the address range guest allocations use.
@@ -695,14 +748,16 @@ HLE64("kernel32.dll", VirtualFree, 3) {
   return 0;
 }
 
-HLE("kernel32.dll", VirtualProtect, 4) {
-  uint32_t addr = Arg(c, 0), size = Arg(c, 1), prot = Arg(c, 2),
-           old = Arg(c, 3);
+HLE64("kernel32.dll", VirtualProtect, 4) {
+  gaddr addr = Arg(c, 0), old = Arg(c, 3);
+  uint64_t size = Arg(c, 1);
+  uint32_t prot = uint32_t(Arg(c, 2));
   if (old) Wr32(old, ProtToWin(g_proc->mem.QueryProt(addr)));
   return g_proc->mem.Protect(addr, size, ProtFromWin(prot)) ? 1 : 0;
 }
 
-HLE("kernel32.dll", VirtualLock, 2) { return 1; }
+HLE64("kernel32.dll", VirtualLock, 2) { return 1; }
+HLE64("kernel32.dll", VirtualUnlock, 2) { return 1; }
 
 // MEMORY_BASIC_INFORMATION: {base, allocation base, allocation protect,
 // region size, state, protect, type}, 28 bytes with 32-bit pointers and
@@ -887,11 +942,6 @@ uint32_t* CsField(gaddr cs, uint32_t off) {
   return reinterpret_cast<uint32_t*>(GPtr(cs + off));
 }
 
-void InitCs(gaddr cs, uint32_t spin) {
-  std::memset(GPtr(cs), 0, Cs().size);
-  Wr32(cs + Cs().lock_count, 0xFFFFFFFF);  // -1 = free
-  Wr32(cs + Cs().spin, spin);              // no effect here
-}
 
 // TryEnterCriticalSection: takes a free section or one this thread owns.
 bool TryEnterCs(gaddr cs) {
@@ -913,6 +963,12 @@ bool TryEnterCs(gaddr cs) {
 }
 
 }  // namespace
+
+void InitCs(gaddr cs, uint32_t spin) {
+  std::memset(GPtr(cs), 0, Cs().size);
+  Wr32(cs + Cs().lock_count, 0xFFFFFFFF);  // -1 = free
+  Wr32(cs + Cs().spin, spin);              // no effect here
+}
 
 void EnterCs(gaddr cs) {
   uint32_t tid = CurrentThread()->tid;
@@ -1057,7 +1113,7 @@ HLE("kernel32.dll", GetSystemTime, 1) {
   return 0;
 }
 
-HLE("kernel32.dll", GetLocalTime, 1) {
+HLE64("kernel32.dll", GetLocalTime, 1) {
   using namespace std::chrono;
   auto now = system_clock::now();
   std::time_t tt = system_clock::to_time_t(now);
@@ -1102,9 +1158,9 @@ HLE("winmm.dll", midiInClose, 1) { return 5; }
 
 // A kernel entry on Windows, so a barrier for guests that poll a flag
 // with Sleep in the loop.
-HLE("kernel32.dll", Sleep, 1) {
+HLE64("kernel32.dll", Sleep, 1) {
   GuestSyncPoint sync;
-  std::this_thread::sleep_for(std::chrono::milliseconds(Arg(c, 0)));
+  std::this_thread::sleep_for(std::chrono::milliseconds(uint32_t(Arg(c, 0))));
   return 0;
 }
 
@@ -1240,7 +1296,7 @@ HLE("kernel32.dll", LCMapStringA, 6) {
 }
 
 HLE("kernel32.dll", GetUserDefaultLCID, 0) { return 0x0409; }
-HLE("kernel32.dll", GetUserDefaultLangID, 0) { return 0x0409; }
+HLE64("kernel32.dll", GetUserDefaultLangID, 0) { return 0x0409; }
 HLE("kernel32.dll", IsValidLocale, 2) { return Arg(c, 0) == 0x0409 ? 1 : 0; }
 
 HLE("kernel32.dll", EnumSystemLocalesA, 2) {

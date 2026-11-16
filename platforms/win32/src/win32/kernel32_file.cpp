@@ -470,7 +470,7 @@ HLE64("kernel32.dll", SetFilePointerEx, 5) {
   return 1;
 }
 
-HLE("kernel32.dll", SetEndOfFile, 1) {
+HLE64("kernel32.dll", SetEndOfFile, 1) {
   int fd = FdOf(Arg(c, 0));
   off_t pos = fd < 0 ? -1 : lseek(fd, 0, SEEK_CUR);
   if (pos < 0 || ftruncate(fd, pos) != 0) {
@@ -781,7 +781,7 @@ HLE("kernel32.dll", FindNextFileA, 2) {
   return 1;
 }
 
-HLE("kernel32.dll", FindClose, 1) {
+HLE64("kernel32.dll", FindClose, 1) {
   return CloseHandleValue(Arg(c, 0)) ? 1 : 0;
 }
 

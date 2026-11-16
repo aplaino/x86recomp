@@ -298,17 +298,19 @@ HLE64("kernel32.dll", ResetEvent, 1) {
 
 // bInitialOwner applies only to a mutex this call creates: one that
 // exists already is opened as it is (ERROR_ALREADY_EXISTS), as on Windows.
-HLE("kernel32.dll", CreateMutexA, 3) {
+uint64_t CreateMutex(Ctx& c, bool wide) {
   GuestSyncPoint sync;
-  bool own = Arg(c, 1);
+  bool own = uint32_t(Arg(c, 1));
   uint32_t tid = CurrentThread()->tid;
-  return CreateNamed(NameOf(Arg(c, 2)), [&] {
+  return HandleRet(CreateNamed(NameOf(Arg(c, 2), wide), [&] {
     auto m = std::make_shared<MutexObject>();
     g_mutexes.push_back(m);
     if (own) m->Acquire(tid);
     return m;
-  });
+  }));
 }
+HLE64("kernel32.dll", CreateMutexA, 3) { return CreateMutex(c, false); }
+HLE64("kernel32.dll", CreateMutexW, 3) { return CreateMutex(c, true); }
 
 // OpenMutexA/OpenFileMappingA(access, inherit, name): a new handle to an
 // existing named object of that type.
@@ -325,7 +327,7 @@ uint32_t OpenNamed(gaddr name_va, KObject::Type type) {
 
 HLE("kernel32.dll", OpenMutexA, 3) { return OpenNamed(Arg(c, 2), KObject::Type::Mutex); }
 
-HLE("kernel32.dll", ReleaseMutex, 1) {
+HLE64("kernel32.dll", ReleaseMutex, 1) {
   GuestSyncPoint sync;
   auto m = std::dynamic_pointer_cast<MutexObject>(GetHandle(Arg(c, 0)));
   if (!m) return 0;
@@ -585,26 +587,26 @@ bool JoinThread(uint32_t h, uint32_t* exit_code) {
 
 namespace {
 
-HLE("kernel32.dll", CreateThread, 6) {
+HLE64("kernel32.dll", CreateThread, 6) {
   uint32_t tid;
   uint32_t h = NewThread(Arg(c, 1), Arg(c, 2), Arg(c, 3), Arg(c, 4) & 4, &tid);
   if (Arg(c, 5)) Wr32(Arg(c, 5), tid);
-  return h;
+  return HandleRet(h);
 }
 
-HLE("kernel32.dll", ResumeThread, 1) {
+HLE64("kernel32.dll", ResumeThread, 1) {
   GuestSyncPoint sync;
   auto to = std::dynamic_pointer_cast<ThreadObject>(GetHandle(Arg(c, 0)));
   if (!to) return 0xFFFFFFFF;
   return RunThreadObject(to) ? 1 : 0;
 }
 
-HLE("kernel32.dll", SuspendThread, 1) {
+HLE64("kernel32.dll", SuspendThread, 1) {
   WarnF("SuspendThread on a running thread is not supported; ignored\n");
   return 0;
 }
 
-HLE("kernel32.dll", TerminateThread, 2) {
+HLE64("kernel32.dll", TerminateThread, 2) {
   WarnF("TerminateThread is not supported; ignored\n");
   return 0;
 }
@@ -617,7 +619,7 @@ HLE("kernel32.dll", ExitThread, 1) {
 // Thread priorities are not applied: host threads keep the default
 // scheduling, and every guest thread reports THREAD_PRIORITY_NORMAL.
 HLE("kernel32.dll", GetThreadPriority, 1) { return 0; }
-HLE("kernel32.dll", SetThreadPriority, 2) { return 1; }
+HLE64("kernel32.dll", SetThreadPriority, 2) { return 1; }
 HLE("kernel32.dll", GetPriorityClass, 1) { return 0x20; }  // NORMAL
 HLE("kernel32.dll", SetPriorityClass, 2) { return 1; }
 
@@ -651,8 +653,8 @@ HLE("kernel32.dll", SetProcessAffinityMask, 2) {
 
 // Returns the previous mask; threads are not tracked, so that is the
 // process mask, as for a thread that was never restricted.
-HLE("kernel32.dll", SetThreadAffinityMask, 2) {
-  uint32_t mask = Arg(c, 1);
+HLE64("kernel32.dll", SetThreadAffinityMask, 2) {
+  uint64_t mask = Arg(c, 1);
   if (!mask || (mask & ~ProcessAffinityMask())) {
     SetLastError(kErrorInvalidParameter);
     return 0;
@@ -660,7 +662,7 @@ HLE("kernel32.dll", SetThreadAffinityMask, 2) {
   return ProcessAffinityMask();
 }
 
-HLE("kernel32.dll", GetThreadContext, 2) {
+HLE64("kernel32.dll", GetThreadContext, 2) {
   // Only used by the crash reporter to sample other threads.
   SetLastError(kErrorAccessDenied);
   return 0;
