@@ -136,6 +136,8 @@ std::string GuestCurrentDir() {
   return g_cwd.empty() ? GuestGameDir() : g_cwd;
 }
 
+std::string GuestFullPath(const std::string& p) { return AbsGuest(p); }
+
 namespace {
 
 std::string OverlayRoot() { return DataDir() + "/install"; }
@@ -638,6 +640,7 @@ uint32_t MoveFile(const std::string& gfrom, const std::string& gto, bool replace
 }
 
 HLE64("kernel32.dll", MoveFileA, 2) { return MoveFile(GStr(Arg(c, 0)), GStr(Arg(c, 1)), false); }
+HLE64("kernel32.dll", MoveFileW, 2) { return MoveFile(WidePath(Arg(c, 0)), WidePath(Arg(c, 1)), false); }
 
 // MoveFileExW(from, to, flags): MOVEFILE_REPLACE_EXISTING, and
 // MOVEFILE_COPY_ALLOWED / MOVEFILE_WRITE_THROUGH, which change nothing
@@ -680,18 +683,28 @@ HLE("kernel32.dll", GetCurrentDirectoryA, 2) {
   return CopyOut(buf, size, d);
 }
 
-HLE("kernel32.dll", GetFullPathNameA, 4) {
-  std::string full = AbsGuest(GStr(Arg(c, 0)));
-  uint32_t size = Arg(c, 1), buf = Arg(c, 2), filepart = Arg(c, 3);
-  uint32_t r = CopyOut(buf, size, full);
-  if (r == full.size() && filepart) {
+// GetFullPathNameA/W(name, size in characters, buffer, &file part).
+uint64_t GetFullPathName(Ctx& c, bool wide) {
+  std::string full = AbsGuest(wide ? WidePath(Arg(c, 0)) : GStr(Arg(c, 0)));
+  uint32_t size = uint32_t(Arg(c, 1));
+  gaddr buf = Arg(c, 2), filepart = Arg(c, 3);
+  if (full.size() + 1 > size) return uint32_t(full.size() + 1);
+  if (wide)
+    PutWStr(buf, full);
+  else
+    PutStr(buf, full);
+  if (filepart) {
     size_t s = full.find_last_of('\\');
-    Wr32(filepart, s == std::string::npos || s + 1 == full.size()
-                       ? 0
-                       : buf + uint32_t(s + 1));
+    gaddr part = s == std::string::npos || s + 1 == full.size() ? 0 : buf + (s + 1) * (wide ? 2 : 1);
+    if (g_proc->x64)
+      Wr64(filepart, part);
+    else
+      Wr32(filepart, uint32_t(part));
   }
-  return r;
+  return uint32_t(full.size());
 }
+HLE64("kernel32.dll", GetFullPathNameA, 4) { return GetFullPathName(c, false); }
+HLE64("kernel32.dll", GetFullPathNameW, 4) { return GetFullPathName(c, true); }
 
 HLE("kernel32.dll", GetLongPathNameA, 3) {
   std::string full = GStr(Arg(c, 0));
@@ -703,6 +716,13 @@ HLE("kernel32.dll", GetTempPathA, 2) {
   std::string t = "C:\\TEMP\\";
   MakeDirs(UserDataRoot() + "/TEMP");
   return CopyOut(Arg(c, 1), Arg(c, 0), t);
+}
+HLE64("kernel32.dll", GetTempPathW, 2) {
+  std::string t = "C:\\TEMP\\";
+  MakeDirs(UserDataRoot() + "/TEMP");
+  if (t.size() + 1 > uint32_t(Arg(c, 0))) return uint32_t(t.size() + 1);
+  PutWStr(Arg(c, 1), t);
+  return uint32_t(t.size());
 }
 
 HLE("kernel32.dll", GetTempFileNameA, 4) {
@@ -725,22 +745,28 @@ HLE("kernel32.dll", GetTempFileNameA, 4) {
 
 // ---- find ------------------------------------------------------------------
 
-void FillFindData(uint32_t fd, const std::string& host_dir, const std::string& name) {
+// WIN32_FIND_DATAA (320 bytes) or W (592): the names at 44, in characters
+// of the set.
+void FillFindData(gaddr fd, const std::string& host_dir, const std::string& name,
+                  bool wide = false) {
   struct stat st{};
   stat((host_dir + "/" + name).c_str(), &st);
-  std::memset(GPtr(fd), 0, 320);
+  std::memset(GPtr(fd), 0, wide ? 592 : 320);
   Wr32(fd + 0, AttributesOf(st, name));
   PutFileTime(fd + 4, platform::StatModifyTime(st));   // creation
   PutFileTime(fd + 12, platform::StatAccessTime(st));  // access
   PutFileTime(fd + 20, platform::StatModifyTime(st));  // write
   Wr32(fd + 28, uint32_t(uint64_t(st.st_size) >> 32));
   Wr32(fd + 32, uint32_t(st.st_size));
-  PutStr(fd + 44, name.substr(0, 259));  // cFileName
+  if (wide)
+    PutWStr(fd + 44, name.substr(0, 259));
+  else
+    PutStr(fd + 44, name.substr(0, 259));  // cFileName
   // cAlternateFileName (8.3) left empty.
 }
 
-HLE("kernel32.dll", FindFirstFileA, 2) {
-  std::string pattern = AbsGuest(GStr(Arg(c, 0)));
+uint64_t FindFirstFile(Ctx& c, bool wide) {
+  std::string pattern = AbsGuest(wide ? WidePath(Arg(c, 0)) : GStr(Arg(c, 0)));
   size_t s = pattern.find_last_of('\\');
   std::string gdir = pattern.substr(0, s), mask = pattern.substr(s + 1);
   if (gdir.size() == 2) gdir += '\\';
@@ -758,14 +784,16 @@ HLE("kernel32.dll", FindFirstFileA, 2) {
   }
   if (f->entries.empty()) {
     SetLastError(kErrorFileNotFound);
-    return kInvalidHandle;
+    return HandleRet(kInvalidHandle);
   }
-  FillFindData(Arg(c, 1), f->entries[0].first, f->entries[0].second);
+  FillFindData(Arg(c, 1), f->entries[0].first, f->entries[0].second, wide);
   f->next = 1;
-  return NewHandle(f);
+  return HandleRet(NewHandle(f));
 }
+HLE64("kernel32.dll", FindFirstFileA, 2) { return FindFirstFile(c, false); }
+HLE64("kernel32.dll", FindFirstFileW, 2) { return FindFirstFile(c, true); }
 
-HLE("kernel32.dll", FindNextFileA, 2) {
+uint64_t FindNextFile(Ctx& c, bool wide) {
   auto o = GetHandle(Arg(c, 0));
   if (!o || o->type != KObject::Type::Find) {
     SetLastError(kErrorInvalidHandle);
@@ -777,9 +805,11 @@ HLE("kernel32.dll", FindNextFileA, 2) {
     return 0;
   }
   const auto& [hdir, name] = f->entries[f->next++];
-  FillFindData(Arg(c, 1), hdir, name);
+  FillFindData(Arg(c, 1), hdir, name, wide);
   return 1;
 }
+HLE64("kernel32.dll", FindNextFileA, 2) { return FindNextFile(c, false); }
+HLE64("kernel32.dll", FindNextFileW, 2) { return FindNextFile(c, true); }
 
 HLE64("kernel32.dll", FindClose, 1) {
   return CloseHandleValue(Arg(c, 0)) ? 1 : 0;
@@ -787,7 +817,8 @@ HLE64("kernel32.dll", FindClose, 1) {
 
 // ---- volumes -----------------------------------------------------------------
 
-HLE("kernel32.dll", GetDriveTypeA, 1) { return 3; }  // DRIVE_FIXED
+HLE64("kernel32.dll", GetDriveTypeA, 1) { return 3; }  // DRIVE_FIXED
+HLE64("kernel32.dll", GetDriveTypeW, 1) { return 3; }
 
 HLE("kernel32.dll", GetLogicalDriveStringsA, 2) {
   const char s[] = "C:\\\0";  // double-NUL terminated list
@@ -805,7 +836,21 @@ HLE("kernel32.dll", GetVolumeInformationA, 8) {
   return 1;
 }
 
-HLE("kernel32.dll", GetDiskFreeSpaceExA, 4) {
+// 8 GiB free of 64 GiB, as 4 KiB clusters of 8 sectors of 512 bytes.
+HLE64("kernel32.dll", GetDiskFreeSpaceW, 5) {
+  if (Arg(c, 1)) Wr32(Arg(c, 1), 8);
+  if (Arg(c, 2)) Wr32(Arg(c, 2), 512);
+  if (Arg(c, 3)) Wr32(Arg(c, 3), uint32_t((8ull << 30) / 4096));
+  if (Arg(c, 4)) Wr32(Arg(c, 4), uint32_t((64ull << 30) / 4096));
+  return 1;
+}
+HLE64("kernel32.dll", GetDiskFreeSpaceExW, 4) {
+  if (Arg(c, 1)) Wr64(Arg(c, 1), 8ull << 30);
+  if (Arg(c, 2)) Wr64(Arg(c, 2), 64ull << 30);
+  if (Arg(c, 3)) Wr64(Arg(c, 3), 8ull << 30);
+  return 1;
+}
+HLE64("kernel32.dll", GetDiskFreeSpaceExA, 4) {
   // 8 GiB free of 64 GiB, reported in 64-bit ULARGE_INTEGERs.
   if (Arg(c, 1)) Wr64(Arg(c, 1), 8ull << 30);
   if (Arg(c, 2)) Wr64(Arg(c, 2), 64ull << 30);

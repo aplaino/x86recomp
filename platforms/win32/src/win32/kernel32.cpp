@@ -277,7 +277,7 @@ gaddr ModuleHandleOf(gaddr name, bool wide) {
 HLE64("kernel32.dll", GetModuleHandleA, 1) { return ModuleHandleOf(Arg(c, 0), false); }
 HLE64("kernel32.dll", GetModuleHandleW, 1) { return ModuleHandleOf(Arg(c, 0), true); }
 
-HLE64("kernel32.dll", GetModuleFileNameA, 3) {
+uint64_t GetModuleFileName(Ctx& c, bool wide) {
   gaddr mod = Arg(c, 0), buf = Arg(c, 1);
   uint32_t size = uint32_t(Arg(c, 2));
   std::string path = GuestExePath();
@@ -293,9 +293,14 @@ HLE64("kernel32.dll", GetModuleFileNameA, 3) {
   }
   if (!size) return 0;
   std::string s = path.substr(0, size - 1);
-  PutStr(buf, s);
+  if (wide)
+    PutWStr(buf, s);
+  else
+    PutStr(buf, s);
   return uint32_t(s.size());
 }
+HLE64("kernel32.dll", GetModuleFileNameA, 3) { return GetModuleFileName(c, false); }
+HLE64("kernel32.dll", GetModuleFileNameW, 3) { return GetModuleFileName(c, true); }
 
 // LoadLibrary(Ex)A/W: lifted DLLs, and the HLE modules.
 gaddr LoadModule(Ctx& c, const char* api, const std::string& n) {
@@ -492,6 +497,16 @@ HLE64("kernel32.dll", IsDebuggerPresent, 0) { return 0; }
 HLE64("kernel32.dll", OutputDebugStringA, 1) {
   std::fprintf(stderr, "[guest] %s", GStr(Arg(c, 0)).c_str());
   return 0;
+}
+HLE64("kernel32.dll", OutputDebugStringW, 1) {
+  std::fprintf(stderr, "[guest] %s", Narrow(GWStr(Arg(c, 0))).c_str());
+  return 0;
+}
+
+// In KB: the 16 GiB GlobalMemoryStatusEx reports for x64 guests.
+HLE64("kernel32.dll", GetPhysicallyInstalledSystemMemory, 1) {
+  Wr64(Arg(c, 0), 16ull << 20);
+  return 1;
 }
 
 HLE("kernel32.dll", SetHandleCount, 1) { return Arg(c, 0); }
@@ -1163,6 +1178,13 @@ HLE64("kernel32.dll", Sleep, 1) {
   std::this_thread::sleep_for(std::chrono::milliseconds(uint32_t(Arg(c, 0))));
   return 0;
 }
+// No APC is ever queued (QueueUserAPC has no handler), so an alertable
+// sleep is a sleep and returns 0, not WAIT_IO_COMPLETION.
+HLE64("kernel32.dll", SleepEx, 2) {
+  GuestSyncPoint sync;
+  std::this_thread::sleep_for(std::chrono::milliseconds(uint32_t(Arg(c, 0))));
+  return 0;
+}
 
 // ---- code pages and locale -----------------------------------------------
 
@@ -1295,7 +1317,9 @@ HLE("kernel32.dll", LCMapStringA, 6) {
   return uint32_t(n);
 }
 
-HLE("kernel32.dll", GetUserDefaultLCID, 0) { return 0x0409; }
+HLE64("kernel32.dll", GetUserDefaultLCID, 0) { return 0x0409; }
+HLE64("kernel32.dll", GetSystemDefaultLCID, 0) { return 0x0409; }
+HLE64("kernel32.dll", GetSystemDefaultLangID, 0) { return 0x0409; }
 HLE64("kernel32.dll", GetUserDefaultLangID, 0) { return 0x0409; }
 HLE("kernel32.dll", IsValidLocale, 2) { return Arg(c, 0) == 0x0409 ? 1 : 0; }
 
