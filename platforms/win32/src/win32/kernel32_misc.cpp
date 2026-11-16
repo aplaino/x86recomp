@@ -2,7 +2,11 @@
 // and ends (console title, FormatMessage, CreateProcess); version.dll
 // (version resources).
 
+#include <cctype>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <sstream>
 #include <ctime>
 #include <string>
 
@@ -460,6 +464,105 @@ HLE("version.dll", VerQueryValueA, 4) {
     Wr32(out_ptr, value);
     Wr32(out_len, vlen);
   }
+  return 1;
+}
+
+
+// ---- profile (INI) files -------------------------------------------------------------
+// A profile path without a directory is in the Windows directory, as on
+// Windows; sections and keys compare without case.
+
+std::string ProfileHostPath(const std::string& file) {
+  std::string g = file.find_first_of("\\/") == std::string::npos ? "C:\\Windows\\" + file : file;
+  return HostPath(GuestFullPath(g));
+}
+
+std::string LowerAscii(std::string s) {
+  for (char& ch : s) ch = char(std::tolower(uint8_t(ch)));
+  return s;
+}
+
+std::string Trim(const std::string& s) {
+  size_t a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n");
+  return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
+}
+
+// The value of key in section, or false when the file, section or key is
+// missing.
+bool ProfileValue(const std::string& file, const std::string& section, const std::string& key,
+                  std::string* value) {
+  std::ifstream f(ProfileHostPath(file));
+  if (!f) return false;
+  const std::string want_sec = LowerAscii(section), want_key = LowerAscii(key);
+  bool in = false;
+  for (std::string line; std::getline(f, line);) {
+    line = Trim(line);
+    if (line.empty() || line[0] == ';') continue;
+    if (line[0] == '[') {
+      size_t e = line.find(']');
+      in = e != std::string::npos && LowerAscii(Trim(line.substr(1, e - 1))) == want_sec;
+      continue;
+    }
+    size_t eq = line.find('=');
+    if (in && eq != std::string::npos && LowerAscii(Trim(line.substr(0, eq))) == want_key) {
+      *value = Trim(line.substr(eq + 1));
+      return true;
+    }
+  }
+  return false;
+}
+
+// GetPrivateProfileIntA/W(section, key, default, file): the value's leading
+// decimal digits (with a sign), or the default.
+uint64_t GetProfileInt(Ctx& c, bool wide) {
+  auto str = [&](int i) { return wide ? Narrow(GWStr(Arg(c, i))) : GStr(Arg(c, i)); };
+  std::string v;
+  if (!ProfileValue(str(3), str(0), str(1), &v)) return uint32_t(Arg(c, 2));
+  return uint32_t(int32_t(std::strtol(v.c_str(), nullptr, 10)));
+}
+HLE64("kernel32.dll", GetPrivateProfileIntA, 4) { return GetProfileInt(c, false); }
+HLE64("kernel32.dll", GetPrivateProfileIntW, 4) { return GetProfileInt(c, true); }
+
+// WritePrivateProfileSectionW(section, "key=value\0...\0\0", file): the
+// section's lines replaced by the given ones (added at the end if new).
+HLE64("kernel32.dll", WritePrivateProfileSectionW, 3) {
+  const std::string section = Narrow(GWStr(Arg(c, 0))), path = ProfileHostPath(Narrow(GWStr(Arg(c, 2))));
+  std::vector<std::string> pairs;
+  for (gaddr p = Arg(c, 1); Rd16(p);) {
+    std::u16string w = GWStr(p);
+    pairs.push_back(Narrow(w));
+    p += 2 * (w.size() + 1);
+  }
+  std::vector<std::string> out;
+  bool in = false, written = false;
+  {
+    std::ifstream f(path);
+    for (std::string line; f && std::getline(f, line);) {
+      std::string t = Trim(line);
+      if (!t.empty() && t[0] == '[') {
+        size_t e = t.find(']');
+        in = e != std::string::npos && LowerAscii(Trim(t.substr(1, e - 1))) == LowerAscii(section);
+        if (in) {
+          out.push_back("[" + section + "]");
+          out.insert(out.end(), pairs.begin(), pairs.end());
+          written = true;
+          continue;
+        }
+      }
+      if (!in) out.push_back(line);
+    }
+  }
+  if (!written) {
+    out.push_back("[" + section + "]");
+    out.insert(out.end(), pairs.begin(), pairs.end());
+  }
+  MakeDirs(path.substr(0, path.find_last_of('/')));
+  std::ofstream f(path, std::ios::trunc);
+  if (!f) {
+    SetLastError(kErrorAccessDenied);
+    return 0;
+  }
+  for (const std::string& l : out) f << l << "\r\n";
   return 1;
 }
 
