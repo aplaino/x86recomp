@@ -526,6 +526,21 @@ DXGI_METHOD(IDXGISwapChain, ResizeBuffers) {
 }
 // SetFullscreenState(fullscreen, output): the window mode only; the guest
 // resizes the buffers itself afterwards, as on Windows.
+// ResizeTarget(DXGI_MODE_DESC*): the window's client area (windowed) or
+// the display mode (fullscreen) to the mode's size; the guest resizes its
+// buffers when WM_SIZE comes, as on Windows. A zero size keeps the target.
+DXGI_METHOD(IDXGISwapChain, ResizeTarget) {
+  SwapChain* s = Chain(c);
+  const gaddr mode = Arg(c, 1);
+  const int w = int(Rd32(mode)), h = int(Rd32(mode + 4));
+  if (!w || !h) return kS_OK;
+  if (s->Windowed())
+    ResizeClientArea(s->Hwnd(), w, h);
+  else
+    SetExclusiveMode(s->Hwnd(), w, h);
+  return kS_OK;
+}
+
 DXGI_METHOD(IDXGISwapChain, SetFullscreenState) {
   SwapChain* s = Chain(c);
   s->SetD(56, Arg(c, 1) ? 0 : 1);

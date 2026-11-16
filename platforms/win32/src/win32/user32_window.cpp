@@ -2478,3 +2478,20 @@ HLE("user32.dll", SetClipboardData, 2) { return 0; }
 }  // namespace
 }  // namespace hle
 }  // namespace recomp
+
+namespace recomp {
+
+void ResizeClientArea(uint32_t hwnd, int cw, int ch) {
+  int x, y, border = 0, caption = 0;
+  {
+    std::lock_guard<std::recursive_mutex> l(g_mu);
+    Window* win = Win(hwnd);
+    if (!win) return;
+    if (!(win->style & WS_CHILD)) FrameSize(win->style, &border, &caption);
+    x = win->x;
+    y = win->y;
+  }
+  hle::ApplyRect(hwnd, x, y, cw + 2 * border, ch + 2 * border + caption, false, true);
+}
+
+}  // namespace recomp

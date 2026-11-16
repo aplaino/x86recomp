@@ -426,6 +426,13 @@ uint64_t CreateView(Ctx& c, ViewKind kind) {
   if (gaddr d = Arg(c, 2)) {
     ReadViewDesc(*v, d);
     v->desc.assign(GPtr(d), GPtr(d) + ViewDescSize(kind));
+    // A shader resource view's MipLevels -1 ("all from the first on")
+    // comes back from GetDesc as the count it stands for.
+    uint32_t mips;
+    std::memcpy(&mips, v->desc.data() + 12, 4);
+    const bool buffer = v->view_dim == 1 || v->view_dim == 11;
+    if (kind == ViewKind::ShaderResource && !buffer && mips == 0xFFFFFFFF)
+      std::memcpy(v->desc.data() + 12, &v->mips, 4);
   } else {
     WholeDesc(*v);
   }
