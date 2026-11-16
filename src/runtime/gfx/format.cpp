@@ -26,9 +26,11 @@ void Device::DestroyBuffer(BufferId) {}
 void Device::UpdateBuffer(BufferId, uint32_t, const void*, uint32_t) {}
 void Device::UpdateImage(TextureId, int, int, const Rect&, const void*, uint32_t) {}
 void Device::ReadImage(TextureId, int, int, const Rect&, void*, uint32_t) {}
-void Device::ClearImage(TextureId, int, const Color&) {}
+void Device::ClearImage(TextureId, int, const Color&, int) {}
 void Device::ClearDepth(DepthId, float, int, int) {}
 void Device::CopyDepth(DepthId, DepthId, const Rect&) {}
+void Device::CopyImage(TextureId, int, int, const Rect&, TextureId, int, int, int, int) {}
+void Device::GenerateMips(TextureId) {}
 void Device::DrawProgram(const ProgramDraw&) {}
 void Device::DispatchProgram(const ProgramDispatch&) {}
 uint64_t Device::WritesQueued() { return 0; }

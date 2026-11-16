@@ -226,6 +226,51 @@ int main() {
   Check(big != 0 && ok, "GPU buffers keep their contents when their room grows");
   for (BufferId b : {vbuf, ibuf, gbuf, big}) dev->DestroyBuffer(b);
 
+  // Images: one layer cleared, a draw into another, a copy between
+  // images and mip levels generated from level 0.
+  ImageDesc ad;
+  ad.w = ad.h = 4;
+  ad.layers = 2;
+  ad.levels = 3;
+  ad.fmt = Format::R8G8B8A8;
+  ad.kind = TextureKind::Tex2DArray;
+  ad.color_target = true;
+  const TextureId arr = dev->CreateImage(ad);
+  dev->ClearImage(arr, 0, {0, 0, 1, 1});
+  dev->ClearImage(arr, 0, {0, 1, 0, 1}, 1);
+  std::vector<uint32_t> lp(16);
+  dev->ReadImage(arr, 0, 0, {0, 0, 4, 4}, lp.data(), 16);
+  Check(lp[0] == 0xFFFF0000u, "a clear of one layer keeps the others");
+  dev->ReadImage(arr, 0, 1, {0, 0, 4, 4}, lp.data(), 16);
+  Check(lp[0] == 0xFF00FF00u, "a clear of one layer clears it");
+  {
+    ProgramDraw d;
+    d.program = prog;
+    d.targets[0] = {arr, 0, 1};
+    d.viewport = {0, 0, 4, 4, 0, 1};
+    d.scissor = {0, 0, 4, 4};
+    d.vertex_count = 3;
+    BufferData vb{cover.data(), 36};
+    d.vs.buffers = &vb;
+    d.fs.textures = &tex;
+    SamplerDesc smp;
+    d.fs.samplers = &smp;
+    d.fs.uniforms = white;
+    dev->DrawProgram(d);
+  }
+  dev->ReadImage(arr, 0, 1, {0, 0, 4, 4}, lp.data(), 16);
+  Check(lp[5] == 0xFF0080FFu, "a draw into a layer of an array");
+  dev->ReadImage(arr, 0, 0, {0, 0, 4, 4}, lp.data(), 16);
+  Check(lp[5] == 0xFFFF0000u, "a draw into a layer leaves the others");
+  dev->CopyImage(arr, 0, 1, {1, 1, 3, 3}, rt, 0, 0, 0, 2);
+  px = pixels();
+  Check(px[8] == 0xFF0080FFu && px[13] == 0xFF0080FFu && px[0] == 0xFF008000u,
+        "CopyImage copies a rectangle of a layer to another image");
+  dev->GenerateMips(arr);
+  dev->ReadImage(arr, 2, 0, {0, 0, 1, 1}, lp.data(), 4);
+  Check(lp[0] == 0xFFFF0000u, "GenerateMips fills the levels below level 0");
+  dev->DestroyTexture(arr);
+
   dev->DrawImage(rt, {0, 0, 4, 4});
   dev->Present();
   dev.reset();
