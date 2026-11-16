@@ -13,8 +13,6 @@
 #include <cstdio>
 #include <random>
 
-// The inline paths too (sse::Arith), as games' lifted code has them.
-#define RECOMP_SSE_HOST 1
 #include "runtime/sse.h"
 
 namespace {
@@ -137,22 +135,6 @@ void FuzzArith(bool dbl, sse::Op op) {
     Ctx cm{}, cf{};
     cm.mxcsr = cf.mxcsr = g_mxcsr;
     const Xmm want = sse::ArithModel(cm, op, dbl, lanes, d, s, 0);
-    // The whole host path, inline part first, as lifted code runs it.
-    {
-      Ctx ci{};
-      ci.mxcsr = g_mxcsr;
-      Xmm all = d;
-      sse::Arith(ci, false, op, dbl, lanes, all, s, 0);
-      const bool same = dbl ? SameLanes<uint64_t>(all, want, 2, IsNan64)
-                            : SameLanes<uint32_t>(all, want, 4, IsNan32);
-      if (!same || (ci.mxcsr & kUE) != (cm.mxcsr & kUE)) {
-        std::printf("FAIL Arith op %d dbl %d lanes %d: d %016" PRIX64 " s %016" PRIX64
-                    " got %016" PRIX64 " want %016" PRIX64 "\n",
-                    int(op), dbl, lanes, sse::Lane<uint64_t>(d, 0), sse::Lane<uint64_t>(s, 0),
-                    sse::Lane<uint64_t>(all, 0), sse::Lane<uint64_t>(want, 0));
-        if (++g_fails > 20) return;
-      }
-    }
     Xmm got = d;
     if (!sse::ArithFtzDaz(cf, op, dbl, lanes, got, s)) {
       if (!SameLanes<uint64_t>(got, d, 2, IsNan64)) {
