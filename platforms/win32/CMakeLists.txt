@@ -195,7 +195,7 @@ extern const uint32_t kNativeCount = ${_count};
 endfunction()
 
 # Store and online service SDKs (GOG Galaxy, ...), answering as offline.
-add_library(recomp_online SHARED src/win32/galaxy64.cpp)
+add_library(recomp_online SHARED src/win32/galaxy64.cpp src/win32/steam_api64.cpp)
 target_link_libraries(recomp_online PUBLIC recomp_win32)
 
 # SDL2.dll for x64 guests that link it themselves, on the host's SDL3.
