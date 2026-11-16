@@ -201,18 +201,50 @@ HLE("advapi32.dll", RegSetValueExA, 6) {
   return kErrorSuccess;
 }
 
-HLE("advapi32.dll", GetUserNameA, 2) {
+uint64_t GetUserName(Ctx& c, bool wide) {
   std::string n = "Player";
-  uint32_t buf = Arg(c, 0), psize = Arg(c, 1);
+  gaddr buf = Arg(c, 0), psize = Arg(c, 1);
   if (Rd32(psize) < n.size() + 1) {
     Wr32(psize, uint32_t(n.size() + 1));
     SetLastError(kErrorInsufficientBuffer);
     return 0;
   }
-  PutStr(buf, n);
+  if (wide)
+    PutWStr(buf, n);
+  else
+    PutStr(buf, n);
   Wr32(psize, uint32_t(n.size() + 1));
   return 1;
 }
+HLE("advapi32.dll", GetUserNameA, 2) { return GetUserName(c, false); }
+HLE64("advapi32.dll", GetUserNameW, 2) { return GetUserName(c, true); }
+
+// SECURITY_DESCRIPTOR (absolute): {Revision, Sbz1, Control, Owner, Group,
+// Sacl, Dacl}, the pointers the guest's size. Kernel objects here have no
+// security, so a descriptor is only filled in for the guest to pass on.
+HLE64("advapi32.dll", InitializeSecurityDescriptor, 2) {
+  std::memset(GPtr(Arg(c, 0)), 0, g_proc->x64 ? 40 : 20);
+  Wr8(Arg(c, 0), uint8_t(Arg(c, 1)));
+  return 1;
+}
+// (sd, present, dacl, defaulted): SE_DACL_PRESENT 0x4, SE_DACL_DEFAULTED 0x8.
+HLE64("advapi32.dll", SetSecurityDescriptorDacl, 4) {
+  const gaddr sd = Arg(c, 0);
+  uint16_t control = Rd16(sd + 2) & ~0xC;
+  if (Arg(c, 1)) control |= 0x4;
+  if (Arg(c, 3)) control |= 0x8;
+  Wr16(sd + 2, control);
+  if (g_proc->x64)
+    Wr64(sd + 32, Arg(c, 1) ? Arg(c, 2) : 0);
+  else
+    Wr32(sd + 16, Arg(c, 1) ? uint32_t(Arg(c, 2)) : 0);
+  return 1;
+}
+
+// The event log: sources open and reports are accepted, and go nowhere.
+HLE64("advapi32.dll", RegisterEventSourceW, 2) { return 0xE1; }
+HLE64("advapi32.dll", DeregisterEventSource, 1) { return 1; }
+HLE64("advapi32.dll", ReportEventW, 9) { return 1; }
 
 // ---- ole32 ------------------------------------------------------------------
 
@@ -255,7 +287,7 @@ HLE64("ole32.dll", CoCreateInstance, 5) {
 // (pProxy, dwAuthnSvc, dwAuthzSvc, pServerPrincName, dwAuthnLevel,
 // dwImpLevel, pAuthInfo, dwCapabilities): the objects are in-process, so
 // there is no proxy security to set.
-HLE("ole32.dll", CoSetProxyBlanket, 8) { return 0; }
+HLE64("ole32.dll", CoSetProxyBlanket, 8) { return 0; }
 
 HLE64("ole32.dll", CoCreateGuid, 1) {
   static std::mt19937_64 rng{std::random_device{}()};

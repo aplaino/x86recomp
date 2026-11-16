@@ -359,9 +359,14 @@ uint32_t CreateFile(Ctx& c, const std::string& gpath) {
     case 4: flags |= O_CREAT; break;                  // OPEN_ALWAYS
     case 5: flags |= O_TRUNC; break;                  // TRUNCATE_EXISTING
   }
+  // A directory opens only with FILE_FLAG_BACKUP_SEMANTICS (for its times,
+  // attributes or change notifications), and then for reading.
   if (exists && S_ISDIR(st.st_mode)) {
-    SetLastError(kErrorAccessDenied);
-    return kInvalidHandle;
+    if (!(uint32_t(Arg(c, 5)) & 0x02000000)) {
+      SetLastError(kErrorAccessDenied);
+      return kInvalidHandle;
+    }
+    flags = O_RDONLY | O_DIRECTORY;
   }
   if (flags & O_CREAT) {
     // Make sure the parent exists in the per-user tree.
@@ -677,10 +682,16 @@ uint32_t RemoveDirectory(const std::string& g) {
 HLE64("kernel32.dll", RemoveDirectoryA, 1) { return RemoveDirectory(GStr(Arg(c, 0))); }
 HLE64("kernel32.dll", RemoveDirectoryW, 1) { return RemoveDirectory(WidePath(Arg(c, 0))); }
 
-HLE("kernel32.dll", GetCurrentDirectoryA, 2) {
-  uint32_t size = Arg(c, 0), buf = Arg(c, 1);
-  std::string d = GuestCurrentDir();
-  return CopyOut(buf, size, d);
+HLE64("kernel32.dll", GetCurrentDirectoryA, 2) {
+  return CopyOut(Arg(c, 1), uint32_t(Arg(c, 0)), GuestCurrentDir());
+}
+// (size in characters, buffer): the length without the NUL, or the size
+// needed with it.
+HLE64("kernel32.dll", GetCurrentDirectoryW, 2) {
+  const std::string d = GuestCurrentDir();
+  if (d.size() + 1 > uint32_t(Arg(c, 0))) return uint32_t(d.size() + 1);
+  PutWStr(Arg(c, 1), d);
+  return uint32_t(d.size());
 }
 
 // GetFullPathNameA/W(name, size in characters, buffer, &file part).
@@ -712,7 +723,7 @@ HLE("kernel32.dll", GetLongPathNameA, 3) {
   return CopyOut(buf, size, full);
 }
 
-HLE("kernel32.dll", GetTempPathA, 2) {
+HLE64("kernel32.dll", GetTempPathA, 2) {
   std::string t = "C:\\TEMP\\";
   MakeDirs(UserDataRoot() + "/TEMP");
   return CopyOut(Arg(c, 1), Arg(c, 0), t);
@@ -765,8 +776,8 @@ void FillFindData(gaddr fd, const std::string& host_dir, const std::string& name
   // cAlternateFileName (8.3) left empty.
 }
 
-uint64_t FindFirstFile(Ctx& c, bool wide) {
-  std::string pattern = AbsGuest(wide ? WidePath(Arg(c, 0)) : GStr(Arg(c, 0)));
+uint64_t FindFirstFile(gaddr name, gaddr data, bool wide) {
+  std::string pattern = AbsGuest(wide ? WidePath(name) : GStr(name));
   size_t s = pattern.find_last_of('\\');
   std::string gdir = pattern.substr(0, s), mask = pattern.substr(s + 1);
   if (gdir.size() == 2) gdir += '\\';
@@ -786,12 +797,16 @@ uint64_t FindFirstFile(Ctx& c, bool wide) {
     SetLastError(kErrorFileNotFound);
     return HandleRet(kInvalidHandle);
   }
-  FillFindData(Arg(c, 1), f->entries[0].first, f->entries[0].second, wide);
+  FillFindData(data, f->entries[0].first, f->entries[0].second, wide);
   f->next = 1;
   return HandleRet(NewHandle(f));
 }
-HLE64("kernel32.dll", FindFirstFileA, 2) { return FindFirstFile(c, false); }
-HLE64("kernel32.dll", FindFirstFileW, 2) { return FindFirstFile(c, true); }
+HLE64("kernel32.dll", FindFirstFileA, 2) { return FindFirstFile(Arg(c, 0), Arg(c, 1), false); }
+HLE64("kernel32.dll", FindFirstFileW, 2) { return FindFirstFile(Arg(c, 0), Arg(c, 1), true); }
+// FindFirstFileExW(name, info level, data, search op, filter, flags): both
+// info levels fill WIN32_FIND_DATAW (the 8.3 name stays empty anyway); the
+// directory-only search op is a hint Windows may ignore too.
+HLE64("kernel32.dll", FindFirstFileExW, 6) { return FindFirstFile(Arg(c, 0), Arg(c, 2), true); }
 
 uint64_t FindNextFile(Ctx& c, bool wide) {
   auto o = GetHandle(Arg(c, 0));
