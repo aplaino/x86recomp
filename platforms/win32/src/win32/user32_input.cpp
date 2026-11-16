@@ -161,8 +161,8 @@ namespace {
 
 using namespace win32;
 
-HLE("user32.dll", MapVirtualKeyA, 2) {
-  uint32_t code = Arg(c, 0), type = Arg(c, 1);
+HLE64("user32.dll", MapVirtualKeyA, 2) {
+  uint32_t code = uint32_t(Arg(c, 0)), type = uint32_t(Arg(c, 1));
   switch (type) {
     case 0: {  // MAPVK_VK_TO_VSC
       bool ext;
@@ -220,7 +220,7 @@ HLE("user32.dll", GetKeyState, 1) {
   return r;
 }
 
-HLE("user32.dll", GetAsyncKeyState, 1) {
+HLE64("user32.dll", GetAsyncKeyState, 1) {
   uint8_t vk = uint8_t(Arg(c, 0));
   uint32_t r = (g_key_down[vk] ? 0x8000u : 0) |
                (g_key_pressed_since[vk].exchange(0) ? 1u : 0);
@@ -229,8 +229,8 @@ HLE("user32.dll", GetAsyncKeyState, 1) {
 
 // ---- system metrics and parameters -------------------------------------------
 
-HLE("user32.dll", GetSystemMetrics, 1) {
-  switch (Arg(c, 0)) {
+HLE64("user32.dll", GetSystemMetrics, 1) {
+  switch (uint32_t(Arg(c, 0))) {
     case 0: return uint32_t(g_display_w);   // SM_CXSCREEN
     case 1: return uint32_t(g_display_h);   // SM_CYSCREEN
     case 2: return 16;    // SM_CXVSCROLL
@@ -280,8 +280,9 @@ HLE("user32.dll", GetSysColor, 1) {
   return i < 31 ? kColors[i] : 0;
 }
 
-HLE("user32.dll", SystemParametersInfoA, 4) {
-  uint32_t action = Arg(c, 0), pv = Arg(c, 2);
+HLE64("user32.dll", SystemParametersInfoA, 4) {
+  uint32_t action = uint32_t(Arg(c, 0));
+  gaddr pv = Arg(c, 2);
   switch (action) {
     case 0x0030:  // SPI_GETWORKAREA
       Wr32(pv, 0);
@@ -327,8 +328,46 @@ HLE("user32.dll", RegisterWindowMessageA, 1) {
 }
 
 // Cursors and icons: opaque handles; the visible cursor is SDL's.
-HLE("user32.dll", LoadCursorA, 2) { return 0x00010000u | (Arg(c, 1) & 0xFFFF); }
-HLE("user32.dll", LoadIconA, 2) { return 0x00020000u | (Arg(c, 1) & 0xFFFF); }
+HLE64("user32.dll", LoadCursorA, 2) { return 0x00010000u | (Arg(c, 1) & 0xFFFF); }
+HLE64("user32.dll", LoadIconA, 2) { return 0x00020000u | (Arg(c, 1) & 0xFFFF); }
+HLE64("user32.dll", LoadCursorW, 2) { return 0x00010000u | (Arg(c, 1) & 0xFFFF); }
+HLE64("user32.dll", LoadIconW, 2) { return 0x00020000u | (Arg(c, 1) & 0xFFFF); }
+// A cursor file is never shown (the host cursor is used): a handle that
+// SetCursor takes like any other.
+HLE64("user32.dll", LoadCursorFromFileW, 1) { return 0x00010000u; }
+
+// The 256 virtual keys' states: bit 7 down, bit 0 toggled.
+HLE64("user32.dll", GetKeyboardState, 1) {
+  const gaddr out = Arg(c, 0);
+  for (int vk = 0; vk < 256; vk++)
+    Wr8(out + vk, uint8_t((g_key_down[vk] ? 0x80 : 0) | (g_key_toggled[vk] ? 1 : 0)));
+  return 1;
+}
+
+// No input is injected: the game sees only the host's input.
+HLE64("user32.dll", SendInput, 3) { return 0; }
+
+// Extra information is only attached by injected input.
+HLE64("user32.dll", GetMessageExtraInfo, 0) { return 0; }
+
+// Already DPI-aware: game sizes are pixels (ToPoints).
+HLE64("user32.dll", SetProcessDPIAware, 0) { return 1; }
+
+// Device arrival is never notified; the handle is only ever passed back to
+// UnregisterDeviceNotification.
+HLE64("user32.dll", RegisterDeviceNotificationA, 3) { return 0x00030001u; }
+
+// Raw input devices: none are listed (games read the keyboard and mouse
+// through messages and DirectInput here).
+HLE64("user32.dll", GetRawInputDeviceList, 3) {
+  const gaddr list = Arg(c, 0), count = Arg(c, 1);
+  if (!list) Wr32(count, 0);
+  return 0;
+}
+HLE64("user32.dll", GetRawInputDeviceInfoA, 4) {
+  SetLastError(6);  // ERROR_INVALID_HANDLE: no device has a handle
+  return uint64_t(int64_t(-1));
+}
 
 // Images are opaque handles too: nothing is drawn through GDI. A file
 // (LR_LOADFROMFILE) must exist, as the game may check for the splash
@@ -350,7 +389,7 @@ HLE("user32.dll", LoadImageA, 6) {
   WarnF("LoadImageA: bitmap resource %X not read; returning a handle\n", name);
   return next += 0x10;
 }
-HLE("user32.dll", SetCursor, 1) {
+HLE64("user32.dll", SetCursor, 1) {
   static uint32_t cur = 0;
   uint32_t old = cur;
   cur = Arg(c, 0);
@@ -423,11 +462,11 @@ uint32_t ShowMessageBox(uint32_t owner, const std::string& text,
   return chosen < 0 ? buttons[def].id : uint32_t(chosen);
 }
 
-HLE("user32.dll", MessageBoxA, 4) {
+HLE64("user32.dll", MessageBoxA, 4) {
   return ShowMessageBox(Arg(c, 0), GStr(Arg(c, 1)), GStr(Arg(c, 2)), Arg(c, 3));
 }
 
-HLE("user32.dll", MessageBoxW, 4) {
+HLE64("user32.dll", MessageBoxW, 4) {
   return ShowMessageBox(Arg(c, 0), Narrow(GWStr(Arg(c, 1))),
                         Narrow(GWStr(Arg(c, 2))), Arg(c, 3));
 }

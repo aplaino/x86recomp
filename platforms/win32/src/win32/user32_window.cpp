@@ -69,15 +69,18 @@ constexpr int32_t GWL_WNDPROC = -4, GWL_HINSTANCE = -6, GWL_HWNDPARENT = -8,
 
 struct WndClass {
   std::string name;  // lower case
-  uint32_t style = 0, wndproc = 0, wnd_extra = 0;
+  uint32_t style = 0, wnd_extra = 0;
+  gaddr wndproc = 0;
   uint16_t atom = 0;
 };
 
 struct Window {
   uint32_t hwnd = 0;
   std::string cls;
-  uint32_t wndproc = 0, style = 0, exstyle = 0, parent = 0, id = 0;
-  uint32_t hinst = 0, userdata = 0, class_style = 0;
+  gaddr wndproc = 0;
+  uint32_t style = 0, exstyle = 0, parent = 0, id = 0;
+  uint32_t hinst = 0, class_style = 0;
+  uint64_t userdata = 0;
   int x = 0, y = 0, w = 0, h = 0;  // window rect (screen)
   std::string title;
   std::vector<uint8_t> extra;      // cbWndExtra bytes (GetWindowLong >= 0)
@@ -96,7 +99,9 @@ struct Window {
 };
 
 struct Msg {
-  uint32_t hwnd, msg, wparam, lparam, time;
+  uint32_t hwnd, msg;
+  uint64_t wparam, lparam;
+  uint32_t time;
   int32_t ptx, pty;
 };
 
@@ -109,7 +114,9 @@ struct Queue {
 // SetTimer: WM_TIMER is not queued but synthesised when the owning
 // thread's queue has nothing else for the caller, as on Windows.
 struct Timer {
-  uint32_t hwnd, id, elapse, proc, tid;
+  uint32_t hwnd, id, elapse;
+  gaddr proc;
+  uint32_t tid;
   int64_t due;  // TickCount() of the next WM_TIMER
 };
 
@@ -180,7 +187,7 @@ void PostTo(uint32_t tid, const Msg& m) {
   g_queue_cv.notify_all();
 }
 
-void Post(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp) {
+void Post(uint32_t hwnd, uint32_t msg, uint64_t wp, uint64_t lp) {
   uint32_t tid;
   {
     std::lock_guard<std::recursive_mutex> l(g_mu);
@@ -191,8 +198,8 @@ void Post(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp) {
 }
 
 // Synchronous delivery to the guest WndProc (SendMessage semantics).
-uint32_t Send(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp) {
-  uint32_t proc;
+uint64_t Send(uint32_t hwnd, uint32_t msg, uint64_t wp, uint64_t lp) {
+  gaddr proc;
   {
     std::lock_guard<std::recursive_mutex> l(g_mu);
     Window* w = Win(hwnd);
@@ -606,15 +613,45 @@ void HandleSdlEvent(const SDL_Event& e) {
   }
 }
 
-// Writes a guest MSG.
-void PutMsg(uint32_t va, const Msg& m) {
+// Writes a guest MSG: {hwnd, message, wParam, lParam, time, pt}, 28 bytes
+// in 32-bit guests; on x64 the handle and parameters are 8 bytes and
+// aligned (48 bytes, with lPrivate).
+void PutMsg(gaddr va, const Msg& m) {
+  if (g_proc->x64) {
+    std::memset(GPtr(va), 0, 48);
+    Wr64(va + 0, m.hwnd);
+    Wr32(va + 8, m.msg);
+    Wr64(va + 16, m.wparam);
+    Wr64(va + 24, m.lparam);
+    Wr32(va + 32, m.time);
+    Wr32(va + 36, uint32_t(m.ptx));
+    Wr32(va + 40, uint32_t(m.pty));
+    return;
+  }
   Wr32(va + 0, m.hwnd);
   Wr32(va + 4, m.msg);
-  Wr32(va + 8, m.wparam);
-  Wr32(va + 12, m.lparam);
+  Wr32(va + 8, uint32_t(m.wparam));
+  Wr32(va + 12, uint32_t(m.lparam));
   Wr32(va + 16, m.time);
   Wr32(va + 20, uint32_t(m.ptx));
   Wr32(va + 24, uint32_t(m.pty));
+}
+
+// A guest MSG's hwnd, message, wParam and lParam (PutMsg's layouts).
+Msg GetMsg(gaddr va) {
+  Msg m{};
+  if (g_proc->x64) {
+    m.hwnd = Rd32(va);
+    m.msg = Rd32(va + 8);
+    m.wparam = Rd64(va + 16);
+    m.lparam = Rd64(va + 24);
+  } else {
+    m.hwnd = Rd32(va);
+    m.msg = Rd32(va + 4);
+    m.wparam = Rd32(va + 8);
+    m.lparam = Rd32(va + 12);
+  }
+  return m;
 }
 
 bool Matches(const Msg& m, uint32_t hwnd, uint32_t lo, uint32_t hi) {
@@ -1147,8 +1184,9 @@ using namespace win32;
 // ---- classes ---------------------------------------------------------------
 
 // g_classes key of a class name argument: an atom (MAKEINTATOM) or a name.
-std::string ClassKey(uint32_t name) {
-  return name < 0x10000 ? "#" + std::to_string(name) : Lower(GStr(name));
+std::string ClassKey(gaddr name, bool wide = false) {
+  if (name < 0x10000) return "#" + std::to_string(name);
+  return Lower(wide ? Narrow(GWStr(name)) : GStr(name));
 }
 
 // The system control classes every process has (see "built-in control
@@ -1195,6 +1233,31 @@ HLE("user32.dll", RegisterClassExA, 1) {
   return RegisterWndClass(wc + 4);
 }
 
+// WNDCLASSEXW on x64: {cbSize, style, lpfnWndProc @8, cbClsExtra @16,
+// cbWndExtra @20, hInstance @24, hIcon, hCursor, hbrBackground,
+// lpszMenuName, lpszClassName @64, hIconSm}, 80 bytes.
+HLE64("user32.dll", RegisterClassExW, 1) {
+  gaddr wc = Arg(c, 0);
+  if (!g_proc->x64) FatalF("RegisterClassExW: 32-bit layout not implemented");
+  if (Rd32(wc) != 80) {
+    SetLastError(87);  // ERROR_INVALID_PARAMETER
+    return 0;
+  }
+  WndClass k;
+  k.style = Rd32(wc + 4);
+  k.wndproc = Rd64(wc + 8);
+  k.wnd_extra = Rd32(wc + 20);
+  k.name = ClassKey(Rd64(wc + 64), true);
+  std::lock_guard<std::recursive_mutex> l(g_mu);
+  if (g_classes.count(k.name)) {
+    SetLastError(kErrorClassAlreadyExists);
+    return 0;
+  }
+  k.atom = g_next_atom++;
+  g_classes[k.name] = k;
+  return k.atom;
+}
+
 HLE("user32.dll", UnregisterClassA, 2) {
   std::string n = ClassKey(Arg(c, 0));
   std::lock_guard<std::recursive_mutex> l(g_mu);
@@ -1208,13 +1271,14 @@ HLE("user32.dll", SetClassLongA, 3) {
 
 // ---- windows ---------------------------------------------------------------
 
-HLE("user32.dll", CreateWindowExA, 12) {
-  uint32_t exstyle = Arg(c, 0), cls_va = Arg(c, 1), title_va = Arg(c, 2),
-           style = Arg(c, 3), parent = Arg(c, 8), menu = Arg(c, 9),
-           hinst = Arg(c, 10), param = Arg(c, 11);
+uint64_t CreateWindowImpl(Ctx& c, bool wide) {
+  uint32_t exstyle = uint32_t(Arg(c, 0)), style = uint32_t(Arg(c, 3)),
+           parent = uint32_t(Arg(c, 8)), menu = uint32_t(Arg(c, 9)),
+           hinst = uint32_t(Arg(c, 10));
+  gaddr cls_va = Arg(c, 1), title_va = Arg(c, 2), param = Arg(c, 11);
   int32_t x = int32_t(Arg(c, 4)), y = int32_t(Arg(c, 5)), w = int32_t(Arg(c, 6)),
           h = int32_t(Arg(c, 7));
-  std::string cls = ClassKey(cls_va);
+  std::string cls = ClassKey(cls_va, wide);
   EnsureSystemClasses();
   Window win;
   {
@@ -1247,7 +1311,7 @@ HLE("user32.dll", CreateWindowExA, 12) {
   win.y = y;
   win.w = w;
   win.h = h;
-  win.title = title_va ? GStr(title_va) : "";
+  win.title = !title_va ? "" : wide ? Narrow(GWStr(title_va)) : GStr(title_va);
   win.tid = CurrentThread()->tid;
   if (!(style & WS_CHILD)) {
     EnsureSdlVideo();
@@ -1263,12 +1327,28 @@ HLE("user32.dll", CreateWindowExA, 12) {
     std::lock_guard<std::recursive_mutex> l(g_mu);
     g_windows[hwnd] = std::move(win);
   }
-  RECOMP_TRACE("  CreateWindowExA(%s, \"%s\", style %08X, %d,%d %dx%d) -> %X\n",
-            cls.c_str(), GStr(title_va).c_str(), style, x, y, w, h, hwnd);
+  RECOMP_TRACE("  CreateWindowEx(%s, \"%s\", style %08X, %d,%d %dx%d) -> %X\n",
+            cls.c_str(), g_windows[hwnd].title.c_str(), style, x, y, w, h, hwnd);
 
-  // CREATESTRUCTA in a process-heap block.
-  uint32_t cs = HeapAllocProcess(48, true);
-  Wr32(cs + 0, param);
+  // CREATESTRUCT in a process-heap block: on x64 {lpCreateParams,
+  // hInstance, hMenu, hwndParent, cy @32, cx, y, x, style @48, lpszName @56,
+  // lpszClass @64, dwExStyle @72}, 80 bytes.
+  const gaddr cs = HeapAllocProcess(g_proc->x64 ? 80 : 48, true);
+  if (g_proc->x64) {
+    Wr64(cs + 0, param);
+    Wr64(cs + 8, hinst);
+    Wr64(cs + 16, menu);
+    Wr64(cs + 24, parent);
+    Wr32(cs + 32, uint32_t(h));
+    Wr32(cs + 36, uint32_t(w));
+    Wr32(cs + 40, uint32_t(y));
+    Wr32(cs + 44, uint32_t(x));
+    Wr32(cs + 48, style);
+    Wr64(cs + 56, title_va);
+    Wr64(cs + 64, cls_va);
+    Wr32(cs + 72, exstyle);
+  } else {
+  Wr32(cs + 0, uint32_t(param));
   Wr32(cs + 4, hinst);
   Wr32(cs + 8, menu);
   Wr32(cs + 12, parent);
@@ -1277,9 +1357,10 @@ HLE("user32.dll", CreateWindowExA, 12) {
   Wr32(cs + 24, uint32_t(y));
   Wr32(cs + 28, uint32_t(x));
   Wr32(cs + 32, style);
-  Wr32(cs + 36, title_va);
-  Wr32(cs + 40, cls_va);
+  Wr32(cs + 36, uint32_t(title_va));
+  Wr32(cs + 40, uint32_t(cls_va));
   Wr32(cs + 44, exstyle);
+  }
   bool ok = Send(hwnd, WM_NCCREATE, 0, cs) != 0;
   if (ok) ok = int32_t(Send(hwnd, WM_CREATE, 0, cs)) != -1;
   HeapFreeProcess(cs);
@@ -1303,9 +1384,11 @@ HLE("user32.dll", CreateWindowExA, 12) {
   }
   return hwnd;
 }
+HLE("user32.dll", CreateWindowExA, 12) { return CreateWindowImpl(c, false); }
+HLE64("user32.dll", CreateWindowExW, 12) { return CreateWindowImpl(c, true); }
 
-HLE("user32.dll", DestroyWindow, 1) {
-  uint32_t hwnd = Arg(c, 0);
+HLE64("user32.dll", DestroyWindow, 1) {
+  uint32_t hwnd = uint32_t(Arg(c, 0));
   {
     std::lock_guard<std::recursive_mutex> l(g_mu);
     if (!Win(hwnd)) return 0;
@@ -1334,8 +1417,8 @@ HLE("user32.dll", IsWindow, 1) {
   return Win(Arg(c, 0)) ? 1 : 0;
 }
 
-HLE("user32.dll", ShowWindow, 2) {
-  uint32_t hwnd = Arg(c, 0), cmd = Arg(c, 1);
+HLE64("user32.dll", ShowWindow, 2) {
+  uint32_t hwnd = uint32_t(Arg(c, 0)), cmd = uint32_t(Arg(c, 1));
   bool was, show = cmd != 0;  // SW_HIDE = 0
   // SW_SHOWMINIMIZED, SW_MINIMIZE, SW_SHOWMINNOACTIVE
   bool minimize = cmd == 2 || cmd == 6 || cmd == 7;
@@ -1398,8 +1481,8 @@ HLE("user32.dll", CloseWindow, 1) {
   return 1;
 }
 
-HLE("user32.dll", UpdateWindow, 1) { return 1; }
-HLE("user32.dll", InvalidateRect, 3) { return 1; }
+HLE64("user32.dll", UpdateWindow, 1) { return 1; }
+HLE64("user32.dll", InvalidateRect, 3) { return 1; }
 
 HLE("user32.dll", IsWindowVisible, 1) {
   std::lock_guard<std::recursive_mutex> l(g_mu);
@@ -1467,8 +1550,8 @@ void ApplyRect(uint32_t hwnd, int x, int y, int w, int h, bool move, bool size) 
   if (moved) Send(hwnd, WM_MOVE, 0, MkLparam(x, y));
 }
 
-HLE("user32.dll", SetWindowPos, 7) {
-  uint32_t hwnd = Arg(c, 0), flags = Arg(c, 6);
+HLE64("user32.dll", SetWindowPos, 7) {
+  uint32_t hwnd = uint32_t(Arg(c, 0)), flags = uint32_t(Arg(c, 6));
   bool nomove = flags & 0x2, nosize = flags & 0x1;
   ApplyRect(hwnd, int32_t(Arg(c, 2)), int32_t(Arg(c, 3)), int32_t(Arg(c, 4)),
             int32_t(Arg(c, 5)), !nomove, !nosize);
@@ -1483,14 +1566,14 @@ HLE("user32.dll", SetWindowPos, 7) {
   return 1;
 }
 
-HLE("user32.dll", MoveWindow, 6) {
+HLE64("user32.dll", MoveWindow, 6) {
   ApplyRect(Arg(c, 0), int32_t(Arg(c, 1)), int32_t(Arg(c, 2)),
             int32_t(Arg(c, 3)), int32_t(Arg(c, 4)), true, true);
   return 1;
 }
 
-HLE("user32.dll", AdjustWindowRect, 3) {
-  uint32_t rc = Arg(c, 0);
+HLE64("user32.dll", AdjustWindowRect, 3) {
+  gaddr rc = Arg(c, 0);
   int border, caption;
   FrameSize(Arg(c, 1), &border, &caption);
   Wr32(rc + 0, Rd32(rc + 0) - border);
@@ -1500,10 +1583,10 @@ HLE("user32.dll", AdjustWindowRect, 3) {
   return 1;
 }
 
-HLE("user32.dll", GetClientRect, 2) {
+HLE64("user32.dll", GetClientRect, 2) {
   std::lock_guard<std::recursive_mutex> l(g_mu);
   Window* w = Win(Arg(c, 0));
-  uint32_t rc = Arg(c, 1);
+  gaddr rc = Arg(c, 1);
   if (!w) return 0;
   int cw, ch;
   ClientSize(*w, &cw, &ch);
@@ -1514,8 +1597,9 @@ HLE("user32.dll", GetClientRect, 2) {
   return 1;
 }
 
-HLE("user32.dll", GetWindowRect, 2) {
-  uint32_t hwnd = Arg(c, 0), rc = Arg(c, 1);
+HLE64("user32.dll", GetWindowRect, 2) {
+  uint32_t hwnd = uint32_t(Arg(c, 0));
+  gaddr rc = Arg(c, 1);
   if (hwnd == 0x00010000) {  // desktop
     Wr32(rc, 0);
     Wr32(rc + 4, 0);
@@ -1533,19 +1617,19 @@ HLE("user32.dll", GetWindowRect, 2) {
   return 1;
 }
 
-HLE("user32.dll", ClientToScreen, 2) {
+HLE64("user32.dll", ClientToScreen, 2) {
   int ox, oy;
   WindowOrigin(Arg(c, 0), &ox, &oy);
-  uint32_t pt = Arg(c, 1);
+  gaddr pt = Arg(c, 1);
   Wr32(pt, Rd32(pt) + uint32_t(ox));
   Wr32(pt + 4, Rd32(pt + 4) + uint32_t(oy));
   return 1;
 }
 
-HLE("user32.dll", ScreenToClient, 2) {
+HLE64("user32.dll", ScreenToClient, 2) {
   int ox, oy;
   WindowOrigin(Arg(c, 0), &ox, &oy);
-  uint32_t pt = Arg(c, 1);
+  gaddr pt = Arg(c, 1);
   Wr32(pt, Rd32(pt) - uint32_t(ox));
   Wr32(pt + 4, Rd32(pt + 4) - uint32_t(oy));
   return 1;
@@ -1668,6 +1752,29 @@ HLE("user32.dll", SetWindowLongA, 3) {
   return old;
 }
 
+// SetWindowLongPtrW (x64): the long values of SetWindowLongA, with the
+// pointer-sized ones (GWLP_WNDPROC, GWLP_USERDATA, extra bytes) 8 bytes.
+HLE64("user32.dll", SetWindowLongPtrW, 3) {
+  std::lock_guard<std::recursive_mutex> l(g_mu);
+  Window* w = Win(Arg(c, 0));
+  int32_t idx = int32_t(Arg(c, 1));
+  uint64_t v = Arg(c, 2), old = 0;
+  if (!w) return 0;
+  switch (idx) {
+    case GWL_WNDPROC: old = w->wndproc; w->wndproc = v; return old;
+    case GWL_HWNDPARENT: old = w->parent; w->parent = uint32_t(v); return old;
+    case GWL_STYLE: old = w->style; w->style = uint32_t(v); return old;
+    case GWL_EXSTYLE: old = w->exstyle; w->exstyle = uint32_t(v); return old;
+    case GWL_USERDATA: old = w->userdata; w->userdata = v; return old;
+    case GWL_ID: old = w->id; w->id = uint32_t(v); return old;
+  }
+  if (idx >= 0 && uint32_t(idx) + 8 <= w->extra.size()) {
+    std::memcpy(&old, w->extra.data() + idx, 8);
+    std::memcpy(w->extra.data() + idx, &v, 8);
+  }
+  return old;
+}
+
 // ---- focus and activation ---------------------------------------------------------
 
 HLE("user32.dll", GetFocus, 0) {
@@ -1680,7 +1787,7 @@ HLE("user32.dll", SetFocus, 1) {
   g_focus = Arg(c, 0);
   return old;
 }
-HLE("user32.dll", GetActiveWindow, 0) {
+HLE64("user32.dll", GetActiveWindow, 0) {
   std::lock_guard<std::recursive_mutex> l(g_mu);
   return g_active;
 }
@@ -1690,7 +1797,7 @@ HLE("user32.dll", SetActiveWindow, 1) {
   g_active = Arg(c, 0);
   return old;
 }
-HLE("user32.dll", GetForegroundWindow, 0) {
+HLE64("user32.dll", GetForegroundWindow, 0) {
   std::lock_guard<std::recursive_mutex> l(g_mu);
   return g_active;
 }
@@ -1707,18 +1814,22 @@ HLE("user32.dll", BringWindowToTop, 1) {
 
 // ---- messages ----------------------------------------------------------------------
 
-HLE("user32.dll", PeekMessageA, 5) {
-  uint32_t msg_va = Arg(c, 0), hwnd = Arg(c, 1), lo = Arg(c, 2), hi = Arg(c, 3),
-           flags = Arg(c, 4);
+uint64_t PeekMessageImpl(Ctx& c) {
+  gaddr msg_va = Arg(c, 0);
+  uint32_t hwnd = uint32_t(Arg(c, 1)), lo = uint32_t(Arg(c, 2)), hi = uint32_t(Arg(c, 3)),
+           flags = uint32_t(Arg(c, 4));
   PumpHostEvents();
   Msg m;
   if (!TakeMessage(hwnd, lo, hi, flags & 1 /* PM_REMOVE */, &m)) return 0;
   PutMsg(msg_va, m);
   return 1;
 }
+HLE64("user32.dll", PeekMessageA, 5) { return PeekMessageImpl(c); }
+HLE64("user32.dll", PeekMessageW, 5) { return PeekMessageImpl(c); }
 
-HLE("user32.dll", GetMessageA, 4) {
-  uint32_t msg_va = Arg(c, 0), hwnd = Arg(c, 1), lo = Arg(c, 2), hi = Arg(c, 3);
+uint64_t GetMessageImpl(Ctx& c) {
+  gaddr msg_va = Arg(c, 0);
+  uint32_t hwnd = uint32_t(Arg(c, 1)), lo = uint32_t(Arg(c, 2)), hi = uint32_t(Arg(c, 3));
   Msg m;
   for (;;) {
     PumpHostEvents();
@@ -1733,24 +1844,30 @@ HLE("user32.dll", GetMessageA, 4) {
   PutMsg(msg_va, m);
   return m.msg == WM_QUIT ? 0 : 1;
 }
+HLE64("user32.dll", GetMessageA, 4) { return GetMessageImpl(c); }
+HLE64("user32.dll", GetMessageW, 4) { return GetMessageImpl(c); }
 
-HLE("user32.dll", PostMessageA, 4) {
-  uint32_t hwnd = Arg(c, 0);
+// The parameters are pointer-sized: whole registers on x64, as passed.
+uint64_t Param(Ctx& c, int i) { return g_proc->x64 ? Arg(c, i) : uint32_t(Arg(c, i)); }
+
+uint64_t PostMessageImpl(Ctx& c) {
+  uint32_t hwnd = uint32_t(Arg(c, 0)), msg = uint32_t(Arg(c, 1));
   if (!hwnd) {
     PostTo(CurrentThread()->tid,
-           Msg{0, uint32_t(Arg(c, 1)), uint32_t(Arg(c, 2)), uint32_t(Arg(c, 3)), TickCount(),
-               g_mouse_x, g_mouse_y});
+           Msg{0, msg, Param(c, 2), Param(c, 3), TickCount(), g_mouse_x, g_mouse_y});
     return 1;
   }
   {
     std::lock_guard<std::recursive_mutex> l(g_mu);
     if (!Win(hwnd)) return 0;
   }
-  Post(hwnd, Arg(c, 1), Arg(c, 2), Arg(c, 3));
+  Post(hwnd, msg, Param(c, 2), Param(c, 3));
   return 1;
 }
+HLE64("user32.dll", PostMessageA, 4) { return PostMessageImpl(c); }
+HLE64("user32.dll", PostMessageW, 4) { return PostMessageImpl(c); }
 
-HLE("user32.dll", PostQuitMessage, 1) {
+HLE64("user32.dll", PostQuitMessage, 1) {
   {
     std::lock_guard<std::recursive_mutex> l(g_mu);
     Queue& q = g_queues[CurrentThread()->tid];
@@ -1761,19 +1878,23 @@ HLE("user32.dll", PostQuitMessage, 1) {
   return 0;
 }
 
-HLE("user32.dll", SendMessageA, 4) {
-  return Send(Arg(c, 0), Arg(c, 1), Arg(c, 2), Arg(c, 3));
+uint64_t SendMessageImpl(Ctx& c) {
+  return Send(uint32_t(Arg(c, 0)), uint32_t(Arg(c, 1)), Param(c, 2), Param(c, 3));
 }
+HLE64("user32.dll", SendMessageA, 4) { return SendMessageImpl(c); }
+HLE64("user32.dll", SendMessageW, 4) { return SendMessageImpl(c); }
 
-HLE("user32.dll", DispatchMessageA, 1) {
-  uint32_t m = Arg(c, 0);
-  uint32_t hwnd = Rd32(m), msg = Rd32(m + 4);
-  // WM_TIMER from a timer with a TIMERPROC goes to the procedure.
-  if (msg == WM_TIMER && Rd32(m + 12))
-    return CallGuest(c, Rd32(m + 12), {hwnd, msg, Rd32(m + 8), Rd32(m + 16)});
-  if (!hwnd) return 0;
-  return Send(hwnd, msg, Rd32(m + 8), Rd32(m + 12));
+uint64_t DispatchMessageImpl(Ctx& c) {
+  const Msg m = GetMsg(Arg(c, 0));
+  // WM_TIMER from a timer with a TIMERPROC goes to the procedure, which
+  // gets the tick count as its last argument.
+  if (m.msg == WM_TIMER && m.lparam)
+    return CallGuest(c, m.lparam, {m.hwnd, m.msg, m.wparam, TickCount()});
+  if (!m.hwnd) return 0;
+  return Send(m.hwnd, m.msg, m.wparam, m.lparam);
 }
+HLE64("user32.dll", DispatchMessageA, 1) { return DispatchMessageImpl(c); }
+HLE64("user32.dll", DispatchMessageW, 1) { return DispatchMessageImpl(c); }
 
 // ---- hot keys ------------------------------------------------------------------------
 
@@ -1810,8 +1931,9 @@ HLE("user32.dll", UnregisterHotKey, 2) {
 
 // ---- timers ------------------------------------------------------------------------
 
-HLE("user32.dll", SetTimer, 4) {
-  uint32_t hwnd = Arg(c, 0), id = Arg(c, 1), elapse = Arg(c, 2), proc = Arg(c, 3);
+HLE64("user32.dll", SetTimer, 4) {
+  uint32_t hwnd = uint32_t(Arg(c, 0)), id = uint32_t(Arg(c, 1)), elapse = uint32_t(Arg(c, 2));
+  gaddr proc = Param(c, 3);
   std::lock_guard<std::recursive_mutex> l(g_mu);
   uint32_t tid = CurrentThread()->tid;
   if (hwnd) {
@@ -1833,8 +1955,8 @@ HLE("user32.dll", SetTimer, 4) {
   return hwnd ? 1 : id;
 }
 
-HLE("user32.dll", KillTimer, 2) {
-  uint32_t hwnd = Arg(c, 0), id = Arg(c, 1);
+HLE64("user32.dll", KillTimer, 2) {
+  uint32_t hwnd = uint32_t(Arg(c, 0)), id = uint32_t(Arg(c, 1));
   std::lock_guard<std::recursive_mutex> l(g_mu);
   auto it = std::find_if(g_timers.begin(), g_timers.end(),
                          [&](const Timer& t) { return t.hwnd == hwnd && t.id == id; });
@@ -1843,10 +1965,10 @@ HLE("user32.dll", KillTimer, 2) {
   return 1;
 }
 
-HLE("user32.dll", TranslateMessage, 1) {
+HLE64("user32.dll", TranslateMessage, 1) {
   // Generate WM_CHAR from WM_KEYDOWN using the US layout and shift/caps.
-  uint32_t m = Arg(c, 0);
-  uint32_t msg = Rd32(m + 4), vk = Rd32(m + 8);
+  const Msg m = GetMsg(Arg(c, 0));
+  uint32_t msg = m.msg, vk = uint32_t(m.wparam);
   if (msg != WM_KEYDOWN && msg != WM_SYSKEYDOWN) return 0;
   bool shift = g_key_down[0x10], caps = g_key_toggled[0x14];
   bool ctrl = g_key_down[0x11];
@@ -1871,7 +1993,7 @@ HLE("user32.dll", TranslateMessage, 1) {
       if (e.vk == vk) ch = uint8_t(shift ? e.s : e.n);
   }
   if (!ch) return 0;
-  Post(Rd32(m), msg == WM_SYSKEYDOWN ? WM_SYSCHAR : WM_CHAR, ch, Rd32(m + 12));
+  Post(m.hwnd, msg == WM_SYSKEYDOWN ? WM_SYSCHAR : WM_CHAR, ch, m.lparam);
   return 1;
 }
 
@@ -1882,8 +2004,9 @@ HLE("user32.dll", CallWindowProcA, 5) {
   return CallGuest(c, Arg(c, 0), {Arg(c, 1), Arg(c, 2), Arg(c, 3), Arg(c, 4)});
 }
 
-HLE("user32.dll", DefWindowProcA, 4) {
-  uint32_t hwnd = Arg(c, 0), msg = Arg(c, 1), wp = Arg(c, 2);
+uint64_t DefWindowProcImpl(Ctx& c) {
+  uint32_t hwnd = uint32_t(Arg(c, 0)), msg = uint32_t(Arg(c, 1));
+  uint64_t wp = Param(c, 2);
   switch (msg) {
     case WM_NCCREATE: return 1;
     case WM_CLOSE: {
@@ -1908,6 +2031,8 @@ HLE("user32.dll", DefWindowProcA, 4) {
       return 0;
   }
 }
+HLE64("user32.dll", DefWindowProcA, 4) { return DefWindowProcImpl(c); }
+HLE64("user32.dll", DefWindowProcW, 4) { return DefWindowProcImpl(c); }
 
 // ---- built-in control classes ------------------------------------------------------
 //
@@ -2131,8 +2256,8 @@ HLE64("user32.dll", CallNextHookEx, 4) { return 0; }
 
 // ---- cursor ------------------------------------------------------------------------
 
-HLE("user32.dll", ShowCursor, 1) {
-  g_cursor_count += Arg(c, 0) ? 1 : -1;
+HLE64("user32.dll", ShowCursor, 1) {
+  g_cursor_count += uint32_t(Arg(c, 0)) ? 1 : -1;
   if (g_sdl_up && !Background()) {
     if (g_cursor_count >= 0)
       SDL_ShowCursor();
@@ -2170,7 +2295,7 @@ bool SyncedCursorPos(int32_t* sx, int32_t* sy) {
   return true;
 }
 
-HLE("user32.dll", GetCursorPos, 1) {
+HLE64("user32.dll", GetCursorPos, 1) {
   int32_t x = g_mouse_x, y = g_mouse_y;
   SyncedCursorPos(&x, &y);
   Wr32(Arg(c, 0), uint32_t(x));
@@ -2187,8 +2312,8 @@ HLE("user32.dll", SetCursorPos, 2) {
 
 // ClipCursor(RECT const*): NULL frees the cursor. A rectangle inside one
 // of our windows makes its cursor virtual and grabs the host pointer.
-HLE("user32.dll", ClipCursor, 1) {
-  uint32_t rc = Arg(c, 0);
+HLE64("user32.dll", ClipCursor, 1) {
+  gaddr rc = Arg(c, 0);
   SDL_Window* release = nullptr;
   SDL_Window* grab = nullptr;
   {
