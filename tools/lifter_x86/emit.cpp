@@ -2945,14 +2945,16 @@ void InsnEmitter::Emit64() {
       if (d_.operand_width == 16) {
         L("const uint32_t v = ::recomp::lift::Rd<uint16_t>(B, rsp); rsp += 2;");
         if (IsMem(0))
-          L(Fmt("::recomp::lift::Wr<uint16_t>(B, %s, uint16_t(v));", AddrExpr(0).c_str()));
+          L(Fmt("::recomp::lift::Wr<uint16_t>(B, uint64_t(%s), uint16_t(v));", AddrExpr(0).c_str()));
         else
           L(Write(0, "v"));
         return;
       }
       L("const uint64_t v = ::recomp::lift::Rd<uint64_t>(B, rsp); rsp += 8;");
+      // uint64_t(): a RIP-relative address is a bare literal, which on
+      // LP64 hosts where uint64_t is unsigned long long fits neither Wr.
       if (IsMem(0))
-        L(Fmt("::recomp::lift::Wr<uint64_t>(B, %s, v);", AddrExpr(0).c_str()));
+        L(Fmt("::recomp::lift::Wr<uint64_t>(B, uint64_t(%s), v);", AddrExpr(0).c_str()));
       else
         L(Write(0, "v"));
       return;
