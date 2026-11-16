@@ -420,12 +420,15 @@ uint32_t RsqrtLane(uint32_t x) {
   if (exp == 0) return (x & 0x80000000u) | 0x7F800000u;  // ±0, denormal: ±inf
   if (x & 0x80000000u) return 0xFFC00000u;               // negative: default NaN
   if (exp == 0xFF) return 0;                             // +inf: +0
-  const uint_fast8_t mode = softfloat_roundingMode, flags = softfloat_exceptionFlags;
-  softfloat_roundingMode = softfloat_round_near_even;
-  float64_t one{0x3FF0000000000000ull};
-  uint32_t r = f64_to_f32(f64_div(one, f64_sqrt(f32_to_f64(float32_t{x})))).v;
-  softfloat_roundingMode = mode;
-  softfloat_exceptionFlags = flags;
+  // The first guess on the host: binary64 sqrt and division and the
+  // narrowing are IEEE's, correctly rounded to nearest even on both (the
+  // host's FP environment is the default one), so they give the bits
+  // SoftFloat did, at a fraction of the cost.
+  float xf;
+  std::memcpy(&xf, &x, sizeof xf);
+  const float guess = float(1.0 / std::sqrt(double(xf)));
+  uint32_t r;
+  std::memcpy(&r, &guess, sizeof r);
   const unsigned __int128 mx = frac | 0x800000u;
   const int ex = int(exp) - 150;  // x = mx * 2^ex
   for (;;) {
@@ -454,11 +457,13 @@ uint32_t RcpLane(uint32_t x) {
   if (exp == 0xFF && frac) return x | 0x00400000u;  // NaN: quieted
   if (exp == 0) return sign | 0x7F800000u;           // ±0, denormal: ±inf
   if (exp == 0xFF) return sign;                      // ±inf: ±0
-  const uint_fast8_t mode = softfloat_roundingMode, flags = softfloat_exceptionFlags;
-  softfloat_roundingMode = softfloat_round_near_even;
-  uint32_t r = f32_div(float32_t{0x3F800000u}, float32_t{x}).v;
-  softfloat_roundingMode = mode;
-  softfloat_exceptionFlags = flags;
+  // IEEE binary32 division, correctly rounded to nearest even on the host
+  // as in SoftFloat (see RsqrtLane).
+  float xf;
+  std::memcpy(&xf, &x, sizeof xf);
+  const float q = 1.0f / xf;
+  uint32_t r;
+  std::memcpy(&r, &q, sizeof r);
   if (((r >> 23) & 0xFF) == 0) return sign;  // denormal result: flushed
   return r;
 }
