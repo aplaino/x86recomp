@@ -336,8 +336,9 @@ HLE64("kernel32.dll", RemoveVectoredExceptionHandler, 1) {
 
 // GetThreadContext(thread, ctx): an x64 thread's own state at the call,
 // with no debug registers set (protectors read Dr0-Dr7 to look for
-// hardware breakpoints, and take a failure for tampering). The parts asked
-// for (ContextFlags) stay as asked. Other threads' contexts are refused:
+// hardware breakpoints, and take a failure for tampering). As on Windows,
+// only the parts ContextFlags asks for are written; the rest of the
+// caller's CONTEXT stays as it was. Other threads' contexts are refused:
 // they are only sampled by crash reporters.
 HLE64("kernel32.dll", GetThreadContext, 2) {
   const gaddr ctx = Arg(c, 1);
@@ -347,8 +348,27 @@ HLE64("kernel32.dll", GetThreadContext, 2) {
   }
   const uint32_t flags = Rd32(ctx + 0x30);
   RECOMP_TRACE("  GetThreadContext: flags %08X, context %08llX\n", flags, (unsigned long long)ctx);
-  WriteContext(ctx, AtReturn(c), c);
-  Wr32(ctx + 0x30, flags);
+  const gaddr full = HeapAllocProcess(kContextSize, false);
+  WriteContext(full, AtReturn(c), c);
+  std::memset(GPtr(full + 0x48), 0, 0x30);  // Dr0-Dr3, Dr6, Dr7: none set
+  auto copy = [&](uint32_t at, uint32_t n) { std::memcpy(GPtr(ctx + at), GPtr(full + at), n); };
+  if (flags & 0x01) {  // CONTEXT_CONTROL: SegCs, SegSs, EFlags, Rsp, Rip
+    copy(0x38, 2);
+    copy(0x42, 6);
+    copy(0x98, 8);
+    copy(0xF8, 8);
+  }
+  if (flags & 0x02) {  // CONTEXT_INTEGER: Rax-Rbx, Rbp-R15
+    copy(0x78, 0x20);
+    copy(0xA0, 0x58);
+  }
+  if (flags & 0x04) copy(0x3A, 8);  // CONTEXT_SEGMENTS: Ds, Es, Fs, Gs
+  if (flags & 0x08) {               // CONTEXT_FLOATING_POINT: MxCsr, FltSave
+    copy(0x34, 4);
+    copy(0x100, 0x200);
+  }
+  if (flags & 0x10) copy(0x48, 0x30);  // CONTEXT_DEBUG_REGISTERS
+  HeapFreeProcess(full);
   return 1;
 }
 
