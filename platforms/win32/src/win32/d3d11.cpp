@@ -166,6 +166,17 @@ D3D11_METHOD(ID3D11Device, GetImmediateContext) {
   return 0;
 }
 
+// CreateDeferredContext(flags, &context): a context that records
+// (d3d11_context.cpp) with the immediate context's methods.
+D3D11_METHOD(ID3D11Device, CreateDeferredContext) {
+  auto x = std::make_shared<Context>();
+  x->deferred = true;
+  const gaddr out = Arg(c, 2);
+  if (!out) return kS_FALSE;
+  Wr64(out, com::Publish(x, ContextVtable()));
+  return kS_OK;
+}
+
 // ---- ID3D11DeviceContext -------------------------------------------------------------
 
 D3D11_METHOD(ID3D11DeviceContext, AddRef) { return com::AddRef(Arg(c, 0)); }

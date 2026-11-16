@@ -647,4 +647,45 @@ CTX_METHOD(Flush) { return 0; }
 CTX_METHOD(GetType) { return Ctx0(c).deferred ? 1 : 0; }
 CTX_METHOD(GetContextFlags) { return 0; }
 
+// FinishCommandList(restore deferred context state, &command list): the
+// recording so far as a command list. The context's state goes back to
+// its defaults unless kept, and then the next recording starts by
+// setting it, as a command list runs from the default state.
+CTX_METHOD(FinishCommandList) {
+  Context& x = Ctx0(c);
+  if (!x.deferred) return kDXGI_ERROR_INVALID_CALL;
+  const bool keep = Arg(c, 1) != 0;
+  auto l = std::make_shared<CommandList>();
+  l->ops = std::move(x.ops);
+  x.ops.clear();
+  x.mapped.clear();
+  if (keep) x.ops.emplace_back([s = ContextState(x)](Context& y) { StateOf(y) = s; });
+  else StateOf(x) = ContextState{};
+  const gaddr out = Arg(c, 2);
+  if (!out) return kS_OK;
+  Wr64(out, com::Publish(l, com::Vtable(kDll, "ID3D11CommandList",
+                                        {"QueryInterface", "AddRef", "Release", "GetDevice",
+                                         "GetPrivateData", "SetPrivateData",
+                                         "SetPrivateDataInterface", "GetContextFlags"})));
+  return kS_OK;
+}
+
+// ExecuteCommandList(command list, restore context state): its operations
+// from the default state; then the context's own state back, or the
+// defaults.
+CTX_METHOD(ExecuteCommandList) {
+  auto l = Obj<CommandList>(Arg(c, 1));
+  const bool restore = Arg(c, 2) != 0;
+  Run(Ctx0(c), [l, restore](Context& y) {
+    std::lock_guard<std::recursive_mutex> g(Dev().gpu_mu);
+    ContextState saved;
+    if (restore) saved = y;
+    StateOf(y) = ContextState{};
+    for (const Op& op : l->ops) op(y);
+    StateOf(y) = restore ? saved : ContextState{};
+    Dev().stats.executed_lists++;
+  });
+  return 0;
+}
+
 }  // namespace recomp::hle::d3d11

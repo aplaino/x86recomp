@@ -713,8 +713,10 @@ D3D11_CHILD(ID3D11RasterizerState)
 D3D11_CHILD(ID3D11SamplerState)
 D3D11_CHILD(ID3D11Query)
 D3D11_CHILD(ID3D11Predicate)
+D3D11_CHILD(ID3D11CommandList)
 #undef D3D11_CHILD
 
+D3D11_METHOD(ID3D11CommandList, GetContextFlags) { return 0; }
 
 // ---- resources: GetType, eviction, GetDesc ------------------------------------------------
 
