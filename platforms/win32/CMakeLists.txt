@@ -37,6 +37,7 @@ add_library(recomp_win32 SHARED
   src/win32/gdi32.cpp
   src/win32/shell_net.cpp
   src/win32/ws2_32.cpp
+  src/win32/ntdll.cpp
   src/win32/com.cpp)
 target_include_directories(recomp_win32 PUBLIC src)
 target_link_libraries(recomp_win32 PUBLIC recomp_x86 recomp_pe SDL3::SDL3
