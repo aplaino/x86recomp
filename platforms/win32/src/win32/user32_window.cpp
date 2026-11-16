@@ -1668,7 +1668,7 @@ HLE("user32.dll", MapWindowPoints, 4) {
   return MkLparam(dx, dy);
 }
 
-HLE("user32.dll", GetDesktopWindow, 0) { return 0x00010000; }
+HLE64("user32.dll", GetDesktopWindow, 0) { return 0x00010000; }
 
 HLE("user32.dll", GetParent, 1) {
   std::lock_guard<std::recursive_mutex> l(g_mu);
@@ -1686,9 +1686,10 @@ HLE("user32.dll", GetWindow, 2) {
 
 HLE("user32.dll", GetLastActivePopup, 1) { return Arg(c, 0); }
 
-HLE("user32.dll", FindWindowA, 2) {
-  std::string cls = Arg(c, 0) ? Lower(GStr(Arg(c, 0))) : "";
-  std::string title = Arg(c, 1) ? GStr(Arg(c, 1)) : "";
+uint64_t FindWindowImpl(Ctx& c, bool wide) {
+  auto str = [&](int i) { return wide ? Narrow(GWStr(Arg(c, i))) : GStr(Arg(c, i)); };
+  std::string cls = Arg(c, 0) ? Lower(str(0)) : "";
+  std::string title = Arg(c, 1) ? str(1) : "";
   std::lock_guard<std::recursive_mutex> l(g_mu);
   for (auto& [h, w] : g_windows) {
     if (w.destroyed || (w.style & WS_CHILD)) continue;
@@ -1698,9 +1699,11 @@ HLE("user32.dll", FindWindowA, 2) {
   }
   return 0;
 }
+HLE("user32.dll", FindWindowA, 2) { return FindWindowImpl(c, false); }
+HLE64("user32.dll", FindWindowW, 2) { return FindWindowImpl(c, true); }
 
-HLE("user32.dll", SetWindowTextA, 2) {
-  std::string t = GStr(Arg(c, 1));
+uint64_t SetWindowTextImpl(Ctx& c, bool wide) {
+  std::string t = wide ? Narrow(GWStr(Arg(c, 1))) : GStr(Arg(c, 1));
   SDL_Window* s = nullptr;
   {
     std::lock_guard<std::recursive_mutex> l(g_mu);
@@ -1712,6 +1715,8 @@ HLE("user32.dll", SetWindowTextA, 2) {
   if (s) RunOnUiThread([&] { SDL_SetWindowTitle(s, AnsiToUtf8(t).c_str()); });
   return 1;
 }
+HLE("user32.dll", SetWindowTextA, 2) { return SetWindowTextImpl(c, false); }
+HLE64("user32.dll", SetWindowTextW, 2) { return SetWindowTextImpl(c, true); }
 
 HLE("user32.dll", GetWindowTextA, 3) {
   std::lock_guard<std::recursive_mutex> l(g_mu);
@@ -1729,7 +1734,9 @@ HLE("user32.dll", GetWindowTextLengthA, 1) {
   return w ? uint32_t(w->title.size()) : 0;
 }
 
-HLE("user32.dll", GetWindowLongA, 2) {
+// GetWindowLongA/W: the 32-bit values (x64 games read the pointer-sized
+// ones with GetWindowLongPtr).
+uint64_t GetWindowLongImpl(Ctx& c) {
   std::lock_guard<std::recursive_mutex> l(g_mu);
   Window* w = Win(Arg(c, 0));
   int32_t idx = int32_t(Arg(c, 1));
@@ -1750,12 +1757,14 @@ HLE("user32.dll", GetWindowLongA, 2) {
   }
   return 0;
 }
+HLE("user32.dll", GetWindowLongA, 2) { return GetWindowLongImpl(c); }
+HLE64("user32.dll", GetWindowLongW, 2) { return GetWindowLongImpl(c); }
 
-HLE("user32.dll", SetWindowLongA, 3) {
+uint64_t SetWindowLongImpl(Ctx& c) {
   std::lock_guard<std::recursive_mutex> l(g_mu);
   Window* w = Win(Arg(c, 0));
   int32_t idx = int32_t(Arg(c, 1));
-  uint32_t v = Arg(c, 2), old = 0;
+  uint32_t v = uint32_t(Arg(c, 2)), old = 0;
   if (!w) return 0;
   switch (idx) {
     case GWL_WNDPROC: old = w->wndproc; w->wndproc = v; return old;
@@ -1771,6 +1780,8 @@ HLE("user32.dll", SetWindowLongA, 3) {
   }
   return old;
 }
+HLE("user32.dll", SetWindowLongA, 3) { return SetWindowLongImpl(c); }
+HLE64("user32.dll", SetWindowLongW, 3) { return SetWindowLongImpl(c); }
 
 // SetWindowLongPtrW (x64): the long values of SetWindowLongA, with the
 // pointer-sized ones (GWLP_WNDPROC, GWLP_USERDATA, extra bytes) 8 bytes.
@@ -1811,7 +1822,7 @@ HLE64("user32.dll", GetActiveWindow, 0) {
   std::lock_guard<std::recursive_mutex> l(g_mu);
   return g_active;
 }
-HLE("user32.dll", SetActiveWindow, 1) {
+HLE64("user32.dll", SetActiveWindow, 1) {
   std::lock_guard<std::recursive_mutex> l(g_mu);
   uint32_t old = g_active;
   g_active = Arg(c, 0);
@@ -1821,7 +1832,7 @@ HLE64("user32.dll", GetForegroundWindow, 0) {
   std::lock_guard<std::recursive_mutex> l(g_mu);
   return g_active;
 }
-HLE("user32.dll", SetForegroundWindow, 1) {
+HLE64("user32.dll", SetForegroundWindow, 1) {
   if (SDL_Window* s = SdlWindowFor(Arg(c, 0))) RunOnUiThread([&] { SDL_RaiseWindow(s); });
   std::lock_guard<std::recursive_mutex> l(g_mu);
   g_active = g_focus = Arg(c, 0);
@@ -2323,7 +2334,7 @@ HLE64("user32.dll", GetCursorPos, 1) {
   return 1;
 }
 
-HLE("user32.dll", SetCursorPos, 2) {
+HLE64("user32.dll", SetCursorPos, 2) {
   g_mouse_x = g_recentre_x = int32_t(Arg(c, 0));
   g_mouse_y = g_recentre_y = int32_t(Arg(c, 1));
   g_last_recentre_ms = TickCount();
@@ -2443,8 +2454,8 @@ HLE("user32.dll", ChangeDisplaySettingsA, 2) {
 
 // Device contexts are named after their window (see DcForWindow); the
 // screen DC (GetDC(NULL)) is a constant.
-HLE("user32.dll", GetDC, 1) { return DcForWindow(Arg(c, 0)); }
-HLE("user32.dll", ReleaseDC, 2) { return 1; }
+HLE64("user32.dll", GetDC, 1) { return DcForWindow(Arg(c, 0)); }
+HLE64("user32.dll", ReleaseDC, 2) { return 1; }
 HLE("user32.dll", BeginPaint, 2) {
   uint32_t ps = Arg(c, 1), dc = DcForWindow(Arg(c, 0));
   std::memset(GPtr(ps), 0, 64);

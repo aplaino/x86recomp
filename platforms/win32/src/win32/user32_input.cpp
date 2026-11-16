@@ -214,7 +214,10 @@ HLE("user32.dll", GetKeyboardLayout, 1) { return 0x04090409; }
 
 // Key state: bit 15 = down; GetKeyState bit 0 = toggled. GetAsyncKeyState
 // bit 0 = "pressed since last call" (still honoured by Windows XP).
-HLE("user32.dll", GetKeyState, 1) {
+// ImmDisableIME(thread): no input method editors here.
+HLE64("imm32.dll", ImmDisableIME, 1) { return 1; }
+
+HLE64("user32.dll", GetKeyState, 1) {
   uint8_t vk = uint8_t(Arg(c, 0));
   uint32_t r = (g_key_down[vk] ? 0xFF80u : 0) | (g_key_toggled[vk] ? 1u : 0);
   return r;

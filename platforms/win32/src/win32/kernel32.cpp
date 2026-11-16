@@ -570,11 +570,24 @@ HLE64("kernel32.dll", GetSystemInfo, 1) {
   return 0;
 }
 
-HLE("kernel32.dll", GlobalMemoryStatus, 1) {
+// x64 guests: MEMORYSTATUS's SIZE_T fields, with GlobalMemoryStatusEx's
+// values.
+HLE64("kernel32.dll", GlobalMemoryStatus, 1) {
+  gaddr ms = Arg(c, 0);
+  if (g_proc->x64) {
+    Wr32(ms + 0, 56);
+    Wr32(ms + 4, 25);
+    Wr64(ms + 8, 16ull << 30);
+    Wr64(ms + 16, 12ull << 30);
+    Wr64(ms + 24, 24ull << 30);
+    Wr64(ms + 32, 20ull << 30);
+    Wr64(ms + 40, kTebLo64 - kUserLo64);
+    Wr64(ms + 48, kTebLo64 - kUserLo64);
+    return 0;
+  }
   // A roomy 2002-era machine: 1 GiB RAM, 1.5 GiB page file. Every value
   // stays below 2 GiB: the game compares these as signed ints (a 2 GiB
   // page file reads as negative and triggers its "swap file" error).
-  uint32_t ms = Arg(c, 0);
   Wr32(ms + 0, 32);
   Wr32(ms + 4, 30);           // memory load %
   Wr32(ms + 8, 0x40000000);   // total phys
@@ -1164,8 +1177,8 @@ HLE64("kernel32.dll", GetLocalTime, 1) {
 // The host's current UTC offset as a zone without DST transitions
 // (TIME_ZONE_ID_UNKNOWN): the guest's local time then equals the host's
 // now, though not across a DST change while it runs.
-HLE("kernel32.dll", GetTimeZoneInformation, 1) {
-  uint32_t tzi = Arg(c, 0);
+HLE64("kernel32.dll", GetTimeZoneInformation, 1) {
+  gaddr tzi = Arg(c, 0);
   std::time_t now = std::time(nullptr);
   std::tm t{};
   localtime_r(&now, &t);
@@ -1177,10 +1190,10 @@ HLE("kernel32.dll", GetTimeZoneInformation, 1) {
   return 0;
 }
 
-HLE("winmm.dll", timeGetTime, 0) { return TickCount(); }
+HLE64("winmm.dll", timeGetTime, 0) { return TickCount(); }
 // The host timer is always fine-grained; nothing to change.
-HLE("winmm.dll", timeBeginPeriod, 1) { return Arg(c, 0) ? 0 : 97; }  // TIMERR_NOCANDO
-HLE("winmm.dll", timeEndPeriod, 1) { return Arg(c, 0) ? 0 : 97; }
+HLE64("winmm.dll", timeBeginPeriod, 1) { return uint32_t(Arg(c, 0)) ? 0 : 97; }  // TIMERR_NOCANDO
+HLE64("winmm.dll", timeEndPeriod, 1) { return uint32_t(Arg(c, 0)) ? 0 : 97; }
 
 // No joystick or MIDI input drivers: games see zero devices.
 HLE("winmm.dll", joyGetNumDevs, 0) { return 0; }
@@ -1326,6 +1339,22 @@ HLE64("kernel32.dll", LCMapStringW, 6) {
   return uint32_t(n);
 }
 
+// CompareStringW(locale, flags, s1, n1, s2, n2): code unit order, without
+// case under NORM_IGNORECASE (the only flag taken); CSTR_LESS_THAN 1,
+// CSTR_EQUAL 2, CSTR_GREATER_THAN 3.
+HLE64("kernel32.dll", CompareStringW, 6) {
+  const bool fold = Arg(c, 1) & 1;
+  auto str = [&](gaddr p, int32_t n) {
+    std::u16string s = n < 0 ? GWStr(p) : std::u16string(reinterpret_cast<const char16_t*>(GPtr(p)), size_t(n));
+    if (fold)
+      for (char16_t& ch : s) ch = char16_t(MapCase(uint16_t(ch), 0x100));  // LCMAP_LOWERCASE
+    return s;
+  };
+  const std::u16string a = str(Arg(c, 2), int32_t(Arg(c, 3))), b = str(Arg(c, 4), int32_t(Arg(c, 5)));
+  const int r = a.compare(b);
+  return r < 0 ? 1 : r == 0 ? 2 : 3;
+}
+
 HLE("kernel32.dll", LCMapStringA, 6) {
   uint32_t flags = Arg(c, 1), src = Arg(c, 2), dst = Arg(c, 4);
   int32_t n = int32_t(Arg(c, 3)), cap = int32_t(Arg(c, 5));
@@ -1346,6 +1375,14 @@ HLE64("kernel32.dll", GetSystemDefaultLCID, 0) { return 0x0409; }
 HLE64("kernel32.dll", GetSystemDefaultLangID, 0) { return 0x0409; }
 HLE64("kernel32.dll", GetUserDefaultLangID, 0) { return 0x0409; }
 HLE64("kernel32.dll", IsValidLocale, 2) { return uint32_t(Arg(c, 0)) == 0x0409 ? 1 : 0; }
+
+HLE64("kernel32.dll", EnumSystemLocalesW, 2) {
+  gaddr buf = HeapAllocProcess(32, true);
+  PutWStr(buf, "00000409");
+  CallGuest(c, Arg(c, 0), {buf});
+  g_process_heap->Free(buf);
+  return 1;
+}
 
 HLE("kernel32.dll", EnumSystemLocalesA, 2) {
   uint32_t buf = HeapAllocProcess(16, true);

@@ -216,9 +216,9 @@ HLE("advapi32.dll", GetUserNameA, 2) {
 
 // ---- ole32 ------------------------------------------------------------------
 
-HLE("ole32.dll", CoInitialize, 1) { return 0; }  // S_OK
-HLE("ole32.dll", CoInitializeEx, 2) { return 0; }
-HLE("ole32.dll", CoUninitialize, 0) { return 0; }
+HLE64("ole32.dll", CoInitialize, 1) { return 0; }  // S_OK
+HLE64("ole32.dll", CoInitializeEx, 2) { return 0; }
+HLE64("ole32.dll", CoUninitialize, 0) { return 0; }
 
 // The COM task allocator: the process heap (a NULL free is a no-op).
 HLE64("ole32.dll", CoTaskMemAlloc, 1) { return HeapAllocProcess(Arg(c, 0), false); }
@@ -257,9 +257,9 @@ HLE64("ole32.dll", CoCreateInstance, 5) {
 // there is no proxy security to set.
 HLE("ole32.dll", CoSetProxyBlanket, 8) { return 0; }
 
-HLE("ole32.dll", CoCreateGuid, 1) {
+HLE64("ole32.dll", CoCreateGuid, 1) {
   static std::mt19937_64 rng{std::random_device{}()};
-  uint32_t g = Arg(c, 0);
+  gaddr g = Arg(c, 0);
   for (int i = 0; i < 4; i++) Wr32(g + 4 * i, uint32_t(rng()));
   Wr8(g + 7, uint8_t((g_proc->mem.read<uint8_t>(g + 7) & 0x0F) | 0x40));  // v4
   return 0;
