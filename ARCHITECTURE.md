@@ -665,6 +665,11 @@ draws). Backends:
    - D3D9's integer pixel centres become SDL_GPU's half-integer ones
      with a half-pixel shift in the vertex shader. SDL_GPU flips Vulkan's
      viewport, so clip space is y-up on both APIs.
+   - Programs (the console GPUs' and Direct3D 11's GLSL stages) compile
+     the same way: on Metal their prelude's binding numbers are the MSL
+     indices SDL_GPU expects, uniform buffers before storage buffers.
+     Metal samplers have no LOD bias, so a program sampler's is lost
+     there.
    - Direct3D 9 shaders (translated from HLSL, see Shaders below) are
      compiled when created: the backend prepends its prelude (bindings
      in SDL_GPU's layout, vertex pulling by declaration type from the
