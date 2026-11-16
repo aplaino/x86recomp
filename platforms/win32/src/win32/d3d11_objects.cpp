@@ -100,14 +100,14 @@ std::shared_ptr<Resource> ResourceAt(gaddr p) {
 uint32_t FormatBytes(uint32_t f, bool* block) {
   *block = false;
   switch (f) {
-    case 2: case 3: case 4: return 16;                              // R32G32B32A32
-    case 6: case 7: case 8: return 12;                              // R32G32B32
-    case 10: case 11: case 12: case 13: case 14: return 8;          // R16G16B16A16
-    case 16: case 17: case 18: return 8;                            // R32G32
-    case 20: case 21: case 22: return 8;                            // R32G8X24
-    case 24: case 25: case 26: return 4;                            // R10G10B10A2
+    case 1: case 2: case 3: case 4: return 16;                      // R32G32B32A32
+    case 5: case 6: case 7: case 8: return 12;                      // R32G32B32
+    case 9: case 10: case 11: case 12: case 13: case 14: return 8;  // R16G16B16A16
+    case 15: case 16: case 17: case 18: return 8;                   // R32G32
+    case 19: case 20: case 21: case 22: return 8;                   // R32G8X24
+    case 23: case 24: case 25: case 26: return 4;                   // R10G10B10A2, R11G11B10
     case 27: case 28: case 29: case 30: case 31: case 32: return 4; // R8G8B8A8
-    case 34: case 35: case 36: case 37: case 38: return 4;          // R16G16
+    case 33: case 34: case 35: case 36: case 37: case 38: return 4; // R16G16
     case 39: case 40: case 41: case 42: case 43: return 4;          // R32
     case 44: case 45: case 46: case 47: return 4;                   // R24G8
     case 48: case 49: case 50: case 51: case 52: return 2;          // R8G8
@@ -654,6 +654,26 @@ D3D11_METHOD(ID3D11Texture2D, GetDesc) {
   const uint32_t f[11] = {r->width, r->height,         r->mips, r->array,      r->format, r->samples,
                           r->quality, uint32_t(r->usage), r->bind, r->cpu_access, r->misc};
   for (int i = 0; i < 11; i++) Wr32(d + 4 * i, f[i]);
+  return 0;
+}
+// D3D11_TEXTURE1D_DESC {Width, MipLevels, ArraySize, Format, Usage,
+// BindFlags, CPUAccessFlags, MiscFlags}.
+D3D11_METHOD(ID3D11Texture1D, GetDesc) {
+  auto r = ResourceAt(Arg(c, 0));
+  const gaddr d = Arg(c, 1);
+  const uint32_t f[8] = {r->width, r->mips, r->array, r->format, uint32_t(r->usage),
+                         r->bind,  r->cpu_access, r->misc};
+  for (int i = 0; i < 8; i++) Wr32(d + 4 * i, f[i]);
+  return 0;
+}
+// D3D11_TEXTURE3D_DESC {Width, Height, Depth, MipLevels, Format, Usage,
+// BindFlags, CPUAccessFlags, MiscFlags}.
+D3D11_METHOD(ID3D11Texture3D, GetDesc) {
+  auto r = ResourceAt(Arg(c, 0));
+  const gaddr d = Arg(c, 1);
+  const uint32_t f[9] = {r->width, r->height,         r->depth, r->mips,       r->format,
+                         uint32_t(r->usage), r->bind, r->cpu_access, r->misc};
+  for (int i = 0; i < 9; i++) Wr32(d + 4 * i, f[i]);
   return 0;
 }
 
