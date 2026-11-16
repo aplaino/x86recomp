@@ -262,7 +262,7 @@ HLE64("kernel32.dll", SystemTimeToFileTime, 2) {
 }
 
 // The SYSTEMTIME a Get*Format call formats; null means now (local).
-std::tm TmFromSystemTime(uint32_t st) {
+std::tm TmFromSystemTime(gaddr st) {
   if (st) return ReadSystemTime(st);
   std::tm t{};
   time_t now = time(nullptr);
@@ -272,18 +272,22 @@ std::tm TmFromSystemTime(uint32_t st) {
 
 // en-US defaults: M/d/yyyy and h:mm:ss tt. Explicit pictures are not
 // translated (the game passes NULL for the format).
-HLE("kernel32.dll", GetDateFormatA, 6) {
+uint64_t GetDateFormat(Ctx& c, bool wide) {
   std::tm t = TmFromSystemTime(Arg(c, 2));
   char out[64];
   if (Arg(c, 1) & 2)  // DATE_LONGDATE
     std::strftime(out, sizeof out, "%A, %B %d, %Y", &t);
   else
     std::snprintf(out, sizeof out, "%d/%d/%d", t.tm_mon + 1, t.tm_mday, t.tm_year + 1900);
-  if (Arg(c, 3)) WarnF("GetDateFormatA: custom picture '%s' ignored\n", GStr(Arg(c, 3)).c_str());
-  return PutCounted(Arg(c, 4), Arg(c, 5), out, false);
+  if (Arg(c, 3))
+    WarnF("GetDateFormat: custom picture '%s' ignored\n",
+          (wide ? Narrow(GWStr(Arg(c, 3))) : GStr(Arg(c, 3))).c_str());
+  return PutCounted(Arg(c, 4), uint32_t(Arg(c, 5)), out, wide);
 }
+HLE("kernel32.dll", GetDateFormatA, 6) { return GetDateFormat(c, false); }
+HLE64("kernel32.dll", GetDateFormatW, 6) { return GetDateFormat(c, true); }
 
-HLE("kernel32.dll", GetTimeFormatA, 6) {
+uint64_t GetTimeFormat(Ctx& c, bool wide) {
   std::tm t = TmFromSystemTime(Arg(c, 2));
   char out[64];
   int h = t.tm_hour % 12;
@@ -292,9 +296,13 @@ HLE("kernel32.dll", GetTimeFormatA, 6) {
   else
     std::snprintf(out, sizeof out, "%d:%02d:%02d %s", h ? h : 12, t.tm_min, t.tm_sec,
                   t.tm_hour < 12 ? "AM" : "PM");
-  if (Arg(c, 3)) WarnF("GetTimeFormatA: custom picture '%s' ignored\n", GStr(Arg(c, 3)).c_str());
-  return PutCounted(Arg(c, 4), Arg(c, 5), out, false);
+  if (Arg(c, 3))
+    WarnF("GetTimeFormat: custom picture '%s' ignored\n",
+          (wide ? Narrow(GWStr(Arg(c, 3))) : GStr(Arg(c, 3))).c_str());
+  return PutCounted(Arg(c, 4), uint32_t(Arg(c, 5)), out, wide);
 }
+HLE("kernel32.dll", GetTimeFormatA, 6) { return GetTimeFormat(c, false); }
+HLE64("kernel32.dll", GetTimeFormatW, 6) { return GetTimeFormat(c, true); }
 
 // ---- strings -------------------------------------------------------------------------
 

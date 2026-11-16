@@ -643,7 +643,7 @@ HLE64("kernel32.dll", TerminateThread, 2) {
   return 0;
 }
 
-HLE("kernel32.dll", ExitThread, 1) {
+HLE64("kernel32.dll", ExitThread, 1) {
   GuestSyncFence();  // OnGuestThreadFinished fences again after unwinding
   throw GuestThreadExit{uint32_t(Arg(c, 0))};
 }
@@ -667,14 +667,14 @@ uint32_t ProcessAffinityMask() {
   return m ? m : SystemAffinityMask();
 }
 
-HLE("kernel32.dll", GetProcessAffinityMask, 3) {
-  Wr32(Arg(c, 1), ProcessAffinityMask());
-  Wr32(Arg(c, 2), SystemAffinityMask());
+HLE64("kernel32.dll", GetProcessAffinityMask, 3) {
+  WrPtr(Arg(c, 1), ProcessAffinityMask());  // DWORD_PTR
+  WrPtr(Arg(c, 2), SystemAffinityMask());
   return 1;
 }
 
-HLE("kernel32.dll", SetProcessAffinityMask, 2) {
-  uint32_t mask = Arg(c, 1);
+HLE64("kernel32.dll", SetProcessAffinityMask, 2) {
+  uint64_t mask = Arg(c, 1);
   if (!mask || (mask & ~SystemAffinityMask())) {
     SetLastError(kErrorInvalidParameter);
     return 0;
