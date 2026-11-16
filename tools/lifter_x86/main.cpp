@@ -298,6 +298,19 @@ int main(int argc, char** argv) {
         if (o.type == ZYDIS_OPERAND_TYPE_MEMORY && o.mem.base == ZYDIS_REGISTER_RIP &&
             in.d.mnemonic == ZYDIS_MNEMONIC_LEA)
           candidate(fm, in.next() + o.mem.disp.value, &from_code_ptrs);
+        // --stack-flow: a protector keeps code addresses in the padding
+        // between functions and reads them (mov, push, jmp through them);
+        // the pointer there is a candidate entry. Absolute operands in
+        // 32-bit code, RIP-relative ones in x64 code.
+        if (p.stack_flow && o.type == ZYDIS_OPERAND_TYPE_MEMORY &&
+            in.d.mnemonic != ZYDIS_MNEMONIC_LEA && o.mem.index == ZYDIS_REGISTER_NONE) {
+          const uint64_t at = o.mem.base == ZYDIS_REGISTER_RIP  ? in.next() + o.mem.disp.value
+                              : o.mem.base == ZYDIS_REGISTER_NONE ? uint32_t(o.mem.disp.value)
+                                                                  : 0;
+          if (at && p.InText(at) && p.InText(at + (p.x64 ? 7 : 3)))
+            candidate(fm, p.x64 ? p.mem.read<uint64_t>(at) : p.mem.read<uint32_t>(at),
+                      &from_code_ptrs);
+        }
       }
     }
   }
