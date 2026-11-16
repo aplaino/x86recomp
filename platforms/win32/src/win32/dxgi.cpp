@@ -20,7 +20,6 @@
 #include "win32/hle.h"
 #include "win32/kernel32_state.h"
 #include "win32/user32_window.h"
-#include "x86/present.h"
 #include "x86/runtime.h"
 
 namespace recomp::hle::d3d11 {
@@ -499,12 +498,12 @@ DXGI_METHOD(IDXGISwapChain, GetBuffer) {
   Wr64(out, s->buffer->guest);
   return kS_OK;
 }
-// Present(sync interval, flags): DXGI_PRESENT_TEST only asks whether the
-// window is visible.
+// Present(sync interval, flags): what was drawn into the back buffer.
+// DXGI_PRESENT_TEST only asks whether the window is visible.
 DXGI_METHOD(IDXGISwapChain, Present) {
   SwapChain* s = Chain(c);
   if (uint32_t(Arg(c, 2)) & kPresentTest) return kS_OK;
-  PresentFrame(*s->device->gfx, s->W(), s->H());
+  GpuPresent(*s->device, *s->buffer, s->W(), s->H());
   return kS_OK;
 }
 DXGI_METHOD(IDXGISwapChain, GetDesc) {

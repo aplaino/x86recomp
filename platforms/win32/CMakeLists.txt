@@ -95,7 +95,8 @@ set_source_files_properties(src/win32/d3dx9.cpp TARGET_DIRECTORY recomp_d3d9
 
 # Direct3D 11 for x64 guests, over gfx::Device's programs.
 add_library(recomp_d3d11 SHARED src/win32/d3d11.cpp src/win32/d3d11_objects.cpp
-            src/win32/d3d11_context.cpp
+            src/win32/d3d11_context.cpp src/win32/d3d11_gpu.cpp
+            src/win32/d3d11_program.cpp src/win32/d3d11_link.cpp
             src/win32/dxgi.cpp)
 target_link_libraries(recomp_d3d11 PUBLIC recomp_win32 recomp_gfx)
 
