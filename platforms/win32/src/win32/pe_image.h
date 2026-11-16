@@ -17,6 +17,8 @@
 
 namespace recomp {
 
+inline constexpr uint32_t kScnMemExecute = 0x20000000;  // IMAGE_SCN_MEM_EXECUTE
+
 struct PeSection {
   std::string name;
   gaddr va;

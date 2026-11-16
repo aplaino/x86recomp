@@ -35,10 +35,11 @@ std::vector<gaddr> g_free_tebs;
 std::set<gaddr> g_live_tebs;
 
 // The image's .text, where its lifted functions are.
-std::pair<gaddr, uint64_t> TextOf(const PeImage& img) {
+// Each executable section of img (.text; a protected image adds the
+// protector's own), as code ranges for dispatch.
+void AddCode(Process& p, const PeImage& img) {
   for (const auto& s : img.sections)
-    if (s.name == ".text") return {s.va, s.vsize};
-  return {0, 0};
+    if (s.characteristics & kScnMemExecute) p.code.push_back({s.va, s.vsize});
 }
 
 // Process::thread_init: the thread's TEB and TLS array, in the layout of
@@ -234,9 +235,10 @@ int RunProcess(const win32::GameConfig& game, const std::string& exe_path,
     Wr32(w.img.tls.index_va, 0);
   }
 
-  // Dispatch looks lifted code up in each image's .text: the EXE's first.
-  p.code.push_back(TextOf(w.img));
-  for (const Module& m : w.modules) p.code.push_back(TextOf(m.img));
+  // Dispatch looks lifted code up in each image's executable sections:
+  // the EXE's first.
+  AddCode(p, w.img);
+  for (const Module& m : w.modules) AddCode(p, m.img);
   InitDispatch();
   for (const Module& m : w.modules) {
     // A DLL lifted at another base, or not at all, has no functions here.
