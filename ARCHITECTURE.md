@@ -740,10 +740,18 @@ API front ends:
   given as operations (each of their Maps with a block of its own,
   installed where the map was recorded) and ExecuteCommandList replays
   them on the immediate context, as Windows' runtime does for drivers
-  without command lists. A draw's program comes from LinkProgram, the
-  interface the DXBC translator fills in (d3d11_impl.h: the binding
-  plan, the vertex fetch the layer builds from the input layout, the
-  vertex stage's uniforms); a draw without one is skipped and counted
+  without command lists. A draw's program is linked from the shaders'
+  translations (win32/dxbc.h; each DXBC translated once) once per
+  vertex shader, pixel shader and input layout (by object, and by
+  content for objects made again from the same bytes): before each
+  stage's GLSL go the varyings' locations for the pair, the layer's
+  uniform block (the draw's base vertex and first instance, the typed
+  buffer views' formats, which the translation decodes at run time, so
+  they are no part of the program) and, for the vertex stage, an
+  r_fetch built from the input layout reading the vertex buffers. The
+  binding plan (d3d11_impl.h) says which Direct3D binding each of the
+  program's buffers and textures is. A draw whose shader is not
+  translated is skipped (the shader named once in the log) and counted
   in the per-frame trace line. Present shows the back buffer's image.
   Not done: multisampling (one sample), geometry and tessellation
   stages, more than four render targets, views of part of a texture's

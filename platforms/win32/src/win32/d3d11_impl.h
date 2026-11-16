@@ -222,15 +222,16 @@ struct CommandList : Child {
   std::vector<Op> ops;
 };
 
-// ---- shader programs: the interface the shader translator fills in
+// ---- shader programs (d3d11_link.cpp, d3d11_program.cpp)
 //
 // A draw needs one gfx program for its vertex shader, pixel shader and
 // input layout (a dispatch for its compute shader). LinkProgram makes it
-// and says what each of the program's gfx resources is among Direct3D's
-// bindings; the layer calls it once per combination (d3d11_program.cpp
-// keeps the result, null included, by the objects' serials) and binds
-// the resources it names for every draw. While it returns null, draws and
-// dispatches are skipped and counted (the frame's trace line, Present).
+// from the shaders' translations (dxbc.h) and says what each of the
+// program's gfx resources is among Direct3D's bindings; the layer calls
+// it once per combination (d3d11_program.cpp keeps the result, null
+// included, by the objects' serials) and binds the resources it names
+// for every draw. A null program (a shader that is not translated) skips
+// the draw, counted in the frame's trace line (Present).
 //
 // The binding plan (StageBindings), per stage, in the program's order:
 //   - read-only buffers (gfx::ProgramStage::buffers, `r_ld(b, word)`):
@@ -239,14 +240,17 @@ struct CommandList : Child {
 //     its first element on: its first element times the structure stride
 //     (structured), 4 (raw) or the format's size (typed)) and, in the
 //     vertex stage, vertex buffers (the bytes from the binding's offset
-//     on, read by VertexFetch's r_fetch; only those a draw reads may be
-//     copied, see VertexUniforms);
+//     on, read by the link code's r_fetch; a draw may bind only the
+//     vertices it reads of a buffer it copies, StageUniforms::ia);
 //   - textures (combined image and sampler, `R_TEXTURE(n)`): the SRV
 //     slot and the sampler slot it is sampled with, -1 for none (texel
 //     loads and size queries: point sampling);
 //   - compute: read-write buffers and storage images, by UAV slot;
-//   - `uniforms`: the stage reads the layer's uniform block (R_UNIFORMS):
-//     VertexUniforms in the vertex stage, none in the others.
+//   - `formats`: the typed buffer views (and a compute stage's typed
+//     buffer UAVs) whose DXGI formats the stage's uniforms carry, for the
+//     translation's R_FMT_T<slot> and R_FMT_U<slot>;
+//   - `uniforms`: the stage reads the layer's uniform block (R_UNIFORMS,
+//     StageUniforms).
 struct StageBindings {
   enum class BufferKind : uint8_t { Constant, View, Vertex };
   struct Buffer {
@@ -258,9 +262,14 @@ struct StageBindings {
     uint32_t view = 0;
     int sampler = -1;
   };
+  struct Format {
+    bool uav = false;
+    uint32_t slot = 0;
+  };
   std::vector<Buffer> buffers;
   std::vector<Texture> textures;
   std::vector<uint32_t> rw_buffers, rw_images;  // compute: UAV slots
+  std::vector<Format> formats;
   bool uniforms = false;
 };
 
@@ -269,46 +278,27 @@ struct LinkedProgram {
   StageBindings vs, ps, cs;
 };
 
-// The translator's: a program for the bound shaders (null: none, the
-// draw is skipped). `ps` and `layout` may be null. Called with
-// Device::gpu_mu held, on the thread running the immediate context.
+// A program for the bound shaders (null: none, the draw is skipped).
+// `ps` and `layout` may be null. Called with Device::gpu_mu held, on the
+// thread running the immediate context.
 std::shared_ptr<const LinkedProgram> LinkProgram(gfx::Device& dev, const Shader& vs,
                                                  const Shader* ps, const InputLayout* layout);
 std::shared_ptr<const LinkedProgram> LinkComputeProgram(gfx::Device& dev, const Shader& cs);
 
-// For the linker: the vertex stage's input fetch from an input layout.
-// `inputs` are the vertex shader's input registers the layout fills (its
-// input signature's elements that are not system values). The GLSL,
-// which goes before the translated vertex shader's, defines
-//   uvec4 r_fetch(uint reg): input register reg's bits, its element's
-//     format converted as Direct3D does (UNORM, SNORM and FLOAT formats
-//     to float bits, UINT and SINT ones to integers; components the
-//     format lacks 0, 0, 0, 1 (1.0 for float formats); registers the
-//     layout does not fill 0);
-//   R_VERTEX_ID and R_INSTANCE_ID (SV_VertexID: gl_VertexIndex less the
-//     draw's base vertex, or its first vertex when it is not indexed;
-//     SV_InstanceID: gl_InstanceIndex, which gfx starts at 0);
-//   the uniform block VertexUniforms;
-// and reads the vertex buffers as read-only buffers first_buffer on,
-// one per input slot listed in *slots (the StageBindings::Buffer entries
-// of kind Vertex to append, in that order). *uniform_bytes is the
-// stage's gfx::ProgramStage::uniform_bytes.
-struct VertexInput {
-  std::string semantic;  // as the signature has it
-  uint32_t index = 0;    // semantic index
-  uint32_t reg = 0;      // input register
-};
-std::string VertexFetch(const InputLayout* layout, const std::vector<VertexInput>& inputs,
-                        uint32_t first_buffer, std::vector<uint32_t>* slots,
-                        uint32_t* uniform_bytes);
-// The vertex stage's uniform block (std140), filled per draw:
-//   ivec4 r_draw:  x what R_VERTEX_ID subtracts from gl_VertexIndex,
-//                  y the draw's first instance (StartInstanceLocation);
-//   uvec4 r_ia[n]: per vertex buffer of *slots, x its stride and y the
-//                  vertex (or instance) its gfx buffer starts at: a draw
-//                  binds only the vertices it reads of buffers it copies.
-struct VertexUniforms {
+// A stage's uniform block (std140, `l_` names: the translation keeps to
+// `r_`), filled per draw:
+//   ivec4 l_draw:   vertex stage: x what R_VERTEX_ID subtracts from
+//                   gl_VertexIndex (the draw's base vertex, or its first
+//                   vertex when it is not indexed), y the draw's first
+//                   instance (StartInstanceLocation);
+//   uvec4 l_fmt[4]: the DXGI formats of StageBindings::formats, entry i
+//                   in l_fmt[i / 4][i % 4];
+//   uvec4 l_ia[n]:  vertex stage: per vertex buffer, x its stride and y
+//                   the vertex (or instance) its gfx buffer starts at.
+constexpr uint32_t kMaxTypedViews = 16;
+struct StageUniforms {
   int32_t draw[4];
+  uint32_t formats[kMaxTypedViews];
   uint32_t ia[32][4];
 };
 
@@ -322,12 +312,14 @@ struct Device : com::Object {
   // immediate context's operations and Present.
   std::recursive_mutex gpu_mu;
   // Programs by the serials of (vertex shader, pixel shader, input
-  // layout), or (compute shader, 0, 0).
+  // layout), or (compute shader, 0, 0); and by their content (DXBC
+  // hashes, the layout's elements), d3d11_program.cpp.
   std::map<std::tuple<uint64_t, uint64_t, uint64_t>, std::shared_ptr<const LinkedProgram>> programs;
+  std::map<std::tuple<uint64_t, uint64_t, uint64_t>, std::shared_ptr<const LinkedProgram>> linked;
   // This frame's work, reported at Present.
   struct Stats {
     uint32_t draws = 0, skipped = 0, dispatches = 0, skipped_dispatches = 0, clears = 0;
-    uint32_t copies = 0, executed_lists = 0;
+    uint32_t copies = 0, executed_lists = 0, linked = 0;
   } stats;
   uint64_t frames = 0;
 };

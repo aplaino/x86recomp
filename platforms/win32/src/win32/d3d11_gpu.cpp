@@ -568,7 +568,7 @@ struct StageData {
   std::vector<gfx::TextureId> textures;
   std::vector<gfx::SamplerDesc> samplers;
   std::vector<gfx::BufferData> buffers;
-  VertexUniforms uniforms{};
+  StageUniforms uniforms{};
   std::vector<gfx::ColorTarget> rw_images;
   std::vector<gfx::RwBufferData> rw_buffers;
 };
@@ -706,6 +706,14 @@ void BindStage(Device& dev, ContextState& x, int st, const StageBindings& b, con
     sd.samplers[i] = t.sampler >= 0 && t.sampler < 16 ? SamplerOf(ss.samplers[t.sampler].get())
                                                       : gfx::SamplerDesc{};
   }
+  // The typed buffer views' formats (R_FMT_T#, R_FMT_U#): 0 for none,
+  // which the translation reads as zeros.
+  for (size_t i = 0; i < b.formats.size() && i < kMaxTypedViews; i++) {
+    const uint32_t slot = b.formats[i].slot;
+    const View* v = b.formats[i].uav ? (slot < 8 ? x.uavs[slot].get() : nullptr)
+                                     : (slot < 128 ? ss.srvs[slot].get() : nullptr);
+    sd.uniforms.formats[i] = v ? v->format : 0;
+  }
   out->textures = sd.textures.data();
   out->samplers = sd.samplers.data();
   out->buffers = sd.buffers.data();
@@ -790,6 +798,9 @@ void GpuDraw(Device& dev, Context& x, const DrawCall& dc) {
     WARN_ONCE("d3d11: a draw with topology %u is skipped\n", x.topology);
     return;
   }
+  // Without a pixel shader only depth and stencil are written.
+  if (!x.stage[1].shader)
+    for (gfx::TargetBlend& b : d.state.blend) b.write_mask = 0;
   // Targets: the first four render target views, from the first on.
   int w = 0, h = 0;
   for (int i = 0; i < 4 && x.rtvs[i]; i++) {
@@ -1140,6 +1151,7 @@ void GpuPresent(Device& dev, Resource& bb, int w, int h) {
   dev.gfx->SetRenderTarget(0, 0);
   dev.gfx->DrawImage(bb.image, {0, 0, w, h});
   const Device::Stats s = dev.stats;
+  const size_t linked = dev.linked.size();
   dev.stats = {};
   const uint64_t frame = dev.frames++;
   // The window system is serviced (guest window procedures may run)
@@ -1149,9 +1161,9 @@ void GpuPresent(Device& dev, Resource& bb, int w, int h) {
   if (g_trace || frame < 5 || frame % 60 == 0)
     std::fprintf(stderr,
                  "d3d11: frame %llu: %u draws (%u skipped: no program), %u dispatches (%u skipped), "
-                 "%u clears, %u copies, %u command lists\n",
+                 "%u clears, %u copies, %u command lists, %u programs linked (%zu in all)\n",
                  (unsigned long long)frame, s.draws, s.skipped, s.dispatches,
-                 s.skipped_dispatches, s.clears, s.copies, s.executed_lists);
+                 s.skipped_dispatches, s.clears, s.copies, s.executed_lists, s.linked, linked);
 }
 
 }  // namespace recomp::hle::d3d11
