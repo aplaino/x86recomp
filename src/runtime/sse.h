@@ -442,7 +442,7 @@ inline void Cvtsi2sd(Xmm& d, int32_t v) { SetLane<uint64_t>(d, 0, Cvtsi2sdLane(v
 #ifdef RECOMP_SSE_HOST
   // Truncated, or rounded to nearest even (MXCSR as usual); NaN and out
   // of range give 0x80000000, as x86 does.
-  if (usual) [[likely]] {
+  if (usual || fast::FtzDazMxcsr(c.mxcsr)) [[likely]] {
     double x = dbl ? Lane<double>(s, 0) : double(Lane<float>(s, 0));
     if (truncate) {
       if (x > -2147483649.0 && x < 2147483648.0) return uint32_t(int32_t(x));
@@ -522,7 +522,7 @@ uint64_t CvtToI64(Ctx& c, bool dbl, Xmm s, bool truncate, uint64_t va);
 [[gnu::always_inline]] inline void CvtIntToF(Ctx& c, bool usual, bool dbl, bool src64, uint64_t v,
                                              Xmm& d, uint64_t va) {
 #ifdef RECOMP_SSE_HOST
-  if (usual) [[likely]] {  // round to nearest even on both
+  if (usual || fast::FtzDazMxcsr(c.mxcsr)) [[likely]] {  // round to nearest even on both
     if (dbl)
       SetLane<double>(d, 0, src64 ? double(int64_t(v)) : double(int32_t(v)));
     else
@@ -544,7 +544,7 @@ uint64_t CvtToI64(Ctx& c, bool dbl, Xmm s, bool truncate, uint64_t va);
   // or rounded to nearest even: MXCSR as usual); the others are set to
   // the indefinite here, since the host saturates (and gives 0 for NaN),
   // and raise IE. PE is set already.
-  if (usual) [[likely]] {
+  if (usual || fast::FtzDazMxcsr(c.mxcsr)) [[likely]] {
     const bool bad = dbl ? fast::HostCvtToDq<true>(truncate, d, s)
                          : fast::HostCvtToDq<false>(truncate, d, s);
     if (bad) c.mxcsr |= 1u;  // IE
@@ -569,8 +569,10 @@ inline void RsqrtSs(Xmm& d, const Xmm& s) {
                                             uint64_t va) {
 #ifdef RECOMP_SSE_HOST
   // Exact, MXCSR included: rounded to nearest even on both, and PE (the
-  // only flag it can raise) is set already.
-  if (usual) [[likely]] {
+  // only flag it can raise) is set already. Under FTZ/DAZ too: no
+  // conversion between integers and floats makes or reads a denormal that
+  // changes its result (a denormal rounds to integer 0 either way).
+  if (usual || fast::FtzDazMxcsr(c.mxcsr)) [[likely]] {
     Xmm r;
     for (int i = 0; i < 4; i++) SetLane<float>(r, i, float(Lane<int32_t>(s, i)));
     d = r;
