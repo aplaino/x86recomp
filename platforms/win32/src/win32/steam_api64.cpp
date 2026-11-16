@@ -189,6 +189,10 @@ HLE_NAMED_X(kDll, "SteamUtils009::#2", SteamUtilsGetConnectedUniverse, kCdecl, t
 HLE_NAMED_X(kDll, "SteamUtils009::#3", SteamUtilsGetServerRealTime, kCdecl, true) {
   return uint32_t(std::time(nullptr));
 }
+HLE_NAMED_X(kDll, "SteamUtils009::#9", SteamUtilsGetAppID, kCdecl, true) {
+  if (!Game().steam_app_id) FatalF("steam_api64: GetAppID, but GameConfig::steam_app_id is not set");
+  return Game().steam_app_id;
+}
 HLE_NAMED_X(kDll, "SteamUtils009::#10", SteamUtilsSetOverlayNotificationPosition, kCdecl, true) {
   return 0;
 }
@@ -199,6 +203,29 @@ HLE_NAMED_X(kDll, "SteamUtils009::#23", SteamUtilsGetSteamUILanguage, kCdecl, tr
   static gaddr s = [] {
     gaddr p = HeapAllocProcess(8, true);
     PutStr(p, "english");
+    return p;
+  }();
+  return s;
+}
+
+// ISteamUser (SteamUser019): not connected to the Steam servers, as with
+// Steam in offline mode. GetSteamID returns the CSteamID class through a
+// hidden pointer (after `this` on x64): always the same individual account
+// of the public universe, so what a game keys by it (save folders) stays
+// put.
+HLE_NAMED_X(kDll, "SteamUser019::#1", SteamUserBLoggedOn, kCdecl, true) { return 0; }
+HLE_NAMED_X(kDll, "SteamUser019::#2", SteamUserGetSteamID, kCdecl, true) {
+  constexpr uint64_t kSteamId = 0x0110000100000001ull;
+  const gaddr out = Arg(c, 1);
+  Wr64(out, kSteamId);
+  return out;
+}
+
+// ISteamFriends (SteamFriends015): the player's name.
+HLE_NAMED_X(kDll, "SteamFriends015::#0", SteamFriendsGetPersonaName, kCdecl, true) {
+  static gaddr s = [] {
+    gaddr p = HeapAllocProcess(8, true);
+    PutStr(p, "Player");
     return p;
   }();
   return s;

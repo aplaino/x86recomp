@@ -77,6 +77,10 @@ struct GameConfig : recomp::GameConfig {
     uint32_t base = 0;  // the lifter's --base for it; 0 = preferred base
   };
   std::vector<LiftedDll> lifted_dlls;
+
+  // The game's Steam app id, which the offline Steamworks reports
+  // (ISteamUtils::GetAppID); 0 if the game never asks.
+  uint32_t steam_app_id = 0;
 };
 
 }  // namespace win32
