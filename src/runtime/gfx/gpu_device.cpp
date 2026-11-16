@@ -1574,13 +1574,15 @@ void r_color0(inout vec4 c) {
     SDL_ReleaseGPUTransferBuffer(dev_, tb);
   }
 
-  void ClearImage(TextureId id, int level, const Color& c) override {
+  void ClearImage(TextureId id, int level, const Color& c, int only) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     auto it = textures_.find(id);
     if (it == textures_.end() || !it->second.rt || level < 0 || level >= it->second.levels) return;
+    const int layers = Layers(it->second, level);
+    if (only >= layers) return;
     Flush();
     SDL_GPUCommandBuffer* cmd = Begin();
-    for (int layer = 0; layer < it->second.layers; layer++) {
+    for (int layer = std::max(only, 0); layer < (only >= 0 ? only + 1 : layers); layer++) {
       SDL_GPUColorTargetInfo ct{};
       ct.texture = it->second.tex;
       ct.mip_level = Uint32(level);
@@ -1601,8 +1603,8 @@ void r_color0(inout vec4 c) {
     SDL_GPUCommandBuffer* cmd = Begin();
     SDL_GPUDepthStencilTargetInfo dt{};
     dt.texture = it->second.tex;
-    dt.load_op = SDL_GPU_LOADOP_CLEAR;
-    dt.clear_depth = z;
+    dt.load_op = std::isnan(z) ? SDL_GPU_LOADOP_LOAD : SDL_GPU_LOADOP_CLEAR;
+    dt.clear_depth = std::isnan(z) ? 0.0f : z;
     dt.store_op = SDL_GPU_STOREOP_STORE;
     dt.stencil_load_op = stencil >= 0 ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
     dt.stencil_store_op = SDL_GPU_STOREOP_STORE;
@@ -1635,6 +1637,56 @@ void r_color0(inout vec4 c) {
     Submit(cmd);
   }
 
+  void CopyImage(TextureId src, int src_level, int src_layer, const Rect& r, TextureId dst,
+                 int dst_level, int dst_layer, int x, int y) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    auto s = textures_.find(src), d = textures_.find(dst);
+    if (s == textures_.end() || d == textures_.end() || src_level < 0 ||
+        src_level >= s->second.levels || dst_level < 0 || dst_level >= d->second.levels)
+      return;
+    const Tex& a = s->second;
+    const Tex& b = d->second;
+    if (src_layer < 0 || src_layer >= Layers(a, src_level) || dst_layer < 0 ||
+        dst_layer >= Layers(b, dst_level))
+      return;
+    if (BitsPerPixel(a.fmt) != BitsPerPixel(b.fmt) || IsCompressed(a.fmt) != IsCompressed(b.fmt))
+      FatalF("gfx: CopyImage between formats %u and %u", unsigned(a.fmt), unsigned(b.fmt));
+    // The source rectangle clipped to both levels.
+    Rect c = Clip(r, LevelSize(a.w, src_level), LevelSize(a.h, src_level));
+    const int bw = LevelSize(b.w, dst_level), bh = LevelSize(b.h, dst_level);
+    c.right = std::min(c.right, c.left + bw - x);
+    c.bottom = std::min(c.bottom, c.top + bh - y);
+    if (c.right <= c.left || c.bottom <= c.top || x < 0 || y < 0) return;
+    Flush();
+    SDL_GPUCommandBuffer* cmd = Begin();
+    SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
+    SDL_GPUTextureLocation from{}, to{};
+    from.texture = a.tex;
+    from.mip_level = Uint32(src_level);
+    from.x = Uint32(c.left);
+    from.y = Uint32(c.top);
+    (a.kind == TextureKind::Tex3D ? from.z : from.layer) = Uint32(src_layer);
+    to.texture = b.tex;
+    to.mip_level = Uint32(dst_level);
+    to.x = Uint32(x);
+    to.y = Uint32(y);
+    (b.kind == TextureKind::Tex3D ? to.z : to.layer) = Uint32(dst_layer);
+    SDL_CopyGPUTextureToTexture(cp, &from, &to, Uint32(c.right - c.left), Uint32(c.bottom - c.top),
+                                1, false);
+    SDL_EndGPUCopyPass(cp);
+    Submit(cmd);
+  }
+
+  void GenerateMips(TextureId id) override {
+    std::lock_guard<std::recursive_mutex> l(mu_);
+    auto it = textures_.find(id);
+    if (it == textures_.end() || !it->second.rt || it->second.levels < 2) return;
+    Flush();
+    SDL_GPUCommandBuffer* cmd = Begin();
+    SDL_GenerateMipmapsForGPUTexture(cmd, it->second.tex);
+    Submit(cmd);
+  }
+
   void DrawProgram(const ProgramDraw& d) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     auto pit = programs_.find(d.program);
@@ -1645,14 +1697,17 @@ void r_color0(inout vec4 c) {
     // The pass: the colour targets (from target 0 on) and the depth.
     std::array<SDL_GPUTexture*, 4> colors{};
     std::array<uint8_t, 4> fmts{};
-    std::array<int, 4> levels{};
+    std::array<int, 4> levels{}, layers{};
     int w = 0, h = 0, n = 0;
     for (int i = 0; i < 4 && d.targets[i].tex; i++, n++) {
       auto it = textures_.find(d.targets[i].tex);
-      if (it == textures_.end() || !it->second.rt || d.targets[i].level >= it->second.levels)
+      if (it == textures_.end() || !it->second.rt || d.targets[i].level < 0 ||
+          d.targets[i].level >= it->second.levels || d.targets[i].layer < 0 ||
+          d.targets[i].layer >= Layers(it->second, d.targets[i].level))
         FatalF("gfx: DrawProgram: target %d is no colour target", i);
       colors[size_t(i)] = it->second.tex;
       levels[size_t(i)] = d.targets[i].level;
+      layers[size_t(i)] = d.targets[i].layer;
       fmts[size_t(i)] = uint8_t(GpuFormat(it->second.fmt));
       if (!i) {
         w = LevelSize(it->second.w, d.targets[i].level);
@@ -1668,7 +1723,7 @@ void r_color0(inout vec4 c) {
       if (!n) w = depth->w, h = depth->h;
     }
     if (!n && !depth) return;
-    SetPass(colors, fmts, depth, w, h, true, levels, d.depth_layer);
+    SetPass(colors, fmts, depth, w, h, true, levels, d.depth_layer, layers);
 
     Cmd c{};
     const Rect sc = Intersect(Clip(d.scissor, w, h), Rect{0, 0, w, h});
@@ -2096,6 +2151,11 @@ void r_color0(inout vec4 c) {
   }
 
   static int LevelSize(int size, int level) { return std::max(1, size >> level); }
+  // The layers of an image's level: a 3D image's are its depth, halved
+  // per level.
+  static int Layers(const Tex& t, int level) {
+    return t.kind == TextureKind::Tex3D ? LevelSize(t.layers, level) : t.layers;
+  }
 
   // The pass for the D3D render targets (current_color_ at current_level_,
   // current_extra_, current_depth_).
@@ -2142,14 +2202,15 @@ void r_color0(inout vec4 c) {
 
   void SetPass(const std::array<SDL_GPUTexture*, 4>& colors, const std::array<uint8_t, 4>& fmts,
                const Depth* d, int w, int h, bool alpha, const std::array<int, 4>& levels = {},
-               int depth_layer = 0) {
+               int depth_layer = 0, const std::array<int, 4>& layers = {}) {
     SDL_GPUTexture* depth = d ? d->tex : nullptr;
-    if (colors == pass_colors_ && levels == pass_levels_ && depth == pass_depth_ &&
-        depth_layer == pass_depth_layer_)
+    if (colors == pass_colors_ && levels == pass_levels_ && layers == pass_layers_ &&
+        depth == pass_depth_ && depth_layer == pass_depth_layer_)
       return;
     Flush();
     pass_colors_ = colors;
     pass_levels_ = levels;
+    pass_layers_ = layers;
     pass_depth_layer_ = depth_layer;
     pass_fmts_ = fmts;
     pass_color_ = colors[0];
@@ -2392,6 +2453,7 @@ void r_color0(inout vec4 c) {
         SDL_GPUColorTargetInfo& ct = cts[i];
         ct.texture = pass_colors_[i];
         ct.mip_level = Uint32(pass_levels_[i]);
+        ct.layer_or_depth_plane = Uint32(pass_layers_[i]);
         ct.load_op = pass_clear_color_ ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
         ct.clear_color = clear_color_;
         ct.store_op = SDL_GPU_STOREOP_STORE;
@@ -3904,10 +3966,21 @@ void r_color0(inout vec4 c) {
       if (!GlslToSpirv(i ? kFs : kVs, i ? ShaderStage::Fragment : ShaderStage::Vertex, &spirv, &log))
         FatalF("gfx: the present shader: %s", log.c_str());
       SDL_GPUShaderCreateInfo si{};
+#if defined(__APPLE__)
+      // Metal: its binding numbers are the MSL indices SDL_GPU expects
+      // (texture and sampler 0, uniform buffer 0).
+      std::string msl;
+      if (!SpirvToMsl(spirv, &msl, &log)) FatalF("gfx: the present shader: %s", log.c_str());
+      si.code = reinterpret_cast<const Uint8*>(msl.c_str());
+      si.code_size = msl.size();
+      si.entrypoint = "main0";
+      si.format = SDL_GPU_SHADERFORMAT_MSL;
+#else
       si.code = reinterpret_cast<const Uint8*>(spirv.data());
       si.code_size = spirv.size() * 4;
       si.entrypoint = "main";
       si.format = SDL_GPU_SHADERFORMAT_SPIRV;
+#endif
       si.stage = i ? SDL_GPU_SHADERSTAGE_FRAGMENT : SDL_GPU_SHADERSTAGE_VERTEX;
       si.num_samplers = i ? 1 : 0;
       si.num_uniform_buffers = i ? 1 : 0;
@@ -3956,6 +4029,7 @@ void r_color0(inout vec4 c) {
   // The pass being recorded: pass_color_ is target 0 of pass_colors_.
   std::array<SDL_GPUTexture*, 4> pass_colors_{};
   std::array<int, 4> pass_levels_{};  // mip level of each
+  std::array<int, 4> pass_layers_{};  // layer of each (programs' targets)
   std::array<uint8_t, 4> pass_fmts_{};
   int pass_targets_ = 0;
   SDL_GPUTexture* pass_color_ = nullptr;

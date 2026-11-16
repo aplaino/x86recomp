@@ -103,9 +103,12 @@ using ShaderId = uint32_t;   // 0: none
 
 // A colour target: a mip level of a render-target texture, or the back
 // buffer (tex 0, level 0). A level is max(1, size >> level) on each side.
+// Programs' targets (ProgramDraw) also name the layer drawn into: an
+// array layer, a cube face or a 3D image's slice.
 struct ColorTarget {
   TextureId tex = 0;
   int level = 0;
+  int layer = 0;
 };
 
 // ---- fixed-function draws (DrawFf)
@@ -485,13 +488,22 @@ class Device {
   // the GPU).
   virtual void ReadImage(TextureId t, int level, int layer, const Rect& r, void* dst,
                          uint32_t pitch);
-  // Clear a colour image's level (all layers) or a depth target's layer
-  // (depth and, if `stencil` >= 0, stencil).
-  virtual void ClearImage(TextureId t, int level, const Color& c);
+  // Clear a colour image's level (all layers, or one if `layer` >= 0) or
+  // a depth target's layer (depth unless `z` is a NaN and, if `stencil`
+  // >= 0, stencil).
+  virtual void ClearImage(TextureId t, int level, const Color& c, int layer = -1);
   virtual void ClearDepth(DepthId d, float z, int stencil, int layer);
   // Copies `r` of a depth target to the same place in another of its
   // format (depth and stencil), in each layer both have.
   virtual void CopyDepth(DepthId src, DepthId dst, const Rect& r);
+  // Copies `r` of a level and layer (a 3D image's slice) of an image to
+  // (x, y) of a level and layer of another whose texels are as large
+  // (the same format, or its sRGB or typed twin), after the draws
+  // recorded before it.
+  virtual void CopyImage(TextureId src, int src_level, int src_layer, const Rect& r, TextureId dst,
+                         int dst_level, int dst_layer, int x, int y);
+  // Fills levels 1 on of a colour image (every layer) from level 0.
+  virtual void GenerateMips(TextureId t);
   virtual void DrawProgram(const ProgramDraw& d);
   // Runs at once (with what was drawn before it) when it has read-write
   // buffers for the host, which it writes back before returning (unless
