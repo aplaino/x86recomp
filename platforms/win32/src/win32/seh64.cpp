@@ -250,6 +250,23 @@ HLE64("kernel32.dll", RtlPcToFileHeader, 2) {
   return base;
 }
 
+// GetThreadContext(thread, ctx): an x64 thread's own state at the call,
+// with no debug registers set (protectors read Dr0-Dr7 to look for
+// hardware breakpoints, and take a failure for tampering). The parts asked
+// for (ContextFlags) stay as asked. Other threads' contexts are refused:
+// they are only sampled by crash reporters.
+HLE64("kernel32.dll", GetThreadContext, 2) {
+  const gaddr ctx = Arg(c, 1);
+  if (!g_proc->x64 || uint32_t(Arg(c, 0)) != 0xFFFFFFFE) {
+    SetLastError(5);  // ERROR_ACCESS_DENIED
+    return 0;
+  }
+  const uint32_t flags = Rd32(ctx + 0x30);
+  WriteContext(ctx, AtReturn(c), c);
+  Wr32(ctx + 0x30, flags);
+  return 1;
+}
+
 // RtlCaptureContext(ctx): the caller's state at the call.
 HLE64("kernel32.dll", RtlCaptureContext, 1) {
   WriteContext(Arg(c, 0), AtReturn(c), c);
