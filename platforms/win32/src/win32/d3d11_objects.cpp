@@ -3,6 +3,7 @@
 // host records (d3d11_impl.h).
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <memory>
 
@@ -123,10 +124,36 @@ uint32_t FormatBytes(uint32_t f, bool* block) {
   }
 }
 
-Resource::~Resource() {
-  if (mem) HeapFreeProcess(mem);
+Child::Child() {
+  static std::atomic<uint64_t> next{1};
+  serial = next++;
 }
-uint8_t* Resource::Data() const { return GPtr(mem); }
+
+Block::Block(uint64_t n) : size(n) {
+  mem = HeapAllocProcess(n ? n : 1, true);
+  if (!mem) FatalF("d3d11: no guest memory for %llu bytes of a resource", (unsigned long long)n);
+}
+Block::~Block() { HeapFreeProcess(mem); }
+uint8_t* Block::Data() const { return GPtr(mem); }
+
+std::shared_ptr<Block> Resource::Contents() const {
+  std::lock_guard<std::mutex> l(mu_);
+  return block_;
+}
+void Resource::SetContents(std::shared_ptr<Block> b) {
+  std::lock_guard<std::mutex> l(mu_);
+  block_ = std::move(b);
+}
+
+// The GPU objects go with the resource (any thread may release it).
+Resource::~Resource() {
+  Device* d = TheDevice();
+  if (!d || !d->gfx || (!image && !depth_target && !gpu_buffer)) return;
+  std::lock_guard<std::recursive_mutex> l(d->gpu_mu);
+  if (image) d->gfx->DestroyTexture(image);
+  if (depth_target) d->gfx->DestroyDepth(depth_target);
+  if (gpu_buffer) d->gfx->DestroyBuffer(gpu_buffer);
+}
 
 uint32_t Resource::RowPitch(uint32_t mip) const {
   bool block;
@@ -170,9 +197,9 @@ bool Fill(Resource& r, gaddr init) {
   if (r.dim != Dim::Buffer && !FormatBytes(r.format, &block))
     FatalF("d3d11: texture format %u not supported", r.format);
   r.size = r.dim == Dim::Buffer ? r.byte_width : r.SubOffset(r.mips * r.array);
-  r.mem = HeapAllocProcess(r.size, true);
-  if (!r.mem) return false;
+  r.SetContents(std::make_shared<Block>(r.size));
   if (!init) return true;
+  r.version = 1;  // contents the GPU's copy starts from
   if (r.dim == Dim::Buffer) {
     std::memcpy(r.Data(), GPtr(Rd64(init)), r.byte_width);
     return true;
@@ -402,6 +429,11 @@ uint64_t CreateView(Ctx& c, ViewKind kind) {
   } else {
     WholeDesc(*v);
   }
+  // A typeless resource is made on the GPU in its views' format.
+  Resource& r = *v->res;
+  if (kind == ViewKind::RenderTarget && !r.rtv_format) r.rtv_format = v->format;
+  if (!r.view_format) r.view_format = v->format;
+  if (kind == ViewKind::ShaderResource && !r.srv_dim) r.srv_dim = v->view_dim;
   if (gaddr out = Arg(c, 3)) {
     Wr64(out, com::Publish(v, VtableFor(ViewIface(kind), {"GetResource", "GetDesc"})));
     return kS_OK;
@@ -683,6 +715,7 @@ D3D11_CHILD(ID3D11Query)
 D3D11_CHILD(ID3D11Predicate)
 #undef D3D11_CHILD
 
+
 // ---- resources: GetType, eviction, GetDesc ------------------------------------------------
 
 #define D3D11_RESOURCE(iface)                                                                 \
@@ -709,32 +742,30 @@ D3D11_METHOD(ID3D11Buffer, GetDesc) {
   Wr32(d + 20, r->stride);
   return 0;
 }
-D3D11_METHOD(ID3D11Texture2D, GetDesc) {
-  auto r = ResourceAt(Arg(c, 0));
-  const gaddr d = Arg(c, 1);
-  const uint32_t f[11] = {r->width, r->height,         r->mips, r->array,      r->format, r->samples,
-                          r->quality, uint32_t(r->usage), r->bind, r->cpu_access, r->misc};
-  for (int i = 0; i < 11; i++) Wr32(d + 4 * i, f[i]);
-  return 0;
-}
 // D3D11_TEXTURE1D_DESC {Width, MipLevels, ArraySize, Format, Usage,
 // BindFlags, CPUAccessFlags, MiscFlags}.
 D3D11_METHOD(ID3D11Texture1D, GetDesc) {
   auto r = ResourceAt(Arg(c, 0));
-  const gaddr d = Arg(c, 1);
-  const uint32_t f[8] = {r->width, r->mips, r->array, r->format, uint32_t(r->usage),
-                         r->bind,  r->cpu_access, r->misc};
-  for (int i = 0; i < 8; i++) Wr32(d + 4 * i, f[i]);
+  const uint32_t f[8] = {r->width, r->mips, r->array, r->format, uint32_t(r->usage), r->bind,
+                         r->cpu_access, r->misc};
+  for (int i = 0; i < 8; i++) Wr32(Arg(c, 1) + 4 * i, f[i]);
   return 0;
 }
 // D3D11_TEXTURE3D_DESC {Width, Height, Depth, MipLevels, Format, Usage,
 // BindFlags, CPUAccessFlags, MiscFlags}.
 D3D11_METHOD(ID3D11Texture3D, GetDesc) {
   auto r = ResourceAt(Arg(c, 0));
+  const uint32_t f[9] = {r->width, r->height, r->depth, r->mips, r->format, uint32_t(r->usage),
+                         r->bind, r->cpu_access, r->misc};
+  for (int i = 0; i < 9; i++) Wr32(Arg(c, 1) + 4 * i, f[i]);
+  return 0;
+}
+D3D11_METHOD(ID3D11Texture2D, GetDesc) {
+  auto r = ResourceAt(Arg(c, 0));
   const gaddr d = Arg(c, 1);
-  const uint32_t f[9] = {r->width, r->height,         r->depth, r->mips,       r->format,
-                         uint32_t(r->usage), r->bind, r->cpu_access, r->misc};
-  for (int i = 0; i < 9; i++) Wr32(d + 4 * i, f[i]);
+  const uint32_t f[11] = {r->width, r->height,         r->mips, r->array,      r->format, r->samples,
+                          r->quality, uint32_t(r->usage), r->bind, r->cpu_access, r->misc};
+  for (int i = 0; i < 11; i++) Wr32(d + 4 * i, f[i]);
   return 0;
 }
 

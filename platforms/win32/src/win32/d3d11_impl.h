@@ -1,14 +1,18 @@
 #pragma once
-// Direct3D 11's host objects (d3d11.cpp, d3d11_context.cpp, dxgi.cpp).
+// Direct3D 11's host objects (d3d11.cpp, d3d11_objects.cpp,
+// d3d11_context.cpp, d3d11_gpu.cpp, d3d11_program.cpp, dxgi.cpp).
 // Resources, views, states and shaders are records of what the guest
 // created: descriptions and data, made into gfx resources when the device
-// draws.
+// first draws with them (d3d11_gpu.cpp).
 
+#include <atomic>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "runtime/gfx/device.h"
@@ -23,9 +27,12 @@ constexpr uint32_t kS_OK = 0, kS_FALSE = 1, kE_INVALIDARG = 0x80070057, kE_FAIL 
 struct Device;
 
 // Every D3D11 object but the device: private data (SetPrivateData, by
-// GUID) and its device (GetDevice).
+// GUID) and its device (GetDevice). `serial` names the object for caches
+// (never reused, unlike its address).
 struct Child : com::Object {
+  Child();
   std::map<std::string, std::vector<uint8_t>> private_data;  // by the GUID's bytes
+  uint64_t serial;
 };
 
 enum class Dim : uint32_t {  // D3D11_RESOURCE_DIMENSION
@@ -41,11 +48,30 @@ constexpr uint32_t kBindVertexBuffer = 0x1, kBindIndexBuffer = 0x2, kBindConstan
 constexpr uint32_t kMiscGenerateMips = 0x1, kMiscTextureCube = 0x4,
                    kMiscBufferAllowRawViews = 0x20, kMiscBufferStructured = 0x40;
 
-// A buffer or texture. Its contents live in guest memory (mem: every
-// subresource one after the other, tightly packed), so Map hands the guest
-// a pointer into them; creation, Map, UpdateSubresource and copies write
-// them. GPU writes (render targets, UAVs) are read back into them only
-// when the guest maps or copies from the resource.
+// Guest memory holding a resource's contents (zeroed when made), freed
+// with the last reference. A resource has one current block; Map with
+// WRITE_DISCARD gives it a fresh one when anything else still holds the
+// current one (a command list that installs it, below), so what was
+// recorded with the old one keeps seeing it: buffer renaming.
+struct Block {
+  explicit Block(uint64_t size);
+  ~Block();
+  Block(const Block&) = delete;
+  Block& operator=(const Block&) = delete;
+  uint8_t* Data() const;
+  gaddr mem = 0;
+  uint64_t size = 0;
+};
+
+// A buffer or texture. Its contents live in guest memory (its Block:
+// every subresource one after the other, tightly packed), so Map hands
+// the guest a pointer into them; creation, Map, UpdateSubresource and
+// copies on the CPU write them. The GPU's copy (an image, a depth target
+// or a GPU buffer, d3d11_gpu.cpp) is made the first time a draw, clear or
+// copy needs it and is brought up to date from the guest memory before
+// each use (`dirty`); what the GPU writes (render targets, GPU copies) is
+// read back into the guest memory only when the guest maps the resource
+// or copies from it on the CPU (`gpu_newer`).
 struct Resource : Child {
   ~Resource() override;
   Dim dim = Dim::Unknown;
@@ -56,10 +82,16 @@ struct Resource : Child {
   // Textures.
   uint32_t width = 1, height = 1, depth = 1, mips = 1, array = 1, format = 0;
   uint32_t samples = 1, quality = 0;
-  gaddr mem = 0;
   uint64_t size = 0;
-  uint8_t* Data() const;
+
+  // The current contents. Deferred contexts read it from other threads.
+  std::shared_ptr<Block> Contents() const;
+  void SetContents(std::shared_ptr<Block> b);
+  gaddr Mem() const { return Contents()->mem; }
+  uint8_t* Data() const { return Contents()->Data(); }
+
   uint64_t version = 0;  // bumped on every CPU write
+
   // The subresource's offset in data and its row pitch and slice pitch.
   uint64_t SubOffset(uint32_t sub) const;
   uint32_t RowPitch(uint32_t mip) const;
@@ -67,6 +99,28 @@ struct Resource : Child {
   uint32_t MipWidth(uint32_t mip) const { return std::max(width >> mip, 1u); }
   uint32_t MipHeight(uint32_t mip) const { return std::max(height >> mip, 1u); }
   uint32_t MipDepth(uint32_t mip) const { return std::max(depth >> mip, 1u); }
+  uint32_t Subresources() const { return dim == Dim::Buffer ? 1 : mips * array; }
+
+  // The formats of the first views made of it: a typeless resource is
+  // made on the GPU in the format it is drawn with (gfx has no views).
+  uint32_t rtv_format = 0, view_format = 0;
+  uint32_t srv_dim = 0;  // the first shader resource view's dimension
+
+  // ---- the GPU side (d3d11_gpu.cpp), under Device::gpu_mu
+  gfx::TextureId image = 0;  // a texture that is not a depth target
+  gfx::DepthId depth_target = 0;
+  gfx::BufferId gpu_buffer = 0;  // a buffer read in place by draws
+  uint32_t gfx_format = 0;       // gfx::Format of `image`
+  std::vector<uint8_t> dirty;    // per subresource: CPU writes `image` lacks
+  uint64_t dirty_lo = 0, dirty_hi = 0;  // a GPU buffer's bytes it lacks
+  bool gpu_newer = false;        // GPU writes the guest memory lacks
+  bool host_reads = false;       // a buffer draws copy from guest memory
+  uint64_t upload_frame = 0;     // the last frame a GPU buffer was refilled in
+  uint32_t uploads = 0;          // ... and how many times in it
+
+ private:
+  mutable std::mutex mu_;
+  std::shared_ptr<Block> block_;
 };
 
 // A view of a resource (SRV, RTV, DSV, UAV): its description as given.
@@ -106,9 +160,9 @@ struct Query : Child {
   bool ended = false;
 };
 
-// The immediate context's pipeline state, as the guest set it.
+// A context's pipeline state, as the guest set it.
 constexpr int kStages = 3;  // vs, ps, cs (no geometry or tessellation)
-struct Context : Child {
+struct ContextState {
   struct VertexBuffer {
     std::shared_ptr<Resource> res;
     uint32_t stride = 0, offset = 0;
@@ -144,10 +198,138 @@ struct Context : Child {
   uint32_t num_scissors = 0;
 };
 
+struct Context;
+// What a deferred context records: an operation on the context it runs
+// on (the immediate one, by ExecuteCommandList). State changes apply to
+// the recording context at once too, for its Get* methods.
+using Op = std::function<void(Context&)>;
+
+// The immediate context or a deferred one (CreateDeferredContext). A
+// deferred context records state changes, draws, clears, copies,
+// updates and the blocks its Maps hand out (renamed, so each recorded
+// draw keeps the contents it was recorded with) until FinishCommandList
+// makes them a command list.
+struct Context : Child, ContextState {
+  bool deferred = false;
+  std::vector<Op> ops;
+  // A deferred context's blocks mapped in this recording: WRITE_NO_OVERWRITE
+  // appends to them.
+  std::map<Resource*, std::shared_ptr<Block>> mapped;
+};
+
+// FinishCommandList's result: the operations in the order recorded.
+struct CommandList : Child {
+  std::vector<Op> ops;
+};
+
+// ---- shader programs: the interface the shader translator fills in
+//
+// A draw needs one gfx program for its vertex shader, pixel shader and
+// input layout (a dispatch for its compute shader). LinkProgram makes it
+// and says what each of the program's gfx resources is among Direct3D's
+// bindings; the layer calls it once per combination (d3d11_program.cpp
+// keeps the result, null included, by the objects' serials) and binds
+// the resources it names for every draw. While it returns null, draws and
+// dispatches are skipped and counted (the frame's trace line, Present).
+//
+// The binding plan (StageBindings), per stage, in the program's order:
+//   - read-only buffers (gfx::ProgramStage::buffers, `r_ld(b, word)`):
+//     constant buffers (the bound buffer's bytes from its start, padded
+//     with zeros to at least `bytes`), buffer SRVs (the view's bytes from
+//     its first element on: its first element times the structure stride
+//     (structured), 4 (raw) or the format's size (typed)) and, in the
+//     vertex stage, vertex buffers (the bytes from the binding's offset
+//     on, read by VertexFetch's r_fetch; only those a draw reads may be
+//     copied, see VertexUniforms);
+//   - textures (combined image and sampler, `R_TEXTURE(n)`): the SRV
+//     slot and the sampler slot it is sampled with, -1 for none (texel
+//     loads and size queries: point sampling);
+//   - compute: read-write buffers and storage images, by UAV slot;
+//   - `uniforms`: the stage reads the layer's uniform block (R_UNIFORMS):
+//     VertexUniforms in the vertex stage, none in the others.
+struct StageBindings {
+  enum class BufferKind : uint8_t { Constant, View, Vertex };
+  struct Buffer {
+    BufferKind kind = BufferKind::Constant;
+    uint32_t slot = 0;
+    uint32_t bytes = 0;  // Constant: at least this many (the declared size)
+  };
+  struct Texture {
+    uint32_t view = 0;
+    int sampler = -1;
+  };
+  std::vector<Buffer> buffers;
+  std::vector<Texture> textures;
+  std::vector<uint32_t> rw_buffers, rw_images;  // compute: UAV slots
+  bool uniforms = false;
+};
+
+struct LinkedProgram {
+  gfx::ProgramId id = 0;
+  StageBindings vs, ps, cs;
+};
+
+// The translator's: a program for the bound shaders (null: none, the
+// draw is skipped). `ps` and `layout` may be null. Called with
+// Device::gpu_mu held, on the thread running the immediate context.
+std::shared_ptr<const LinkedProgram> LinkProgram(gfx::Device& dev, const Shader& vs,
+                                                 const Shader* ps, const InputLayout* layout);
+std::shared_ptr<const LinkedProgram> LinkComputeProgram(gfx::Device& dev, const Shader& cs);
+
+// For the linker: the vertex stage's input fetch from an input layout.
+// `inputs` are the vertex shader's input registers the layout fills (its
+// input signature's elements that are not system values). The GLSL,
+// which goes before the translated vertex shader's, defines
+//   uvec4 r_fetch(uint reg): input register reg's bits, its element's
+//     format converted as Direct3D does (UNORM, SNORM and FLOAT formats
+//     to float bits, UINT and SINT ones to integers; components the
+//     format lacks 0, 0, 0, 1 (1.0 for float formats); registers the
+//     layout does not fill 0);
+//   R_VERTEX_ID and R_INSTANCE_ID (SV_VertexID: gl_VertexIndex less the
+//     draw's base vertex, or its first vertex when it is not indexed;
+//     SV_InstanceID: gl_InstanceIndex, which gfx starts at 0);
+//   the uniform block VertexUniforms;
+// and reads the vertex buffers as read-only buffers first_buffer on,
+// one per input slot listed in *slots (the StageBindings::Buffer entries
+// of kind Vertex to append, in that order). *uniform_bytes is the
+// stage's gfx::ProgramStage::uniform_bytes.
+struct VertexInput {
+  std::string semantic;  // as the signature has it
+  uint32_t index = 0;    // semantic index
+  uint32_t reg = 0;      // input register
+};
+std::string VertexFetch(const InputLayout* layout, const std::vector<VertexInput>& inputs,
+                        uint32_t first_buffer, std::vector<uint32_t>* slots,
+                        uint32_t* uniform_bytes);
+// The vertex stage's uniform block (std140), filled per draw:
+//   ivec4 r_draw:  x what R_VERTEX_ID subtracts from gl_VertexIndex,
+//                  y the draw's first instance (StartInstanceLocation);
+//   uvec4 r_ia[n]: per vertex buffer of *slots, x its stride and y the
+//                  vertex (or instance) its gfx buffer starts at: a draw
+//                  binds only the vertices it reads of buffers it copies.
+struct VertexUniforms {
+  int32_t draw[4];
+  uint32_t ia[32][4];
+};
+
+// ---- the device
+
 struct Device : com::Object {
   std::shared_ptr<Context> context;  // the immediate context
   std::shared_ptr<com::Object> dxgi;  // its IDXGIDevice1 (dxgi.cpp)
   std::unique_ptr<gfx::Device> gfx;  // made on the first swap chain's window
+  // Held by everything that touches gfx or the resources' GPU side: the
+  // immediate context's operations and Present.
+  std::recursive_mutex gpu_mu;
+  // Programs by the serials of (vertex shader, pixel shader, input
+  // layout), or (compute shader, 0, 0).
+  std::map<std::tuple<uint64_t, uint64_t, uint64_t>, std::shared_ptr<const LinkedProgram>> programs;
+  // This frame's work, reported at Present.
+  struct Stats {
+    uint32_t draws = 0, skipped = 0, dispatches = 0, skipped_dispatches = 0, clears = 0;
+    uint32_t copies = 0, executed_lists = 0;
+  } stats;
+  uint64_t frames = 0;
 };
 
 // The device's IDXGIDevice1 interface, with a reference added (dxgi.cpp).
@@ -163,5 +345,46 @@ Device* TheDevice();
 // Bytes per pixel (or per 4x4 block for block-compressed formats) of a
 // DXGI_FORMAT, and whether it is block-compressed; 0 for an unknown one.
 uint32_t FormatBytes(uint32_t format, bool* block);
+
+// ---- the GPU side (d3d11_gpu.cpp): what the immediate context runs.
+// Each takes Device::gpu_mu.
+
+struct DrawCall {
+  bool indexed = false;
+  uint32_t count = 0, instances = 1;
+  uint32_t first = 0;      // first vertex, or first index
+  int32_t base_vertex = 0;  // indexed
+  uint32_t first_instance = 0;
+};
+void GpuDraw(Device& dev, Context& x, const DrawCall& d);
+void GpuDispatch(Device& dev, Context& x, uint32_t gx, uint32_t gy, uint32_t gz);
+void GpuClearTarget(Device& dev, const View& v, const float color[4]);
+void GpuClearDepth(Device& dev, const View& v, uint32_t flags, float z, uint8_t stencil);
+void GpuClearUav(Device& dev, const View& v, const uint32_t values[4], bool floats);
+void GpuGenerateMips(Device& dev, const View& v);
+// Copies between resources, on the GPU when either side's newest
+// contents are there, otherwise in guest memory. `box` is a D3D11_BOX
+// (left, top, front, right, bottom, back), null for the whole
+// subresource.
+void GpuCopy(Device& dev, Resource& dst, uint32_t dst_sub, uint32_t x, uint32_t y, uint32_t z,
+             Resource& src, uint32_t src_sub, const uint32_t* box);
+void GpuCopyResource(Device& dev, Resource& dst, Resource& src);
+// UpdateSubresource's write of host bytes (rows `pitch` apart, slices
+// `slice_pitch`) into a subresource's box (null: all of it).
+void GpuUpdate(Device& dev, Resource& r, uint32_t sub, const uint32_t* box, const uint8_t* src,
+               uint32_t pitch, uint32_t slice_pitch);
+// Before the CPU reads or partly rewrites a resource: the GPU's writes
+// read back into its guest memory.
+void GpuSyncToCpu(Device& dev, Resource& r);
+// After the CPU wrote subresource `sub` (~0u: all of them) or, for a
+// buffer, bytes lo..hi.
+void CpuWrote(Resource& r, uint32_t sub, uint64_t lo = 0, uint64_t hi = ~0ull);
+// Shows a swap chain's back buffer and reports the frame.
+void GpuPresent(Device& dev, Resource& back_buffer, int w, int h);
+
+// The program for a draw's (dispatch's) shaders (d3d11_program.cpp).
+std::shared_ptr<const LinkedProgram> ProgramFor(Device& dev, const Shader& vs, const Shader* ps,
+                                                const InputLayout* layout);
+std::shared_ptr<const LinkedProgram> ComputeProgramFor(Device& dev, const Shader& cs);
 
 }  // namespace recomp::hle::d3d11
