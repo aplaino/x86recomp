@@ -11,6 +11,8 @@
 #include "runtime/sse.h"
 
 #include <bit>
+#include <cmath>
+#include <cstring>
 #include <type_traits>
 
 extern "C" {
@@ -566,6 +568,184 @@ void Ldmxcsr(Ctx& c, uint32_t v, uint64_t va) {
     FatalF("sse: ldmxcsr %08X sets reserved bits at %08llX (#GP)", v,
            (unsigned long long)va);
   c.mxcsr = v;
+}
+
+
+// ---- RECOMP_SSE_HOST with FTZ and DAZ (sse.h, ArithFtzDaz) ----------------
+
+namespace {
+
+constexpr uint32_t kUePe = 0x30;  // MXCSR UE | PE
+constexpr uint32_t kDaz = 0x40;
+
+// The lane with a denormal made a zero of its sign if `daz` (DAZ).
+template <bool D>
+typename fast::Bits<D>::U Daz(typename fast::Bits<D>::U v, bool daz) {
+  using B = fast::Bits<D>;
+  return daz && (v & B::kExp) == 0 ? v & ~(B::kExp | B::kFrac) : v;
+}
+
+// The first `lanes` lanes of x, DAZ'd if `daz`; the others as they are
+// (scalar forms keep d's upper lanes).
+template <bool D>
+Xmm DazLanes(int lanes, Xmm x, bool daz) {
+  using U = typename fast::Bits<D>::U;
+  if (daz)
+    for (int i = 0; i < lanes; i++) SetLane<U>(x, i, Daz<D>(Lane<U>(x, i), true));
+  return x;
+}
+
+enum class Ftz { kKeep, kFlushed, kModel };
+
+// FTZ on a host result: a denormal becomes a zero of its sign; the
+// smallest normal magnitude is left to the model (see sse.h).
+template <bool D>
+Ftz FlushResult(typename fast::Bits<D>::U& v) {
+  using B = fast::Bits<D>;
+  using U = typename B::U;
+  const U mag = v & (B::kExp | B::kFrac);
+  constexpr U kMinNormal = B::kFrac + 1;
+  if (mag == kMinNormal) return Ftz::kModel;
+  if ((v & B::kExp) == 0 && mag != 0) {
+    v &= ~(B::kExp | B::kFrac);
+    return Ftz::kFlushed;
+  }
+  return Ftz::kKeep;
+}
+
+template <bool D>
+bool FiniteNonzero(typename fast::Bits<D>::U v) {
+  using B = fast::Bits<D>;
+  return (v & (B::kExp | B::kFrac)) != 0 && (v & B::kExp) != B::kExp;
+}
+
+template <bool D>
+bool ArithFtzDazT(Ctx& c, Op op, int lanes, Xmm& d, const Xmm& s) {
+  using U = typename fast::Bits<D>::U;
+  using F = typename fast::Bits<D>::F;
+  Xmm r = d;
+  bool flushed = false;
+  const bool daz = c.mxcsr & kDaz;
+  for (int i = 0; i < lanes; i++) {
+    const U xb = Daz<D>(Lane<U>(d, i), daz), yb = Daz<D>(Lane<U>(s, i), daz);
+    F x, y;
+    std::memcpy(&x, &xb, sizeof x);
+    std::memcpy(&y, &yb, sizeof y);
+    F v;
+    switch (op) {
+      case kAdd: v = x + y; break;
+      case kSub: v = x - y; break;
+      case kMul: v = x * y; break;
+      default: v = x / y; break;
+    }
+    U vb;
+    std::memcpy(&vb, &v, sizeof vb);
+    // A sum or difference is zero only exactly (a nonzero one is at least
+    // the smallest denormal); a product or quotient of nonzero finite
+    // operands only by underflow.
+    if ((op == kMul || op == kDiv) && (vb & ~(U(1) << (sizeof(U) * 8 - 1))) == 0 &&
+        FiniteNonzero<D>(xb) && FiniteNonzero<D>(yb))
+      return false;
+    switch (FlushResult<D>(vb)) {
+      case Ftz::kModel: return false;
+      case Ftz::kFlushed: flushed = true; break;
+      case Ftz::kKeep: break;
+    }
+    SetLane<U>(r, i, vb);
+  }
+  if (flushed) c.mxcsr |= kUePe;
+  d = r;
+  return true;
+}
+
+}  // namespace
+
+bool ArithFtzDaz(Ctx& c, Op op, bool dbl, int lanes, Xmm& d, const Xmm& s) {
+  return dbl ? ArithFtzDazT<true>(c, op, lanes, d, s) : ArithFtzDazT<false>(c, op, lanes, d, s);
+}
+
+// Compares and MIN/MAX have no rounded result: DAZ'd operands, then the
+// host's rule (MIN/MAX return the DAZ'd lane, as the operation sees it).
+void CmpDaz(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s, uint8_t pred) {
+  const bool daz = c.mxcsr & kDaz;
+  if (dbl) {
+    Xmm a = DazLanes<true>(lanes, d, daz);
+    fast::HostCmp<true>(lanes, a, DazLanes<true>(lanes, s, daz), pred);
+    d = a;
+  } else {
+    Xmm a = DazLanes<false>(lanes, d, daz);
+    fast::HostCmp<false>(lanes, a, DazLanes<false>(lanes, s, daz), pred);
+    d = a;
+  }
+}
+
+void MinMaxDaz(Ctx& c, bool max, bool dbl, int lanes, Xmm& d, const Xmm& s) {
+  const bool daz = c.mxcsr & kDaz;
+  if (dbl) {
+    Xmm a = DazLanes<true>(lanes, d, daz);
+    fast::HostMinMax<true>(max, lanes, a, DazLanes<true>(lanes, s, daz));
+    d = a;
+  } else {
+    Xmm a = DazLanes<false>(lanes, d, daz);
+    fast::HostMinMax<false>(max, lanes, a, DazLanes<false>(lanes, s, daz));
+    d = a;
+  }
+}
+
+// The square root of a normal or denormal number is normal: only DAZ
+// applies.
+void SqrtDaz(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s) {
+  const bool daz = c.mxcsr & kDaz;
+  Xmm r = d;
+  for (int i = 0; i < lanes; i++) {
+    if (dbl) {
+      const uint64_t b = Daz<true>(Lane<uint64_t>(s, i), daz);
+      double x;
+      std::memcpy(&x, &b, sizeof x);
+      SetLane<double>(r, i, std::sqrt(x));
+    } else {
+      const uint32_t b = Daz<false>(Lane<uint32_t>(s, i), daz);
+      float x;
+      std::memcpy(&x, &b, sizeof x);
+      SetLane<float>(r, i, std::sqrt(x));
+    }
+  }
+  d = r;
+}
+
+// Widening a DAZ'd float is exact; narrowing flushes as ArithFtzDaz does.
+bool CvtFloatFtzDaz(Ctx& c, bool to_dbl, int lanes, Xmm& d, const Xmm& s) {
+  Xmm r = d;
+  bool flushed = false;
+  const bool daz = c.mxcsr & kDaz;
+  if (to_dbl) {
+    for (int i = 0; i < lanes; i++) {
+      const uint32_t b = Daz<false>(Lane<uint32_t>(s, i), daz);
+      float x;
+      std::memcpy(&x, &b, sizeof x);
+      SetLane<double>(r, i, double(x));
+    }
+  } else {
+    for (int i = 0; i < lanes; i++) {
+      const uint64_t b = Daz<true>(Lane<uint64_t>(s, i), daz);
+      double x;
+      std::memcpy(&x, &b, sizeof x);
+      const float v = float(x);
+      uint32_t vb;
+      std::memcpy(&vb, &v, sizeof vb);
+      if ((vb & 0x7FFFFFFFu) == 0 && FiniteNonzero<true>(b)) return false;
+      switch (FlushResult<false>(vb)) {
+        case Ftz::kModel: return false;
+        case Ftz::kFlushed: flushed = true; break;
+        case Ftz::kKeep: break;
+      }
+      SetLane<uint32_t>(r, i, vb);
+    }
+    if (lanes == 2) SetLane<uint64_t>(r, 1, 0);
+  }
+  if (flushed) c.mxcsr |= kUePe;
+  d = r;
+  return true;
 }
 
 }  // namespace recomp::sse

@@ -107,6 +107,12 @@ struct Bits<true> {
 [[gnu::always_inline]] inline bool UsualMxcsr(uint32_t mxcsr) {
   return (mxcsr & 0xFFE0u) == 0x1FA0u;
 }
+// MXCSR as usual but for flush-to-zero, with or without denormals-are-
+// zero, which games set for speed: the RECOMP_SSE_HOST paths below
+// (*FtzDaz) then flush the host's results, and its operands under DAZ.
+[[gnu::always_inline]] inline bool FtzDazMxcsr(uint32_t mxcsr) {
+  return (mxcsr & 0xFFA0u) == 0x9FA0u;
+}
 
 template <bool D>
 inline bool NormalOrZero(typename Bits<D>::U v) {
@@ -253,6 +259,24 @@ inline bool Arith(Op op, int lanes, Xmm& d, const Xmm& s) {
 // d = d op s, lane-wise: `lanes` lanes of double (dbl) or float. Scalar
 // forms pass lanes = 1 and keep the upper lanes of d.
 [[gnu::cold]] Xmm ArithModel(Ctx& c, Op op, bool dbl, int lanes, Xmm d, Xmm s, uint64_t va);
+
+// RECOMP_SSE_HOST with FTZ, and DAZ if MXCSR has it (fast::FtzDazMxcsr),
+// out of line in sse.cpp. DAZ: each denormal operand lane is a zero of its
+// sign before the host's operation, as the SDM defines it (without DAZ the
+// host takes denormal operands exactly, as x86 does). FTZ: a denormal host result is a
+// zero of its sign and sets UE and PE. Exact but for the two cases where
+// the host's IEEE result cannot tell what x86 does, for which these return
+// false (and change nothing) so that the model decides: a result of
+// exactly the smallest normal magnitude (x86 detects tininess after
+// rounding: it may have rounded up from a tiny value, to be flushed), and a
+// product, quotient or narrowed value of nonzero finite operands that
+// rounds to zero (UE). The rest is HostArith's contract.
+bool ArithFtzDaz(Ctx& c, Op op, bool dbl, int lanes, Xmm& d, const Xmm& s);
+void CmpDaz(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s, uint8_t pred);
+void MinMaxDaz(Ctx& c, bool max, bool dbl, int lanes, Xmm& d, const Xmm& s);
+void SqrtDaz(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s);
+bool CvtFloatFtzDaz(Ctx& c, bool to_dbl, int lanes, Xmm& d, const Xmm& s);
+
 // Always inlined: op, dbl and lanes are constants at every call site, so
 // the host path folds to the one instruction (out of line, a call and a
 // switch per SSE instruction).
@@ -270,6 +294,9 @@ inline bool Arith(Op op, int lanes, Xmm& d, const Xmm& s) {
   if (usual &&
       (dbl ? fast::Arith<true>(op, lanes, d, s) : fast::Arith<false>(op, lanes, d, s)))
     [[likely]] return;
+#ifdef RECOMP_SSE_HOST
+  if (fast::FtzDazMxcsr(c.mxcsr) && ArithFtzDaz(c, op, dbl, lanes, d, s)) return;
+#endif
   d = ArithModel(c, op, dbl, lanes, d, s, va);
 }
 
@@ -289,6 +316,10 @@ inline bool Arith(Op op, int lanes, Xmm& d, const Xmm& s) {
       fast::HostCmp<true>(lanes, d, s, pred);
     else
       fast::HostCmp<false>(lanes, d, s, pred);
+    return;
+  }
+  if (pred < 8 && fast::FtzDazMxcsr(c.mxcsr)) {
+    CmpDaz(c, dbl, lanes, d, s, pred);
     return;
   }
 #endif
@@ -347,6 +378,10 @@ inline bool Arith(Op op, int lanes, Xmm& d, const Xmm& s) {
         SetLane<float>(r, i, std::sqrt(Lane<float>(s, i)));
     }
     d = r;
+    return;
+  }
+  if (fast::FtzDazMxcsr(c.mxcsr)) {
+    SqrtDaz(c, dbl, lanes, d, s);
     return;
   }
 #endif
@@ -417,6 +452,10 @@ uint64_t CvtToI64(Ctx& c, bool dbl, Xmm s, bool truncate, uint64_t va);
       fast::HostMinMax<false>(max, lanes, d, s);
     return;
   }
+  if (fast::FtzDazMxcsr(c.mxcsr)) {
+    MinMaxDaz(c, max, dbl, lanes, d, s);
+    return;
+  }
 #endif
   d = MinMaxModel(c, max, dbl, lanes, d, s, va);
 }
@@ -446,6 +485,7 @@ uint64_t CvtToI64(Ctx& c, bool dbl, Xmm s, bool truncate, uint64_t va);
     d = r;
     return;
   }
+  if (fast::FtzDazMxcsr(c.mxcsr) && CvtFloatFtzDaz(c, to_dbl, lanes, d, s)) return;
 #endif
   d = CvtFloatModel(c, to_dbl, lanes, d, s, va);
 }
