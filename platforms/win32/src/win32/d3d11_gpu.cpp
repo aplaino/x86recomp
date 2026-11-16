@@ -998,6 +998,12 @@ void CpuCopyRegion(Resource& d, uint32_t dsub, uint32_t dx, uint32_t dy, uint32_
   uint32_t x0 = 0, y0 = 0, z0 = 0, x1 = s.MipWidth(smip), y1 = s.MipHeight(smip),
            z1 = s.MipDepth(smip);
   if (box) x0 = box[0], y0 = box[1], z0 = box[2], x1 = box[3], y1 = box[4], z1 = box[5];
+  // No further than the destination level reaches.
+  const uint32_t dw = d.MipWidth(dmip), dh = d.MipHeight(dmip), dd = d.MipDepth(dmip);
+  if (dx >= dw || dy >= dh || dz >= dd) return;
+  x1 = std::min(x1, x0 + (dw - dx));
+  y1 = std::min(y1, y0 + (dh - dy));
+  z1 = std::min(z1, z0 + (dd - dz));
   if (x1 <= x0 || y1 <= y0 || z1 <= z0) return;
   const uint32_t rows = (y1 - y0 + div - 1) / div, row_bytes = (x1 - x0 + div - 1) / div * bpp;
   uint8_t* dst = d.Data() + d.SubOffset(dsub);

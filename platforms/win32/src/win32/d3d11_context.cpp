@@ -72,6 +72,25 @@ void Run(Context& x, F f) {
 
 ContextState& StateOf(Context& x) { return x; }
 
+// A D3D11_BOX {left, top, front, right, bottom, back} from the guest,
+// clamped to a subresource's extent (a buffer's bytes); false if it is
+// empty or inverted, for which Direct3D does nothing.
+bool ReadBox(const Resource& r, uint32_t sub, gaddr p, std::array<uint32_t, 6>* box) {
+  for (int i = 0; i < 6; i++) (*box)[i] = Rd32(p + 4 * i);
+  uint32_t ext[3] = {r.byte_width, 1, 1};
+  if (r.dim != Dim::Buffer) {
+    const uint32_t mip = sub % r.mips;
+    ext[0] = r.MipWidth(mip);
+    ext[1] = r.dim == Dim::Texture1D ? 1 : r.MipHeight(mip);
+    ext[2] = r.MipDepth(mip);
+  }
+  for (int i = 0; i < 3; i++) {
+    (*box)[3 + i] = std::min((*box)[3 + i], ext[i]);
+    if ((*box)[i] >= (*box)[3 + i]) return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 #define D3D11_METHOD(iface, name) \
@@ -452,9 +471,9 @@ CTX_METHOD(UpdateSubresource) {
   const gaddr bp = Arg(c, 3);
   gaddr src = Arg(c, 4);
   const uint32_t pitch = uint32_t(Arg(c, 5)), slice_pitch = uint32_t(Arg(c, 6));
+  if (sub >= r->Subresources()) return 0;
   std::array<uint32_t, 6> box{};
-  if (bp)
-    for (int i = 0; i < 6; i++) box[i] = Rd32(bp + 4 * i);
+  if (bp && !ReadBox(*r, sub, bp, &box)) return 0;
   if (!x.deferred) {
     GpuUpdate(Dev(), *r, sub, bp ? box.data() : nullptr, GPtr(src), pitch, slice_pitch);
     return 0;
@@ -462,15 +481,15 @@ CTX_METHOD(UpdateSubresource) {
   // The bytes it reads.
   uint64_t size;
   if (r->dim == Dim::Buffer) {
-    size = bp ? box[3] - std::min(box[3], box[0]) : r->byte_width;
+    size = bp ? box[3] - box[0] : r->byte_width;
     if (bp) src += box[0];
   } else {
     const uint32_t mip = sub % r->mips;
     bool block;
     const uint32_t bpp = FormatBytes(r->format, &block), div = block ? 4 : 1;
-    const uint32_t w = bp ? box[3] - box[0] : r->MipWidth(mip), h = bp ? box[4] - box[1] : r->MipHeight(mip),
+    const uint32_t w = bp ? box[3] - box[0] : r->MipWidth(mip),
+                   h = bp ? box[4] - box[1] : r->dim == Dim::Texture1D ? 1 : r->MipHeight(mip),
                    d = bp ? box[5] - box[2] : r->MipDepth(mip);
-    if (!w || !h || !d) return 0;
     size = uint64_t(d - 1) * slice_pitch + uint64_t((h + div - 1) / div - 1) * pitch +
            uint64_t((w + div - 1) / div) * bpp;
     if (bp) src += uint64_t(box[2]) * slice_pitch + uint64_t(box[1] / div) * pitch + box[0] / div * bpp;
@@ -496,9 +515,9 @@ CTX_METHOD(CopySubresourceRegion) {
   const uint32_t dsub = uint32_t(Arg(c, 2)), ssub = uint32_t(Arg(c, 7));
   const uint32_t dx = uint32_t(Arg(c, 3)), dy = uint32_t(Arg(c, 4)), dz = uint32_t(Arg(c, 5));
   const gaddr bp = Arg(c, 8);
+  if (dsub >= d->Subresources() || ssub >= s->Subresources()) return 0;
   std::array<uint32_t, 6> box{};
-  if (bp)
-    for (int i = 0; i < 6; i++) box[i] = Rd32(bp + 4 * i);
+  if (bp && !ReadBox(*s, ssub, bp, &box)) return 0;
   const bool has_box = bp != 0;
   Run(Ctx0(c), [=](Context&) {
     GpuCopy(Dev(), *d, dsub, dx, dy, dz, *s, ssub, has_box ? box.data() : nullptr);
