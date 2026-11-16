@@ -162,6 +162,14 @@ std::string SampleStack(pthread_t th) {
     else if (n.find("SampleStack") != std::string::npos || n.find("OnDumpSignal") != std::string::npos) continue;
     if (!out.empty()) out += " < ";
     out += n.size() > 60 ? n.substr(0, 60) : n;
+    // The innermost frame's offset: which instruction of a large lifted
+    // function (disassemble the binary there).
+    if (!kept) {
+      char off[24];
+      std::snprintf(off, sizeof off, "+0x%lx",
+                    (unsigned long)((char*)g_sample_frames[i] - (char*)info.dli_saddr));
+      out += off;
+    }
     kept++;
   }
   g_sample_state.store(0);
@@ -176,7 +184,9 @@ void HitchMain(double limit_ms) {
   std::map<std::string, int> samples;
   int64_t frame_seen = 0, last_sample = 0;
   for (;;) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    // On time: a plain sleep at this QoS is coalesced to a few wake-ups a
+    // hitch, and with them a sample or two.
+    platform::SleepUntilNs(platform::MonotonicNs() + 5000000u);
     const int64_t frame = g_frame.load(), now = NowMs();
     if (!frame || !g_active.load()) continue;
     if (frame != frame_seen) {
