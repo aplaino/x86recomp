@@ -620,7 +620,8 @@ bool FiniteNonzero(typename fast::Bits<D>::U v) {
 }
 
 template <bool D>
-bool ArithFtzDazT(Ctx& c, Op op, int lanes, Xmm& d, const Xmm& s) {
+[[gnu::always_inline]] inline bool ArithFtzDazT(Ctx& c, Op op, int lanes, Xmm& d,
+                                                const Xmm& s) {
   using U = typename fast::Bits<D>::U;
   using F = typename fast::Bits<D>::F;
   Xmm r = d;
@@ -663,6 +664,21 @@ bool ArithFtzDazT(Ctx& c, Op op, int lanes, Xmm& d, const Xmm& s) {
 bool ArithFtzDaz(Ctx& c, Op op, bool dbl, int lanes, Xmm& d, const Xmm& s) {
   return dbl ? ArithFtzDazT<true>(c, op, lanes, d, s) : ArithFtzDazT<false>(c, op, lanes, d, s);
 }
+
+template <bool D, Op kOp, int kLanes>
+bool ArithFtz(Ctx& c, Xmm& d, const Xmm& s) {
+  return ArithFtzDazT<D>(c, kOp, kLanes, d, s);
+}
+#define RECOMP_SSE_FTZ_INST(D, L)                             \
+  template bool ArithFtz<D, kAdd, L>(Ctx&, Xmm&, const Xmm&); \
+  template bool ArithFtz<D, kSub, L>(Ctx&, Xmm&, const Xmm&); \
+  template bool ArithFtz<D, kMul, L>(Ctx&, Xmm&, const Xmm&); \
+  template bool ArithFtz<D, kDiv, L>(Ctx&, Xmm&, const Xmm&);
+RECOMP_SSE_FTZ_INST(false, 1)
+RECOMP_SSE_FTZ_INST(false, 4)
+RECOMP_SSE_FTZ_INST(true, 1)
+RECOMP_SSE_FTZ_INST(true, 2)
+#undef RECOMP_SSE_FTZ_INST
 
 // Compares and MIN/MAX have no rounded result: DAZ'd operands, then the
 // host's rule (MIN/MAX return the DAZ'd lane, as the operation sees it).

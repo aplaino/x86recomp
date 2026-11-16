@@ -272,6 +272,31 @@ inline bool Arith(Op op, int lanes, Xmm& d, const Xmm& s) {
 // product, quotient or narrowed value of nonzero finite operands that
 // rounds to zero (UE). The rest is HostArith's contract.
 bool ArithFtzDaz(Ctx& c, Op op, bool dbl, int lanes, Xmm& d, const Xmm& s);
+// The same for one operation and width, so each SSE instruction calls a
+// function with no switch and constant lanes (instantiated in sse.cpp for
+// ADD/SUB/MUL/DIV on 1 or 4 floats and 1 or 2 doubles).
+template <bool D, Op kOp, int kLanes>
+bool ArithFtz(Ctx& c, Xmm& d, const Xmm& s);
+[[gnu::always_inline]] inline bool ArithFtzFor(Ctx& c, Op op, bool dbl, int lanes, Xmm& d,
+                                               const Xmm& s) {
+#define RECOMP_SSE_FTZ_OPS(D, L)                       \
+  switch (op) {                                        \
+    case kAdd: return ArithFtz<D, kAdd, L>(c, d, s);   \
+    case kSub: return ArithFtz<D, kSub, L>(c, d, s);   \
+    case kMul: return ArithFtz<D, kMul, L>(c, d, s);   \
+    case kDiv: return ArithFtz<D, kDiv, L>(c, d, s);   \
+    default: break;                                    \
+  }
+  if (dbl) {
+    if (lanes == 1) RECOMP_SSE_FTZ_OPS(true, 1)
+    if (lanes == 2) RECOMP_SSE_FTZ_OPS(true, 2)
+  } else {
+    if (lanes == 1) RECOMP_SSE_FTZ_OPS(false, 1)
+    if (lanes == 4) RECOMP_SSE_FTZ_OPS(false, 4)
+  }
+#undef RECOMP_SSE_FTZ_OPS
+  return ArithFtzDaz(c, op, dbl, lanes, d, s);
+}
 void CmpDaz(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s, uint8_t pred);
 void MinMaxDaz(Ctx& c, bool max, bool dbl, int lanes, Xmm& d, const Xmm& s);
 void SqrtDaz(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s);
@@ -295,7 +320,7 @@ bool CvtFloatFtzDaz(Ctx& c, bool to_dbl, int lanes, Xmm& d, const Xmm& s);
       (dbl ? fast::Arith<true>(op, lanes, d, s) : fast::Arith<false>(op, lanes, d, s)))
     [[likely]] return;
 #ifdef RECOMP_SSE_HOST
-  if (fast::FtzDazMxcsr(c.mxcsr) && ArithFtzDaz(c, op, dbl, lanes, d, s)) return;
+  if (fast::FtzDazMxcsr(c.mxcsr) && ArithFtzFor(c, op, dbl, lanes, d, s)) return;
 #endif
   d = ArithModel(c, op, dbl, lanes, d, s, va);
 }
