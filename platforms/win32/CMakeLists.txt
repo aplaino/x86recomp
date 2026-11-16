@@ -89,6 +89,12 @@ target_link_libraries(recomp_d3d9 PUBLIC recomp_win32 recomp_gfx recomp_hlsl)
 set_source_files_properties(src/win32/d3dx9.cpp TARGET_DIRECTORY recomp_d3d9
   PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 
+# Direct3D 11 for x64 guests, over gfx::Device's programs.
+add_library(recomp_d3d11 SHARED src/win32/d3d11.cpp src/win32/d3d11_objects.cpp
+            src/win32/d3d11_context.cpp
+            src/win32/dxgi.cpp)
+target_link_libraries(recomp_d3d11 PUBLIC recomp_win32 recomp_gfx)
+
 # OpenGL 1.x (opengl32, wgl, gdi32 pixel formats) over gfx::Device.
 add_library(recomp_opengl SHARED
   ${RECOMP_ROOT}/src/runtime/gl/context.cpp
