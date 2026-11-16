@@ -736,16 +736,22 @@ HLE64("kernel32.dll", GetTempPathW, 2) {
   return uint32_t(t.size());
 }
 
-HLE("kernel32.dll", GetTempFileNameA, 4) {
+// GetTempFileNameA/W(dir, prefix, unique, buffer): <dir>\<pre><hex>.TMP,
+// made (empty) when unique is 0 and the number was picked here.
+uint64_t GetTempFileName(Ctx& c, bool wide) {
   static uint32_t counter = 1;
-  std::string dir = GStr(Arg(c, 0)), prefix = GStr(Arg(c, 1)).substr(0, 3);
-  uint32_t unique = Arg(c, 2) ? Arg(c, 2) : counter++;
+  auto str = [&](int i) { return wide ? WidePath(Arg(c, i)) : GStr(Arg(c, i)); };
+  std::string dir = str(0), prefix = str(1).substr(0, 3);
+  uint32_t unique = uint32_t(Arg(c, 2)) ? uint32_t(Arg(c, 2)) : counter++;
   char name[32];
   std::snprintf(name, sizeof name, "%s%X.TMP", prefix.c_str(), unique & 0xFFFF);
   std::string full = dir;
   if (!full.empty() && full.back() != '\\') full += '\\';
   full += name;
-  PutStr(Arg(c, 3), full);
+  if (wide)
+    PutWStr(Arg(c, 3), full);
+  else
+    PutStr(Arg(c, 3), full);
   if (!Arg(c, 2)) {
     int fd = open(HostPath(full, PathAccess::kWrite).c_str(),
                   O_CREAT | O_WRONLY | O_CLOEXEC, 0644);
@@ -753,6 +759,8 @@ HLE("kernel32.dll", GetTempFileNameA, 4) {
   }
   return unique;
 }
+HLE64("kernel32.dll", GetTempFileNameA, 4) { return GetTempFileName(c, false); }
+HLE64("kernel32.dll", GetTempFileNameW, 4) { return GetTempFileName(c, true); }
 
 // ---- find ------------------------------------------------------------------
 

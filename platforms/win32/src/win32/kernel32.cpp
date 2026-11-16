@@ -772,6 +772,16 @@ HLE64("kernel32.dll", HeapDestroy, 1) {
   return g_heaps.erase(Arg(c, 0)) ? 1 : 0;
 }
 
+// HeapLock/HeapUnlock: the guest heaps lock themselves per call. HeapWalk
+// enumerates nothing (ERROR_NO_MORE_ITEMS at once): protectors walk heaps
+// to look for a debug heap's fill patterns, and games never need the list.
+HLE64("kernel32.dll", HeapLock, 1) { return 1; }
+HLE64("kernel32.dll", HeapUnlock, 1) { return 1; }
+HLE64("kernel32.dll", HeapWalk, 2) {
+  SetLastError(259);  // ERROR_NO_MORE_ITEMS
+  return 0;
+}
+
 // (heap, class, info, length): the low-fragmentation heap and
 // terminate-on-corruption are what the guest heaps are like anyway.
 HLE64("kernel32.dll", HeapSetInformation, 4) { return 1; }
