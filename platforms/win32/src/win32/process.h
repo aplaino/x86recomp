@@ -81,6 +81,12 @@ struct GameConfig : recomp::GameConfig {
   // The game's Steam app id, which the offline Steamworks reports
   // (ISteamUtils::GetAppID); 0 if the game never asks.
   uint32_t steam_app_id = 0;
+
+  // Where the EXE starts (a VA), when not at its PE entry point: a DRM
+  // wrapper's stub runs first on Windows and then jumps to the program's
+  // own entry point, which this names. The stub is neither lifted nor
+  // run. 0: the PE entry point.
+  uint64_t entry = 0;
 };
 
 }  // namespace win32
