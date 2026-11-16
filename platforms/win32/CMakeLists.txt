@@ -106,6 +106,12 @@ target_link_libraries(recomp_d3d11 PUBLIC recomp_win32 recomp_gfx)
 add_library(recomp_d3dcompiler SHARED src/win32/d3dcompiler.cpp)
 target_link_libraries(recomp_d3dcompiler PUBLIC recomp_win32)
 
+# dxbc_check (tools/dxbc_check): the DXBC translation over the shaders in
+# files, each compiled as the device would. A developer tool, not built
+# by default.
+add_executable(dxbc_check EXCLUDE_FROM_ALL tools/dxbc_check/dxbc_check.cpp)
+target_link_libraries(dxbc_check PRIVATE recomp_d3d11 recomp_gfx)
+
 # OpenGL 1.x (opengl32, wgl, gdi32 pixel formats) over gfx::Device.
 add_library(recomp_opengl SHARED
   ${RECOMP_ROOT}/src/runtime/gl/context.cpp
