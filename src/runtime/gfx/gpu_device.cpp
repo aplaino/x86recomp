@@ -1400,9 +1400,6 @@ void r_color0(inout vec4 c) {
   ProgramId CreateProgram(const ProgramDesc& d) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     if (!heap_) GrowHeap(0);  // bound beside the arenas
-#if defined(__APPLE__)
-    FatalF("gfx: programs on Metal are not implemented yet");
-#endif
     // What a draw or dispatch binds: ProgramStageCmd's textures and
     // DispatchProgram's storage images.
     for (const ProgramStage* st : {&d.vs, &d.fs, &d.cs})
@@ -1415,13 +1412,12 @@ void r_color0(inout vec4 c) {
     pr.cs = d.cs;
     if (!d.cs.glsl.empty()) {
       pr.compute = true;
-      const std::vector<uint32_t> spirv =
-          CompileProgramStage(d.cs, ShaderStage::Compute, d.local_size);
+      const ProgramCode code(CompileProgramStage(d.cs, ShaderStage::Compute, d.local_size));
       SDL_GPUComputePipelineCreateInfo ci{};
-      ci.code = reinterpret_cast<const Uint8*>(spirv.data());
-      ci.code_size = spirv.size() * 4;
-      ci.entrypoint = "main";
-      ci.format = SDL_GPU_SHADERFORMAT_SPIRV;
+      ci.code = code.code;
+      ci.code_size = code.size;
+      ci.entrypoint = code.entry;
+      ci.format = code.format;
       ci.num_samplers = d.cs.textures;
       ci.num_readonly_storage_buffers = d.cs.buffers ? 2 : 0;
       ci.num_readwrite_storage_textures = d.cs.rw_images;
@@ -1435,13 +1431,13 @@ void r_color0(inout vec4 c) {
     } else {
       for (bool vertex : {true, false}) {
         const ProgramStage& st = vertex ? d.vs : d.fs;
-        const std::vector<uint32_t> spirv =
-            CompileProgramStage(st, vertex ? ShaderStage::Vertex : ShaderStage::Fragment, nullptr);
+        const ProgramCode code(
+            CompileProgramStage(st, vertex ? ShaderStage::Vertex : ShaderStage::Fragment, nullptr));
         SDL_GPUShaderCreateInfo si{};
-        si.code = reinterpret_cast<const Uint8*>(spirv.data());
-        si.code_size = spirv.size() * 4;
-        si.entrypoint = "main";
-        si.format = SDL_GPU_SHADERFORMAT_SPIRV;
+        si.code = code.code;
+        si.code_size = code.size;
+        si.entrypoint = code.entry;
+        si.format = code.format;
         si.stage = vertex ? SDL_GPU_SHADERSTAGE_VERTEX : SDL_GPU_SHADERSTAGE_FRAGMENT;
         si.num_samplers = st.textures;
         si.num_storage_buffers = st.buffers ? 2 : 0;
@@ -3531,17 +3527,51 @@ void r_color0(inout vec4 c) {
     if (p.cp) SDL_ReleaseGPUComputePipeline(dev_, p.cp);
   }
 
+  // A program stage's code as SDL_GPU takes it: its SPIR-V, or on Metal
+  // the MSL SPIRV-Cross makes of it.
+  struct ProgramCode {
+    explicit ProgramCode(std::vector<uint32_t> s) : spirv(std::move(s)) {
+#if defined(__APPLE__)
+      std::string log;
+      if (!SpirvToMsl(spirv, &msl, &log)) FatalF("gfx: a program's SPIR-V to MSL: %s", log.c_str());
+      code = reinterpret_cast<const Uint8*>(msl.c_str());
+      size = msl.size();
+      entry = "main0";
+      format = SDL_GPU_SHADERFORMAT_MSL;
+#else
+      code = reinterpret_cast<const Uint8*>(spirv.data());
+      size = spirv.size() * 4;
+#endif
+    }
+    std::vector<uint32_t> spirv;
+    std::string msl;
+    const Uint8* code = nullptr;
+    size_t size = 0;
+    const char* entry = "main";
+    SDL_GPUShaderFormat format = SDL_GPU_SHADERFORMAT_SPIRV;
+  };
+
   static uint32_t ProgramUniformBlocks(const ProgramStage& st) {
     return (st.buffers || st.rw_buffers ? 1 : 0) + (st.uniform_bytes ? 1 : 0);
   }
 
   // The stage's prelude (ProgramDesc) in SDL_GPU's SPIR-V sets, and its
-  // SPIR-V.
+  // SPIR-V. On Metal the binding numbers are the MSL indices SDL_GPU
+  // expects (SpirvToMsl keeps them; sets do not matter): textures from 0
+  // and storage images after them; uniform buffers from 0, then the
+  // read-only storage buffers, then the read-write one.
   static std::vector<uint32_t> CompileProgramStage(const ProgramStage& st, ShaderStage stage,
                                                    const uint32_t* local_size) {
     if (st.textures > 16) FatalF("gfx: a program stage with %u textures", st.textures);
-    const int res = stage == ShaderStage::Fragment ? 2 : 0;
-    const int uni = stage == ShaderStage::Vertex ? 1 : stage == ShaderStage::Fragment ? 3 : 2;
+#if defined(__APPLE__)
+    const bool metal = true;
+#else
+    const bool metal = false;
+#endif
+    const int res = metal ? 0 : stage == ShaderStage::Fragment ? 2 : 0;
+    const int uni = metal ? 0 : stage == ShaderStage::Vertex ? 1 : stage == ShaderStage::Fragment ? 3 : 2;
+    const uint32_t nuni = ProgramUniformBlocks(st);
+    const uint32_t mem = metal ? nuni : st.textures;
     char b[256];
     std::string pre = "#version 450\n";
     std::snprintf(b, sizeof b, "#define R_TEXTURE(n) set = %d, binding = (n)\n", res);
@@ -3550,14 +3580,18 @@ void r_color0(inout vec4 c) {
       std::snprintf(b, sizeof b,
                     "layout(std430, set = %d, binding = %u) readonly buffer RMem { uint r_mem[]; };\n"
                     "layout(std430, set = %d, binding = %u) readonly buffer RHeap { uint r_heap[]; };\n",
-                    res, st.textures, res, st.textures + 1);
+                    res, mem, res, mem + 1);
       pre += b;
     }
     if (stage == ShaderStage::Compute) {
-      pre += "#define R_IMAGE(n) set = 1, binding = (n)\n";
+      if (metal)
+        std::snprintf(b, sizeof b, "#define R_IMAGE(n) set = 0, binding = (%u + (n))\n", st.textures);
+      else
+        std::snprintf(b, sizeof b, "#define R_IMAGE(n) set = 1, binding = (n)\n");
+      pre += b;
       if (st.rw_buffers) {
-        std::snprintf(b, sizeof b, "layout(std430, set = 1, binding = %u) buffer RRw { uint r_rw[]; };\n",
-                      st.rw_images);
+        std::snprintf(b, sizeof b, "layout(std430, set = %d, binding = %u) buffer RRw { uint r_rw[]; };\n",
+                      metal ? 0 : 1, metal ? nuni + (st.buffers ? 2 : 0) : st.rw_images);
         pre += b;
       }
       std::snprintf(b, sizeof b, "layout(local_size_x = %u, local_size_y = %u, local_size_z = %u) in;\n",

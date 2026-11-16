@@ -2,9 +2,10 @@
 // draw reading a buffer, a uniform block and a texture into a colour
 // target, the scissor, clears and depth testing, a compute dispatch
 // writing a buffer (written back) and a storage image, GPU buffers read
-// by draws and dispatches and drawn from as indices, and reading images
-// back, on a device without a window. Needs a Vulkan device (lavapipe
-// will do); exits 77 (skipped) without one.
+// by draws and dispatches and drawn from as indices, image layers, copies
+// and mip levels, and reading images back, on a device without a window.
+// Needs a Vulkan device (lavapipe will do) or Metal; exits 77 (skipped)
+// without one.
 
 #include <SDL3/SDL.h>
 

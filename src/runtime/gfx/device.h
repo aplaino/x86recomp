@@ -307,6 +307,7 @@ struct PipelineState {
   TargetBlend blend[4];
   Color blend_constant{0, 0, 0, 0};
 };
+// lod_bias is not applied on Metal, whose samplers have none.
 struct SamplerDesc {
   bool min_linear = false, mag_linear = false, mip_linear = false;
   AddressMode u = AddressMode::Repeat, v = AddressMode::Repeat, w = AddressMode::Repeat;
