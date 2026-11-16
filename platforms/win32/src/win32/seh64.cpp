@@ -262,6 +262,7 @@ HLE64("kernel32.dll", GetThreadContext, 2) {
     return 0;
   }
   const uint32_t flags = Rd32(ctx + 0x30);
+  RECOMP_TRACE("  GetThreadContext: flags %08X, context %08llX\n", flags, (unsigned long long)ctx);
   WriteContext(ctx, AtReturn(c), c);
   Wr32(ctx + 0x30, flags);
   return 1;
