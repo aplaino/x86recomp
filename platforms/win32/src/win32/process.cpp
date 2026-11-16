@@ -11,6 +11,7 @@
 #include "runtime/log.h"
 #include "win32/hle.h"
 #include "win32/kernel32_state.h"
+#include "win32/seh64.h"
 #include "win32/user32_window.h"
 
 namespace recomp {
@@ -210,6 +211,7 @@ int RunProcess(const win32::GameConfig& game, const std::string& exe_path,
   p.guest_fault = [](Ctx& c, bool write, gaddr addr) {
     return hle::RaiseAccessViolation(c, write, uint32_t(addr));
   };
+  p.guest_trap = [](Ctx& c, gaddr va) { return hle::seh64::RaiseTrap(c, va); };
   p.pump_events = PumpHostEvents;
   w.game_args = game_args;
   // The EXE and the lifted DLLs may import from each other statically (a

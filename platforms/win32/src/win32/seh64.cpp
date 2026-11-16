@@ -6,10 +6,12 @@
 
 #include <cstring>
 #include <exception>
+#include <mutex>
 #include <vector>
 
 #include "runtime/log.h"
 #include "win32/hle.h"
+#include "win32/kernel32_state.h"
 #include "x86/lifted.h"
 #include "x86/runtime.h"
 
@@ -20,6 +22,11 @@ constexpr int kRsp = 4;
 constexpr uint32_t kRecordSize = 0x98, kDcSize = 0x50;
 
 thread_local std::vector<Dispatching> t_dispatching;
+
+// Vectored exception handlers (AddVectoredExceptionHandler), in calling
+// order, with the guest blocks that are their handles.
+std::mutex g_veh_mu;
+std::vector<std::pair<gaddr, gaddr>> g_veh;  // {handle, handler}
 
 // Guest scratch memory below the current stack pointer for the structures a
 // handler call needs; c.rsp moves below it for the call and back after. An
@@ -118,7 +125,7 @@ unwind::Regs ReadContext(gaddr ctx) {
 const Dispatching* Current() { return t_dispatching.empty() ? nullptr : &t_dispatching.back(); }
 
 void Raise(Ctx& c, uint32_t code, uint32_t flags, const uint64_t* params, uint32_t n,
-           const unwind::Regs& at) {
+           const unwind::Regs& at, gaddr next) {
   Scratch s(c, 0x1000);
   const gaddr rec = s.base, ctx = s.base + 0x100, work = s.base + 0x600, dc = s.base + 0xB00;
   std::memset(GPtr(rec), 0, kRecordSize);
@@ -136,6 +143,40 @@ void Raise(Ctx& c, uint32_t code, uint32_t flags, const uint64_t* params, uint32
   struct Pop {
     ~Pop() { t_dispatching.pop_back(); }
   } pop;
+  // A handler continued execution: the registers from the context it was
+  // given, at the raise point.
+  auto resume = [&] {
+    if (flags & kNoncontinuable)
+      FatalF("a handler continued the noncontinuable exception %08X", code);
+    unwind::Regs back = ReadContext(ctx);
+    if ((back.rip != at.rip && (!next || back.rip != next)) || back.gpr[kRsp] != at.gpr[kRsp])
+      FatalF("a handler continued exception %08X elsewhere (rip %08llX): not supported", code,
+             (unsigned long long)back.rip);
+    uint64_t* regs[16] = {&c.rax, &c.rcx, &c.rdx, &c.rbx, &c.rsp, &c.rbp, &c.rsi, &c.rdi,
+                          &c.r8,  &c.r9,  &c.r10, &c.r11, &c.r12, &c.r13, &c.r14, &c.r15};
+    for (int i = 0; i < 16; i++)
+      if (i != kRsp) *regs[i] = back.gpr[i];
+  };
+  // Vectored handlers first, as on Windows: each gets EXCEPTION_POINTERS
+  // {record, context} and returns EXCEPTION_CONTINUE_EXECUTION (-1) or
+  // EXCEPTION_CONTINUE_SEARCH (0).
+  std::vector<std::pair<gaddr, gaddr>> veh;
+  {
+    std::lock_guard<std::mutex> l(g_veh_mu);
+    veh = g_veh;
+  }
+  for (const auto& [handle, handler] : veh) {
+    Wr64(work, rec);
+    Wr64(work + 8, ctx);
+    const int32_t d = int32_t(CallGuest(c, handler, {work}));
+    if (d == -1) {
+      resume();
+      return;
+    }
+    if (d != 0)
+      FatalF("x64 exception %08X: vectored handler %08llX returned %d", code,
+             (unsigned long long)handler, d);
+  }
   unwind::Regs r = at;
   const PeImage* img;
   gaddr fn;
@@ -149,16 +190,7 @@ void Raise(Ctx& c, uint32_t code, uint32_t flags, const uint64_t* params, uint32
     WriteDc(dc, pc, *img, fn, frame, 0, work, h, data);
     uint32_t d = uint32_t(CallGuest(c, h, {rec, frame, ctx, dc}));
     if (d == kContinueExecution) {
-      if (flags & kNoncontinuable)
-        FatalF("a handler continued the noncontinuable exception %08X", code);
-      unwind::Regs back = ReadContext(ctx);
-      if (back.rip != at.rip || back.gpr[kRsp] != at.gpr[kRsp])
-        FatalF("a handler continued exception %08X elsewhere (rip %08llX): not supported",
-               code, (unsigned long long)back.rip);
-      uint64_t* regs[16] = {&c.rax, &c.rcx, &c.rdx, &c.rbx, &c.rsp, &c.rbp, &c.rsi, &c.rdi,
-                            &c.r8,  &c.r9,  &c.r10, &c.r11, &c.r12, &c.r13, &c.r14, &c.r15};
-      for (int i = 0; i < 16; i++)
-        if (i != kRsp) *regs[i] = back.gpr[i];
+      resume();
       return;
     }
     if (d != kContinueSearch)
@@ -248,6 +280,58 @@ HLE64("kernel32.dll", RtlPcToFileHeader, 2) {
   const gaddr base = img ? img->image_base : 0;
   Wr64(Arg(c, 1), base);
   return base;
+}
+
+bool RaiseTrap(Ctx& c, gaddr va) {
+  // int3 (CC), int 3 (CD 03) and int 2D (CD 2D, the kernel debugger's
+  // service call, which protectors execute to see whether a debugger takes
+  // it); other traps stay fatal.
+  uint32_t len = 0;
+  bool service = false;
+  if (Rd8(va) == 0xCC) len = 1;
+  else if (Rd8(va) == 0xCD && Rd8(va + 1) == 0x03) len = 2;
+  else if (Rd8(va) == 0xCD && Rd8(va + 1) == 0x2D) len = 2, service = true;
+  if (!g_proc->x64 || !len) return false;
+  unwind::Regs at;
+  const uint64_t* regs[16] = {&c.rax, &c.rcx, &c.rdx, &c.rbx, &c.rsp, &c.rbp, &c.rsi, &c.rdi,
+                              &c.r8,  &c.r9,  &c.r10, &c.r11, &c.r12, &c.r13, &c.r14, &c.r15};
+  for (int i = 0; i < 16; i++) at.gpr[i] = *regs[i];
+  for (int i = 0; i < 16; i++) std::memcpy(at.xmm[i], c.xmm[i].b, 16);
+  if (service) {
+    // With no debugger, the kernel skips a byte past int 2D and reports
+    // the breakpoint one byte back: at the next instruction, with the
+    // service and its arguments (rax, rcx, rdx) as parameters.
+    at.rip = va + len;
+    const uint64_t params[3] = {c.rax, c.rcx, c.rdx};
+    Raise(c, 0x80000003, 0, params, 3, at, va + len);
+    return true;
+  }
+  at.rip = va;  // Windows reports a breakpoint at the instruction
+  const uint64_t param = 0;
+  Raise(c, 0x80000003, 0, &param, 1, at, va + len);  // EXCEPTION_BREAKPOINT
+  return true;
+}
+
+// AddVectoredExceptionHandler(first, handler): called before the frames'
+// handlers (Raise), first ones at the front. The handle is a guest block.
+HLE64("kernel32.dll", AddVectoredExceptionHandler, 2) {
+  const gaddr handle = HeapAllocProcess(16, true);
+  std::lock_guard<std::mutex> l(g_veh_mu);
+  if (Arg(c, 0))
+    g_veh.insert(g_veh.begin(), {handle, Arg(c, 1)});
+  else
+    g_veh.push_back({handle, Arg(c, 1)});
+  return handle;
+}
+HLE64("kernel32.dll", RemoveVectoredExceptionHandler, 1) {
+  std::lock_guard<std::mutex> l(g_veh_mu);
+  for (auto it = g_veh.begin(); it != g_veh.end(); ++it)
+    if (it->first == Arg(c, 0)) {
+      g_veh.erase(it);
+      HeapFreeProcess(Arg(c, 0));
+      return 1;
+    }
+  return 0;
 }
 
 // GetThreadContext(thread, ctx): an x64 thread's own state at the call,

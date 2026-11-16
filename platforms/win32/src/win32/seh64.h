@@ -36,10 +36,16 @@ void WriteContext(gaddr ctx, const unwind::Regs& r, const Ctx& c);
 unwind::Regs ReadContext(gaddr ctx);
 
 // RaiseException: dispatches the exception from `at`. Returns if a handler
-// continued execution (c then holds the context it left); fatal if no
+// continued execution (c then holds the context it left), at `at` or, for
+// a trapping instruction, at `next` (the instruction after it); fatal if no
 // handler takes it.
 void Raise(Ctx& c, uint32_t code, uint32_t flags, const uint64_t* params, uint32_t n,
-           const unwind::Regs& at);
+           const unwind::Regs& at, gaddr next = 0);
+
+// int3 at va in lifted code (Process::guest_trap): EXCEPTION_BREAKPOINT,
+// raised with the context at the instruction, as on Windows; true if a
+// handler continued after it.
+bool RaiseTrap(Ctx& c, gaddr va);
 
 // The exception being dispatched on this thread: its record and the
 // context it was raised in (language handlers that unwind start there).
