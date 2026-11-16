@@ -30,6 +30,9 @@ void LeaveCs(gaddr cs);
 void InitCs(gaddr cs, uint32_t spin);
 // Wakes every thread blocked in a guest wait to check again.
 void WakeWaiters();
+// The lifted DLLs the EXE imports from statically, loaded and initialised
+// (DllMain) before its entry point runs, dependencies first.
+void AttachExeImports(Ctx& c);
 // A new guest thread running entry(param) (CreateThread, _beginthreadex):
 // its handle, and its id in *tid. stack 0 is the EXE's default.
 uint32_t NewThread(uint64_t stack, gaddr entry, uint64_t param, bool suspended, uint32_t* tid);

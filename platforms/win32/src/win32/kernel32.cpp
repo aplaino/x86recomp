@@ -229,9 +229,17 @@ HLE64("kernel32.dll", GetVersionExW, 1) {
 HLE64("kernel32.dll", EncodePointer, 1) { return Arg(c, 0); }
 HLE64("kernel32.dll", DecodePointer, 1) { return Arg(c, 0); }
 
-HLE("kernel32.dll", GetVersionExA, 1) {
-  uint32_t vi = Arg(c, 0);
+HLE64("kernel32.dll", GetVersionExA, 1) {
+  gaddr vi = Arg(c, 0);
   uint32_t size = Rd32(vi);
+  if (g_proc->x64) {  // Windows 10, as GetVersionExW and the PEB say
+    std::memset(GPtr(vi + 4), 0, size - 4);
+    Wr32(vi + 4, 10);
+    Wr32(vi + 12, 19045);
+    Wr32(vi + 16, 2);
+    if (size >= 156) Wr8(vi + 154, 1);  // VER_NT_WORKSTATION
+    return 1;
+  }
   Wr32(vi + 4, 5);
   Wr32(vi + 8, 1);
   Wr32(vi + 12, 2600);
@@ -276,6 +284,59 @@ bool CallDllMain(Ctx& c, Module& m, uint32_t reason) {
   return uint32_t(CallGuest(c, m.img.entry, {m.img.image_base, reason, 0})) != 0;
 }
 
+// The lifted DLLs m imports from statically, each once.
+std::vector<Module*> LiftedDeps(Module& m) {
+  std::vector<Module*> deps;
+  for (const PeImport& imp : m.img.imports) {
+    Module* d = LiftedDll(imp.dll);
+    if (d && d != &m && std::find(deps.begin(), deps.end(), d) == deps.end()) deps.push_back(d);
+  }
+  return deps;
+}
+
+void ReleaseLifted(Ctx& c, Module& m);
+
+// Takes a reference on each lifted DLL m imports from, loading (and
+// initialising) those not loaded yet, then runs m's DllMain(PROCESS_ATTACH):
+// as the Windows loader orders it, a module's static dependencies are
+// initialised before it, and they stay loaded while it is. Caller holds
+// the loader lock and has counted m's reference.
+bool AttachLifted(Ctx& c, Module& m) {
+  std::vector<Module*> taken;
+  auto undo = [&] {
+    for (Module* d : taken)
+      if (--d->refs == 0) ReleaseLifted(c, *d);
+  };
+  for (Module* d : LiftedDeps(m)) {
+    if (d->refs++) {
+      taken.push_back(d);
+      continue;
+    }
+    if (d->stale) MapModule(*d);
+    if (!AttachLifted(c, *d)) {
+      WarnF("%s: DllMain of its dependency %s failed\n", m.name.c_str(), d->name.c_str());
+      d->refs = 0;
+      undo();
+      return false;
+    }
+    taken.push_back(d);
+  }
+  if (!CallDllMain(c, m, kDllProcessAttach)) {
+    undo();
+    return false;
+  }
+  return true;
+}
+
+// The last reference to m is gone: DllMain(PROCESS_DETACH), then its
+// references on its dependencies, which unload in turn when that was their
+// last. m maps afresh on its next load (CallDllMain marked it stale).
+void ReleaseLifted(Ctx& c, Module& m) {
+  CallDllMain(c, m, kDllProcessDetach);
+  for (Module* d : LiftedDeps(m))
+    if (d->refs && --d->refs == 0) ReleaseLifted(c, *d);
+}
+
 // A guest string argument, ANSI or UTF-16.
 std::string GArg(gaddr p, bool wide) { return wide ? Narrow(GWStr(p)) : GStr(p); }
 
@@ -297,6 +358,21 @@ gaddr ModuleHandleOf(gaddr name, bool wide) {
 }
 
 HLE64("kernel32.dll", GetModuleHandleA, 1) { return ModuleHandleOf(Arg(c, 0), false); }
+
+// GetModuleHandleExW(flags, name or address, &module): FROM_ADDRESS (4)
+// finds the image holding the address; references are not counted (lifted
+// DLLs loaded at startup stay mapped).
+HLE64("kernel32.dll", GetModuleHandleExW, 3) {
+  gaddr h = 0;
+  if (Arg(c, 0) & 4) {
+    if (const PeImage* img = ImageAt(Arg(c, 1))) h = img->image_base;
+    if (!h) SetLastError(kErrorModNotFound);
+  } else {
+    h = ModuleHandleOf(Arg(c, 1), true);
+  }
+  WrPtr(Arg(c, 2), h);
+  return h ? 1 : 0;
+}
 HLE64("kernel32.dll", GetModuleHandleW, 1) { return ModuleHandleOf(Arg(c, 0), true); }
 
 uint64_t GetModuleFileName(Ctx& c, bool wide) {
@@ -330,7 +406,7 @@ gaddr LoadModule(Ctx& c, const char* api, const std::string& n) {
     std::lock_guard<std::recursive_mutex> l(g_loader_mu);
     if (m->refs++) return m->img.image_base;
     if (m->stale) MapModule(*m);
-    if (!CallDllMain(c, *m, kDllProcessAttach)) {
+    if (!AttachLifted(c, *m)) {
       WarnF("%s(%s): DllMain failed\n", api, n.c_str());
       m->refs = 0;
       SetLastError(kErrorDllInitFailed);
@@ -359,8 +435,7 @@ HLE64("kernel32.dll", LoadLibraryExW, 3) {
 
 HLE64("kernel32.dll", FreeLibrary, 1) {
   std::lock_guard<std::recursive_mutex> l(g_loader_mu);
-  if (Module* m = LoadedDllAt(Arg(c, 0)); m && --m->refs == 0)
-    CallDllMain(c, *m, kDllProcessDetach);
+  if (Module* m = LoadedDllAt(Arg(c, 0)); m && --m->refs == 0) ReleaseLifted(c, *m);
   return 1;
 }
 
@@ -403,14 +478,15 @@ uint64_t StartupInfo(gaddr si) {
 HLE64("kernel32.dll", GetStartupInfoA, 1) { return StartupInfo(Arg(c, 0)); }
 HLE64("kernel32.dll", GetStartupInfoW, 1) { return StartupInfo(Arg(c, 0)); }
 
-HLE("kernel32.dll", GetEnvironmentStrings, 0) { return g_win32->environ_a; }
+HLE64("kernel32.dll", GetEnvironmentStrings, 0) { return g_win32->environ_a; }
 HLE64("kernel32.dll", GetEnvironmentStringsW, 0) { return g_win32->environ_w; }
-HLE("kernel32.dll", FreeEnvironmentStringsA, 1) { return 1; }
+HLE64("kernel32.dll", FreeEnvironmentStringsA, 1) { return 1; }
 HLE64("kernel32.dll", FreeEnvironmentStringsW, 1) { return 1; }
 
-HLE("kernel32.dll", GetEnvironmentVariableA, 3) {
+HLE64("kernel32.dll", GetEnvironmentVariableA, 3) {
   std::string name = GStr(Arg(c, 0));
-  uint32_t buf = Arg(c, 1), size = Arg(c, 2);
+  gaddr buf = Arg(c, 1);
+  uint32_t size = uint32_t(Arg(c, 2));
   const char* env = g_proc->mem.ptr<const char>(g_win32->environ_a);
   std::string key = Lower(name) + "=";
   for (const char* e = env; *e; e += std::strlen(e) + 1) {
@@ -471,10 +547,22 @@ HLE("kernel32.dll", SetThreadExecutionState, 1) {
 
 // Console control events (Ctrl+C, close) are never delivered: the host
 // terminal's signals end the process directly. Registration succeeds.
-HLE("kernel32.dll", SetConsoleCtrlHandler, 2) { return 1; }
+HLE64("kernel32.dll", SetConsoleCtrlHandler, 2) { return 1; }
+
+// There is no console: its handles are files to the CRT, which asks these
+// to tell them apart.
+HLE64("kernel32.dll", GetConsoleMode, 2) {
+  SetLastError(kErrorInvalidHandle);
+  return 0;
+}
+HLE64("kernel32.dll", GetConsoleCP, 0) { return 437; }
+HLE64("kernel32.dll", AreFileApisANSI, 0) { return 1; }
 
 HLE64("kernel32.dll", GetSystemDirectoryA, 2) {
   return CopyOut(Arg(c, 0), uint32_t(Arg(c, 1)), "C:\\WINDOWS\\system32");
+}
+HLE64("kernel32.dll", GetWindowsDirectoryA, 2) {
+  return CopyOut(Arg(c, 0), uint32_t(Arg(c, 1)), "C:\\WINDOWS");
 }
 
 HLE64("kernel32.dll", GetCurrentProcess, 0) { return HandleRet(0xFFFFFFFF); }
@@ -531,7 +619,7 @@ HLE64("kernel32.dll", GetPhysicallyInstalledSystemMemory, 1) {
   return 1;
 }
 
-HLE("kernel32.dll", SetHandleCount, 1) { return Arg(c, 0); }
+HLE64("kernel32.dll", SetHandleCount, 1) { return Arg(c, 0); }
 
 // Looked up dynamically by the CRT (Pentium FDIV check). Matches the CPU
 // that Cpuid() reports: MMX yes, no SSE/3DNow!, no FDIV erratum.
@@ -662,15 +750,19 @@ HLE("kernel32.dll", GetComputerNameA, 2) {
 
 HLE64("kernel32.dll", GetProcessHeap, 0) { return g_win32->process_heap; }
 
-HLE("kernel32.dll", HeapCreate, 3) {
+HLE64("kernel32.dll", HeapCreate, 3) {
   GuestHeap* h = NewHeap(Arg(c, 1), Arg(c, 2));
   return h ? h->handle() : 0;
 }
 
-HLE("kernel32.dll", HeapDestroy, 1) {
+HLE64("kernel32.dll", HeapDestroy, 1) {
   std::lock_guard<std::mutex> l(g_heaps_mu);
   return g_heaps.erase(Arg(c, 0)) ? 1 : 0;
 }
+
+// (heap, class, info, length): the low-fragmentation heap and
+// terminate-on-corruption are what the guest heaps are like anyway.
+HLE64("kernel32.dll", HeapSetInformation, 4) { return 1; }
 
 HLE64("kernel32.dll", HeapAlloc, 3) {
   GuestHeap* h = FindHeap(Arg(c, 0));
@@ -718,6 +810,10 @@ HLE("kernel32.dll", GlobalFree, 1) {
   g_process_heap->Free(Arg(c, 0));
   return 0;
 }
+
+// LocalAlloc(flags, size): LMEM_MOVEABLE handles are plain pointers, as for
+// GlobalAlloc; LMEM_ZEROINIT 0x40.
+HLE64("kernel32.dll", LocalAlloc, 2) { return HeapAllocProcess(Arg(c, 1), Arg(c, 0) & 0x40); }
 
 HLE64("kernel32.dll", LocalFree, 1) {
   if (Arg(c, 0)) g_process_heap->Free(Arg(c, 0));
@@ -905,7 +1001,7 @@ gaddr TlsSlot(gaddr teb, uint32_t i) {
   return g_proc->x64 ? teb + 0x1480 + 8 * i : teb + 0xE10 + 4 * i;
 }
 
-HLE64("kernel32.dll", TlsAlloc, 0) {
+uint64_t TlsAllocImpl() {
   GuestSyncPoint sync;
   std::lock_guard<std::mutex> l(g_tls_mu);
   for (uint32_t i = 0; i < 64; i++)
@@ -918,9 +1014,8 @@ HLE64("kernel32.dll", TlsAlloc, 0) {
 
 // Clears the slot in every thread, as Windows does, so that a TlsAlloc
 // handing the index out again finds it null everywhere.
-HLE64("kernel32.dll", TlsFree, 1) {
+uint64_t TlsFreeImpl(uint32_t i) {
   GuestSyncPoint sync;
-  const uint32_t i = uint32_t(Arg(c, 0));
   std::lock_guard<std::mutex> l(g_tls_mu);
   if (i >= 64 || !(g_tls_used & (1ull << i))) {
     SetLastError(kErrorInvalidParameter);
@@ -931,19 +1026,29 @@ HLE64("kernel32.dll", TlsFree, 1) {
   return 1;
 }
 
-HLE64("kernel32.dll", TlsGetValue, 1) {
-  uint32_t i = uint32_t(Arg(c, 0));
+uint64_t TlsGetValueImpl(uint32_t i) {
   if (i >= 64) return 0;
   SetLastError(0);
   return RdPtr(TlsSlot(Teb(CurrentThread()), i));
 }
 
-HLE64("kernel32.dll", TlsSetValue, 2) {
-  uint32_t i = uint32_t(Arg(c, 0));
+uint64_t TlsSetValueImpl(uint32_t i, uint64_t v) {
   if (i >= 64) return 0;
-  WrPtr(TlsSlot(Teb(CurrentThread()), i), Arg(c, 1));
+  WrPtr(TlsSlot(Teb(CurrentThread()), i), v);
   return 1;
 }
+
+HLE64("kernel32.dll", TlsAlloc, 0) { return TlsAllocImpl(); }
+HLE64("kernel32.dll", TlsFree, 1) { return TlsFreeImpl(uint32_t(Arg(c, 0))); }
+HLE64("kernel32.dll", TlsGetValue, 1) { return TlsGetValueImpl(uint32_t(Arg(c, 0))); }
+HLE64("kernel32.dll", TlsSetValue, 2) { return TlsSetValueImpl(uint32_t(Arg(c, 0)), Arg(c, 1)); }
+
+// Fiber local storage: no fibers here, so a thread's FLS is its TLS. The
+// callback FlsAlloc takes (for a thread's exit) is not called.
+HLE64("kernel32.dll", FlsAlloc, 1) { return TlsAllocImpl(); }
+HLE64("kernel32.dll", FlsFree, 1) { return TlsFreeImpl(uint32_t(Arg(c, 0))); }
+HLE64("kernel32.dll", FlsGetValue, 1) { return TlsGetValueImpl(uint32_t(Arg(c, 0))); }
+HLE64("kernel32.dll", FlsSetValue, 2) { return TlsSetValueImpl(uint32_t(Arg(c, 0)), Arg(c, 1)); }
 
 // ---- critical sections ---------------------------------------------------
 // Windows XP's algorithm on the guest CRITICAL_SECTION itself, so the
@@ -1316,8 +1421,9 @@ HLE64("kernel32.dll", GetStringTypeW, 4) {
   return 1;
 }
 
-HLE("kernel32.dll", GetStringTypeA, 5) {
-  uint32_t type = Arg(c, 1), src = Arg(c, 2), out = Arg(c, 4);
+HLE64("kernel32.dll", GetStringTypeA, 5) {
+  uint32_t type = uint32_t(Arg(c, 1));
+  gaddr src = Arg(c, 2), out = Arg(c, 4);
   int32_t n = int32_t(Arg(c, 3));
   if (type != kCtCtype1) return 0;
   if (n < 0) n = int32_t(std::strlen(g_proc->mem.ptr<const char>(src)) + 1);
@@ -1355,8 +1461,9 @@ HLE64("kernel32.dll", CompareStringW, 6) {
   return r < 0 ? 1 : r == 0 ? 2 : 3;
 }
 
-HLE("kernel32.dll", LCMapStringA, 6) {
-  uint32_t flags = Arg(c, 1), src = Arg(c, 2), dst = Arg(c, 4);
+HLE64("kernel32.dll", LCMapStringA, 6) {
+  uint32_t flags = uint32_t(Arg(c, 1));
+  gaddr src = Arg(c, 2), dst = Arg(c, 4);
   int32_t n = int32_t(Arg(c, 3)), cap = int32_t(Arg(c, 5));
   if (n < 0) n = int32_t(std::strlen(g_proc->mem.ptr<const char>(src)) + 1);
   if (!cap) return uint32_t(n);
@@ -1443,5 +1550,16 @@ HLE64("kernel32.dll", GetLocaleInfoA, 4) { return LocaleInfo(c, false); }
 HLE64("kernel32.dll", GetLocaleInfoW, 4) { return LocaleInfo(c, true); }
 
 }  // namespace
+
+void AttachExeImports(Ctx& c) {
+  std::lock_guard<std::recursive_mutex> l(g_loader_mu);
+  for (const PeImport& imp : g_win32->img.imports) {
+    Module* d = LiftedDll(imp.dll);
+    if (!d || d->refs) continue;
+    d->refs = 1;
+    if (!AttachLifted(c, *d)) FatalF("%s: DllMain failed at startup", d->name.c_str());
+  }
+}
+
 }  // namespace hle
 }  // namespace recomp

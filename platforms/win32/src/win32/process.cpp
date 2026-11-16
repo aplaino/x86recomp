@@ -154,11 +154,28 @@ const PeImage* ImageAt(gaddr va) {
   return nullptr;
 }
 
-void MapModule(Module& m) {
+namespace {
+
+// An import from a lifted DLL is that DLL's export (by name or ordinal);
+// anything else is an HLE thunk.
+gaddr BindImport(const std::string& dll, const std::string& name) {
+  const std::string n = hle::NormaliseDll(dll);
+  for (const Module& m : g_win32->modules) {
+    if (m.name != n) continue;
+    const bool by_ordinal = name.size() > 1 && name[0] == '#';
+    const uint32_t ordinal = by_ordinal ? uint32_t(std::stoul(name.substr(1))) : 0;
+    for (const PeExport& e : m.img.exports)
+      if (by_ordinal ? e.ordinal == ordinal : e.name == name) return e.va;
+    FatalF("import %s!%s: the lifted DLL does not export it", n.c_str(), name.c_str());
+  }
+  return hle::ImportThunk(dll, name);
+}
+
+void MapModuleWith(Module& m, const ImportBinder& bind) {
   Process& p = *g_proc;
   if (m.img.image_size) p.mem.Decommit(m.img.image_base, m.img.image_size);
   std::string err;
-  if (!m.img.Load(m.host_path, p.mem, &err, m.base, hle::ImportThunk))
+  if (!m.img.Load(m.host_path, p.mem, &err, m.base, bind))
     FatalF("lifted DLL %s: %s", m.name.c_str(), err.c_str());
   // Windows XP did not set up static TLS for LoadLibrary'd DLLs either,
   // so 32-bit DLLs of that era have none. x64 ones get a slot of their own
@@ -178,6 +195,10 @@ void MapModule(Module& m) {
   m.stale = false;
 }
 
+}  // namespace
+
+void MapModule(Module& m) { MapModuleWith(m, BindImport); }
+
 int RunProcess(const win32::GameConfig& game, const std::string& exe_path,
                const std::string& game_dir, const std::string& game_args) {
   g_win32 = new Win32Process;
@@ -191,16 +212,21 @@ int RunProcess(const win32::GameConfig& game, const std::string& exe_path,
   };
   p.pump_events = PumpHostEvents;
   w.game_args = game_args;
-  std::string err;
-  if (!w.img.Load(exe_path, p.mem, &err, 0, hle::ImportThunk))
-    FatalF("%s", err.c_str());
+  // The EXE and the lifted DLLs may import from each other statically (a
+  // game's middleware, an engine split into DLLs). So every lifted DLL's
+  // export table is read first, its imports left unbound; then each DLL is
+  // mapped again with its imports bound, and the EXE after them.
   for (const auto& d : game.lifted_dlls) {
     Module& m = w.modules.emplace_back();
     m.name = hle::NormaliseDll(d.name);
     m.host_path = HostPath(GuestGameDir() + "\\" + d.name);
     m.base = d.base;
-    MapModule(m);
+    MapModuleWith(m, [](const std::string&, const std::string&) { return gaddr(0); });
   }
+  for (Module& m : w.modules) MapModule(m);
+  std::string err;
+  if (!w.img.Load(exe_path, p.mem, &err, 0, BindImport))
+    FatalF("%s", err.c_str());
 
   if (p.x64) {
     // Everything above 4 GiB, below the TEBs.
@@ -256,7 +282,10 @@ int RunProcess(const win32::GameConfig& game, const std::string& exe_path,
   Thread* main = CreateGuestThread(w.img.stack_reserve);
   RegisterMainThread(main);
   const gaddr entry = game.entry ? gaddr(game.entry) : w.img.entry;
-  return int(RunMainThread(main, [&](Ctx& c) { return CallGuest(c, entry, {}); }));
+  return int(RunMainThread(main, [&](Ctx& c) {
+    hle::AttachExeImports(c);
+    return CallGuest(c, entry, {});
+  }));
 }
 
 }  // namespace recomp

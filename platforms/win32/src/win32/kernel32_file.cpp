@@ -487,7 +487,7 @@ HLE64("kernel32.dll", SetEndOfFile, 1) {
   return 1;
 }
 
-HLE("kernel32.dll", GetFileSize, 2) {
+HLE64("kernel32.dll", GetFileSize, 2) {
   int fd = FdOf(Arg(c, 0));
   struct stat st;
   if (fd < 0 || fstat(fd, &st) != 0) {
