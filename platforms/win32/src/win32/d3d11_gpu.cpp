@@ -993,8 +993,11 @@ bool OnGpu(const Resource& r) { return (r.image || r.depth_target) && r.gpu_newe
 void CpuCopyRegion(Resource& d, uint32_t dsub, uint32_t dx, uint32_t dy, uint32_t dz, Resource& s,
                    uint32_t ssub, const uint32_t* box) {
   const uint32_t smip = ssub % s.mips, dmip = dsub % d.mips;
-  bool block;
+  bool block, dblock;
   const uint32_t bpp = FormatBytes(s.format, &block), div = block ? 4 : 1;
+  // Direct3D copies only between formats of the same size (one typeless
+  // family); it drops anything else.
+  if (FormatBytes(d.format, &dblock) != bpp || dblock != block) return;
   uint32_t x0 = 0, y0 = 0, z0 = 0, x1 = s.MipWidth(smip), y1 = s.MipHeight(smip),
            z1 = s.MipDepth(smip);
   if (box) x0 = box[0], y0 = box[1], z0 = box[2], x1 = box[3], y1 = box[4], z1 = box[5];
