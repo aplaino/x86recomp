@@ -57,6 +57,9 @@ std::atomic<bool> g_dump_done{false};
 std::atomic<int> g_sample_state{0};  // 1 asked, 2 taken
 void* g_sample_frames[96];
 int g_sample_n = 0;
+// The interrupted instruction: backtrace() from the handler starts at the
+// interrupted function's return address, one frame above where it was.
+void* g_sample_pc = nullptr;
 std::atomic<pthread_t> g_present_th{};  // the thread that presents frames
 
 int64_t NowMs() {
@@ -75,9 +78,26 @@ void WriteAll(int fd, const char* s) {
   }
 }
 
+// The program counter in a signal's context, or null where unknown.
+void* InterruptedPc(void* uc) {
+#if defined(__APPLE__) && defined(__aarch64__)
+  return reinterpret_cast<void*>(static_cast<ucontext_t*>(uc)->uc_mcontext->__ss.__pc);
+#elif defined(__APPLE__) && defined(__x86_64__)
+  return reinterpret_cast<void*>(static_cast<ucontext_t*>(uc)->uc_mcontext->__ss.__rip);
+#elif defined(__linux__) && defined(__aarch64__)
+  return reinterpret_cast<void*>(static_cast<ucontext_t*>(uc)->uc_mcontext.pc);
+#elif defined(__linux__) && defined(__x86_64__)
+  return reinterpret_cast<void*>(static_cast<ucontext_t*>(uc)->uc_mcontext.gregs[REG_RIP]);
+#else
+  (void)uc;
+  return nullptr;
+#endif
+}
+
 // Runs on the interrupted thread.
-void OnDumpSignal(int) {
+void OnDumpSignal(int, siginfo_t*, void* uc) {
   if (g_sample_state.load() == 1) {
+    g_sample_pc = InterruptedPc(uc);
     g_sample_n = backtrace(g_sample_frames, 96);
     g_sample_state.store(2);
     return;
@@ -148,9 +168,14 @@ std::string SampleStack(pthread_t th) {
   }
   std::string out;
   int kept = 0;
-  for (int i = 2; i < g_sample_n && kept < 12; i++) {
+  // The interrupted instruction first, then the return addresses.
+  void* frames[97];
+  int n = 0;
+  if (g_sample_pc) frames[n++] = g_sample_pc;
+  for (int i = 2; i < g_sample_n; i++) frames[n++] = g_sample_frames[i];
+  for (int i = 0; i < n && kept < 12; i++) {
     Dl_info info;
-    if (!dladdr(g_sample_frames[i], &info) || !info.dli_sname) continue;
+    if (!dladdr(frames[i], &info) || !info.dli_sname) continue;
     int st = 0;
     char* dm = abi::__cxa_demangle(info.dli_sname, nullptr, nullptr, &st);
     std::string n = st == 0 && dm ? dm : info.dli_sname;
@@ -167,7 +192,7 @@ std::string SampleStack(pthread_t th) {
     if (!kept) {
       char off[24];
       std::snprintf(off, sizeof off, "+0x%lx",
-                    (unsigned long)((char*)g_sample_frames[i] - (char*)info.dli_saddr));
+                    (unsigned long)((char*)frames[i] - (char*)info.dli_saddr));
       out += off;
     }
     kept++;
@@ -256,8 +281,8 @@ void StartWatchdog() {
   void* f[2];
   backtrace(f, 2);
   struct sigaction sa{};
-  sa.sa_handler = OnDumpSignal;
-  sa.sa_flags = SA_RESTART;
+  sa.sa_sigaction = OnDumpSignal;
+  sa.sa_flags = SA_RESTART | SA_SIGINFO;
   sigemptyset(&sa.sa_mask);
   sigaction(SIGUSR2, &sa, nullptr);
   std::thread(WatchdogMain).detach();
