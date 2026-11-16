@@ -255,7 +255,8 @@ int RunProcess(const win32::GameConfig& game, const std::string& exe_path,
 
   Thread* main = CreateGuestThread(w.img.stack_reserve);
   RegisterMainThread(main);
-  return int(RunMainThread(main, [&](Ctx& c) { return CallGuest(c, w.img.entry, {}); }));
+  const gaddr entry = game.entry ? gaddr(game.entry) : w.img.entry;
+  return int(RunMainThread(main, [&](Ctx& c) { return CallGuest(c, entry, {}); }));
 }
 
 }  // namespace recomp
