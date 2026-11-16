@@ -929,6 +929,32 @@ void InsnEmitter::EmitLocked() {
       L("if (!ok) { " + WriteReg(Acc(n), "a") + " }");
       return;
     }
+    case ZYDIS_MNEMONIC_BTS:
+    case ZYDIS_MNEMONIC_BTR:
+    case ZYDIS_MNEMONIC_BTC: {
+      // One atomic fetch-or/and/xor of the bit; CF is its old value. A
+      // register bit offset selects a byte relative to the operand (signed),
+      // as without lock.
+      const char* op = d_.mnemonic == ZYDIS_MNEMONIC_BTS   ? "__atomic_fetch_or"
+                       : d_.mnemonic == ZYDIS_MNEMONIC_BTR ? "__atomic_fetch_and"
+                                                           : "__atomic_fetch_xor";
+      const char* inv = d_.mnemonic == ZYDIS_MNEMONIC_BTR ? "~" : "";
+      if (IsReg(1)) {
+        L(Fmt("const int64_t off = int64_t(%s(%s));",
+              n == 8 ? "int64_t" : n == 2 ? "int16_t" : "int32_t", Read(1).c_str()));
+        L(X64() ? "const uint64_t a = m0 + uint64_t(off >> 3);"
+                : "const uint32_t a = uint32_t(m0 + uint32_t(off >> 3));");
+        L("const uint32_t bit = uint32_t(off) & 7u;");
+        L("uint8_t* p = ::recomp::lift::AtomicPtr<uint8_t>(B, a);");
+        L(Fmt("const uint8_t old = %s(p, uint8_t(%s(1u << bit)), __ATOMIC_SEQ_CST);", op, inv));
+      } else {
+        L(Fmt("const uint32_t bit = %s & %du;", Read(1).c_str(), n * 8 - 1));
+        L(Fmt("%s* p = ::recomp::lift::AtomicPtr<%s>(B, m0);", t, t));
+        L(Fmt("const %s old = %s(p, %s(%s(%s(1) << bit)), __ATOMIC_SEQ_CST);", t, op, t, inv, t));
+      }
+      L("F.cf = (old >> bit) & 1u;");
+      return;
+    }
     default:
       Unimpl();
       return;
