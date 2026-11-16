@@ -1003,6 +1003,7 @@ bool OnGpu(const Resource& r) { return (r.image || r.depth_target) && r.gpu_newe
 // blocks).
 void CpuCopyRegion(Resource& d, uint32_t dsub, uint32_t dx, uint32_t dy, uint32_t dz, Resource& s,
                    uint32_t ssub, const uint32_t* box) {
+  if (dsub >= d.Subresources() || ssub >= s.Subresources()) return;
   const uint32_t smip = ssub % s.mips, dmip = dsub % d.mips;
   bool block, dblock;
   const uint32_t bpp = FormatBytes(s.format, &block), div = block ? 4 : 1;
@@ -1036,6 +1037,8 @@ void CpuCopyRegion(Resource& d, uint32_t dsub, uint32_t dx, uint32_t dy, uint32_
 void GpuCopy(Device& dev, Resource& d, uint32_t dsub, uint32_t dx, uint32_t dy, uint32_t dz,
              Resource& s, uint32_t ssub, const uint32_t* box) {
   std::lock_guard<std::recursive_mutex> l(dev.gpu_mu);
+  // Every caller's subresources within the resources (a buffer has one).
+  if (dsub >= d.Subresources() || ssub >= s.Subresources()) return;
   dev.stats.copies++;
   if (d.dim == Dim::Buffer) {
     GpuSyncToCpu(dev, s);

@@ -530,6 +530,7 @@ CTX_METHOD(CopySubresourceRegion) {
 CTX_METHOD(ResolveSubresource) {
   auto d = Obj<Resource>(Arg(c, 1)), s = Obj<Resource>(Arg(c, 3));
   const uint32_t dsub = uint32_t(Arg(c, 2)), ssub = uint32_t(Arg(c, 4));
+  if (dsub >= d->Subresources() || ssub >= s->Subresources()) return 0;
   Run(Ctx0(c), [=](Context&) { GpuCopy(Dev(), *d, dsub, 0, 0, 0, *s, ssub, nullptr); });
   return 0;
 }
