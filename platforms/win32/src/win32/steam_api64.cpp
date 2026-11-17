@@ -310,11 +310,13 @@ RECOMP_STEAM_METHOD("SteamUser016", "SteamUser019", 2, SteamUserGetSteamID) {
   return out;
 }
 
-// ISteamFriends (SteamFriends013 and 015): the player's name.
+// ISteamFriends (SteamFriends013 and 015): the player's name, and no
+// friends (nor anyone blocked or ignored) offline.
 RECOMP_STEAM_METHOD("SteamFriends013", "SteamFriends015", 0, SteamFriendsGetPersonaName) {
   static gaddr s = GuestString("Player");
   return s;
 }
+RECOMP_STEAM_METHOD("SteamFriends013", "SteamFriends015", 3, SteamFriendsGetFriendCount) { return 0; }
 
 #undef RECOMP_STEAM_METHOD
 
