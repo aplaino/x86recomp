@@ -76,10 +76,11 @@ struct Scope {
   Ctx& c;
   uint64_t va;
   uint32_t flags = 0;
+  // The rounding mode SoftFloat gets at each Begin (SoftFloat's state is
+  // thread-local, so forms that compute nothing, compares, never touch it).
+  uint8_t mode;
 
-  Scope(Ctx& cc, uint64_t v) : c(cc), va(v) {
-    softfloat_roundingMode = RoundingMode(c.mxcsr);
-  }
+  Scope(Ctx& cc, uint64_t v) : c(cc), va(v), mode(RoundingMode(c.mxcsr)) {}
   // DAZ: a denormal operand is the zero of its sign before anything is
   // computed with it, and raises no DE (SDM vol. 1, 10.2.3.4). Applied to
   // every floating-point operand first, so the rules below (NaNs,
@@ -94,7 +95,10 @@ struct Scope {
   void Operand(typename Fmt<D>::U v) {
     if (IsDenormal<D>(v)) flags |= kDE;
   }
-  void Begin() { softfloat_exceptionFlags = 0; }
+  void Begin() {
+    softfloat_roundingMode = mode;
+    softfloat_exceptionFlags = 0;
+  }
   void End() { flags |= FromSf(softfloat_exceptionFlags); }
   // A lane's floating-point result. A denormal one is tiny (exact or not):
   // underflow when that is unmasked; with it masked and FTZ set, the zero
@@ -620,7 +624,7 @@ void Cvtph2ps(Ctx& c, Xmm& d, const Xmm& s, int from, uint64_t va) {
 // DAZ applies to the operands; the half results are not flushed (FTZ).
 void Cvtps2ph(Ctx& c, Xmm& d, int to, const Xmm& s, uint8_t imm, uint64_t va) {
   Scope sc(c, va);
-  if (!(imm & 4)) softfloat_roundingMode = RoundingMode(uint32_t(imm & 3) << 13);
+  if (!(imm & 4)) sc.mode = RoundingMode(uint32_t(imm & 3) << 13);
   Xmm r = d;
   for (int i = 0; i < 4; i++) {
     uint32_t a = sc.Daz<false>(Lane<uint32_t>(s, i));
