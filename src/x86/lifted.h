@@ -71,6 +71,9 @@ void Dispatch(Ctx& c, uint64_t target, uint64_t va);
 void Trap(Ctx& c, uint64_t va);
 void RaiseDivideError(Ctx& c, uint64_t va);
 void Probe(Ctx& c, uint64_t va, const char* name);
+// Development (manifest note-cmov): a conditional move at va moved; the
+// thread's last ones are reported with a fatal error.
+void NoteCmov(Ctx& c, uint64_t va);
 void Flow(Ctx& c, uint64_t t, uint64_t ret, uint64_t va);
 void Xgetbv(Ctx& c);                           // ecx in, edx:eax out
 #endif
