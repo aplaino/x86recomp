@@ -1833,6 +1833,9 @@ void r_color0(inout vec4 c) {
     }
     if (st.buffers && ro.empty()) ro.resize(4, 0);
     if (st.rw_buffers && !rw_size) rw_size = 4;
+    // Offsets and sizes below are 32-bit (the GPU's regions, the landings).
+    if (rw_size > UINT32_MAX / 2 || ro.size() > UINT32_MAX / 2)
+      FatalF("gfx: a dispatch's buffers take %zu + %zu bytes", ro.size(), rw_size);
     // The read-write arena's spans that are not copied in on the GPU, each
     // after the other in the upload: zeros but for the host data in them.
     size_t host_bytes = 0;
