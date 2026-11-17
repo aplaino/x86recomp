@@ -23,14 +23,19 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <map>
 #include <mutex>
+#include <thread>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "runtime/gfx/device.h"
@@ -473,6 +478,17 @@ class GpuDevice final : public Device {
 
   ~GpuDevice() override {
     if (!dev_) return;
+    {
+      std::lock_guard<std::mutex> wl(work_mu_);
+      stop_work_ = true;
+    }
+    work_cv_.notify_all();
+    for (std::thread& t : workers_) t.join();
+    for (auto& [id, m] : made_programs_) {
+      if (m.vsh) SDL_ReleaseGPUShader(dev_, m.vsh);
+      if (m.fsh) SDL_ReleaseGPUShader(dev_, m.fsh);
+    }
+    for (auto& [k, p] : made_pipelines_) SDL_ReleaseGPUGraphicsPipeline(dev_, p);
     if (open_) SDL_SubmitGPUCommandBuffer(open_);
     SDL_WaitForGPUIdle(dev_);
     for (const InFlight& f : in_flight_) SDL_ReleaseGPUFence(dev_, f.fence);
@@ -1189,27 +1205,14 @@ void r_color0(inout vec4 c) {
       sh.samplers = std::max(sh.samplers, smp.reg + 1);
     }
     bool vertex = prog.stage == hlsl::Stage::Vertex;
-    std::string glsl = "#version 450\n" + Prelude(prog.stage, sh.samplers) + prog.glsl;
-    std::vector<uint32_t> spirv;
-    std::string log;
-    if (!GlslToSpirv(glsl, vertex ? ShaderStage::Vertex : ShaderStage::Fragment, &spirv, &log)) {
-      std::fprintf(stderr, "%s\n", glsl.c_str());
-      FatalF("gfx: compiling a translated shader (source above): %s", log.c_str());
-    }
+    const std::string glsl = "#version 450\n" + Prelude(prog.stage, sh.samplers) + prog.glsl;
+    const ProgramCode code(CompileStage(glsl, vertex ? ShaderStage::Vertex : ShaderStage::Fragment,
+                                        "a translated shader"));
     SDL_GPUShaderCreateInfo si{};
-#if defined(__APPLE__)
-    std::string msl;
-    if (!SpirvToMsl(spirv, &msl, &log)) FatalF("gfx: SPIR-V to MSL: %s", log.c_str());
-    si.code = reinterpret_cast<const Uint8*>(msl.c_str());
-    si.code_size = msl.size();
-    si.entrypoint = "main0";
-    si.format = SDL_GPU_SHADERFORMAT_MSL;
-#else
-    si.code = reinterpret_cast<const Uint8*>(spirv.data());
-    si.code_size = spirv.size() * 4;
-    si.entrypoint = "main";
-    si.format = SDL_GPU_SHADERFORMAT_SPIRV;
-#endif
+    si.code = code.code;
+    si.code_size = code.size;
+    si.entrypoint = code.entry;
+    si.format = code.format;
     si.stage = vertex ? SDL_GPU_SHADERSTAGE_VERTEX : SDL_GPU_SHADERSTAGE_FRAGMENT;
     si.num_samplers = sh.samplers;
     si.num_storage_buffers = vertex ? 1 : 0;
@@ -1428,31 +1431,44 @@ void r_color0(inout vec4 c) {
       ci.threadcount_z = d.local_size[2];
       pr.cp = SDL_CreateGPUComputePipeline(dev_, &ci);
       if (!pr.cp) FatalF("gfx: SDL_CreateGPUComputePipeline: %s", SDL_GetError());
-    } else {
-      for (bool vertex : {true, false}) {
-        const ProgramStage& st = vertex ? d.vs : d.fs;
-        const ProgramCode code(
-            CompileProgramStage(st, vertex ? ShaderStage::Vertex : ShaderStage::Fragment, nullptr));
-        SDL_GPUShaderCreateInfo si{};
-        si.code = code.code;
-        si.code_size = code.size;
-        si.entrypoint = code.entry;
-        si.format = code.format;
-        si.stage = vertex ? SDL_GPU_SHADERSTAGE_VERTEX : SDL_GPU_SHADERSTAGE_FRAGMENT;
-        si.num_samplers = st.textures;
-        si.num_storage_buffers = st.buffers ? 2 : 0;
-        si.num_uniform_buffers = ProgramUniformBlocks(st);
-        SDL_GPUShader* sh = SDL_CreateGPUShader(dev_, &si);
-        if (!sh) FatalF("gfx: SDL_CreateGPUShader (program): %s", SDL_GetError());
-        (vertex ? pr.vsh : pr.fsh) = sh;
-      }
+    }
+    const ProgramId id = next_id_++;
+    if (!pr.compute && d.background) {
+      pr.background = true;
+      pr.ready = false;
+      Enqueue({id, false, {}, [this, vs = d.vs, fs = d.fs] {
+                 Made m;
+                 m.vsh = MakeShader(vs, true);
+                 m.fsh = MakeShader(fs, false);
+                 return m;
+               }});
+    } else if (!pr.compute) {
+      pr.vsh = MakeShader(d.vs, true);
+      pr.fsh = MakeShader(d.fs, false);
     }
     pr.vs.glsl.clear();
     pr.fs.glsl.clear();
     pr.cs.glsl.clear();
-    const ProgramId id = next_id_++;
     programs_[id] = pr;
     return id;
+  }
+
+  // A program's vertex or fragment shader (on any thread).
+  SDL_GPUShader* MakeShader(const ProgramStage& st, bool vertex) {
+    const ProgramCode code(
+        CompileProgramStage(st, vertex ? ShaderStage::Vertex : ShaderStage::Fragment, nullptr));
+    SDL_GPUShaderCreateInfo si{};
+    si.code = code.code;
+    si.code_size = code.size;
+    si.entrypoint = code.entry;
+    si.format = code.format;
+    si.stage = vertex ? SDL_GPU_SHADERSTAGE_VERTEX : SDL_GPU_SHADERSTAGE_FRAGMENT;
+    si.num_samplers = st.textures;
+    si.num_storage_buffers = st.buffers ? 2 : 0;
+    si.num_uniform_buffers = ProgramUniformBlocks(st);
+    SDL_GPUShader* sh = SDL_CreateGPUShader(dev_, &si);
+    if (!sh) FatalF("gfx: SDL_CreateGPUShader (program): %s", SDL_GetError());
+    return sh;
   }
 
   void DestroyProgram(ProgramId id) override {
@@ -1460,6 +1476,25 @@ void r_color0(inout vec4 c) {
     auto it = programs_.find(id);
     if (it == programs_.end()) return;
     Flush();
+    if (it->second.background) {
+      std::unique_lock<std::mutex> wl(work_mu_);
+      made_cv_.wait(wl, [&] { return !working_.count(id); });
+      if (auto m = made_programs_.find(id); m != made_programs_.end()) {
+        it->second.vsh = m->second.vsh;
+        it->second.fsh = m->second.fsh;
+        made_programs_.erase(m);
+      }
+      for (auto p = made_pipelines_.begin(); p != made_pipelines_.end();) {
+        if (p->first.program == id) {
+          SDL_ReleaseGPUGraphicsPipeline(dev_, p->second);
+          p = made_pipelines_.erase(p);
+        } else {
+          ++p;
+        }
+      }
+      for (auto p = asked_pipelines_.begin(); p != asked_pipelines_.end();)
+        p = p->program == id ? asked_pipelines_.erase(p) : std::next(p);
+    }
     for (auto p = program_pipelines_.begin(); p != program_pipelines_.end();) {
       if (p->first.program == id) {
         SDL_ReleaseGPUGraphicsPipeline(dev_, p->second);
@@ -1683,12 +1718,13 @@ void r_color0(inout vec4 c) {
     Submit(cmd);
   }
 
-  void DrawProgram(const ProgramDraw& d) override {
+  bool DrawProgram(const ProgramDraw& d) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     auto pit = programs_.find(d.program);
-    if (pit == programs_.end() || pit->second.compute) return;
-    if (!d.indirect && (!d.vertex_count || !d.instance_count)) return;
-    const Program& pr = pit->second;
+    if (pit == programs_.end() || pit->second.compute) return true;
+    if (!d.indirect && (!d.vertex_count || !d.instance_count)) return true;
+    Program& pr = pit->second;
+    if (!ProgramReady(d.program, pr)) return false;
 
     // The pass: the colour targets (from target 0 on) and the depth.
     std::array<SDL_GPUTexture*, 4> colors{};
@@ -1718,12 +1754,14 @@ void r_color0(inout vec4 c) {
       depth = &dit->second;
       if (!n) w = depth->w, h = depth->h;
     }
-    if (!n && !depth) return;
+    if (!n && !depth) return true;
+    SDL_GPUGraphicsPipeline* pipeline = ProgramPipeline(d.program, d.state, n, fmts, depth);
+    if (!pipeline) return false;
     SetPass(colors, fmts, depth, w, h, true, levels, d.depth_layer, layers);
 
     Cmd c{};
     const Rect sc = Intersect(Clip(d.scissor, w, h), Rect{0, 0, w, h});
-    if (sc.right <= sc.left || sc.bottom <= sc.top) return;
+    if (sc.right <= sc.left || sc.bottom <= sc.top) return true;
     c.scissor = {sc.left, sc.top, sc.right - sc.left, sc.bottom - sc.top};
     c.viewport = {float(d.viewport.x), float(d.viewport.y), float(d.viewport.width),
                   float(d.viewport.height), d.viewport.min_z, d.viewport.max_z};
@@ -1764,7 +1802,7 @@ void r_color0(inout vec4 c) {
     c.count = d.vertex_count;
 
     ProgramCmd pc;
-    pc.pipeline = ProgramPipeline(d.program, d.state, n, fmts, depth);
+    pc.pipeline = pipeline;
     pc.instances = d.instance_count;
     pc.blend_constant = {d.state.blend_constant.r, d.state.blend_constant.g,
                          d.state.blend_constant.b, d.state.blend_constant.a};
@@ -1774,6 +1812,7 @@ void r_color0(inout vec4 c) {
     c.program = int(program_cmds_.size());
     program_cmds_.push_back(pc);
     cmds_.push_back(c);
+    return true;
   }
 
   void DispatchProgram(const ProgramDispatch& d) override {
@@ -2011,6 +2050,7 @@ void r_color0(inout vec4 c) {
 
   void Present() override {
     std::lock_guard<std::recursive_mutex> l(mu_);
+    wait_left_ = kWaitPerFrame;
     Flush();
     SDL_GPUCommandBuffer* cmd = Begin();
     SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
@@ -3527,6 +3567,8 @@ void r_color0(inout vec4 c) {
 
   struct Program {
     bool compute = false;
+    bool background = false;  // ProgramDesc::background
+    bool ready = true;        // its shaders are made (vsh, fsh)
     ProgramStage vs, fs, cs;  // without their GLSL
     SDL_GPUShader* vsh = nullptr;
     SDL_GPUShader* fsh = nullptr;
@@ -3555,41 +3597,43 @@ void r_color0(inout vec4 c) {
     if (p.cp) SDL_ReleaseGPUComputePipeline(dev_, p.cp);
   }
 
-  // A program stage's code as SDL_GPU takes it: its SPIR-V, or on Metal
-  // the MSL SPIRV-Cross makes of it.
+  // A stage's code (CompileGlsl) as SDL_GPU takes it.
   struct ProgramCode {
-    explicit ProgramCode(std::vector<uint32_t> s) : spirv(std::move(s)) {
+    explicit ProgramCode(std::string c) : bytes(std::move(c)) {
+      code = reinterpret_cast<const Uint8*>(bytes.data());
+      size = bytes.size();
 #if defined(__APPLE__)
-      std::string log;
-      if (!SpirvToMsl(spirv, &msl, &log)) FatalF("gfx: a program's SPIR-V to MSL: %s", log.c_str());
-      code = reinterpret_cast<const Uint8*>(msl.c_str());
-      size = msl.size();
       entry = "main0";
       format = SDL_GPU_SHADERFORMAT_MSL;
-#else
-      code = reinterpret_cast<const Uint8*>(spirv.data());
-      size = spirv.size() * 4;
 #endif
     }
-    std::vector<uint32_t> spirv;
-    std::string msl;
+    std::string bytes;
     const Uint8* code = nullptr;
     size_t size = 0;
     const char* entry = "main";
     SDL_GPUShaderFormat format = SDL_GPU_SHADERFORMAT_SPIRV;
   };
 
+  static std::string CompileStage(const std::string& glsl, ShaderStage stage, const char* what) {
+    std::string code, log;
+    if (!CompileGlsl(glsl, stage, &code, &log)) {
+      std::fprintf(stderr, "%s\n", glsl.c_str());
+      FatalF("gfx: compiling %s (source above): %s", what, log.c_str());
+    }
+    return code;
+  }
+
   static uint32_t ProgramUniformBlocks(const ProgramStage& st) {
     return (st.buffers || st.rw_buffers ? 1 : 0) + (st.uniform_bytes ? 1 : 0);
   }
 
   // The stage's prelude (ProgramDesc) in SDL_GPU's SPIR-V sets, and its
-  // SPIR-V. On Metal the binding numbers are the MSL indices SDL_GPU
+  // code. On Metal the binding numbers are the MSL indices SDL_GPU
   // expects (SpirvToMsl keeps them; sets do not matter): textures from 0
   // and storage images after them; uniform buffers from 0, then the
   // read-only storage buffers, then the read-write one.
-  static std::vector<uint32_t> CompileProgramStage(const ProgramStage& st, ShaderStage stage,
-                                                   const uint32_t* local_size) {
+  static std::string CompileProgramStage(const ProgramStage& st, ShaderStage stage,
+                                         const uint32_t* local_size) {
     if (st.textures > 16) FatalF("gfx: a program stage with %u textures", st.textures);
 #if defined(__APPLE__)
     const bool metal = true;
@@ -3647,14 +3691,7 @@ void r_color0(inout vec4 c) {
              "  return r_buf[b].z != 0u ? r_heap[w] : r_mem[w];\n}\n";
     std::snprintf(b, sizeof b, "#define R_UNIFORMS set = %d, binding = %u\n", uni, binding);
     pre += b;
-    const std::string glsl = pre + st.glsl;
-    std::vector<uint32_t> spirv;
-    std::string log;
-    if (!GlslToSpirv(glsl, stage, &spirv, &log)) {
-      std::fprintf(stderr, "%s\n", glsl.c_str());
-      FatalF("gfx: compiling a program (source above): %s", log.c_str());
-    }
-    return spirv;
+    return CompileStage(pre + st.glsl, stage, "a program");
   }
 
   struct GpuBuffer {
@@ -3938,11 +3975,35 @@ void r_color0(inout vec4 c) {
     k.bias_clamp = st.depth_bias_clamp;
     auto it = program_pipelines_.find(k);
     if (it != program_pipelines_.end()) return it->second;
-
     const Program& pr = programs_.at(id);
+    SDL_GPUGraphicsPipeline* p = nullptr;
+    if (pr.background) {
+      std::unique_lock<std::mutex> wl(work_mu_);
+      if (asked_pipelines_.insert(k).second)
+        EnqueueLocked({id, true, k, [this, k, vsh = pr.vsh, fsh = pr.fsh] {
+                         Made m;
+                         m.pipeline = MakePipeline(k, vsh, fsh);
+                         return m;
+                       }});
+      if (!AwaitMade(wl, [&] { return made_pipelines_.count(k) != 0; })) return nullptr;
+      auto m = made_pipelines_.find(k);
+      p = m->second;
+      made_pipelines_.erase(m);
+      asked_pipelines_.erase(k);
+    } else {
+      p = MakePipeline(k, pr.vsh, pr.fsh);
+    }
+    program_pipelines_[k] = p;
+    return p;
+  }
+
+  // The pipeline of key k (on any thread).
+  SDL_GPUGraphicsPipeline* MakePipeline(const ProgramKey& k, SDL_GPUShader* vsh,
+                                        SDL_GPUShader* fsh) {
+    const int targets = k.targets;
     SDL_GPUGraphicsPipelineCreateInfo pi{};
-    pi.vertex_shader = pr.vsh;
-    pi.fragment_shader = pr.fsh;
+    pi.vertex_shader = vsh;
+    pi.fragment_shader = fsh;
     static const SDL_GPUPrimitiveType kTopology[] = {
         SDL_GPU_PRIMITIVETYPE_POINTLIST, SDL_GPU_PRIMITIVETYPE_LINELIST,
         SDL_GPU_PRIMITIVETYPE_LINESTRIP, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
@@ -3989,12 +4050,84 @@ void r_color0(inout vec4 c) {
     }
     pi.target_info.color_target_descriptions = cds;
     pi.target_info.num_color_targets = Uint32(targets);
-    pi.target_info.has_depth_stencil_target = depth != nullptr;
-    pi.target_info.depth_stencil_format = depth ? depth->gpu_format : SDL_GPU_TEXTUREFORMAT_INVALID;
+    pi.target_info.has_depth_stencil_target = k.depth_format != 0;
+    pi.target_info.depth_stencil_format = SDL_GPUTextureFormat(k.depth_format);
     SDL_GPUGraphicsPipeline* p = SDL_CreateGPUGraphicsPipeline(dev_, &pi);
     if (!p) FatalF("gfx: SDL_CreateGPUGraphicsPipeline (program): %s", SDL_GetError());
-    program_pipelines_[k] = p;
     return p;
+  }
+
+  // ---- background work (ProgramDesc::background)
+  //
+  // Jobs make a program's shaders or one of its pipelines on a worker
+  // thread, outside mu_: what they make waits in made_programs_ and
+  // made_pipelines_ until the thread drawing adopts it (ProgramReady,
+  // ProgramPipeline). A draw waits for its job only while the frame's
+  // allowance lasts (wait_left_, renewed at Present).
+  struct Made {
+    SDL_GPUShader* vsh = nullptr;
+    SDL_GPUShader* fsh = nullptr;
+    SDL_GPUGraphicsPipeline* pipeline = nullptr;
+  };
+  struct Job {
+    ProgramId program = 0;
+    bool pipeline = false;  // else the program's shaders
+    ProgramKey key{};       // the pipeline's
+    std::function<Made()> make;
+  };
+  static constexpr int kWorkers = 3;
+  static constexpr std::chrono::milliseconds kWaitPerFrame{4};
+
+  void Enqueue(Job j) {
+    std::lock_guard<std::mutex> wl(work_mu_);
+    EnqueueLocked(std::move(j));
+  }
+  void EnqueueLocked(Job j) {
+    if (workers_.empty())
+      for (int i = 0; i < kWorkers; i++) workers_.emplace_back([this] { Work(); });
+    working_[j.program]++;
+    work_.push_back(std::move(j));
+    work_cv_.notify_one();
+  }
+  void Work() {
+    std::unique_lock<std::mutex> wl(work_mu_);
+    for (;;) {
+      work_cv_.wait(wl, [&] { return stop_work_ || !work_.empty(); });
+      if (work_.empty()) return;
+      Job j = std::move(work_.front());
+      work_.pop_front();
+      wl.unlock();
+      const Made m = j.make();
+      wl.lock();
+      if (j.pipeline) made_pipelines_[j.key] = m.pipeline;
+      else made_programs_[j.program] = m;
+      if (--working_[j.program] == 0) working_.erase(j.program);
+      made_cv_.notify_all();
+    }
+  }
+  // Whether `made` holds, waiting for it within the frame's allowance;
+  // wl holds work_mu_.
+  template <class F>
+  bool AwaitMade(std::unique_lock<std::mutex>& wl, F made) {
+    if (made()) return true;
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool ok = made_cv_.wait_for(wl, wait_left_, made);
+    const auto spent = std::chrono::steady_clock::now() - t0;
+    wait_left_ = spent < wait_left_ ? wait_left_ - spent : std::chrono::steady_clock::duration::zero();
+    return ok;
+  }
+  // Whether the program's shaders are made, adopting a background
+  // program's from the workers.
+  bool ProgramReady(ProgramId id, Program& pr) {
+    if (pr.ready) return true;
+    std::unique_lock<std::mutex> wl(work_mu_);
+    if (!AwaitMade(wl, [&] { return made_programs_.count(id) != 0; })) return false;
+    auto m = made_programs_.find(id);
+    pr.vsh = m->second.vsh;
+    pr.fsh = m->second.fsh;
+    made_programs_.erase(m);
+    pr.ready = true;
+    return true;
   }
 
   // DrawImage's: a triangle over the back buffer fetching the image's
@@ -4191,6 +4324,18 @@ void r_color0(inout vec4 c) {
   static constexpr size_t kMaxArena = size_t(1) << 30;
   std::map<ProgramId, Program> programs_;
   std::unordered_map<ProgramKey, SDL_GPUGraphicsPipeline*, BytesHash<ProgramKey>> program_pipelines_;
+  // Background work: the jobs, the workers and what they made (under
+  // work_mu_); the pipelines asked for and not adopted yet (under mu_).
+  std::mutex work_mu_;
+  std::condition_variable work_cv_, made_cv_;
+  std::deque<Job> work_;
+  std::vector<std::thread> workers_;
+  bool stop_work_ = false;
+  std::map<ProgramId, int> working_;  // jobs queued or running, per program
+  std::map<ProgramId, Made> made_programs_;
+  std::unordered_map<ProgramKey, SDL_GPUGraphicsPipeline*, BytesHash<ProgramKey>> made_pipelines_;
+  std::unordered_set<ProgramKey, BytesHash<ProgramKey>> asked_pipelines_;
+  std::chrono::steady_clock::duration wait_left_ = kWaitPerFrame;
   std::map<ProgramSamplerKey, SDL_GPUSampler*> program_samplers_;
   std::vector<ProgramCmd> program_cmds_;
   Arena pmem_;

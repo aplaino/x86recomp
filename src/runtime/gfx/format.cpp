@@ -31,7 +31,7 @@ void Device::ClearDepth(DepthId, float, int, int) {}
 void Device::CopyDepth(DepthId, DepthId, const Rect&) {}
 void Device::CopyImage(TextureId, int, int, const Rect&, TextureId, int, int, int, int) {}
 void Device::GenerateMips(TextureId) {}
-void Device::DrawProgram(const ProgramDraw&) {}
+bool Device::DrawProgram(const ProgramDraw&) { return true; }
 void Device::DispatchProgram(const ProgramDispatch&) {}
 uint64_t Device::WritesQueued() { return 0; }
 uint64_t Device::LandWrites(bool) { return 0; }

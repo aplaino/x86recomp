@@ -256,6 +256,12 @@ struct ProgramStage {
 struct ProgramDesc {
   ProgramStage vs, fs, cs;
   uint32_t local_size[3] = {1, 1, 1};
+  // Vertex and fragment: the program's shaders, and its pipelines as
+  // draws need them, are made on worker threads, so the thread drawing
+  // never stops for the driver's compiler (hundreds of milliseconds for a
+  // shader it has not cached). A draw waits for them only briefly; one
+  // they are not ready for is not drawn (DrawProgram).
+  bool background = false;
 };
 
 // A texture or render target for programs: `layers` array layers (6 for
@@ -505,7 +511,9 @@ class Device {
                          int dst_level, int dst_layer, int x, int y);
   // Fills levels 1 on of a colour image (every layer) from level 0.
   virtual void GenerateMips(TextureId t);
-  virtual void DrawProgram(const ProgramDraw& d);
+  // False when the draw is not drawn because its program or pipeline is
+  // still being made (ProgramDesc::background).
+  virtual bool DrawProgram(const ProgramDraw& d);
   // Runs at once (with what was drawn before it) when it has read-write
   // buffers for the host, which it writes back before returning (unless
   // land_later).
