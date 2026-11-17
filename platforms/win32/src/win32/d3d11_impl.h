@@ -11,8 +11,11 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <string>
 #include <tuple>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "runtime/gfx/device.h"
@@ -200,10 +203,55 @@ struct ContextState {
 };
 
 struct Context;
-// What a deferred context records: an operation on the context it runs
-// on (the immediate one, by ExecuteCommandList). State changes apply to
-// the recording context at once too, for its Get* methods.
-using Op = std::function<void(Context&)>;
+// What a deferred context records: operations on the context they run on
+// (the immediate one, by ExecuteCommandList), in order, and the bytes
+// they carry (Bytes). Both are kept back to back in chunks, so recording
+// allocates once per chunk rather than per operation (games record
+// thousands a frame). State changes apply to the recording context at
+// once too, for its Get* methods.
+class OpList {
+ public:
+  OpList() = default;
+  OpList(OpList&& o) noexcept { *this = std::move(o); }
+  OpList& operator=(OpList&& o) noexcept;
+  OpList(const OpList&) = delete;
+  OpList& operator=(const OpList&) = delete;
+  ~OpList() { Clear(); }
+
+  // f(Context&) runs at Run, after the operations added before it.
+  template <typename F>
+  void Add(F&& f) {
+    using T = std::decay_t<F>;
+    static_assert(alignof(T) <= kAlign, "an operation aligned past 16 bytes");
+    const size_t size = sizeof(Header) + (sizeof(T) + kAlign - 1) / kAlign * kAlign;
+    auto* h = new (Room(ops_, size, kOpChunk)) Header{
+        [](void* p, Context& x) { (*static_cast<T*>(p))(x); },
+        [](void* p) { static_cast<T*>(p)->~T(); }, size};
+    new (h + 1) T(std::forward<F>(f));
+  }
+  void Run(Context& x) const;
+  // n bytes that live as long as the list (data an operation reads).
+  uint8_t* Bytes(size_t n) {
+    return static_cast<uint8_t*>(Room(bytes_, (n + kAlign - 1) / kAlign * kAlign, kByteChunk));
+  }
+  void Clear();
+
+ private:
+  static constexpr size_t kAlign = 16, kOpChunk = 16 << 10, kByteChunk = 64 << 10;
+  struct alignas(16) Header {
+    void (*run)(void*, Context&);
+    void (*destroy)(void*);
+    size_t size;  // the header's and the operation's bytes
+  };
+  struct Chunk {
+    std::unique_ptr<uint8_t[]> mem;
+    size_t size = 0, used = 0;
+  };
+  // n bytes (a multiple of kAlign) at the end of the last chunk, or of a
+  // new one of at least `chunk` bytes.
+  static void* Room(std::vector<Chunk>& chunks, size_t n, size_t chunk);
+  std::vector<Chunk> ops_, bytes_;
+};
 
 // The immediate context or a deferred one (CreateDeferredContext). A
 // deferred context records state changes, draws, clears, copies,
@@ -212,7 +260,7 @@ using Op = std::function<void(Context&)>;
 // makes them a command list.
 struct Context : Child, ContextState {
   bool deferred = false;
-  std::vector<Op> ops;
+  OpList ops;
   // A deferred context's blocks mapped in this recording: WRITE_NO_OVERWRITE
   // appends to them.
   std::map<Resource*, std::shared_ptr<Block>> mapped;
@@ -220,7 +268,7 @@ struct Context : Child, ContextState {
 
 // FinishCommandList's result: the operations in the order recorded.
 struct CommandList : Child {
-  std::vector<Op> ops;
+  OpList ops;
 };
 
 // ---- shader programs (d3d11_link.cpp, d3d11_program.cpp)

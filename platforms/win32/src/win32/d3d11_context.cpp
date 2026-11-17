@@ -59,16 +59,31 @@ gaddr Out(const std::shared_ptr<T>& o) {
 template <typename F>
 void Set(Context& x, F f) {
   f(x);
-  if (x.deferred) x.ops.emplace_back(std::move(f));
+  if (x.deferred) x.ops.Add(std::move(f));
 }
 
 // Work for the GPU: run on the immediate context, recorded on a deferred
 // one.
 template <typename F>
 void Run(Context& x, F f) {
-  if (x.deferred) x.ops.emplace_back(std::move(f));
+  if (x.deferred) x.ops.Add(std::move(f));
   else f(x);
 }
+
+// A setter's arguments: up to kInline of them in place, the rest on the
+// heap (calls set a few slots; a vector allocated for every one).
+template <typename T, uint32_t kInline = 16>
+struct Args {
+  uint32_t n = 0;
+  T inl[kInline];
+  std::vector<T> more;
+  void Push(T v) {
+    if (n < kInline) inl[n] = std::move(v);
+    else more.push_back(std::move(v));
+    n++;
+  }
+  const T& operator[](uint32_t i) const { return i < kInline ? inl[i] : more[i - kInline]; }
+};
 
 ContextState& StateOf(Context& x) { return x; }
 
@@ -93,6 +108,52 @@ bool ReadBox(const Resource& r, uint32_t sub, gaddr p, std::array<uint32_t, 6>* 
 
 }  // namespace
 
+// ---- recorded operations (OpList) -------------------------------------------------------
+
+OpList& OpList::operator=(OpList&& o) noexcept {
+  if (this != &o) {
+    Clear();
+    ops_ = std::move(o.ops_);
+    bytes_ = std::move(o.bytes_);
+    o.ops_.clear();
+    o.bytes_.clear();
+  }
+  return *this;
+}
+
+void* OpList::Room(std::vector<Chunk>& chunks, size_t n, size_t chunk) {
+  if (chunks.empty() || chunks.back().size - chunks.back().used < n) {
+    Chunk c;
+    c.size = std::max(n, chunk);
+    c.mem.reset(new uint8_t[c.size]);  // aligned for any scalar (16 bytes)
+    chunks.push_back(std::move(c));
+  }
+  Chunk& c = chunks.back();
+  void* p = c.mem.get() + c.used;
+  c.used += n;
+  return p;
+}
+
+void OpList::Run(Context& x) const {
+  for (const Chunk& c : ops_)
+    for (size_t at = 0; at < c.used;) {
+      auto* h = reinterpret_cast<Header*>(c.mem.get() + at);
+      h->run(h + 1, x);
+      at += h->size;
+    }
+}
+
+void OpList::Clear() {
+  for (Chunk& c : ops_)
+    for (size_t at = 0; at < c.used;) {
+      auto* h = reinterpret_cast<Header*>(c.mem.get() + at);
+      at += h->size;
+      h->destroy(h + 1);
+    }
+  ops_.clear();
+  bytes_.clear();
+}
+
 #define D3D11_METHOD(iface, name) \
   HLE_NAMED_X(kDll, #iface "::" #name, iface##_##name, kCdecl, true)
 #define CTX_METHOD(name) D3D11_METHOD(ID3D11DeviceContext, name)
@@ -112,12 +173,11 @@ template <typename T, size_t N, typename Pick>
 void SetSlots(Context& x, Ctx& c, Pick pick) {
   const uint32_t start = uint32_t(Arg(c, 1)), n = uint32_t(Arg(c, 2));
   const gaddr arr = Arg(c, 3);
-  std::vector<std::shared_ptr<T>> v;
-  for (uint32_t i = 0; i < n && start + i < N; i++)
-    v.push_back(arr ? Obj<T>(Rd64(arr + 8 * i)) : nullptr);
-  Set(x, [start, v, pick](Context& y) {
+  Args<std::shared_ptr<T>> v;
+  for (uint32_t i = 0; i < n && start + i < N; i++) v.Push(arr ? Obj<T>(Rd64(arr + 8 * i)) : nullptr);
+  Set(x, [start, v = std::move(v), pick](Context& y) {
     auto& slots = pick(y);
-    for (size_t i = 0; i < v.size(); i++) slots[start + i] = v[i];
+    for (uint32_t i = 0; i < v.n; i++) slots[start + i] = v[i];
   });
 }
 template <typename T, size_t N>
@@ -130,11 +190,10 @@ void GetSlots(std::shared_ptr<T> (&slots)[N], Ctx& c) {
 void SetConstantBuffers(Context& x, int st, Ctx& c) {
   const uint32_t start = uint32_t(Arg(c, 1)), n = uint32_t(Arg(c, 2));
   const gaddr arr = Arg(c, 3);
-  std::vector<std::shared_ptr<Resource>> v;
-  for (uint32_t i = 0; i < n && start + i < 14; i++)
-    v.push_back(arr ? Obj<Resource>(Rd64(arr + 8 * i)) : nullptr);
-  Set(x, [st, start, v](Context& y) {
-    for (size_t i = 0; i < v.size(); i++) y.stage[st].cbs[start + i] = {v[i], 0, 0};
+  Args<std::shared_ptr<Resource>> v;
+  for (uint32_t i = 0; i < n && start + i < 14; i++) v.Push(arr ? Obj<Resource>(Rd64(arr + 8 * i)) : nullptr);
+  Set(x, [st, start, v = std::move(v)](Context& y) {
+    for (uint32_t i = 0; i < v.n; i++) y.stage[st].cbs[start + i] = {v[i], 0, 0};
   });
 }
 
@@ -256,12 +315,12 @@ CTX_METHOD(IAGetPrimitiveTopology) {
 CTX_METHOD(IASetVertexBuffers) {
   const uint32_t start = uint32_t(Arg(c, 1)), n = uint32_t(Arg(c, 2));
   const gaddr bufs = Arg(c, 3), strides = Arg(c, 4), offsets = Arg(c, 5);
-  std::vector<ContextState::VertexBuffer> v;
+  Args<ContextState::VertexBuffer> v;
   for (uint32_t i = 0; i < n && start + i < 32; i++)
-    v.push_back({bufs ? Obj<Resource>(Rd64(bufs + 8 * i)) : nullptr, strides ? Rd32(strides + 4 * i) : 0,
-                 offsets ? Rd32(offsets + 4 * i) : 0});
-  Set(Ctx0(c), [start, v](Context& y) {
-    for (size_t i = 0; i < v.size(); i++) y.vbs[start + i] = v[i];
+    v.Push({bufs ? Obj<Resource>(Rd64(bufs + 8 * i)) : nullptr, strides ? Rd32(strides + 4 * i) : 0,
+            offsets ? Rd32(offsets + 4 * i) : 0});
+  Set(Ctx0(c), [start, v = std::move(v)](Context& y) {
+    for (uint32_t i = 0; i < v.n; i++) y.vbs[start + i] = v[i];
   });
   return 0;
 }
@@ -310,11 +369,11 @@ CTX_METHOD(RSGetState) {
 // (count, D3D11_VIEWPORT {TopLeftX, TopLeftY, Width, Height, MinDepth, MaxDepth}*)
 CTX_METHOD(RSSetViewports) {
   const uint32_t n = std::min<uint32_t>(uint32_t(Arg(c, 1)), 16);
-  std::vector<ContextState::Viewport> v(n);
+  std::array<ContextState::Viewport, 16> v;
   for (uint32_t i = 0; i < n; i++) std::memcpy(&v[i], GPtr(Arg(c, 2) + 24 * i), 24);
-  Set(Ctx0(c), [v](Context& y) {
-    y.num_viewports = uint32_t(v.size());
-    std::copy(v.begin(), v.end(), y.viewports);
+  Set(Ctx0(c), [v, n](Context& y) {
+    y.num_viewports = n;
+    std::copy(v.begin(), v.begin() + n, y.viewports);
   });
   return 0;
 }
@@ -333,11 +392,11 @@ CTX_METHOD(RSGetViewports) {
 // (count, D3D11_RECT {left, top, right, bottom}*)
 CTX_METHOD(RSSetScissorRects) {
   const uint32_t n = std::min<uint32_t>(uint32_t(Arg(c, 1)), 16);
-  std::vector<std::array<int32_t, 4>> v(n);
+  std::array<std::array<int32_t, 4>, 16> v;
   for (uint32_t i = 0; i < n; i++) std::memcpy(v[i].data(), GPtr(Arg(c, 2) + 16 * i), 16);
-  Set(Ctx0(c), [v](Context& y) {
-    y.num_scissors = uint32_t(v.size());
-    for (size_t i = 0; i < v.size(); i++) std::copy(v[i].begin(), v[i].end(), y.scissors[i]);
+  Set(Ctx0(c), [v, n](Context& y) {
+    y.num_scissors = n;
+    for (uint32_t i = 0; i < n; i++) std::copy(v[i].begin(), v[i].end(), y.scissors[i]);
   });
   return 0;
 }
@@ -435,7 +494,7 @@ CTX_METHOD(Map) {
       if (type != kMapWriteDiscard || r->dim != Dim::Buffer)
         std::memcpy(b->Data(), r->Data(), r->size);  // what the map does not rewrite stays
       x.mapped[r.get()] = b;
-      x.ops.emplace_back([r, b](Context&) {
+      x.ops.Add([r, b](Context&) {
         r->SetContents(b);
         CpuWrote(*r, ~0u);
       });
@@ -467,7 +526,7 @@ CTX_METHOD(Unmap) {
   const uint32_t sub = r->dim == Dim::Buffer ? 0 : uint32_t(Arg(c, 2));
   Context& x = Ctx0(c);
   if (x.deferred) {
-    x.ops.emplace_back([r, sub](Context&) { CpuWrote(*r, sub); });
+    x.ops.Add([r, sub](Context&) { CpuWrote(*r, sub); });
     return 0;
   }
   std::lock_guard<std::recursive_mutex> l(Dev().gpu_mu);
@@ -512,10 +571,11 @@ CTX_METHOD(UpdateSubresource) {
            uint64_t((w + div - 1) / div) * bpp;
     if (bp) src += uint64_t(box[2]) * slice_pitch + uint64_t(box[1] / div) * pitch + box[0] / div * bpp;
   }
-  std::vector<uint8_t> bytes(GPtr(src), GPtr(src) + size);
+  uint8_t* bytes = x.ops.Bytes(size);
+  std::memcpy(bytes, GPtr(src), size);
   const bool has_box = bp != 0;
-  x.ops.emplace_back([r, sub, box, has_box, bytes, pitch, slice_pitch](Context&) {
-    GpuUpdate(Dev(), *r, sub, has_box ? box.data() : nullptr, bytes.data(), pitch, slice_pitch);
+  x.ops.Add([r, sub, box, has_box, bytes, pitch, slice_pitch](Context&) {
+    GpuUpdate(Dev(), *r, sub, has_box ? box.data() : nullptr, bytes, pitch, slice_pitch);
   });
   return 0;
 }
@@ -753,9 +813,8 @@ CTX_METHOD(FinishCommandList) {
   const bool keep = Arg(c, 1) != 0;
   auto l = std::make_shared<CommandList>();
   l->ops = std::move(x.ops);
-  x.ops.clear();
   x.mapped.clear();
-  if (keep) x.ops.emplace_back([s = ContextState(x)](Context& y) { StateOf(y) = s; });
+  if (keep) x.ops.Add([s = ContextState(x)](Context& y) { StateOf(y) = s; });
   else StateOf(x) = ContextState{};
   const gaddr out = Arg(c, 2);
   if (!out) return kS_OK;
@@ -777,7 +836,7 @@ CTX_METHOD(ExecuteCommandList) {
     ContextState saved;
     if (restore) saved = y;
     StateOf(y) = ContextState{};
-    for (const Op& op : l->ops) op(y);
+    l->ops.Run(y);
     StateOf(y) = restore ? saved : ContextState{};
     Dev().stats.executed_lists++;
   });
