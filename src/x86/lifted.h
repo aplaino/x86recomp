@@ -50,8 +50,10 @@ struct GuestResume {
 void Dispatch(Ctx& c, uint32_t target, uint32_t va);
 #endif
 // Dispatches to r.target, and again for each later GuestResume into the
-// same frame (r.ebp) thrown while that continuation runs.
-void Resume(Ctx& c, GuestResume r);
+// same frame (r.ebp) thrown while that continuation runs. `ret` is the
+// owning function's return address when its returns are checked
+// (stack-flow lifting), 0 otherwise: the continuation returns there.
+void Resume(Ctx& c, GuestResume r, uint64_t ret);
 #ifndef RECOMP_LIFT_X64
 [[noreturn]] void Unimplemented(Ctx& c, uint32_t va, const char* what);
 [[noreturn]] void BadJump(Ctx& c, uint32_t va, uint32_t target);
