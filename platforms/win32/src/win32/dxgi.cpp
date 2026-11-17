@@ -388,6 +388,7 @@ struct SwapChain : com::Object {
   Device* device = nullptr;
   uint8_t desc[72] = {};
   std::shared_ptr<Resource> buffer;
+  int mode_w = 0, mode_h = 0;  // the target ResizeTarget set; 0: the buffers' size
   uint32_t D(int at) const { return *reinterpret_cast<const uint32_t*>(desc + at); }
   void SetD(int at, uint32_t v) { *reinterpret_cast<uint32_t*>(desc + at) = v; }
   uint32_t Hwnd() const { return uint32_t(*reinterpret_cast<const uint64_t*>(desc + 48)); }
@@ -406,7 +407,7 @@ void ApplyWindowMode(SwapChain& s) {
     SetExclusiveMode(s.Hwnd(), 0, 0);
     return;
   }
-  SetExclusiveMode(s.Hwnd(), s.W(), s.H());
+  SetExclusiveMode(s.Hwnd(), s.mode_w ? s.mode_w : s.W(), s.mode_h ? s.mode_h : s.H());
   ShowWindowNoActivate(s.Hwnd());
 }
 
@@ -528,18 +529,20 @@ DXGI_METHOD(IDXGISwapChain, ResizeBuffers) {
 }
 // SetFullscreenState(fullscreen, output): the window mode only; the guest
 // resizes the buffers itself afterwards, as on Windows.
-// ResizeTarget(DXGI_MODE_DESC*): the window's client area (windowed) or
-// the display mode (fullscreen) to the mode's size; the guest resizes its
-// buffers when WM_SIZE comes, as on Windows. A zero size keeps the target.
+// ResizeTarget(DXGI_MODE_DESC*): the display mode (fullscreen) and the
+// window's client area to the mode's size; the guest resizes its buffers
+// when WM_SIZE comes, as on Windows, where the window covers the new mode.
+// The target stays the mode fullscreen uses (SetFullscreenState). A zero
+// size keeps the target.
 DXGI_METHOD(IDXGISwapChain, ResizeTarget) {
   SwapChain* s = Chain(c);
   const gaddr mode = Arg(c, 1);
   const int w = int(Rd32(mode)), h = int(Rd32(mode + 4));
   if (!w || !h) return kS_OK;
-  if (s->Windowed())
-    ResizeClientArea(s->Hwnd(), w, h);
-  else
-    SetExclusiveMode(s->Hwnd(), w, h);
+  s->mode_w = w;
+  s->mode_h = h;
+  if (!s->Windowed()) SetExclusiveMode(s->Hwnd(), w, h);
+  ResizeClientArea(s->Hwnd(), w, h);
   return kS_OK;
 }
 
