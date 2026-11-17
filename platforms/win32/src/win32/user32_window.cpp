@@ -434,14 +434,19 @@ void ActivateApp(uint32_t hwnd, bool active) {
   Post(hwnd, active ? WM_SETFOCUS : WM_KILLFOCUS, 0, 0);
 }
 
-void HandleSdlEvent(const SDL_Event& e) {
-  // Dev aid: <ID>_TRACE_INPUT=1 logs the keys and focus changes the host
-  // delivers, and whether a game window takes them.
+// Dev aid: <ID>_TRACE_INPUT=1 logs the keys, mouse buttons, focus changes
+// and cursor visibility the game sees, and whether a game window takes
+// them.
+bool TraceInput() {
   static const bool trace = [] {
     const char* v = Env("TRACE_INPUT");
     return v && *v && *v != '0';
   }();
-  if (trace) {
+  return trace;
+}
+
+void HandleSdlEvent(const SDL_Event& e) {
+  if (TraceInput()) {
     if (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP)
       WarnF("input: key %s %s (window %u -> hwnd %X)\n", SDL_GetScancodeName(e.key.scancode),
             e.type == SDL_EVENT_KEY_DOWN ? "down" : "up", unsigned(e.key.windowID),
@@ -544,7 +549,10 @@ void HandleSdlEvent(const SDL_Event& e) {
       }
       AttachClip();
       bool clipped = g_clip.on && g_clip.hwnd == h;
-      if (clipped || ExclusiveSize(h, &mw, &mh)) {
+      // In exclusive mode a cursor the game shows follows the pointer, as
+      // on Windows (menus pointed at with the mouse); a hidden one is the
+      // virtual cursor below (mouse look).
+      if (clipped || (ExclusiveSize(h, &mw, &mh) && g_cursor_count < 0)) {
         // Virtual cursor: the game recentres it with SetCursorPos every
         // frame and steers its own pointer by the difference, as on a
         // fullscreen Windows desktop. Real motion moves the virtual
@@ -568,7 +576,10 @@ void HandleSdlEvent(const SDL_Event& e) {
         }
       } else {
         int x = int((e.motion.x - cm.x0) * cm.kx), y = int((e.motion.y - cm.y0) * cm.ky);
-        if (cm.fitted) {
+        if (e.motion.which == kTestPointer) {  // already client pixels
+          x = int(e.motion.x);
+          y = int(e.motion.y);
+        } else if (cm.fitted) {
           // Over the black bars: the pointer is at the screen's edge.
           x = std::clamp(x, 0, std::max(cm.cw - 1, 0));
           y = std::clamp(y, 0, std::max(cm.ch - 1, 0));
@@ -590,6 +601,9 @@ void HandleSdlEvent(const SDL_Event& e) {
       int ox, oy;
       WindowOrigin(h, &ox, &oy);
       int x = g_mouse_x - ox, y = g_mouse_y - oy;  // where motion left it
+      if (TraceInput())
+        WarnF("input: mouse button %d %s at client %d,%d (cursor %s)\n", int(e.button.button),
+              down ? "down" : "up", x, y, g_cursor_count >= 0 ? "shown" : "hidden");
       if (e.button.button >= SDL_BUTTON_LEFT && e.button.button <= SDL_BUTTON_X2) {
         // SDL: left, middle, right, X1, X2; DirectInput: left, right, middle.
         static const uint8_t kDiButton[] = {0, 2, 1, 3, 4};
@@ -1173,6 +1187,11 @@ void SetExclusiveMode(uint32_t hwnd, int w, int h) {
     win->mode_h = h;
     sdl = win->fullscreen ? nullptr : win->sdl;
   }
+  // The screen the game sees is the mode while it is exclusive, as after a
+  // real switch (GetSystemMetrics, the desktop window's rectangle): games
+  // scale the cursor by it. Leaving the mode restores the desktop.
+  g_display_w = w ? w : g_desktop_w;
+  g_display_h = h ? h : g_desktop_h;
   if (sdl && w) RunOnUiThread([&] { SDL_SetWindowSize(sdl, ToPoints(sdl, w), ToPoints(sdl, h)); });
   UpdateFullscreen(hwnd);
 }
@@ -1633,6 +1652,10 @@ HLE64("user32.dll", GetClientRect, 2) {
   if (!w) return 0;
   int cw, ch;
   ClientSize(*w, &cw, &ch);
+  if (TraceInput()) {
+    static int lw = -1, lh = -1;
+    if (cw != lw || ch != lh) WarnF("input: GetClientRect -> %dx%d\n", (lw = cw), (lh = ch));
+  }
   Wr32(rc, 0);
   Wr32(rc + 4, 0);
   Wr32(rc + 8, uint32_t(cw));
@@ -1644,6 +1667,7 @@ HLE64("user32.dll", GetWindowRect, 2) {
   uint32_t hwnd = uint32_t(Arg(c, 0));
   gaddr rc = Arg(c, 1);
   if (hwnd == 0x00010000) {  // desktop
+    if (TraceInput()) WarnF("input: GetWindowRect(desktop) -> %dx%d\n", g_display_w, g_display_h);
     Wr32(rc, 0);
     Wr32(rc + 4, 0);
     Wr32(rc + 8, uint32_t(g_display_w));
@@ -1673,6 +1697,12 @@ HLE64("user32.dll", ScreenToClient, 2) {
   int ox, oy;
   WindowOrigin(Arg(c, 0), &ox, &oy);
   gaddr pt = Arg(c, 1);
+  if (TraceInput()) {
+    static int lx = INT32_MIN, ly = INT32_MIN;
+    const int x = int32_t(Rd32(pt)), y = int32_t(Rd32(pt + 4));
+    if (x != lx || y != ly)
+      WarnF("input: ScreenToClient(%d, %d) -> %d,%d (origin %d,%d)\n", (lx = x), (ly = y), x - ox, y - oy, ox, oy);
+  }
   Wr32(pt, Rd32(pt) - uint32_t(ox));
   Wr32(pt + 4, Rd32(pt + 4) - uint32_t(oy));
   return 1;
@@ -2292,8 +2322,13 @@ HLE64("user32.dll", CallNextHookEx, 4) { return 0; }
 
 HLE64("user32.dll", ShowCursor, 1) {
   g_cursor_count += uint32_t(Arg(c, 0)) ? 1 : -1;
-  if (g_sdl_up && !Background()) {
-    if (g_cursor_count >= 0)
+  if (TraceInput()) WarnF("input: ShowCursor(%d): count %d\n", int(Arg(c, 0) != 0), g_cursor_count);
+  // Games call it every frame, or in loops until the count changes sign:
+  // the host cursor only changes with the sign.
+  static int shown = -1;  // unknown
+  if (g_sdl_up && !Background() && shown != (g_cursor_count >= 0)) {
+    shown = g_cursor_count >= 0;
+    if (shown)
       SDL_ShowCursor();
     else
       SDL_HideCursor();
@@ -2332,12 +2367,18 @@ bool SyncedCursorPos(int32_t* sx, int32_t* sy) {
 HLE64("user32.dll", GetCursorPos, 1) {
   int32_t x = g_mouse_x, y = g_mouse_y;
   SyncedCursorPos(&x, &y);
+  if (TraceInput()) {
+    static int32_t lx = INT32_MIN, ly = INT32_MIN;
+    if (x != lx || y != ly) WarnF("input: GetCursorPos -> %d,%d\n", (lx = x), (ly = y));
+  }
   Wr32(Arg(c, 0), uint32_t(x));
   Wr32(Arg(c, 0) + 4, uint32_t(y));
   return 1;
 }
 
 HLE64("user32.dll", SetCursorPos, 2) {
+  if (TraceInput() && (g_recentre_x != int32_t(Arg(c, 0)) || g_recentre_y != int32_t(Arg(c, 1))))
+    WarnF("input: SetCursorPos(%d, %d)\n", int32_t(Arg(c, 0)), int32_t(Arg(c, 1)));
   g_mouse_x = g_recentre_x = int32_t(Arg(c, 0));
   g_mouse_y = g_recentre_y = int32_t(Arg(c, 1));
   g_last_recentre_ms = TickCount();
