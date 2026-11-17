@@ -847,7 +847,12 @@ void RunOnUiThread(const std::function<void()>& fn) {
 void EnsureSdlVideo() {
   if (g_sdl_up) return;
   if (!OnMainThread()) FatalF("SDL video requested off the main thread");
-  if (Background()) SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
+  if (Background()) {
+    SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
+    // Never the foreground app (macOS): an automated run would otherwise
+    // take the keyboard from whatever the person at the desktop is using.
+    SDL_SetHint(SDL_HINT_MAC_BACKGROUND_APP, "1");
+  }
   // Leave SIGINT/SIGTERM alone: SDL would turn them into quit events the
   // game may ignore, making the process hard to stop.
   SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
