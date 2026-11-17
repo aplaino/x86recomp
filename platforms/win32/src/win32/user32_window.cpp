@@ -1496,7 +1496,7 @@ HLE64("user32.dll", ShowWindow, 2) {
 
 // CloseWindow minimizes (it does not destroy).
 HLE("user32.dll", CloseWindow, 1) {
-  uint32_t show = ProcAddress(ModuleHandle("user32.dll"), "ShowWindow");
+  gaddr show = ProcAddress(ModuleHandle("user32.dll"), "ShowWindow");
   CallGuest(c, show, {Arg(c, 0), 6 /* SW_MINIMIZE */});
   return 1;
 }
@@ -2021,7 +2021,7 @@ uint64_t DefWindowProcImpl(Ctx& c) {
   switch (msg) {
     case WM_NCCREATE: return 1;
     case WM_CLOSE: {
-      uint32_t destroy = ProcAddress(ModuleHandle("user32.dll"), "DestroyWindow");
+      gaddr destroy = ProcAddress(ModuleHandle("user32.dll"), "DestroyWindow");
       CallGuest(c, destroy, {hwnd});
       return 0;
     }
@@ -2063,7 +2063,7 @@ constexpr uint32_t STM_SETICON = 0x0170, STM_GETICON = 0x0171, STM_SETIMAGE = 0x
                    STM_GETIMAGE = 0x0173;
 
 uint32_t CallDefWindowProc(Ctx& c, uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp) {
-  uint32_t def = ProcAddress(ModuleHandle("user32.dll"), "DefWindowProcA");
+  gaddr def = ProcAddress(ModuleHandle("user32.dll"), "DefWindowProcA");
   return CallGuest(c, def, {hwnd, msg, wp, lp});
 }
 
@@ -2229,7 +2229,7 @@ HLE("user32.dll", MsgWaitForMultipleObjects, 5) {
   // Wait for objects or for any queued input/message (wake mask ignored).
   uint32_t n = Arg(c, 0), arr = Arg(c, 1), wait_all = Arg(c, 2),
            timeout = Arg(c, 3);
-  uint32_t wfm = ProcAddress(ModuleHandle("kernel32.dll"), "WaitForMultipleObjects");
+  gaddr wfm = ProcAddress(ModuleHandle("kernel32.dll"), "WaitForMultipleObjects");
   auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);
   for (;;) {
     PumpHostEvents();
