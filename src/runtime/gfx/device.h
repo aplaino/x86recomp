@@ -288,6 +288,9 @@ enum class StencilOp : uint8_t {
 enum class CullMode : uint8_t { None, Front, Back };
 enum class AddressMode : uint8_t { Repeat, MirroredRepeat, ClampToEdge };
 
+// Colour targets a program draw writes at once (SDL_GPU and Metal: 8).
+inline constexpr int kMaxTargets = 8;
+
 struct TargetBlend {
   bool enable = false;
   BlendFactor src_color = BlendFactor::One, dst_color = BlendFactor::Zero;
@@ -310,7 +313,7 @@ struct PipelineState {
   bool stencil = false;
   StencilFace stencil_front, stencil_back;
   uint8_t stencil_read_mask = 0xFF, stencil_write_mask = 0xFF, stencil_ref = 0;
-  TargetBlend blend[4];
+  TargetBlend blend[kMaxTargets];
   Color blend_constant{0, 0, 0, 0};
 };
 // lod_bias is not applied on Metal, whose samplers have none.
@@ -349,7 +352,7 @@ struct ProgramResources {
 struct ProgramDraw {
   ProgramId program = 0;
   PipelineState state;
-  ColorTarget targets[4];
+  ColorTarget targets[kMaxTargets];
   DepthId depth = 0;
   int depth_layer = 0;  // the layer of an array depth target drawn into
   Viewport viewport{};

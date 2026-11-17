@@ -349,13 +349,13 @@ struct ProgramKey {
   uint8_t topology, cull, front_ccw, depth_test, depth_write, depth_clip, depth_compare, stencil;
   uint8_t s_ops[2][4];  // fail, depth fail, pass, compare: front, back
   uint8_t s_read, s_write, targets, depth_format;
-  uint8_t fmt[4];
-  uint8_t blend[4][8];  // enable, src, dst, op, src alpha, dst alpha, alpha op, mask
+  uint8_t fmt[kMaxTargets];
+  uint8_t blend[kMaxTargets][8];  // enable, src, dst, op, src alpha, dst alpha, alpha op, mask
   float bias, bias_slope, bias_clamp;
 
   bool operator==(const ProgramKey& o) const { return std::memcmp(this, &o, sizeof *this) == 0; }
 };
-static_assert(sizeof(ProgramKey) == 72, "no padding: compared and hashed as bytes");
+static_assert(sizeof(ProgramKey) == 108, "no padding: compared and hashed as bytes");
 
 struct ProgramSamplerKey {
   uint8_t min, mag, mip, u, v, w, compare, compare_op;
@@ -1727,11 +1727,11 @@ void r_color0(inout vec4 c) {
     if (!ProgramReady(d.program, pr)) return false;
 
     // The pass: the colour targets (from target 0 on) and the depth.
-    std::array<SDL_GPUTexture*, 4> colors{};
-    std::array<uint8_t, 4> fmts{};
-    std::array<int, 4> levels{}, layers{};
+    std::array<SDL_GPUTexture*, kMaxTargets> colors{};
+    std::array<uint8_t, kMaxTargets> fmts{};
+    std::array<int, kMaxTargets> levels{}, layers{};
     int w = 0, h = 0, n = 0;
-    for (int i = 0; i < 4 && d.targets[i].tex; i++, n++) {
+    for (int i = 0; i < kMaxTargets && d.targets[i].tex; i++, n++) {
       auto it = textures_.find(d.targets[i].tex);
       if (it == textures_.end() || !it->second.rt || d.targets[i].level < 0 ||
           d.targets[i].level >= it->second.levels || d.targets[i].layer < 0 ||
@@ -2227,9 +2227,9 @@ void r_color0(inout vec4 c) {
     SDL_GPUTexture* color = backbuffer_;
     int w = bb_w_, h = bb_h_;
     bool alpha = false;
-    std::array<SDL_GPUTexture*, 4> targets{};
-    std::array<uint8_t, 4> fmts{};
-    std::array<int, 4> levels{};
+    std::array<SDL_GPUTexture*, kMaxTargets> targets{};
+    std::array<uint8_t, kMaxTargets> fmts{};
+    std::array<int, kMaxTargets> levels{};
     fmts[0] = SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;
     if (current_color_) {
       auto it = textures_.find(current_color_);
@@ -2259,14 +2259,14 @@ void r_color0(inout vec4 c) {
 
   // A pass with the back buffer's format (back and front buffer).
   void SetPass(SDL_GPUTexture* color, const Depth* d) {
-    std::array<uint8_t, 4> fmts{};
+    std::array<uint8_t, kMaxTargets> fmts{};
     fmts[0] = SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;
-    SetPass({color, nullptr, nullptr, nullptr}, fmts, d, bb_w_, bb_h_, false);
+    SetPass({color}, fmts, d, bb_w_, bb_h_, false);
   }
 
-  void SetPass(const std::array<SDL_GPUTexture*, 4>& colors, const std::array<uint8_t, 4>& fmts,
-               const Depth* d, int w, int h, bool alpha, const std::array<int, 4>& levels = {},
-               int depth_layer = 0, const std::array<int, 4>& layers = {}) {
+  void SetPass(const std::array<SDL_GPUTexture*, kMaxTargets>& colors, const std::array<uint8_t, kMaxTargets>& fmts,
+               const Depth* d, int w, int h, bool alpha, const std::array<int, kMaxTargets>& levels = {},
+               int depth_layer = 0, const std::array<int, kMaxTargets>& layers = {}) {
     SDL_GPUTexture* depth = d ? d->tex : nullptr;
     if (colors == pass_colors_ && levels == pass_levels_ && layers == pass_layers_ &&
         depth == pass_depth_ && depth_layer == pass_depth_layer_)
@@ -2279,7 +2279,7 @@ void r_color0(inout vec4 c) {
     pass_fmts_ = fmts;
     pass_color_ = colors[0];
     pass_targets_ = 0;
-    while (pass_targets_ < 4 && colors[pass_targets_]) pass_targets_++;
+    while (pass_targets_ < kMaxTargets && colors[pass_targets_]) pass_targets_++;
     pass_depth_ = depth;
     pass_w_ = w;
     pass_h_ = h;
@@ -2512,7 +2512,7 @@ void r_color0(inout vec4 c) {
     if (!cmd) cmd = Begin();
     if (draw && (pass_color_ || pass_depth_)) {
       // A clear clears every target, as D3D9's does.
-      SDL_GPUColorTargetInfo cts[4]{};
+      SDL_GPUColorTargetInfo cts[kMaxTargets]{};
       for (int i = 0; i < pass_targets_; i++) {
         SDL_GPUColorTargetInfo& ct = cts[i];
         ct.texture = pass_colors_[i];
@@ -3935,7 +3935,7 @@ void r_color0(inout vec4 c) {
   }
 
   SDL_GPUGraphicsPipeline* ProgramPipeline(ProgramId id, const PipelineState& st, int targets,
-                                           const std::array<uint8_t, 4>& fmts,
+                                           const std::array<uint8_t, kMaxTargets>& fmts,
                                            const Depth* depth) {
     ProgramKey k{};
     k.program = id;
@@ -4033,7 +4033,7 @@ void r_color0(inout vec4 c) {
     }
     pi.depth_stencil_state.compare_mask = k.s_read;
     pi.depth_stencil_state.write_mask = k.s_write;
-    SDL_GPUColorTargetDescription cds[4]{};
+    SDL_GPUColorTargetDescription cds[kMaxTargets]{};
     for (int i = 0; i < targets; i++) {
       SDL_GPUColorTargetDescription& cd = cds[i];
       cd.format = SDL_GPUTextureFormat(k.fmt[i]);
@@ -4222,10 +4222,10 @@ void r_color0(inout vec4 c) {
   DepthId current_depth_ = 0;
 
   // The pass being recorded: pass_color_ is target 0 of pass_colors_.
-  std::array<SDL_GPUTexture*, 4> pass_colors_{};
-  std::array<int, 4> pass_levels_{};  // mip level of each
-  std::array<int, 4> pass_layers_{};  // layer of each (programs' targets)
-  std::array<uint8_t, 4> pass_fmts_{};
+  std::array<SDL_GPUTexture*, kMaxTargets> pass_colors_{};
+  std::array<int, kMaxTargets> pass_levels_{};  // mip level of each
+  std::array<int, kMaxTargets> pass_layers_{};  // layer of each (programs' targets)
+  std::array<uint8_t, kMaxTargets> pass_fmts_{};
   int pass_targets_ = 0;
   SDL_GPUTexture* pass_color_ = nullptr;
   SDL_GPUTexture* pass_depth_ = nullptr;
