@@ -265,7 +265,11 @@ std::shared_ptr<const LinkedProgram> LinkProgram(gfx::Device& dev, const Shader&
   if (!tv->ok || (tp && !tp->ok)) return nullptr;
   auto p = std::make_shared<LinkedProgram>();
   p->vs = BindingsOf(tv->s);
-  if (tp) p->ps = BindingsOf(tp->s);
+  if (tp) {
+    p->ps = BindingsOf(tp->s);
+    p->ps_hash = ps->hash;
+    p->targets = uint8_t(tp->s.targets);
+  }
   if (!Fits(vs, tv->s, p->vs) || (ps && !Fits(*ps, tp->s, p->ps))) return nullptr;
 
   const std::string varyings = dxbc::VaryingDefines(&tv->s, tp ? &tp->s : nullptr);

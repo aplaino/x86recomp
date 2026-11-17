@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 
+#include "runtime/env.h"
 #include "runtime/log.h"
 #include "win32/com.h"
 #include "win32/d3d11_impl.h"
@@ -459,6 +461,21 @@ D3D11_METHOD(ID3D11Device, CreateUnorderedAccessView) { return CreateView(c, Vie
 
 namespace {
 
+// Dev aid: <ID>_DUMP_SHADERS=<dir> writes each shader's DXBC there as
+// <hash>.<stage>.dxbc (the hash the layer's warnings name).
+void DumpShader(const Shader& s) {
+  static const char* dir = Env("DUMP_SHADERS");
+  if (!dir || !*dir) return;
+  static const char* const kStage[] = {"vs", "ps", "cs", "hs", "ds", "gs"};
+  char name[64];
+  std::snprintf(name, sizeof name, "/%016llX.%s.dxbc", (unsigned long long)s.hash,
+                s.stage < 6 ? kStage[s.stage] : "xx");
+  if (std::FILE* f = std::fopen((std::string(dir) + name).c_str(), "wb")) {
+    std::fwrite(s.dxbc.data(), 1, s.dxbc.size(), f);
+    std::fclose(f);
+  }
+}
+
 // (bytecode, length, class linkage, &shader): the DXBC kept as is; its
 // shader version token says the stage.
 uint64_t CreateShader(Ctx& c, uint32_t stage, const char* iface) {
@@ -469,6 +486,7 @@ uint64_t CreateShader(Ctx& c, uint32_t stage, const char* iface) {
   s->stage = stage;
   s->dxbc.assign(GPtr(code), GPtr(code) + len);
   s->hash = Fnv64(s->dxbc.data(), s->dxbc.size());
+  DumpShader(*s);
   if (gaddr out = Arg(c, 4)) {
     Wr64(out, com::Publish(s, com::Vtable(kDll, iface, kChildMethods)));
     return kS_OK;
