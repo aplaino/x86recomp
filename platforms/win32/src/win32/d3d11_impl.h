@@ -321,6 +321,7 @@ struct Device : com::Object {
   struct Stats {
     uint32_t draws = 0, skipped = 0, dispatches = 0, skipped_dispatches = 0, clears = 0;
     uint32_t copies = 0, executed_lists = 0, linked = 0;
+    uint32_t waiting = 0;  // draws left out: their program is being made
   } stats;
   uint64_t frames = 0;
   // Where a dispatch's writes to a UAV slot with nothing bound go: a GPU
