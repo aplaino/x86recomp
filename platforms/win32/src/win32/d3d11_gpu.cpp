@@ -889,7 +889,12 @@ void GpuDispatch(Device& dev, Context& x, uint32_t gx, uint32_t gy, uint32_t gz)
       if (v->first_element) WARN_ONCE("d3d11: UAVs of a buffer from an element past its first\n");
       r.gpu_newer = true;
     } else {
+      // Nothing bound: zeros, and the writes go to a GPU buffer nothing
+      // reads. Written back to the host, they would make the dispatch
+      // wait for the GPU to finish all it was given.
+      if (!dev.scratch_uav) dev.scratch_uav = dev.gfx->CreateBuffer(16);
       rb.data = const_cast<uint8_t*>(s.Zeros(16));
+      rb.buffer = dev.scratch_uav;
       rb.size = 16;
     }
     sd.rw_buffers.push_back(rb);
