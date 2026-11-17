@@ -465,9 +465,10 @@ void Dispatch(Ctx& c, uint32_t target, uint32_t va) {
 
 // The continuation runs in the owning function's catch handler, where a
 // second throw would leave that function's try block: catch it here.
-void Resume(Ctx& c, GuestResume r) {
+void Resume(Ctx& c, GuestResume r, uint64_t ret) {
   for (;;) {
     try {
+      c.ret_hint = ret;
       if (g_proc->x64)
         Dispatch(c, uint64_t(r.target), uint64_t(r.from));
       else

@@ -3797,7 +3797,7 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
           : eh == p_.eh_frames.end() ? "    if (r.ebp != SJ) throw;  // another activation's frame\n"
           : sj ? "    if (r.ebp != EF && r.ebp != SJ) throw;  // another activation's frame\n"
                : "    if (r.ebp != EF) throw;  // another activation's frame\n") +
-         "    ::recomp::Resume(c, r);\n"
+         "    ::recomp::Resume(c, r, " + (p_.stack_flow ? "R" : "0") + ");\n"
          "    return;\n"
          "  }\n";
   o += "}\n\n";
