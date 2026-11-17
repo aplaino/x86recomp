@@ -3,7 +3,8 @@
 //
 // A guest interface pointer points at a small block in guest memory:
 //   +0 vtable (guest array of thunk addresses, one per method)
-//   then magic 'RCOM' (+4, or +8 in x64 guests, after the 8-byte vtable)
+//   then magic 'RCOM' (+4, or +8 in x64 guests, after the 8-byte vtable),
+//   and at +12 the object's index in the lookup table (com.cpp)
 // Pointers and vtable slots are the guest's pointer size.
 // Methods are HLE handlers named "Interface::Method" (in the DLL that
 // provides the interface), so an unimplemented method fails by name.
@@ -20,10 +21,11 @@
 
 namespace recomp::com {
 
-struct Object {
+struct Object : std::enable_shared_from_this<Object> {
   virtual ~Object() = default;
   gaddr guest = 0;  // the guest interface pointer
   uint32_t refs = 1;
+  uint32_t slot = ~0u;  // its entry in the lookup table (com.cpp)
 };
 
 // Builds (once per name) the guest vtable for `iface` with the given
@@ -34,12 +36,14 @@ gaddr Vtable(const char* dll, const char* iface, const std::vector<const char*>&
 gaddr Publish(std::shared_ptr<Object> obj, gaddr vtable);
 
 // Host object behind a guest interface pointer (nullptr if not ours).
+// Without a lock: guest code calls through its objects from many threads
+// at once (deferred contexts recording in parallel).
+Object* Find(gaddr guest);
 std::shared_ptr<Object> Lookup(gaddr guest);
 
 template <typename T>
 T* As(gaddr guest) {
-  auto o = Lookup(guest);
-  return dynamic_cast<T*>(o.get());
+  return dynamic_cast<T*>(Find(guest));
 }
 
 uint32_t AddRef(gaddr guest);
