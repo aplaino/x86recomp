@@ -1,6 +1,7 @@
 // CompileGlsl's cache (runtime/gfx/shader_compile.h): code made once is
 // kept by its source and read back the same, another source or stage is
-// another file, and a directory others may write is not used.
+// another file, the directory set is the one used even when its path
+// later names another, and a directory others may write is not used.
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -37,6 +38,10 @@ const char* kFrag2 =
     "#version 450\n"
     "layout(location = 0) out vec4 o;\n"
     "void main() { o = vec4(1.0); }\n";
+const char* kFrag3 =
+    "#version 450\n"
+    "layout(location = 0) out vec4 o;\n"
+    "void main() { o = vec4(0.0); }\n";
 
 }  // namespace
 
@@ -68,6 +73,13 @@ int main() {
   }
   Check(CompileGlsl(kFrag, ShaderStage::Fragment, &again, &log) && again == code + "\n// kept\n",
         "the kept file is used");
+
+  // The directory set stays the one used when its path names another.
+  const std::filesystem::path moved = root / "moved";
+  std::filesystem::rename(dir, moved);
+  std::filesystem::create_directories(dir);
+  Check(CompileGlsl(kFrag3, ShaderStage::Fragment, &again, &log), "compiles after a rename");
+  Check(Files(moved) == 3 && Files(dir) == 0, "the directory set is the one used");
 
   // A directory others may write is not used.
   const std::filesystem::path shared = root / "shared";
