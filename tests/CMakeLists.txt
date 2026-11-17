@@ -153,4 +153,10 @@ if(RECOMP_HOST)
   add_test(NAME gfx_ff COMMAND gfx_ff_test)
   set_tests_properties(gfx_ff PROPERTIES SKIP_RETURN_CODE 77
                        ENVIRONMENT "SDL_VIDEO_DRIVER=offscreen;SDL_GPU_DRIVER=vulkan")
+
+# shader_cache_test: CompileGlsl keeps code by its source, reads it back,
+# and uses no directory others may write. No GPU.
+  add_executable(shader_cache_test shader_cache_test.cpp)
+  target_link_libraries(shader_cache_test PRIVATE recomp_gfx recomp_log)
+  add_test(NAME shader_cache COMMAND shader_cache_test)
 endif()

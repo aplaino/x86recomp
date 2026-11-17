@@ -4,6 +4,8 @@
 #include <glslang/Public/ShaderLang.h>
 #include <glslang/SPIRV/GlslangToSpv.h>
 
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -43,8 +45,13 @@ std::string CacheName(const std::string& glsl, ShaderStage stage) {
 void SetShaderCacheDir(const std::string& dir) {
   std::error_code ec;
   if (!dir.empty()) std::filesystem::create_directories(dir, ec);
+  // Only a directory of this user's that no one else may write: the code
+  // in it runs on the GPU as the game's.
+  struct stat st;
+  const bool ours = !ec && !dir.empty() && ::lstat(dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode) &&
+                    st.st_uid == ::getuid() && !(st.st_mode & (S_IWGRP | S_IWOTH));
   std::lock_guard<std::mutex> l(g_cache_mu);
-  g_cache_dir = ec ? std::string() : dir;
+  g_cache_dir = ours ? dir : std::string();
 }
 
 bool CompileGlsl(const std::string& glsl, ShaderStage stage, std::string* code, std::string* log) {
@@ -68,13 +75,16 @@ bool CompileGlsl(const std::string& glsl, ShaderStage stage, std::string* code, 
   code->assign(reinterpret_cast<const char*>(spirv.data()), spirv.size() * 4);
 #endif
   if (!path.empty()) {
-    // Written aside and renamed: a reader sees all of a file or none.
+    // Written aside (a new file, never through a link) and renamed: a
+    // reader sees all of a file or none.
     static std::atomic<unsigned> n{0};
     const std::string tmp = path + "." + std::to_string(getpid()) + "-" + std::to_string(n++);
-    std::ofstream f(tmp, std::ios::binary);
-    f.write(code->data(), std::streamsize(code->size()));
-    f.close();
-    if (!f || std::rename(tmp.c_str(), path.c_str()) != 0) std::remove(tmp.c_str());
+    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644);
+    if (fd >= 0) {
+      const bool ok = ::write(fd, code->data(), code->size()) == ssize_t(code->size());
+      if (::close(fd) != 0 || !ok || std::rename(tmp.c_str(), path.c_str()) != 0)
+        std::remove(tmp.c_str());
+    }
   }
   return true;
 }
