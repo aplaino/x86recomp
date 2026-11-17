@@ -28,6 +28,10 @@ inline int g_desktop_hz = 60;
 // Set-1 scan code for a virtual key (US layout); *ext = E0-prefixed.
 uint8_t ScanCodeForVk(uint8_t vk, bool* ext);
 
+// The character a key types on the US layout with these modifiers (as
+// TranslateMessage and ToAscii report it); 0 for none.
+uint32_t CharForVk(uint32_t vk, bool shift, bool caps, bool ctrl, bool numlock);
+
 // Raw input as DirectInput reports it, from the SDL event pump (main
 // thread): mouse motion in mickeys (host relative motion, unscaled: one
 // unit of host motion is one mickey, as a device unit is on Windows), the

@@ -2001,28 +2001,8 @@ HLE64("user32.dll", TranslateMessage, 1) {
   const Msg m = GetMsg(Arg(c, 0));
   uint32_t msg = m.msg, vk = uint32_t(m.wparam);
   if (msg != WM_KEYDOWN && msg != WM_SYSKEYDOWN) return 0;
-  bool shift = g_key_down[0x10], caps = g_key_toggled[0x14];
-  bool ctrl = g_key_down[0x11];
-  uint32_t ch = 0;
-  if (vk >= 'A' && vk <= 'Z') {
-    ch = (shift != caps) ? vk : vk + 32;
-    if (ctrl) ch = vk - 'A' + 1;
-  } else if (vk >= 0x60 && vk <= 0x69 && g_key_toggled[0x90]) {
-    ch = '0' + (vk - 0x60);
-  } else {
-    static const struct { uint8_t vk; char n, s; } k[] = {
-        {'0', '0', ')'}, {'1', '1', '!'}, {'2', '2', '@'}, {'3', '3', '#'},
-        {'4', '4', '$'}, {'5', '5', '%'}, {'6', '6', '^'}, {'7', '7', '&'},
-        {'8', '8', '*'}, {'9', '9', '('}, {0xBD, '-', '_'}, {0xBB, '=', '+'},
-        {0xDB, '[', '{'}, {0xDD, ']', '}'}, {0xDC, '\\', '|'},
-        {0xBA, ';', ':'}, {0xDE, '\'', '"'}, {0xC0, '`', '~'},
-        {0xBC, ',', '<'}, {0xBE, '.', '>'}, {0xBF, '/', '?'},
-        {0x20, ' ', ' '}, {0x0D, 13, 13}, {0x08, 8, 8}, {0x09, 9, 9},
-        {0x1B, 27, 27}, {0x6A, '*', '*'}, {0x6B, '+', '+'},
-        {0x6D, '-', '-'}, {0x6F, '/', '/'}, {0x6E, '.', '.'}};
-    for (const auto& e : k)
-      if (e.vk == vk) ch = uint8_t(shift ? e.s : e.n);
-  }
+  const uint32_t ch = CharForVk(vk, g_key_down[0x10], g_key_toggled[0x14], g_key_down[0x11],
+                                g_key_toggled[0x90]);
   if (!ch) return 0;
   Post(m.hwnd, msg == WM_SYSKEYDOWN ? WM_SYSCHAR : WM_CHAR, ch, m.lparam);
   return 1;

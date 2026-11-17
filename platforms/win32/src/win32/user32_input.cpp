@@ -132,6 +132,24 @@ void EmitRawInput(RawInput::Kind kind, uint8_t code, int32_t value) {
   if (RawInputSink sink = g_raw_sink) sink({kind, code, value, TickCount()});
 }
 
+uint32_t CharForVk(uint32_t vk, bool shift, bool caps, bool ctrl, bool numlock) {
+  if (vk >= 'A' && vk <= 'Z') return ctrl ? vk - 'A' + 1 : (shift != caps) ? vk : vk + 32;
+  if (vk >= 0x60 && vk <= 0x69) return numlock ? '0' + (vk - 0x60) : 0;
+  static const struct { uint8_t vk; char n, s; } k[] = {
+      {'0', '0', ')'}, {'1', '1', '!'}, {'2', '2', '@'}, {'3', '3', '#'},
+      {'4', '4', '$'}, {'5', '5', '%'}, {'6', '6', '^'}, {'7', '7', '&'},
+      {'8', '8', '*'}, {'9', '9', '('}, {0xBD, '-', '_'}, {0xBB, '=', '+'},
+      {0xDB, '[', '{'}, {0xDD, ']', '}'}, {0xDC, '\\', '|'},
+      {0xBA, ';', ':'}, {0xDE, '\'', '"'}, {0xC0, '`', '~'},
+      {0xBC, ',', '<'}, {0xBE, '.', '>'}, {0xBF, '/', '?'},
+      {0x20, ' ', ' '}, {0x0D, 13, 13}, {0x08, 8, 8}, {0x09, 9, 9},
+      {0x1B, 27, 27}, {0x6A, '*', '*'}, {0x6B, '+', '+'},
+      {0x6D, '-', '-'}, {0x6F, '/', '/'}, {0x6E, '.', '.'}};
+  for (const auto& e : k)
+    if (e.vk == vk) return uint8_t(shift ? e.s : e.n);
+  return 0;
+}
+
 uint8_t ScanCodeForVk(uint8_t vk, bool* ext) {
   *ext = false;
   switch (vk) {  // left/right specific VKs
@@ -189,6 +207,21 @@ HLE64("user32.dll", MapVirtualKeyA, 2) {
     }
   }
   return 0;
+}
+
+// ToAscii(vk, scan code, key state[256], &char, flags): the character the
+// key types with the modifiers in the given key state; nothing for a key
+// going up (bit 15 of the scan code).
+HLE64("user32.dll", ToAscii, 5) {
+  const uint32_t vk = uint32_t(Arg(c, 0)) & 0xFF, scan = uint32_t(Arg(c, 1));
+  const gaddr state = Arg(c, 2);
+  if (scan & 0x8000) return 0;
+  auto down = [&](uint32_t k) { return (Rd8(state + k) & 0x80) != 0; };
+  auto toggled = [&](uint32_t k) { return (Rd8(state + k) & 1) != 0; };
+  const uint32_t ch = CharForVk(vk, down(0x10), toggled(0x14), down(0x11), toggled(0x90));
+  if (!ch) return 0;
+  Wr16(Arg(c, 3), uint16_t(ch));
+  return 1;
 }
 
 HLE("user32.dll", VkKeyScanA, 1) {
