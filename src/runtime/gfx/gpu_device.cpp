@@ -1789,8 +1789,17 @@ void r_color0(inout vec4 c) {
     // The read-only and read-write buffers, each in its own arena, and
     // their places in the uniform block. Read-only GPU buffers are read
     // in the heap; read-write ones are copied into their arena, and their
-    // results back out, on the GPU.
-    Arena ro, rw;
+    // results back out, on the GPU. The read-write arena is only offsets
+    // (rw_size) and the parts with host data (rw_host): a large GPU
+    // buffer's room is never made on the host.
+    Arena ro;
+    struct HostPart {
+      size_t at;
+      const void* data;
+      uint32_t size;
+    };
+    std::vector<HostPart> rw_host;
+    size_t rw_size = 0;
     std::vector<uint32_t> table(4 * size_t(st.buffers + st.rw_buffers), 0);
     std::vector<BufferCopy> rw_in, rw_out;
     bool host_rw = false;
@@ -1807,11 +1816,11 @@ void r_color0(inout vec4 c) {
     std::vector<uint32_t> rw_at(st.rw_buffers);
     for (uint32_t b = 0; b < st.rw_buffers; b++) {
       const RwBufferData& bd = d.rw_buffers[b];
-      rw_at[b] = uint32_t(rw.size());
-      table[4 * (st.buffers + b)] = uint32_t(rw.size() / 4);
+      rw_at[b] = uint32_t(rw_size);
+      table[4 * (st.buffers + b)] = uint32_t(rw_size / 4);
       table[4 * (st.buffers + b) + 1] = bd.size;
       if (bd.buffer) {
-        BufferCopy c = GpuBufferCopy(bd.buffer, rw.size(), bd.size);
+        BufferCopy c = GpuBufferCopy(bd.buffer, rw_size, bd.size);
         c.held = (bd.size + 3) & ~3u;
         if (!bd.data) rw_in.push_back(c);
         rw_out.push_back(c);
@@ -1819,16 +1828,30 @@ void r_color0(inout vec4 c) {
       } else {
         host_rw = true;
       }
-      AppendWords(rw, bd.data, bd.size);
+      if (bd.data && bd.size) rw_host.push_back({rw_size, bd.data, bd.size});
+      rw_size += (size_t(bd.size) + 3) & ~size_t(3);
     }
     if (st.buffers && ro.empty()) ro.resize(4, 0);
-    if (st.rw_buffers && rw.empty()) rw.resize(4, 0);
+    if (st.rw_buffers && !rw_size) rw_size = 4;
+    // The read-write arena's spans that are not copied in on the GPU, each
+    // after the other in the upload: zeros but for the host data in them.
+    size_t host_bytes = 0;
+    HostSpans(rw_in, rw_size, [&](size_t, size_t n) { host_bytes += n; });
 
-    if (!ro.empty() || !rw.empty()) {
-      auto* p = MapUpload(ro.size() + rw.size());
+    if (!ro.empty() || rw_size) {
+      auto* p = MapUpload(ro.size() + host_bytes);
       SDL_GPUTransferBuffer* tb = upload_tb_;
       if (!ro.empty()) std::memcpy(p, ro.data(), ro.size());
-      HostSpans(rw_in, rw.size(), [&](size_t at, size_t n) { std::memcpy(p + ro.size() + at, rw.data() + at, n); });
+      size_t packed = ro.size();
+      HostSpans(rw_in, rw_size, [&](size_t at, size_t n) {
+        uint8_t* dst = p + packed;
+        std::memset(dst, 0, n);
+        for (const HostPart& h : rw_host) {
+          const size_t lo = std::max(at, h.at), hi = std::min(at + n, h.at + h.size);
+          if (lo < hi) std::memcpy(dst + (lo - at), static_cast<const uint8_t*>(h.data) + (lo - h.at), hi - lo);
+        }
+        packed += n;
+      });
       SDL_UnmapGPUTransferBuffer(dev_, tb);
       SDL_GPUCommandBuffer* cmd = Begin();  // after MapUpload, which may submit it
       SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
@@ -1838,14 +1861,16 @@ void r_color0(inout vec4 c) {
         SDL_GPUBufferRegion dst{cro_, 0, Uint32(ro.size())};
         SDL_UploadToGPUBuffer(cp, &src, &dst, true);
       }
-      if (!rw.empty()) {
-        EnsureBuffer(crw_, crw_cap_, rw.size(),
+      if (rw_size) {
+        EnsureBuffer(crw_, crw_cap_, rw_size,
                      SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ |
                          SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE);
-        HostSpans(rw_in, rw.size(), [&](size_t at, size_t n) {
-          SDL_GPUTransferBufferLocation src{tb, Uint32(upload_at_ + ro.size() + at)};
+        size_t from = ro.size();
+        HostSpans(rw_in, rw_size, [&](size_t at, size_t n) {
+          SDL_GPUTransferBufferLocation src{tb, Uint32(upload_at_ + from)};
           SDL_GPUBufferRegion dst{crw_, Uint32(at), Uint32(n)};
           SDL_UploadToGPUBuffer(cp, &src, &dst, false);
+          from += n;
         });
         CopyBuffers(cp, rw_in, crw_, true);
       }
@@ -1864,7 +1889,7 @@ void r_color0(inout vec4 c) {
     SDL_GPUStorageBufferReadWriteBinding rwb{};
     rwb.buffer = crw_;
     SDL_GPUComputePass* cp = SDL_BeginGPUComputePass(cmd, images, st.rw_images, &rwb,
-                                                     rw.empty() ? 0 : 1);
+                                                     rw_size ? 1 : 0);
     SDL_BindGPUComputePipeline(cp, pr.cp);
     ProgramStageCmd sc;
     RecordStage(sc, st, d.cs);
@@ -1892,7 +1917,7 @@ void r_color0(inout vec4 c) {
       return;
     }
     Landing w;
-    w.cap = Uint32(rw.size());
+    w.cap = Uint32(rw_size);
     for (size_t i = 0; i < download_pool_.size(); i++) {
       if (download_pool_[i].cap < w.cap) continue;
       w = download_pool_[i];
@@ -1901,7 +1926,7 @@ void r_color0(inout vec4 c) {
     }
     if (!w.tb) w.tb = NewDownload(w.cap);
     SDL_GPUCopyPass* down = SDL_BeginGPUCopyPass(cmd);
-    SDL_GPUBufferRegion src{crw_, 0, Uint32(rw.size())};
+    SDL_GPUBufferRegion src{crw_, 0, Uint32(rw_size)};
     SDL_GPUTransferBufferLocation dst{w.tb, 0};
     SDL_DownloadFromGPUBuffer(down, &src, &dst);
     SDL_EndGPUCopyPass(down);
