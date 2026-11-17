@@ -3,6 +3,9 @@
 // through Process's hooks.
 
 #include <pthread.h>
+#ifdef __APPLE__
+#include <pthread/qos.h>
+#endif
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -281,10 +284,16 @@ static uint32_t RunGuestThread(Thread* t, const std::function<uint64_t(Ctx&)>& b
 }
 
 // Starts fn(arg) on a new detached host thread with the big guest stack.
+// macOS: at the user-interactive QoS class, as a game's frame work is; at
+// the default class the scheduler may put a game's job threads on the
+// efficiency cores while its main thread waits for them.
 static void SpawnHostThread(void* (*fn)(void*), void* arg) {
   pthread_attr_t attr;
   pthread_attr_init(&attr);
   pthread_attr_setstacksize(&attr, kHostStack);
+#ifdef __APPLE__
+  pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
   pthread_t th;
   if (pthread_create(&th, &attr, fn, arg) != 0) FatalF("pthread_create failed");
   pthread_attr_destroy(&attr);
@@ -354,6 +363,11 @@ uint32_t RunMainThread(Thread* t, const std::function<uint64_t(Ctx&)>& body) {
   HoldThread(t);
   g_main_thread = t;
   g_main_body = &body;
+#ifdef __APPLE__
+  // The guest's main thread at the class its other threads get
+  // (SpawnHostThread), however the process was started.
+  pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
   platform::RunOnStack(stack, kHostStack, GuestMainTrampoline);
   munmap(stack, kHostStack);
   return g_main_exit;
