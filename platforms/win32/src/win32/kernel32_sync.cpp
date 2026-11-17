@@ -36,10 +36,20 @@ namespace recomp {
 namespace {
 
 std::mutex g_wait_mu;
-std::condition_variable g_wait_cv;
+
+// A thread asleep in a wait, on a condition variable of its own: a signal
+// wakes the threads waiting on that object (Wake), not every thread that
+// waits (a kernel call each, and each then takes g_wait_mu to look again).
+// Registered on its objects under g_wait_mu before it first looks at them,
+// so a signal under g_wait_mu either comes before the look or finds it.
+struct Sleeper {
+  std::condition_variable cv;
+};
+std::set<Sleeper*> g_sleeping;  // under g_wait_mu: for wakes of all (WakeAll)
 
 struct Waitable : KObject {
   using KObject::KObject;
+  std::vector<Sleeper*> sleepers;  // under g_wait_mu: the threads waiting on it
   // Under g_wait_mu: is the object signalled for thread `tid`?
   virtual bool Signalled(uint32_t tid) const = 0;
   // Under g_wait_mu: a wait on it was satisfied; consume (auto-reset,
@@ -158,15 +168,26 @@ uint32_t WaitObjects(const std::vector<std::shared_ptr<Waitable>>& objs,
   auto deadline = std::chrono::steady_clock::now() +
                   std::chrono::milliseconds(timeout_ms);
   std::unique_lock<std::mutex> l(g_wait_mu);
-  // Registered as a waiter for the whole wait (PulseEvent), under the lock.
+  // Registered as a waiter for the whole wait (PulseEvent, Wake), under
+  // the lock.
+  Sleeper me;
   struct Registration {
     const std::vector<std::shared_ptr<Waitable>>& objs;
     uint32_t tid;
+    Sleeper* me;
     ~Registration() {
-      for (const auto& o : objs) o->Waiting(tid, false);
+      for (const auto& o : objs) {
+        o->Waiting(tid, false);
+        std::erase(o->sleepers, me);
+      }
+      g_sleeping.erase(me);
     }
-  } reg{objs, tid};
-  for (const auto& o : objs) o->Waiting(tid, true);
+  } reg{objs, tid, &me};
+  for (const auto& o : objs) {
+    o->Waiting(tid, true);
+    o->sleepers.push_back(&me);
+  }
+  g_sleeping.insert(&me);
   for (;;) {
     if (wait_all) {
       bool all = true;
@@ -187,7 +208,7 @@ uint32_t WaitObjects(const std::vector<std::shared_ptr<Waitable>>& objs,
       // events from here, in slices, until the wait is satisfied.
       auto slice = std::chrono::steady_clock::now() + std::chrono::milliseconds(10);
       if (timeout_ms != kInfinite && deadline < slice) slice = deadline;
-      g_wait_cv.wait_until(l, slice);
+      me.cv.wait_until(l, slice);
       l.unlock();
       PumpHostEvents();
       l.lock();
@@ -196,14 +217,21 @@ uint32_t WaitObjects(const std::vector<std::shared_ptr<Waitable>>& objs,
       continue;
     }
     if (timeout_ms == kInfinite) {
-      g_wait_cv.wait(l);
-    } else if (g_wait_cv.wait_until(l, deadline) == std::cv_status::timeout) {
+      me.cv.wait(l);
+    } else if (me.cv.wait_until(l, deadline) == std::cv_status::timeout) {
       return kWaitTimeout;  // deadline passed: no re-check
     }
   }
 }
 
-void SignalChanged() { g_wait_cv.notify_all(); }
+// Under g_wait_mu: wakes the threads waiting on `o`, or every waiting
+// thread.
+void Wake(const Waitable& o) {
+  for (Sleeper* s : o.sleepers) s->cv.notify_one();
+}
+void WakeAll() {
+  for (Sleeper* s : g_sleeping) s->cv.notify_one();
+}
 
 }  // namespace
 
@@ -220,7 +248,10 @@ std::shared_ptr<KObject> PseudoHandle(uint32_t h) {
   return nullptr;
 }
 
-void hle::WakeWaiters() { SignalChanged(); }
+void hle::WakeWaiters() {
+  std::lock_guard<std::mutex> l(g_wait_mu);
+  WakeAll();
+}
 
 bool SignalEventHandle(uint32_t h, bool pulse) {
   auto e = std::dynamic_pointer_cast<EventObject>(GetHandle(h));
@@ -231,8 +262,8 @@ bool SignalEventHandle(uint32_t h, bool pulse) {
       e->Pulse();
     else
       e->signalled = true;
+    Wake(*e);
   }
-  SignalChanged();
   return true;
 }
 
@@ -368,9 +399,11 @@ HLE64("kernel32.dll", ReleaseMutex, 1) {
   {
     std::lock_guard<std::mutex> l(g_wait_mu);
     if (m->owner != CurrentThread()->tid) return 0;
-    if (--m->count == 0) m->owner = 0;
+    if (--m->count == 0) {
+      m->owner = 0;
+      Wake(*m);
+    }
   }
-  SignalChanged();
   return 1;
 }
 
@@ -405,8 +438,8 @@ HLE64("kernel32.dll", ReleaseSemaphore, 3) {
     }
     if (gaddr prev = Arg(c, 2)) Wr32(prev, uint32_t(s->count));
     s->count += n;
+    Wake(*s);
   }
-  SignalChanged();
   return 1;
 }
 
@@ -901,8 +934,8 @@ void OnGuestThreadFinished(uint32_t tid, uint32_t exit_code) {
       }
       ++m;
     }
+    WakeAll();
   }
-  SignalChanged();
 }
 
 }  // namespace recomp
