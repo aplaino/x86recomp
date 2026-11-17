@@ -322,6 +322,9 @@ struct Device : com::Object {
     uint32_t copies = 0, executed_lists = 0, linked = 0;
   } stats;
   uint64_t frames = 0;
+  // Where a dispatch's writes to a UAV slot with nothing bound go: a GPU
+  // buffer nothing reads (d3d11_gpu.cpp, GpuDispatch).
+  gfx::BufferId scratch_uav = 0;
 };
 
 // The device's IDXGIDevice1 interface, with a reference added (dxgi.cpp).
