@@ -783,6 +783,10 @@ void GpuDraw(Device& dev, Context& x, const DrawCall& dc) {
   if (!dev.gfx) return;
   dev.stats.draws++;
   if (!dc.count || !dc.instances) return;
+  if (x.geometry) {
+    WARN_ONCE("d3d11: draws with a geometry shader are skipped\n");
+    return;
+  }
   const Shader* vs = x.stage[0].shader.get();
   std::shared_ptr<const LinkedProgram> prog;
   if (vs) prog = ProgramFor(dev, *vs, x.stage[1].shader.get(), x.layout.get());
