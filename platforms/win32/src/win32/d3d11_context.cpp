@@ -189,20 +189,35 @@ CTX_STAGE(PS, 1)
 CTX_STAGE(CS, 2)
 #undef CTX_STAGE
 
-// The geometry, hull and domain stages are never used: only unbinding
-// them is accepted.
-#define CTX_UNUSED_STAGE(P)                                                                 \
+// The geometry, hull and domain stages are not drawn. Geometry shaders
+// can only be unbound; the tessellation stages can be bound, as games
+// keep them bound for their tessellated draws: those draw patch lists,
+// which are skipped (TopologyOf, d3d11_gpu.cpp).
+#define CTX_UNUSED_STAGE(P, bindable)                                                       \
   CTX_METHOD(P##SetShader) {                                                                \
-    if (Arg(c, 1)) FatalF("d3d11: " #P " shaders are not supported");                       \
+    if (Arg(c, 1) && !(bindable)) FatalF("d3d11: " #P " shaders are not supported");        \
     return 0;                                                                               \
   }                                                                                         \
   CTX_METHOD(P##SetConstantBuffers) { return 0; }                                           \
   CTX_METHOD(P##SetShaderResources) { return 0; }                                           \
   CTX_METHOD(P##SetSamplers) { return 0; }
-CTX_UNUSED_STAGE(GS)
-CTX_UNUSED_STAGE(HS)
-CTX_UNUSED_STAGE(DS)
+CTX_UNUSED_STAGE(GS, false)
+CTX_UNUSED_STAGE(HS, true)
+CTX_UNUSED_STAGE(DS, true)
 #undef CTX_UNUSED_STAGE
+
+// Stream output, likewise: SOSetTargets(count, buffers, offsets) only
+// unbinding, and SOGetTargets finds nothing bound.
+CTX_METHOD(SOSetTargets) {
+  const uint32_t n = uint32_t(Arg(c, 1));
+  for (uint32_t i = 0; i < n && Arg(c, 2); i++)
+    if (Rd64(Arg(c, 2) + 8 * i)) FatalF("d3d11: stream output is not supported");
+  return 0;
+}
+CTX_METHOD(SOGetTargets) {
+  for (uint32_t i = 0; i < uint32_t(Arg(c, 1)); i++) Wr64(Arg(c, 2) + 8 * i, 0);
+  return 0;
+}
 
 // CSSetUnorderedAccessViews(start, count, views, initial counts)
 CTX_METHOD(CSSetUnorderedAccessViews) {
