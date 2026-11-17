@@ -164,7 +164,10 @@ struct Query : Child {
 };
 
 // A context's pipeline state, as the guest set it.
-constexpr int kStages = 3;  // vs, ps, cs (no geometry or tessellation)
+// vs, ps, cs and ds: the domain stage of point patches (dxbc.h), whose
+// domain shader is drawn as the vertex stage. No geometry stage.
+constexpr int kStages = 4;
+constexpr int kDomainStage = 3;
 struct ContextState {
   struct VertexBuffer {
     std::shared_ptr<Resource> res;
@@ -182,6 +185,7 @@ struct ContextState {
   };
   StageState stage[kStages];
   bool geometry = false;  // a geometry shader is bound: draws are skipped
+  std::shared_ptr<Shader> hull;  // point patches only (dxbc::PointToQuadHull)
   std::shared_ptr<View> uavs[8];  // compute
   std::shared_ptr<InputLayout> layout;
   uint32_t topology = 0;
@@ -324,7 +328,8 @@ struct StageBindings {
 
 struct LinkedProgram {
   gfx::ProgramId id = 0;
-  StageBindings vs, ps, cs;
+  StageBindings vs, ps, cs;  // vs: the domain stage's, for a point patch
+  uint32_t patch_vertices = 0;  // a point patch's: the vertices drawn for each patch
 };
 
 // A program for the bound shaders (null: none, the draw is skipped).
@@ -333,6 +338,13 @@ struct LinkedProgram {
 std::shared_ptr<const LinkedProgram> LinkProgram(gfx::Device& dev, const Shader& vs,
                                                  const Shader* ps, const InputLayout* layout);
 std::shared_ptr<const LinkedProgram> LinkComputeProgram(gfx::Device& dev, const Shader& cs);
+// A point patch's (dxbc.h): the domain shader as the vertex stage, run for
+// patch_vertices vertices a patch (two triangles for each quad of its
+// grid), each patch's vertex fetched as the pass-through vertex shader's
+// inputs. Null if the shaders are not those of point patches.
+std::shared_ptr<const LinkedProgram> LinkPointPatchProgram(gfx::Device& dev, const Shader& vs,
+                                                           const Shader& hs, const Shader& ds,
+                                                           const Shader* ps, const InputLayout* layout);
 
 // A stage's uniform block (std140, `l_` names: the translation keeps to
 // `r_`), filled per draw:
@@ -365,6 +377,10 @@ struct Device : com::Object {
   // hashes, the layout's elements), d3d11_program.cpp.
   std::map<std::tuple<uint64_t, uint64_t, uint64_t>, std::shared_ptr<const LinkedProgram>> programs;
   std::map<std::tuple<uint64_t, uint64_t, uint64_t>, std::shared_ptr<const LinkedProgram>> linked;
+  // Point patch programs, by the vertex, hull, domain and pixel shaders' and
+  // the layout's serials.
+  std::map<std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>, std::shared_ptr<const LinkedProgram>>
+      point_patch_programs;
   // This frame's work, reported at Present.
   struct Stats {
     uint32_t draws = 0, skipped = 0, dispatches = 0, skipped_dispatches = 0, clears = 0;
@@ -431,5 +447,8 @@ void GpuPresent(Device& dev, Resource& back_buffer, int w, int h);
 std::shared_ptr<const LinkedProgram> ProgramFor(Device& dev, const Shader& vs, const Shader* ps,
                                                 const InputLayout* layout);
 std::shared_ptr<const LinkedProgram> ComputeProgramFor(Device& dev, const Shader& cs);
+std::shared_ptr<const LinkedProgram> PointPatchProgramFor(Device& dev, const Shader& vs, const Shader& hs,
+                                                          const Shader& ds, const Shader* ps,
+                                                          const InputLayout* layout);
 
 }  // namespace recomp::hle::d3d11

@@ -207,6 +207,28 @@ struct Shader {
 // instruction's listing precedes its GLSL as a comment.
 bool Translate(const void* dxbc, size_t size, Shader* out, bool annotate = false);
 
+// Point patches, the tessellation games use to draw sprites: a patch of
+// one control point that the tessellator makes one quad of. A domain
+// shader translates as a vertex stage that runs for each corner of the
+// quad: its control point's registers are the stage's inputs (v#, from
+// r_fetch, the vertex shader's inputs) and its domain point is
+// R_DOMAIN_POINT (a vec3, defined by the link code). These say whether a
+// draw's other stages fit that:
+// - a hull shader whose control points pass through unchanged and whose
+//   tessellation factors on a quad domain are whole numbers of segments
+//   (literals; the partitioning making that many of each), the largest N:
+//   the quad is drawn as an N x N grid (*segments) of two triangles each
+//   (*ccw: their winding in the domain);
+bool PointToQuadHull(const void* dxbc, size_t size, bool* ccw, uint32_t* segments);
+// - a vertex shader that only copies each input register to the output
+//   register of the same number, or writes constants (*constants) into
+//   them, so the domain shader's control point registers are the vertex's
+//   inputs with those constants.
+struct ConstantOutput {
+  uint32_t reg = 0, comp = 0, bits = 0;
+};
+bool PassThroughVertexShader(const void* dxbc, size_t size, std::vector<ConstantOutput>* constants);
+
 // A listing of the container's program in the style of fxc's
 // disassembly, each instruction preceded by its dword offset; empty with
 // *error set for one that cannot be read.
