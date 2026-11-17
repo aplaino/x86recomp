@@ -14,6 +14,7 @@
 #include "runtime/display.h"
 #include "runtime/env.h"
 #include "runtime/gfx/present.h"
+#include "runtime/gfx/shader_compile.h"
 #include "runtime/log.h"
 #include "win32/com.h"
 #include "win32/d3d11_impl.h"
@@ -426,6 +427,7 @@ void SetUp(SwapChain& s) {
     if (!d.gfx) {
       SDL_Window* w = SdlWindowFor(s.Hwnd());
       if (!w) FatalF("dxgi: CreateSwapChain: no SDL window for hwnd %08X", s.Hwnd());
+      gfx::SetShaderCacheDir(DataDir() + "/shadercache");
       d.gfx = gfx::CreateChosenDevice(w);
     }
     d.gfx->ResetSwapChain(s.W(), s.H(), Vsync());

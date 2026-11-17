@@ -19,6 +19,7 @@
 
 #include "runtime/display.h"
 #include "runtime/gfx/present.h"
+#include "runtime/gfx/shader_compile.h"
 #include "runtime/log.h"
 #include "win32/com.h"
 #include "win32/d3d9_impl.h"
@@ -562,6 +563,7 @@ HLE_NAMED("d3d9.dll", "IDirect3D9::CreateDevice", D3D9_CreateDevice, 7) {
   d->hwnd = d->pp.hDeviceWindow ? d->pp.hDeviceWindow : focus;
   SDL_Window* w = SdlWindowFor(d->hwnd);
   if (!w) FatalF("d3d9: CreateDevice: no SDL window for hwnd %08X", d->hwnd);
+  gfx::SetShaderCacheDir(DataDir() + "/shadercache");
   d->gfx = gfx::CreateChosenDevice(w);
   uint32_t self = com::Publish(d, DeviceVtable());
   com::AddRef(d->d3d);

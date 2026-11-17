@@ -57,6 +57,13 @@ struct GameConfig : recomp::GameConfig {
   // from it; a game's best profile may need more than the default.
   uint32_t video_memory_mb = 64;
 
+  // Direct3D 11: shader programs, and the pipelines their draws need, are
+  // made on worker threads (gfx::ProgramDesc::background), so no frame
+  // stops while the driver compiles a shader it has not cached; a draw
+  // whose program is not made yet is left out of its frame instead.
+  // <ID>_SYNC_SHADERS=1 makes them on the thread drawing.
+  bool background_shaders = false;
+
   // The display adapter DirectDraw identifies (GetDeviceIdentifier).
   // Games that pick a detail profile by the adapter's identity may need
   // a particular one; the default names no real hardware.

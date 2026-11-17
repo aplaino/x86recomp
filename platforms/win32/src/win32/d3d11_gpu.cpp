@@ -859,7 +859,7 @@ void GpuDraw(Device& dev, Context& x, const DrawCall& dc) {
   vsd.uniforms.draw[1] = int32_t(dc.first_instance);
   BindStage(dev, x, 0, prog->vs, &dc, vsd, s, &d.vs);
   BindStage(dev, x, 1, prog->ps, &dc, psd, s, &d.fs);
-  dev.gfx->DrawProgram(d);
+  if (!dev.gfx->DrawProgram(d)) dev.stats.waiting++;
 }
 
 void GpuDispatch(Device& dev, Context& x, uint32_t gx, uint32_t gy, uint32_t gz) {
@@ -1172,9 +1172,10 @@ void GpuPresent(Device& dev, Resource& bb, int w, int h) {
   PresentFrame(*dev.gfx, w, h);
   if (g_trace || frame < 5 || frame % 60 == 0)
     std::fprintf(stderr,
-                 "d3d11: frame %llu: %u draws (%u skipped: no program), %u dispatches (%u skipped), "
-                 "%u clears, %u copies, %u command lists, %u programs linked (%zu in all)\n",
-                 (unsigned long long)frame, s.draws, s.skipped, s.dispatches,
+                 "d3d11: frame %llu: %u draws (%u skipped: no program, %u waiting for shaders), "
+                 "%u dispatches (%u skipped), %u clears, %u copies, %u command lists, %u programs "
+                 "linked (%zu in all)\n",
+                 (unsigned long long)frame, s.draws, s.skipped, s.waiting, s.dispatches,
                  s.skipped_dispatches, s.clears, s.copies, s.executed_lists, s.linked, linked);
 }
 

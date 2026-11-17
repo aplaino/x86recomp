@@ -15,9 +15,11 @@
 #include <mutex>
 #include <string>
 
+#include "runtime/env.h"
 #include "runtime/log.h"
 #include "win32/d3d11_impl.h"
 #include "win32/dxbc.h"
+#include "win32/process.h"
 
 namespace recomp::hle::d3d11 {
 
@@ -290,6 +292,11 @@ std::shared_ptr<const LinkedProgram> LinkProgram(gfx::Device& dev, const Shader&
   } else {
     d.fs.glsl = varyings + "void main() {}\n";
   }
+  static const bool background = [] {
+    const char* e = Env("SYNC_SHADERS");
+    return Game().background_shaders && !(e && *e && *e != '0');
+  }();
+  d.background = background;
   p->id = dev.CreateProgram(d);
   RECOMP_TRACE("  d3d11: program %u: vertex %016llX, pixel %016llX\n", p->id,
                (unsigned long long)vs.hash, ps ? (unsigned long long)ps->hash : 0ull);
