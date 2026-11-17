@@ -3001,7 +3001,12 @@ void r_color0(inout vec4 c) {
     k.s_fail = k.s_zfail = k.s_pass = SDL_GPU_STENCILOP_KEEP;
     k.s_func = SDL_GPU_COMPAREOP_ALWAYS;
     k.depth_format = uint8_t(pass_depth_format_);
-    // Fixed-function draws write target 0 only.
+    // Fixed-function draws write target 0 only. These pipelines (and
+    // PipelineKey) hold four targets; only program draws make passes of
+    // more.
+    if (pass_targets_ > 4)
+      FatalF("gfx: a fixed-function or shader draw in a pass of %d colour targets (at most 4)",
+             pass_targets_);
     k.targets = uint8_t(pass_targets_);
     for (int i = 0; i < 4; i++) k.fmt[i] = i < pass_targets_ ? pass_fmts_[i] : 0;
     return k;
