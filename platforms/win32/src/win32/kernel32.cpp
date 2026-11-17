@@ -670,6 +670,56 @@ HLE64("kernel32.dll", GetSystemInfo, 1) {
   return 0;
 }
 
+// GetLogicalProcessorInformation(buffer, &length): the processors
+// GetSystemInfo reports as single-thread cores of one package on one NUMA
+// node, with the CPUID model's caches (family 16h: 32 KB L1 data and
+// instruction caches per core, a 2 MB L2 they share). An entry is the
+// mask, the relationship and a 16-byte union at 2 pointers.
+HLE64("kernel32.dll", GetLogicalProcessorInformation, 2) {
+  const gaddr buf = Arg(c, 0), len = Arg(c, 1);
+  const uint32_t ncpu = GuestProcessorCount(), ptr = g_proc->x64 ? 8 : 4, size = 2 * ptr + 16;
+  const uint64_t all = (1ull << ncpu) - 1;
+  enum : uint32_t { kCore = 0, kNuma = 1, kCache = 2, kPackage = 3 };
+  enum : uint32_t { kUnified = 0, kInstruction = 1, kData = 2 };
+  struct Entry {
+    uint64_t mask;
+    uint32_t rel;
+    uint8_t level = 0, assoc = 0;
+    uint32_t cache_size = 0, type = 0;
+  };
+  std::vector<Entry> entries;
+  for (uint32_t i = 0; i < ncpu; i++) {
+    entries.push_back({1ull << i, kCore});
+    entries.push_back({1ull << i, kCache, 1, 8, 32 << 10, kData});
+    entries.push_back({1ull << i, kCache, 1, 2, 32 << 10, kInstruction});
+  }
+  entries.push_back({all, kCache, 2, 16, 2 << 20, kUnified});
+  entries.push_back({all, kPackage});
+  entries.push_back({all, kNuma});
+  const uint32_t need = uint32_t(entries.size()) * size;
+  if (!buf || Rd32(len) < need) {
+    Wr32(len, need);
+    SetLastError(kErrorInsufficientBuffer);
+    return 0;
+  }
+  std::memset(GPtr(buf), 0, need);
+  for (size_t i = 0; i < entries.size(); i++) {
+    const Entry& e = entries[i];
+    const gaddr at = buf + i * size, u = at + 2 * ptr;
+    WrPtr(at, e.mask);
+    Wr32(at + ptr, e.rel);
+    if (e.rel == kCache) {  // CACHE_DESCRIPTOR: level, associativity, line size, size, type
+      Wr8(u, e.level);
+      Wr8(u + 1, e.assoc);
+      Wr16(u + 2, 64);
+      Wr32(u + 4, e.cache_size);
+      Wr32(u + 8, e.type);
+    }
+  }
+  Wr32(len, need);
+  return 1;
+}
+
 // x64 guests: MEMORYSTATUS's SIZE_T fields, with GlobalMemoryStatusEx's
 // values.
 HLE64("kernel32.dll", GlobalMemoryStatus, 1) {
