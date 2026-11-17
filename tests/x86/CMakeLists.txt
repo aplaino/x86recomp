@@ -40,6 +40,26 @@ target_compile_options(sse_rsqrt_test PRIVATE -O2)
 add_test(NAME sse_rsqrt COMMAND sse_rsqrt_test)
 set_tests_properties(sse_rsqrt PROPERTIES TIMEOUT 300)
 
+# sse_host_test: SSE arithmetic's host path against the model, in the
+# modes games keep MXCSR in and those it must refuse; portable. Then built
+# with each planted bug of the host path (RECOMP_SSE_MUTATION, sse.cpp),
+# which it must catch (it exits 0 only then); each builds its own sse.cpp.
+add_executable(sse_host_test sse_host_test.cpp)
+target_include_directories(sse_host_test PRIVATE "${RECOMP_ROOT}/src")
+target_link_libraries(sse_host_test PRIVATE recomp_x87)
+target_compile_options(sse_host_test PRIVATE -O2 ${RECOMP_X87_FP_FLAGS})
+add_test(NAME sse_host COMMAND sse_host_test)
+set_tests_properties(sse_host PROPERTIES TIMEOUT 300)
+foreach(_m RANGE 1 7)
+  add_executable(sse_host_mutation_${_m} sse_host_test.cpp "${RECOMP_ROOT}/src/x86/sse.cpp")
+  target_include_directories(sse_host_mutation_${_m} PRIVATE "${RECOMP_ROOT}/src")
+  target_compile_features(sse_host_mutation_${_m} PRIVATE cxx_std_20)
+  target_compile_definitions(sse_host_mutation_${_m} PRIVATE RECOMP_SSE_MUTATION=${_m})
+  target_compile_options(sse_host_mutation_${_m} PRIVATE -O2 ${RECOMP_X87_FP_FLAGS})
+  target_link_libraries(sse_host_mutation_${_m} PRIVATE softfloat recomp_base)
+  add_test(NAME sse_host_mutation_${_m} COMMAND sse_host_mutation_${_m} 200000)
+endforeach()
+
 # sse_ftz_test: FTZ and DAZ against the host (x86-64 hosts only).
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
   add_executable(sse_ftz_test sse_ftz_test.cpp)
