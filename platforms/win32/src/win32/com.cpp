@@ -4,6 +4,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <thread>
 
 #include "runtime/log.h"
 #include "win32/hle.h"
@@ -20,15 +21,20 @@ std::map<std::string, gaddr> g_vtables;
 std::map<gaddr, std::shared_ptr<Object>> g_objects;  // by guest pointer, owning
 std::vector<std::pair<guest::GUID, CreateFn>> g_classes;
 
-// Lookups without the lock (Find): each object has a slot, whose index is
-// in its guest block (+12, unused otherwise), holding the object and its
-// guest pointer, so a stale block (released, its memory reused) finds
-// nothing. Slots are in chunks that never move; they are taken and freed
-// under g_mu.
+// Lookups without the lock (FindAs, Lookup): each object has a slot,
+// whose index is in its guest block (+12, unused otherwise), holding the
+// object and its guest pointer, so a stale block (released, its memory
+// reused) finds nothing. A lookup pins the slot while it reads it and
+// takes its answer; Release clears the slot and then waits for the pins
+// to go, so the object outlives every lookup that could have seen it (all
+// sequentially consistent: a lookup either sees the slot cleared or is
+// waited for). Slots are in chunks that never move, one per cache line;
+// they are taken and freed under g_mu.
 constexpr uint32_t kChunkBits = 16, kChunk = 1u << kChunkBits, kChunks = 256;
-struct Slot {
+struct alignas(64) Slot {
   std::atomic<Object*> obj{nullptr};
   std::atomic<gaddr> guest{0};
+  std::atomic<uint32_t> pins{0};
 };
 std::atomic<Slot*> g_chunks[kChunks];
 uint32_t g_next_slot = 0;
@@ -89,20 +95,38 @@ gaddr Publish(std::shared_ptr<Object> obj, gaddr vtable) {
   return p;
 }
 
-Object* Find(gaddr guest) {
+namespace {
+
+// The slot a block names if the block is one of ours (null if not).
+Slot* SlotOf(gaddr guest) {
   // Ours are 16-byte blocks: one page, or the next one committed too.
   if (!guest || !g_proc->mem.IsCommitted(guest) || !g_proc->mem.IsCommitted(guest + 15))
     return nullptr;
   if (Rd32(guest + (g_proc->x64 ? 8 : 4)) != kMagic) return nullptr;
-  Slot* s = SlotAt(Rd32(guest + 12));
-  if (!s) return nullptr;
-  Object* o = s->obj.load(std::memory_order_acquire);
-  return o && s->guest.load(std::memory_order_relaxed) == guest ? o : nullptr;
+  return SlotAt(Rd32(guest + 12));
+}
+
+// `use` of the object in guest's slot, pinned (nullptr: not ours or gone).
+template <typename F>
+auto Pinned(gaddr guest, F use) -> decltype(use(nullptr)) {
+  Slot* s = SlotOf(guest);
+  if (!s) return use(nullptr);
+  s->pins.fetch_add(1);
+  Object* o = s->obj.load();
+  if (o && s->guest.load() != guest) o = nullptr;
+  auto r = use(o);
+  s->pins.fetch_sub(1);
+  return r;
+}
+
+}  // namespace
+
+void* FindAs(gaddr guest, void* (*cast)(Object*)) {
+  return Pinned(guest, [&](Object* o) -> void* { return o ? cast(o) : nullptr; });
 }
 
 std::shared_ptr<Object> Lookup(gaddr guest) {
-  Object* o = Find(guest);
-  return o ? o->shared_from_this() : nullptr;
+  return Pinned(guest, [](Object* o) { return o ? o->shared_from_this() : nullptr; });
 }
 
 uint32_t AddRef(gaddr guest) {
@@ -125,8 +149,9 @@ uint32_t Release(gaddr guest) {
       dead = it->second;
       g_objects.erase(it);
       Slot* s = SlotAt(dead->slot);
-      s->obj.store(nullptr, std::memory_order_release);
-      s->guest.store(0, std::memory_order_relaxed);
+      s->obj.store(nullptr);
+      s->guest.store(0);
+      while (s->pins.load()) std::this_thread::yield();
       g_free_slots.push_back(dead->slot);
       // Poison the guest block so a use-after-release is caught.
       Wr64(guest, 0);

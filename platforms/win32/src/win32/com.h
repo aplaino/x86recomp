@@ -37,13 +37,15 @@ gaddr Publish(std::shared_ptr<Object> obj, gaddr vtable);
 
 // Host object behind a guest interface pointer (nullptr if not ours).
 // Without a lock: guest code calls through its objects from many threads
-// at once (deferred contexts recording in parallel).
-Object* Find(gaddr guest);
+// at once (deferred contexts recording in parallel). A release on another
+// thread waits until a lookup in progress has its answer (FindAs: `cast`
+// of the object, while it is pinned).
+void* FindAs(gaddr guest, void* (*cast)(Object*));
 std::shared_ptr<Object> Lookup(gaddr guest);
 
 template <typename T>
 T* As(gaddr guest) {
-  return dynamic_cast<T*>(Find(guest));
+  return static_cast<T*>(FindAs(guest, [](Object* o) -> void* { return dynamic_cast<T*>(o); }));
 }
 
 uint32_t AddRef(gaddr guest);
