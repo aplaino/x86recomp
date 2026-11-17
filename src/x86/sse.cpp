@@ -458,16 +458,16 @@ void ArithModel(Ctx& c, Op op, bool dbl, int lanes, Xmm& d, const Xmm& s,
     ArithModelT<false>(c, op, lanes, d, s, va);
 }
 
-void Cmp(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s, uint8_t pred,
-         uint64_t va) {
+void CmpModel(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s, uint8_t pred,
+              uint64_t va) {
   if (dbl)
     CmpT<true>(c, lanes, d, s, pred, va);
   else
     CmpT<false>(c, lanes, d, s, pred, va);
 }
 
-int Comi(Ctx& c, bool dbl, bool ordered, const Xmm& a, const Xmm& b,
-         uint64_t va) {
+int ComiModel(Ctx& c, bool dbl, bool ordered, const Xmm& a, const Xmm& b,
+              uint64_t va) {
   return dbl ? ComiT<true>(c, ordered, a, b, va) : ComiT<false>(c, ordered, a, b, va);
 }
 
@@ -547,8 +547,8 @@ uint64_t CvtToI64(Ctx& c, bool dbl, const Xmm& s, bool truncate, uint64_t va) {
   return uint64_t(r);
 }
 
-void MinMax(Ctx& c, bool max, bool dbl, int lanes, Xmm& d, const Xmm& s,
-            uint64_t va) {
+void MinMaxModel(Ctx& c, bool max, bool dbl, int lanes, Xmm& d, const Xmm& s,
+                 uint64_t va) {
   if (dbl)
     MinMaxT<true>(c, max, lanes, d, s, va);
   else

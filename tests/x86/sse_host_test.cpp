@@ -1,6 +1,8 @@
-// sse_host_test: SSE arithmetic's host path (sse.cpp, HostArith) against
-// the model alone (ArithModel): ADD/SUB/MUL/DIV on 1 or 4 floats and 1 or
-// 2 doubles, with MXCSR as games keep it, with and without FTZ and DAZ,
+// sse_host_test: SSE's host paths (sse.h, namespace host) against the
+// models alone: ADD/SUB/MUL/DIV (ArithModel), compares (CmpModel, every
+// predicate), MIN/MAX (MinMaxModel) and (U)COMIS (ComiModel), on 1 or 4
+// floats and 1 or 2 doubles, with MXCSR as games keep it, with and without
+// FTZ and DAZ,
 // and in modes the host path must leave to the model (another rounding
 // control, PE clear; unmasked exceptions are fatal in the model, #XM not
 // being modelled, and refused by the same check). Lanes come from edge values
@@ -125,6 +127,49 @@ void Case(uint32_t mxcsr, sse::Op op, int lanes) {
   }
 }
 
+// The same operands for CMPxx, MINxx/MAXxx and (U)COMIS.
+template <bool D>
+void CaseCompare(uint32_t mxcsr, int lanes) {
+  Xmm d{}, s{};
+  for (int i = 0; i < 16 / int(sizeof(U<D>)); i++) {
+    U<D> a = Lane<D>(), b = g_rng() % 4 ? Lane<D>() : a ^ (U<D>(g_rng()) & 1);
+    if (g_rng() % 8 == 0) b = a ^ (U<D>(1) << (sizeof(U<D>) * 8 - 1));  // +0 and -0, x and -x
+    std::memcpy(d.b + i * sizeof a, &a, sizeof a);
+    std::memcpy(s.b + i * sizeof b, &b, sizeof b);
+  }
+  auto check = [&](const char* what, const Xmm& got, const Xmm& want, const Ctx& h, const Ctx& m) {
+    if ((std::memcmp(got.b, want.b, 16) || h.mxcsr != m.mxcsr) && g_failures++ < 10)
+      std::printf("FAIL %s %s lanes %d mxcsr %04X: got mxcsr %04X, want %04X\n", what,
+                  D ? "double" : "float", lanes, mxcsr, h.mxcsr, m.mxcsr);
+  };
+  {
+    const uint8_t pred = uint8_t(g_rng() % 32);
+    Ctx h{}, m{};
+    h.mxcsr = m.mxcsr = mxcsr;
+    Xmm got = d, want = d;
+    sse::Cmp(h, D, lanes, got, s, pred, 0);
+    sse::CmpModel(m, D, lanes, want, s, pred, 0);
+    check("cmp", got, want, h, m);
+  }
+  {
+    const bool max = g_rng() & 1;
+    Ctx h{}, m{};
+    h.mxcsr = m.mxcsr = mxcsr;
+    Xmm got = d, want = d;
+    sse::MinMax(h, max, D, lanes, got, s, 0);
+    sse::MinMaxModel(m, max, D, lanes, want, s, 0);
+    check(max ? "max" : "min", got, want, h, m);
+  }
+  {
+    const bool ordered = g_rng() & 1;
+    Ctx h{}, m{};
+    h.mxcsr = m.mxcsr = mxcsr;
+    const int got = sse::Comi(h, D, ordered, d, s, 0), want = sse::ComiModel(m, D, ordered, d, s, 0);
+    if ((got != want || h.mxcsr != m.mxcsr) && g_failures++ < 10)
+      std::printf("FAIL comi %s mxcsr %04X: got %d, want %d\n", D ? "double" : "float", mxcsr, got, want);
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -143,6 +188,10 @@ int main(int argc, char** argv) {
       Case<true>(mxcsr, op, g_rng() & 1 ? 1 : 2);
     else
       Case<false>(mxcsr, op, g_rng() & 1 ? 1 : 4);
+    if (g_rng() & 1)
+      CaseCompare<true>(mxcsr, g_rng() & 1 ? 1 : 2);
+    else
+      CaseCompare<false>(mxcsr, g_rng() & 1 ? 1 : 4);
   }
   std::printf("sse_host_test: %ld cases, %d failures\n", cases, g_failures);
 #if RECOMP_SSE_MUTATION
