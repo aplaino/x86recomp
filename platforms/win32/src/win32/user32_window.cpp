@@ -934,8 +934,9 @@ void InjectTestFocus() {
 //                         (the game's cursor should follow it exactly),
 //                         independent of how the frame is shown
 //   <t> click [left|right]
-//   <t> key <SDL scancode name> [seconds]   e.g. Escape, Return, Space, A;
-//                         held for that long (default 0.08)
+//   <t> key <SDL scancode name> [seconds]   e.g. Escape, Return, Space, A,
+//                         Left_Shift ('_' for a space); held for that long
+//                         (default 0.08), so overlapping lines are chords
 // '#' starts a comment.
 struct TestEvent {
   double t;
@@ -1008,6 +1009,7 @@ void InjectTestInput() {
         e.button.down = false;
         q.push_back({t + 0.08, e});
       } else if (c == "key" && n >= 3) {
+        std::replace(a, a + std::strlen(a), '_', ' ');
         SDL_Scancode sc = SDL_GetScancodeFromName(a);
         if (sc == SDL_SCANCODE_UNKNOWN) {
           WarnF("TEST_INPUT: unknown key %s\n", a);
