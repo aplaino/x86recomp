@@ -145,7 +145,7 @@ int main(int argc, char** argv) {
       Case<false>(mxcsr, op, g_rng() & 1 ? 1 : 4);
   }
   std::printf("sse_host_test: %ld cases, %d failures\n", cases, g_failures);
-#ifdef RECOMP_SSE_MUTATION
+#if RECOMP_SSE_MUTATION
   // A planted bug must be caught.
   return g_failures ? 0 : 1;
 #else
