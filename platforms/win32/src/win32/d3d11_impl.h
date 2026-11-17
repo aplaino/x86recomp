@@ -277,8 +277,6 @@ struct StageBindings {
 struct LinkedProgram {
   gfx::ProgramId id = 0;
   StageBindings vs, ps, cs;
-  uint8_t targets = 0;  // the SV_Target registers the pixel shader writes (bit i: i)
-  uint64_t ps_hash = 0;
 };
 
 // A program for the bound shaders (null: none, the draw is skipped).

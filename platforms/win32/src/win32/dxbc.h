@@ -98,7 +98,7 @@
 // (Direct3D gives clip w), SV_IsFrontFace gl_FrontFacing, SV_SampleIndex
 // gl_SampleID, SV_PrimitiveID gl_PrimitiveID (on Metal, MSL 2.2 and
 // later); SV_TargetN is location N
-// (vec4, uvec4 or ivec4 by its type; the device draws to 4 targets),
+// (vec4, uvec4 or ivec4 by its type; the device draws to 8 targets),
 // SV_Depth gl_FragDepth, SV_Coverage gl_SampleMask.
 // Compute shaders: SV_DispatchThreadID, SV_GroupID, SV_GroupThreadID and
 // SV_GroupIndex are gl_GlobalInvocationID, gl_WorkGroupID,

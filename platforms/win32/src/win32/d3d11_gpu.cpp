@@ -478,7 +478,7 @@ gfx::PipelineState PipelineOf(const ContextState& x, bool* ok) {
   const std::vector<uint8_t>& bs = x.blend ? x.blend->desc : none;
   const bool independent = Field<uint32_t>(bs, 4, 0) != 0;
   if (Field<uint32_t>(bs, 0, 0)) WARN_ONCE("d3d11: alpha to coverage is not drawn\n");
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < gfx::kMaxTargets; i++) {
     const size_t at = 8 + 32 * size_t(independent ? i : 0);
     gfx::TargetBlend& b = p.blend[i];
     b.enable = Field<uint32_t>(bs, at, 0) != 0;
@@ -809,24 +809,15 @@ void GpuDraw(Device& dev, Context& x, const DrawCall& dc) {
   // Without a pixel shader only depth and stencil are written.
   if (!x.stage[1].shader)
     for (gfx::TargetBlend& b : d.state.blend) b.write_mask = 0;
-  // Targets: the first four render target views, from the first on.
+  // Targets: the render target views from the first on.
   int w = 0, h = 0;
-  for (int i = 0; i < 4 && x.rtvs[i]; i++) {
+  for (int i = 0; i < gfx::kMaxTargets && x.rtvs[i]; i++) {
     const View& v = *x.rtvs[i];
     Resource& r = *v.res;
     EnsureImage(dev, r);
     d.targets[i] = {r.image, int(v.first_mip), int(v.first_slice)};
     r.gpu_newer = true;
     if (!i) w = int(r.MipWidth(v.first_mip)), h = int(r.MipHeight(v.first_mip));
-  }
-  // Past the fourth (gfx draws to four): a pixel shader that writes one
-  // loses that output, reported once per shader.
-  if (prog->targets >> 4) {
-    static std::set<uint64_t> warned;
-    for (int i = 4; i < 8; i++)
-      if (x.rtvs[i] && (prog->targets >> i & 1) && warned.insert(prog->ps_hash).second)
-        WarnF("d3d11: pixel shader %016llX writes render target %d, past the fourth: not drawn\n",
-              (unsigned long long)prog->ps_hash, i);
   }
   if (x.dsv) {
     Resource& r = *x.dsv->res;
