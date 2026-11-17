@@ -50,18 +50,30 @@ inline void St(uint8_t* B, uint64_t a, const Xmm& x, int bytes) {
   std::memcpy(B + a, x.b, bytes);
 }
 // Legacy-SSE m128 operands other than movups/movupd/movdqu must be 16-byte
-// aligned (#GP otherwise): fatal, naming the instruction.
-void CheckAligned(Ctx& c, uint64_t a, uint64_t va);
+// aligned (#GP otherwise): fatal, naming the instruction. The test is
+// inline (every such access has one), the report out of line.
+[[noreturn, gnu::cold]] void Misaligned(uint64_t a, uint64_t va, unsigned align);
+inline void CheckAligned(Ctx& c, uint64_t a, uint64_t va) {
+  (void)c;
+  if (a & 15) [[unlikely]] Misaligned(a, va, 16);
+}
 // The same for VEX moves that require `align` (16 or 32) bytes.
-void CheckAligned(Ctx& c, uint64_t a, uint64_t va, unsigned align);
+inline void CheckAligned(Ctx& c, uint64_t a, uint64_t va, unsigned align) {
+  (void)c;
+  if (a & (align - 1)) [[unlikely]] Misaligned(a, va, align);
+}
 
 // ---- floating point ---------------------------------------------------
 enum Op : uint8_t { kAdd, kSub, kMul, kDiv };
 
 // d = d op s, lane-wise: `lanes` lanes of double (dbl) or float. Scalar
-// forms pass lanes = 1 and keep the upper lanes of d.
+// forms pass lanes = 1 and keep the upper lanes of d. With MXCSR as games
+// keep it most lanes are the host's arithmetic, proven the same
+// (sse.cpp, HostArith); ArithModel is the model alone (tests).
 void Arith(Ctx& c, Op op, bool dbl, int lanes, Xmm& d, const Xmm& s,
            uint64_t va);
+void ArithModel(Ctx& c, Op op, bool dbl, int lanes, Xmm& d, const Xmm& s,
+                uint64_t va);
 
 // CMPPS/PD/SS/SD: each lane of d becomes all ones if `d pred s` holds,
 // else zero. pred is AVX's 5-bit predicate (0 EQ_OQ, 1 LT_OS, 2 LE_OS,

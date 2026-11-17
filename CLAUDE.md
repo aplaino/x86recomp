@@ -139,7 +139,10 @@ OS or middleware API goes here, even when a game is where it came up.
   the rounding mode), and code that runs such a path is built with
   RECOMP_X87_FP_FLAGS (-ffp-contract=off, no fast-math).
 - SSE and AVX: lanes through x86/sse.cpp (SoftFloat + x86 NaN
-  rules + exact MXCSR flags), never host float/double arithmetic.
+  rules + exact MXCSR flags). Host float/double only inside proven-exact
+  paths there, as for the x87: the proof next to the code, the model for
+  everything outside its conditions, and a fuzz test against the model
+  (tests/x86/sse_host_test) that each planted bug of the path makes fail.
   Changes must keep tests/x86/lift_sse_test and (for x64 images)
   tests/x86/lift_x64_test passing.
 - CPUID is a fixed CPU, never the host's: SSE2-class for 32-bit guests,
