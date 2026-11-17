@@ -92,6 +92,9 @@ struct Program {
   std::map<uint64_t, std::vector<uint64_t>> jumptables;  // jmp va -> targets
   std::set<uint64_t> noreturn_iat;            // import slots of ExitProcess etc.
   std::map<uint64_t, std::string> probes;     // manifest: probe on entry
+  // manifest `note-cmov <va> <end>` (development): x64 conditional moves
+  // in these ranges record that they moved (NoteCmov).
+  std::vector<std::pair<uint64_t, uint64_t>> note_cmov;
   std::set<uint64_t> replaced;                // manifest: the game project
                                               // defines f_X; the lifted body
                                               // is emitted as f_X_lifted

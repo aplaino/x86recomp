@@ -2922,6 +2922,11 @@ void InsnEmitter::Emit64() {
     // CMOVcc: the source is read even when the condition is false, and a
     // 32-bit destination is zero-extended either way.
     int n = Bytes(0);
+    for (const auto& [lo, hi] : p_.note_cmov)
+      if (in_.va >= lo && in_.va < hi) {
+        L(Fmt("if (%s) ::recomp::NoteCmov(c, %s);", cond, va.c_str()));
+        break;
+      }
     L(Fmt("const %s v = %s;", VT(n), Read(1).c_str()));
     if (n == 4)
       L(Write(0, Fmt("(%s) ? v : %s", cond, Read(0).c_str())));

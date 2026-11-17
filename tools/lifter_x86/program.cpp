@@ -169,6 +169,12 @@ bool Program::LoadManifest(const std::string& path, std::string* err) {
         return false;
       }
       modules.back().text.emplace_back(va, Hex(name) + (mod.base - mod.preferred_base));
+    } else if (kind == "note-cmov") {
+      if (name.empty()) {
+        *err = path + ":" + std::to_string(no) + ": note-cmov needs an end address";
+        return false;
+      }
+      note_cmov.emplace_back(va, Hex(name) + (mod.base - mod.preferred_base));
     } else if (kind == "probe") {
       entries.insert(va);
       probes[va] = name.empty() ? "probe" : name;

@@ -135,6 +135,17 @@ void DumpGuestState(const Ctx& c) {
 
 namespace {
 
+// The conditional moves NoteCmov recorded on this thread (manifest
+// note-cmov), the last kCmovRing of them.
+namespace {
+constexpr int kCmovRing = 256;
+struct CmovNote {
+  uint64_t va, gpr[16], stack[2];
+};
+thread_local CmovNote t_cmov[kCmovRing];
+thread_local uint64_t t_cmov_count = 0;
+}  // namespace
+
 // g_fatal_report: FatalF's message with the guest state and backtraces,
 // to stderr and, so it survives a filtered or closed terminal, to
 // $XDG_DATA_HOME/<id>/crashes/crash-<time>-<pid>.txt.
@@ -144,6 +155,22 @@ namespace {
     if (Thread* t = CurrentThread()) {
       std::fprintf(stderr, "  guest thread %04X\n", t->tid);
       DumpGuestState(t->ctx);
+      if (t_cmov_count) {
+        const uint64_t n = std::min<uint64_t>(t_cmov_count, kCmovRing);
+        std::fprintf(stderr, "  conditional moves taken (%llu in all; the last %llu, oldest first):",
+                     (unsigned long long)t_cmov_count, (unsigned long long)n);
+        for (uint64_t i = t_cmov_count - n; i < t_cmov_count; i++)
+          std::fprintf(stderr, "%s%llX", (i - (t_cmov_count - n)) % 8 ? " " : "\n   ",
+                       (unsigned long long)t_cmov[i % kCmovRing].va);
+        std::fprintf(stderr, "\n  the last 12 with their registers (rax rcx rdx rbx rsp rbp rsi rdi r8-r15) and [rsp], [rsp+8]:\n");
+        for (uint64_t i = t_cmov_count - std::min<uint64_t>(n, 12); i < t_cmov_count; i++) {
+          const CmovNote& e = t_cmov[i % kCmovRing];
+          std::fprintf(stderr, "   %llX:", (unsigned long long)e.va);
+          for (uint64_t g : e.gpr) std::fprintf(stderr, " %llX", (unsigned long long)g);
+          std::fprintf(stderr, " | %llX %llX\n", (unsigned long long)e.stack[0],
+                       (unsigned long long)e.stack[1]);
+        }
+      }
     }
     std::fprintf(stderr, "  host backtrace:\n");
     std::fflush(stderr);
@@ -597,6 +624,16 @@ uint64_t Rdtsc(Ctx& c) {
   return 3 * uint64_t(
       duration_cast<nanoseconds>(steady_clock::now().time_since_epoch())
           .count());
+}
+
+void NoteCmov(Ctx& c, uint64_t va) {
+  CmovNote& e = t_cmov[t_cmov_count++ % kCmovRing];
+  e.va = va;
+  const uint64_t r[16] = {c.rax, c.rcx, c.rdx, c.rbx, c.rsp, c.rbp, c.rsi, c.rdi,
+                          c.r8,  c.r9,  c.r10, c.r11, c.r12, c.r13, c.r14, c.r15};
+  std::memcpy(e.gpr, r, sizeof r);
+  e.stack[0] = Rd64(c.rsp);
+  e.stack[1] = Rd64(c.rsp + 8);
 }
 
 void Probe(Ctx& c, uint64_t va, const char* name) {
