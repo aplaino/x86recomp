@@ -11,9 +11,7 @@
 #include <atomic>
 #include <cstdio>
 #include <filesystem>
-#include <fstream>
 #include <functional>
-#include <iterator>
 #include <mutex>
 
 #if defined(__APPLE__)
@@ -25,7 +23,7 @@ namespace recomp::gfx {
 namespace {
 
 std::mutex g_cache_mu;
-std::string g_cache_dir;
+int g_cache_fd = -1;  // the cache directory, opened; -1: none
 
 // A cache file's name: two 64-bit hashes of the stage and the source.
 // The tag names what the code is made with; change it when the compilers'
@@ -43,28 +41,50 @@ std::string CacheName(const std::string& glsl, ShaderStage stage) {
 }  // namespace
 
 void SetShaderCacheDir(const std::string& dir) {
-  std::error_code ec;
-  if (!dir.empty()) std::filesystem::create_directories(dir, ec);
+  int fd = -1;
+  if (!dir.empty()) {
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    fd = ec ? -1 : ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  }
   // Only a directory of this user's that no one else may write: the code
-  // in it runs on the GPU as the game's.
+  // in it runs on the GPU as the game's. The checks and all the files go
+  // through the directory opened once, so renaming a directory on its
+  // path later cannot put another in its place.
   struct stat st;
-  const bool ours = !ec && !dir.empty() && ::lstat(dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode) &&
-                    st.st_uid == ::getuid() && !(st.st_mode & (S_IWGRP | S_IWOTH));
+  if (fd >= 0 && (::fstat(fd, &st) != 0 || st.st_uid != ::getuid() ||
+                  (st.st_mode & (S_IWGRP | S_IWOTH)))) {
+    ::close(fd);
+    fd = -1;
+  }
   std::lock_guard<std::mutex> l(g_cache_mu);
-  g_cache_dir = ours ? dir : std::string();
+  if (g_cache_fd >= 0) ::close(g_cache_fd);
+  g_cache_fd = fd;
 }
 
 bool CompileGlsl(const std::string& glsl, ShaderStage stage, std::string* code, std::string* log) {
-  std::string path;
+  // A duplicate of the cache directory's descriptor, closed on return.
+  struct Dir {
+    int fd = -1;
+    ~Dir() {
+      if (fd >= 0) ::close(fd);
+    }
+  } d;
   {
     std::lock_guard<std::mutex> l(g_cache_mu);
-    if (!g_cache_dir.empty()) path = g_cache_dir + "/" + CacheName(glsl, stage);
+    if (g_cache_fd >= 0) d.fd = ::fcntl(g_cache_fd, F_DUPFD_CLOEXEC, 0);
   }
-  if (!path.empty()) {
-    std::ifstream f(path, std::ios::binary);
-    if (f) {
-      code->assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
-      if (!code->empty()) return true;
+  const int dir = d.fd;
+  const std::string name = dir >= 0 ? CacheName(glsl, stage) : std::string();
+  if (dir >= 0) {
+    const int fd = ::openat(dir, name.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd >= 0) {
+      code->clear();
+      char b[65536];
+      ssize_t n;
+      while ((n = ::read(fd, b, sizeof b)) > 0) code->append(b, size_t(n));
+      ::close(fd);
+      if (n == 0 && !code->empty()) return true;
     }
   }
   std::vector<uint32_t> spirv;
@@ -74,16 +94,16 @@ bool CompileGlsl(const std::string& glsl, ShaderStage stage, std::string* code, 
 #else
   code->assign(reinterpret_cast<const char*>(spirv.data()), spirv.size() * 4);
 #endif
-  if (!path.empty()) {
+  if (dir >= 0) {
     // Written aside (a new file, never through a link) and renamed: a
     // reader sees all of a file or none.
     static std::atomic<unsigned> n{0};
-    const std::string tmp = path + "." + std::to_string(getpid()) + "-" + std::to_string(n++);
-    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644);
+    const std::string tmp = name + "." + std::to_string(getpid()) + "-" + std::to_string(n++);
+    const int fd = ::openat(dir, tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
     if (fd >= 0) {
       const bool ok = ::write(fd, code->data(), code->size()) == ssize_t(code->size());
-      if (::close(fd) != 0 || !ok || std::rename(tmp.c_str(), path.c_str()) != 0)
-        std::remove(tmp.c_str());
+      if (::close(fd) != 0 || !ok || ::renameat(dir, tmp.c_str(), dir, name.c_str()) != 0)
+        ::unlinkat(dir, tmp.c_str(), 0);
     }
   }
   return true;
