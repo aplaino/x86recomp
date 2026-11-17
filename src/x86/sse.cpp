@@ -189,89 +189,6 @@ void SqrtT(Ctx& c, int lanes, Xmm& d, const Xmm& s, uint64_t va) {
   d = r;
 }
 
-// ---- the host's arithmetic where it is the model's (proof below) ------
-//
-// With MXCSR as games keep it, every exception masked, round to nearest
-// and PE already raised (UsualMxcsr), with or without FTZ and DAZ, a lane
-// whose operands are normal or zero (under DAZ after a denormal operand
-// is made the zero of its sign, as the model does, which raises nothing)
-// gets from the host (IEEE binary32/64, round to nearest, no flush to
-// zero: the default FPCR/MXCSR, never changed; built without contraction
-// into FMA) the bits SoftFloat gives, and no flag but PE, when its result
-// is one of these:
-// - normal and not of the smallest normal magnitude: neither infinite (OE,
-//   ZE) nor a NaN (IE: 0/0 is the only invalid operation of finite
-//   operands), and not tiny before or after rounding (no UE either way);
-// - zero from ADD or SUB: exact, so no UE;
-// - denormal, under FTZ: tiny whichever way tininess is detected, so the
-//   model flushes it to the zero of its sign and raises UE and PE.
-// Anything else (NaN or infinite operands, denormal ones without DAZ,
-// results at or below the normal range otherwise) takes the model for the
-// whole instruction. tests/x86/sse_host_test fuzzes this against the
-// model in each mode; built with RECOMP_SSE_MUTATION=<n> one of the
-// checks below is broken, which it must catch.
-#ifndef RECOMP_SSE_MUTATION
-#define RECOMP_SSE_MUTATION 0
-#endif
-constexpr bool Mutated(int n) { return RECOMP_SSE_MUTATION == n; }
-
-bool UsualMxcsr(uint32_t mxcsr) {
-  return (mxcsr & (Mutated(7) ? 0x7F80u : 0x7FA0u)) == (Mutated(7) ? 0x1F80u : 0x1FA0u);
-}
-
-template <bool D>
-bool NormalOrZero(typename Fmt<D>::U v) {
-  const typename Fmt<D>::U e = v & Fmt<D>::kExp;
-  return e != Fmt<D>::kExp && (e || !(v & Fmt<D>::kFrac));
-}
-
-template <bool D>
-bool HostArith(Ctx& c, Op op, int lanes, Xmm& d, const Xmm& s) {
-  using U = typename Fmt<D>::U;
-  using F = std::conditional_t<D, double, float>;
-  constexpr U kSign = U(1) << (sizeof(U) * 8 - 1), kMinNormal = Fmt<D>::kFrac + 1;
-  const bool ftz = c.mxcsr & kFTZ, daz = c.mxcsr & kDAZ;
-  bool flushed = false;
-  Xmm r = d;
-  for (int i = 0; i < lanes; i++) {
-    U a = Lane<U>(d, i), b = Lane<U>(s, i);
-    if (daz) {
-      if (IsDenormal<D>(a)) a &= Mutated(1) ? 0 : kSign;
-      if (IsDenormal<D>(b)) b &= Mutated(1) ? 0 : kSign;
-    }
-    if (!NormalOrZero<D>(a) || !NormalOrZero<D>(b)) return false;
-    F x, y, f;
-    std::memcpy(&x, &a, sizeof x);
-    std::memcpy(&y, &b, sizeof y);
-    switch (op) {
-      case kAdd: f = x + y; break;
-      case kSub: f = x - y; break;
-      case kMul: f = x * y; break;
-      default: f = x / y; break;
-    }
-    U v;
-    std::memcpy(&v, &f, sizeof v);
-    const U mag = v & ~kSign;
-    if (mag > Fmt<D>::kExp || (mag == Fmt<D>::kExp && !Mutated(6))) return false;
-    if (mag == kMinNormal && !Mutated(2)) return false;
-    if (!(v & Fmt<D>::kExp)) {
-      if (mag) {
-        if (!ftz && !Mutated(4)) return false;
-        if (ftz) {
-          v &= kSign;
-          flushed = true;
-        }
-      } else if ((op == kMul || op == kDiv) && !Mutated(3)) {
-        if ((a & ~kSign) && (b & ~kSign)) return false;
-      }
-    }
-    SetLane<U>(r, i, v);
-  }
-  if (flushed && !Mutated(5)) c.mxcsr |= kUE | kPE;
-  d = r;
-  return true;
-}
-
 template <bool D>
 void ArithModelT(Ctx& c, Op op, int lanes, Xmm& d, const Xmm& s, uint64_t va) {
   using U = typename Fmt<D>::U;
@@ -527,14 +444,6 @@ void Rcp(Xmm& d, const Xmm& s) {
 void Misaligned(uint64_t a, uint64_t va, unsigned align) {
   FatalF("sse: misaligned %u-byte operand %08llX at %08llX (#GP)", align,
          (unsigned long long)a, (unsigned long long)va);
-}
-
-void Arith(Ctx& c, Op op, bool dbl, int lanes, Xmm& d, const Xmm& s,
-           uint64_t va) {
-  if (UsualMxcsr(c.mxcsr) &&
-      (dbl ? HostArith<true>(c, op, lanes, d, s) : HostArith<false>(c, op, lanes, d, s)))
-    return;
-  ArithModel(c, op, dbl, lanes, d, s, va);
 }
 
 void ArithModel(Ctx& c, Op op, bool dbl, int lanes, Xmm& d, const Xmm& s,
