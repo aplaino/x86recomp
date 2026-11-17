@@ -789,9 +789,23 @@ void GpuDraw(Device& dev, Context& x, const DrawCall& dc) {
     return;
   }
   const Shader* vs = x.stage[0].shader.get();
+  // A list of patches of one control point (D3D11_PRIMITIVE_TOPOLOGY_1_
+  // CONTROL_POINT_PATCHLIST) with a domain shader: point patches, drawn as
+  // their quads' triangles (dxbc.h), when the shaders are those.
+  const Shader* ds = x.stage[kDomainStage].shader.get();
+  const bool point_patch = x.topology == 33 && x.hull && ds;
   std::shared_ptr<const LinkedProgram> prog;
-  if (vs) prog = ProgramFor(dev, *vs, x.stage[1].shader.get(), x.layout.get());
+  if (vs && point_patch)
+    prog = PointPatchProgramFor(dev, *vs, *x.hull, *ds, x.stage[1].shader.get(), x.layout.get());
+  else if (vs && x.topology != 33)
+    prog = ProgramFor(dev, *vs, x.stage[1].shader.get(), x.layout.get());
   if (!prog || !prog->id) {
+    if (vs && x.topology == 33) {
+      static std::set<uint64_t> warned;
+      if (warned.insert(x.hull ? x.hull->hash : 0).second)
+        WarnF("d3d11: a draw of patches (hull shader %016llX, domain %016llX) is skipped: not point patches\n",
+              x.hull ? (unsigned long long)x.hull->hash : 0ull, ds ? (unsigned long long)ds->hash : 0ull);
+    }
     dev.stats.skipped++;
     return;
   }
@@ -799,6 +813,10 @@ void GpuDraw(Device& dev, Context& x, const DrawCall& dc) {
   gfx::ProgramDraw d;
   d.program = prog->id;
   d.state = PipelineOf(x, &ok);
+  if (point_patch) {
+    d.state.topology = gfx::Topology::TriangleList;
+    ok = true;
+  }
   if (!ok) {
     static std::set<uint64_t> warned;
     if (warned.insert(vs->hash).second)
@@ -837,7 +855,29 @@ void GpuDraw(Device& dev, Context& x, const DrawCall& dc) {
   // Geometry.
   d.vertex_count = dc.count;
   d.instance_count = dc.instances;
-  if (dc.indexed) {
+  // An indexed point patch's vertices are indexed on the host: vertex j
+  // of patch p is the patch's control point's vertex times the vertices a
+  // patch has, plus j (the domain stage divides it back).
+  std::vector<uint32_t> patch_indices;
+  if (point_patch && dc.indexed) {
+    if (!x.ib) return;
+    const Resource& ib = *x.ib;
+    const uint32_t isize = x.ib_format == 42 ? 4 : 2, per = prog->patch_vertices;
+    const uint64_t at = x.ib_offset + uint64_t(dc.first) * isize;
+    if (at >= ib.byte_width) return;
+    const uint32_t n = uint32_t(std::min<uint64_t>(dc.count, (ib.byte_width - at) / isize));
+    patch_indices.resize(size_t(n) * per);
+    for (uint32_t p = 0; p < n; p++) {
+      uint32_t v;
+      if (isize == 4) std::memcpy(&v, ib.Data() + at + 4ull * p, 4);
+      else v = uint32_t(ib.Data()[at + 2ull * p]) | uint32_t(ib.Data()[at + 2ull * p + 1]) << 8;
+      v += uint32_t(dc.base_vertex);
+      for (uint32_t j = 0; j < per; j++) patch_indices[size_t(p) * per + j] = v * per + j;
+    }
+    d.index_size = 4;
+    d.indices = patch_indices.data();
+    d.vertex_count = uint32_t(patch_indices.size());
+  } else if (dc.indexed) {
     if (!x.ib) return;
     Resource& ib = *x.ib;
     const uint32_t isize = x.ib_format == 42 ? 4 : 2;
@@ -852,6 +892,9 @@ void GpuDraw(Device& dev, Context& x, const DrawCall& dc) {
     } else {
       d.indices = ib.Data() + at;
     }
+  } else if (point_patch) {
+    d.vertex_count = dc.count * prog->patch_vertices;
+    d.base_vertex = int32_t(dc.first * prog->patch_vertices);
   } else {
     d.base_vertex = int32_t(dc.first);
   }
@@ -859,7 +902,7 @@ void GpuDraw(Device& dev, Context& x, const DrawCall& dc) {
   StageData vsd, psd;
   vsd.uniforms.draw[0] = dc.indexed ? dc.base_vertex : int32_t(dc.first);
   vsd.uniforms.draw[1] = int32_t(dc.first_instance);
-  BindStage(dev, x, 0, prog->vs, &dc, vsd, s, &d.vs);
+  BindStage(dev, x, point_patch ? kDomainStage : 0, prog->vs, &dc, vsd, s, &d.vs);
   BindStage(dev, x, 1, prog->ps, &dc, psd, s, &d.fs);
   if (!dev.gfx->DrawProgram(d)) dev.stats.waiting++;
 }

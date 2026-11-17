@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <mutex>
 #include <string>
@@ -188,7 +189,7 @@ float l_f10(uint v) { return unpackHalf2x16(((v >> 5u) << 10u) | ((v & 0x1Fu) <<
 // on, one per input slot listed in *slots. Registers the layout does not
 // fill read 0, as do formats the input assembler does not read.
 std::string VertexFetch(const InputLayout* layout, const dxbc::Shader& vs, uint32_t first_buffer,
-                        std::vector<uint32_t>* slots) {
+                        std::vector<uint32_t>* slots, const char* vertex = "uint(gl_VertexIndex)") {
   slots->clear();
   struct Use {
     const InputLayout::Element* e;
@@ -225,7 +226,7 @@ std::string VertexFetch(const InputLayout* layout, const dxbc::Shader& vs, uint3
     const std::string ks = std::to_string(k), b = std::to_string(first_buffer + k) + "u";
     std::string index;
     if (!u.e->per_instance)
-      index = "uint(gl_VertexIndex) - l_ia[" + ks + "].y";
+      index = std::string(vertex) + " - l_ia[" + ks + "].y";
     else if (u.e->step_rate)
       index = "uint(gl_InstanceIndex) / " + std::to_string(u.e->step_rate) +
               "u + uint(l_draw.y) - l_ia[" + ks + "].y";
@@ -300,6 +301,84 @@ std::shared_ptr<const LinkedProgram> LinkProgram(gfx::Device& dev, const Shader&
   p->id = dev.CreateProgram(d);
   RECOMP_TRACE("  d3d11: program %u: vertex %016llX, pixel %016llX\n", p->id,
                (unsigned long long)vs.hash, ps ? (unsigned long long)ps->hash : 0ull);
+  return p;
+}
+
+std::shared_ptr<const LinkedProgram> LinkPointPatchProgram(gfx::Device& dev, const Shader& vs,
+                                                           const Shader& hs, const Shader& ds,
+                                                           const Shader* ps, const InputLayout* layout) {
+  bool ccw = false;
+  uint32_t n = 0;
+  std::vector<dxbc::ConstantOutput> constants;
+  if (vs.stage != 0 || ds.stage != 4 || (ps && ps->stage != 1) ||
+      !dxbc::PointToQuadHull(hs.dxbc.data(), hs.dxbc.size(), &ccw, &n) ||
+      !dxbc::PassThroughVertexShader(vs.dxbc.data(), vs.dxbc.size(), &constants))
+    return nullptr;
+  const auto tv = Translated(vs);
+  const auto td = Translated(ds);
+  const auto tp = ps ? Translated(*ps) : nullptr;
+  if (!tv->ok || !td->ok || (tp && !tp->ok)) return nullptr;
+  auto p = std::make_shared<LinkedProgram>();
+  p->vs = BindingsOf(td->s);
+  if (tp) p->ps = BindingsOf(tp->s);
+  if (!Fits(ds, td->s, p->vs) || (ps && !Fits(*ps, tp->s, p->ps))) return nullptr;
+
+  const std::string varyings = dxbc::VaryingDefines(&td->s, tp ? &tp->s : nullptr);
+  gfx::ProgramDesc d;
+  // The domain stage: its domain point the corner of the patch's quad
+  // this vertex is, its control point the patch's vertex (the vertex
+  // shader passes its inputs through, and the hull shader its control
+  // point), fetched as the vertex shader's inputs.
+  p->patch_vertices = 6 * n * n;
+  const std::string per = std::to_string(p->patch_vertices) + "u";
+  std::vector<uint32_t> slots;
+  std::string fetch = VertexFetch(layout, tv->s, td->s.stage.buffers, &slots,
+                                  ("(uint(gl_VertexIndex) / " + per + ")").c_str());
+  for (uint32_t s : slots) p->vs.buffers.push_back({StageBindings::BufferKind::Vertex, s, 0});
+  // The constants the vertex shader writes over its inputs.
+  if (!constants.empty()) {
+    const std::string decl = "uvec4 r_fetch(uint reg) {";
+    fetch.replace(fetch.find(decl), decl.size(), "uvec4 r_fetch_vertex(uint reg) {");
+    fetch += "uvec4 r_fetch(uint reg) {\n  uvec4 v = r_fetch_vertex(reg);\n";
+    for (const dxbc::ConstantOutput& k : constants)
+      fetch += "  if (reg == " + std::to_string(k.reg) + "u) v[" + std::to_string(k.comp) + "] = " +
+               std::to_string(k.bits) + "u;\n";
+    fetch += "  return v;\n}\n";
+  }
+  // Vertex k of a patch: corner k % 6 of quad k / 6 of the n x n grid.
+  const char* corners = ccw ? "vec2(0, 0), vec2(0, 1), vec2(1, 0), vec2(0, 1), vec2(1, 1), vec2(1, 0)"
+                            : "vec2(0, 0), vec2(1, 0), vec2(0, 1), vec2(0, 1), vec2(1, 0), vec2(1, 1)";
+  const std::string ns = std::to_string(n) + "u";
+  const std::string domain =
+      std::string("const vec2 r_corners[6] = vec2[](") + corners + ");\n" +
+      "vec3 r_domain_point() {\n  uint k = uint(gl_VertexIndex) % " + per + ", q = k / 6u;\n" +
+      "  return vec3((vec2(float(q % " + ns + "), float(q / " + ns + ")) + r_corners[k % 6u]) / " +
+      std::to_string(n) + ".0, 0.0);\n}\n#define R_DOMAIN_POINT r_domain_point()\n";
+  d.vs = td->s.stage;
+  d.vs.buffers = uint32_t(p->vs.buffers.size());
+  d.vs.glsl = varyings + UniformBlock(p->vs, uint32_t(slots.size()), &d.vs.uniform_bytes) + fetch +
+              domain + td->s.stage.glsl;
+  p->vs.uniforms = true;
+  if (tp) {
+    d.fs = tp->s.stage;
+    std::string block;
+    if (!p->ps.formats.empty()) {
+      block = UniformBlock(p->ps, 0, &d.fs.uniform_bytes);
+      p->ps.uniforms = true;
+    }
+    d.fs.glsl = varyings + block + tp->s.stage.glsl;
+  } else {
+    d.fs.glsl = varyings + "void main() {}\n";
+  }
+  static const bool background = [] {
+    const char* e = Env("SYNC_SHADERS");
+    return Game().background_shaders && !(e && *e && *e != '0');
+  }();
+  d.background = background;
+  p->id = dev.CreateProgram(d);
+  RECOMP_TRACE("  d3d11: point patch program %u: vertex %016llX, domain %016llX, pixel %016llX\n", p->id,
+               (unsigned long long)vs.hash, (unsigned long long)ds.hash,
+               ps ? (unsigned long long)ps->hash : 0ull);
   return p;
 }
 

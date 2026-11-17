@@ -123,13 +123,15 @@ std::string Define(const std::string& name, const std::string& value) {
 
 std::string LinkCode(const dxbc::Shader& sh, gfx::ProgramStage* st) {
   std::string g;
-  if (sh.type == dxbc::ShaderType::Vertex) g += dxbc::VaryingDefines(&sh, nullptr);
+  // A domain shader is drawn as a vertex stage (dxbc.h, point patches).
+  const bool vertex = sh.type == dxbc::ShaderType::Vertex || sh.type == dxbc::ShaderType::Domain;
+  if (vertex) g += dxbc::VaryingDefines(&sh, nullptr);
   if (sh.type == dxbc::ShaderType::Pixel) g += dxbc::VaryingDefines(nullptr, &sh);
   for (const dxbc::ShaderResource& r : sh.resources)
     if (r.dim == dxbc::ResourceDim::Buffer) g += Define("R_FMT_T" + std::to_string(r.slot), "2u");
   for (const dxbc::UnorderedAccess& u : sh.uavs)
     if (u.dim == dxbc::ResourceDim::Buffer) g += Define("R_FMT_U" + std::to_string(u.slot), "2u");
-  if (sh.type == dxbc::ShaderType::Vertex) {
+  if (vertex) {
     // One vertex buffer after the translation's, 16 bytes a register.
     const uint32_t vb = st->buffers++;
     g += "uvec4 r_fetch(uint reg) {\n  uint i = uint(gl_VertexIndex) * 16u + reg * 4u;\n"
@@ -159,7 +161,8 @@ void Run(const Blob& b, Result* r, bool annotate) {
     return;
   }
   gfx::ProgramStage st = sh.stage;
-  const gfx::ShaderStage stage = sh.type == dxbc::ShaderType::Vertex  ? gfx::ShaderStage::Vertex
+  const gfx::ShaderStage stage = sh.type == dxbc::ShaderType::Vertex || sh.type == dxbc::ShaderType::Domain
+                                     ? gfx::ShaderStage::Vertex
                                  : sh.type == dxbc::ShaderType::Pixel ? gfx::ShaderStage::Fragment
                                                                       : gfx::ShaderStage::Compute;
   const std::string link = LinkCode(sh, &st);

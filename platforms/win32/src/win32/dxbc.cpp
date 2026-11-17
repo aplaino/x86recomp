@@ -885,8 +885,9 @@ class Translator {
     sh_->major = p_.major;
     sh_->minor = p_.minor;
     stage_ = p_.type;
-    if (stage_ != ShaderType::Vertex && stage_ != ShaderType::Pixel && stage_ != ShaderType::Compute)
-      return Fail("a shader type not translated (vertex, pixel and compute are)");
+    if (stage_ != ShaderType::Vertex && stage_ != ShaderType::Pixel && stage_ != ShaderType::Compute &&
+        stage_ != ShaderType::Domain)
+      return Fail("a shader type not translated (vertex, pixel, compute and domain are)");
     for (const Instr& in : p_.instrs) {
       cur_ = &in;
       if (IsDeclOp(in.op) && !Declare(in)) return false;
@@ -1029,13 +1030,25 @@ class Translator {
         return true;
       case kDclIndexRange:
         return true;  // v# and o# are arrays
+      case kDclInputControlPointCount:
+        if (stage_ == ShaderType::Domain && ((in.token >> 11) & 0x3F) != 1)
+          return Fail("a domain shader of patches of more than one control point");
+        return true;
+      case kDclTessDomain:
+        if (stage_ == ShaderType::Domain && (ctl & 3) != 3) return Fail("a domain other than quads");
+        return true;
       case kDclInput: case kDclInputSgv: case kDclInputSiv: case kDclInputPs: case kDclInputPsSgv:
       case kDclInputPsSiv: case kDclOutput: case kDclOutputSgv: case kDclOutputSiv: {
         const Operand& o = in.ops[0];
         const bool out = in.op >= kDclOutput;
-        if (o.type == (out ? kOutput : kInput)) {
-          if (o.ndim != 1 || o.index[0].rel >= 0) return Fail("an input or output of more than one index");
-          if (o.index[0].imm >= 32) return Fail("an input or output register past 31");
+        // A domain shader's control point (its only one) is its inputs.
+        const bool point = !out && o.type == kInputControlPoint && stage_ == ShaderType::Domain;
+        if (o.type == (out ? kOutput : kInput) || point) {
+          if (point && (o.ndim != 2 || o.index[1].rel >= 0)) return Fail("a control point input of this form");
+          if (!point && (o.ndim != 1 || o.index[0].rel >= 0))
+            return Fail("an input or output of more than one index");
+          const uint32_t reg = o.index[point ? 1 : 0].imm;
+          if (reg >= 32) return Fail("an input or output register past 31");
           // A register's components can be declared apart (an input and
           // a system value in one register).
           IoDecl d;
@@ -1043,7 +1056,7 @@ class Translator {
           if (!d.mask) return Fail("an input or output of no components");
           if (!in.lits.empty()) d.sv = in.lits[0];
           if (in.op >= kDclInputPs && in.op <= kDclInputPsSiv) d.interp = ctl & 0xF;
-          std::vector<IoDecl>& v = (out ? outs_ : ins_)[o.index[0].imm];
+          std::vector<IoDecl>& v = (out ? outs_ : ins_)[reg];
           for (IoDecl& e : v)
             if (e.sv == d.sv && e.interp == d.interp) {
               e.mask |= d.mask;
@@ -1064,6 +1077,9 @@ class Translator {
             return true;
           case kInputThreadId: case kInputThreadGroupId: case kInputThreadIdInGroup:
           case kInputThreadIdInGroupFlattened: case kInputPrimitiveId:
+            return true;
+          case kInputDomainPoint:
+            domain_point_ = true;
             return true;
           default: return Fail("an input or output of this type not translated yet");
         }
@@ -1268,6 +1284,13 @@ class Translator {
       case kInputThreadIdInGroupFlattened: return "uvec4(gl_LocalInvocationIndex)";
       case kInputPrimitiveId: return "uvec4(uint(gl_PrimitiveID))";
       case kInputCoverageMask: return "uvec4(r_cov)";
+      case kInputControlPoint: {
+        if (o.ndim != 2 || o.index[0].rel >= 0 || o.index[0].imm != 0 || o.index[1].rel >= 0)
+          return Fail("a control point other than the patch's one"), "r_v[0]";
+        if (o.index[1].imm >= InputCount()) return Fail("an input not declared"), "r_v[0]";
+        return "r_v[" + std::to_string(o.index[1].imm) + "]";
+      }
+      case kInputDomainPoint: return "r_dom";
       default: return {};
     }
   }
@@ -2216,11 +2239,15 @@ class Translator {
   }
   uint32_t OutputCount() const {
     uint32_t n = outs_.empty() ? 0 : outs_.rbegin()->first + 1;
-    if (stage_ == ShaderType::Vertex)
+    if (VertexLike())
       for (const SignatureElement& el : sh_->outputs)
         if (el.system_value == 0 && el.reg < 32) n = std::max(n, el.reg + 1);
     return n;
   }
+
+  // The stages whose outputs are the vertex's (a domain shader is drawn
+  // as a vertex stage, dxbc.h).
+  bool VertexLike() const { return stage_ == ShaderType::Vertex || stage_ == ShaderType::Domain; }
 
   static char CompType(uint32_t t) { return t == 1 ? 'u' : t == 2 ? 'i' : 'f'; }
   static std::string Vec4Of(char t) { return t == 'u' ? "uvec4" : t == 'i' ? "ivec4" : "vec4"; }
@@ -2285,7 +2312,11 @@ class Translator {
 
     // Inputs and outputs.
     const uint32_t nin = InputCount(), nout = OutputCount();
-    if (stage_ == ShaderType::Vertex) {
+    if (domain_point_) {
+      g += "#ifndef R_DOMAIN_POINT\n#define R_DOMAIN_POINT vec3(0.0)\n#endif\nuvec4 r_dom;\n";
+      pre += "  r_dom = floatBitsToUint(vec4(R_DOMAIN_POINT, 0.0));\n";
+    }
+    if (VertexLike()) {
       for (const auto& [reg, decls] : ins_) {
         const std::string r = "r_v[" + std::to_string(reg) + "]";
         if (Fetched(reg)) pre += "  " + r + " = r_fetch(" + UintLit(reg) + ");\n";
@@ -2421,7 +2452,7 @@ class Translator {
     g += body_;
     g += "}\nvoid main() {\n";
     for (uint32_t i = 0; i < nin; i++)
-      if (stage_ != ShaderType::Vertex || !Fetched(i)) g += "  r_v[" + std::to_string(i) + "] = uvec4(0u);\n";
+      if (!VertexLike() || !Fetched(i)) g += "  r_v[" + std::to_string(i) + "] = uvec4(0u);\n";
     if (nout) g += "  for (int i = 0; i < " + std::to_string(nout) + "; i++) r_o[i] = uvec4(0u);\n";
     g += pre + "  r_main();\n" + post + "}\n";
     sh_->stage.glsl = std::move(g);
@@ -2437,6 +2468,7 @@ class Translator {
   int indent_ = 1;
   std::vector<char> flow_;
   bool last_label_ = false, early_depth_ = false, out_mask_ = false, coverage_ = false;
+  bool domain_point_ = false;
   uint32_t out_depth_ = 0;
   std::set<std::string> helpers_;
   uint32_t temps_ = 0;
@@ -2452,6 +2484,120 @@ class Translator {
 };
 
 }  // namespace
+
+namespace {
+
+bool Load(const void* dxbc, size_t size, Program* p) {
+  std::vector<Chunk> chunks;
+  std::string err;
+  return Chunks(static_cast<const uint8_t*>(dxbc), size, &chunks, &err) && LoadProgram(chunks, p, &err);
+}
+
+// mov o#, src# into the output register of the source's number, each
+// component from itself: a stage passing a register through. The source
+// is v# or, with `point`, the patch's first control point's register
+// (v[0][#] in a hull shader's control point phase).
+bool CopiesRegister(const Instr& in, bool point) {
+  if (in.op != kMov || in.sat || in.ops.size() != 2) return false;
+  const Operand& d = in.ops[0];
+  const Operand& s = in.ops[1];
+  if (d.type != kOutput || d.ndim != 1 || d.index[0].rel >= 0 || d.ncomp != 4 || d.mode != 0) return false;
+  if ((s.type != kInput && !(point && s.type == kInputControlPoint)) || s.mod || s.ncomp != 4) return false;
+  const int dim = point ? 1 : 0;
+  if (s.ndim != uint32_t(dim + 1) || s.index[dim].rel >= 0 || s.index[dim].imm != d.index[0].imm) return false;
+  if (dim && (s.index[0].rel >= 0 || s.index[0].imm != 0)) return false;
+  for (int c = 0; c < 4; c++)
+    if ((d.mask >> c) & 1) {
+      const int from = s.mode == 0 ? c : s.swz[c];
+      if (from != c) return false;
+    }
+  return true;
+}
+
+}  // namespace
+
+bool PassThroughVertexShader(const void* dxbc, size_t size, std::vector<ConstantOutput>* constants) {
+  Program p;
+  constants->clear();
+  if (!Load(dxbc, size, &p) || p.type != ShaderType::Vertex) return false;
+  for (const Instr& in : p.instrs) {
+    if (IsDeclOp(in.op) || in.op == kRet || CopiesRegister(in, false)) continue;
+    // mov o#.mask, l(...): constants into an output register.
+    if (in.op != kMov || in.sat || in.ops.size() != 2) return false;
+    const Operand& d = in.ops[0];
+    const Operand& s = in.ops[1];
+    if (d.type != kOutput || d.ndim != 1 || d.index[0].rel >= 0 || d.ncomp != 4 || d.mode != 0 ||
+        s.type != kImm32 || s.mod)
+      return false;
+    for (uint32_t c = 0; c < 4; c++)
+      if ((d.mask >> c) & 1) constants->push_back({d.index[0].imm, c, s.imm[s.ncomp == 4 ? c : 0]});
+  }
+  return true;
+}
+
+bool PointToQuadHull(const void* dxbc, size_t size, bool* ccw, uint32_t* segments) {
+  Program p;
+  if (!Load(dxbc, size, &p) || p.type != ShaderType::Hull) return false;
+  enum { kDecls, kControlPoints, kPatch } phase = kDecls;
+  uint32_t factors = 0;  // the tessellation factors declared (bit: system value - 11)
+  bool quad = false, prim = false;
+  uint32_t partitioning = 0;
+  float factor = 0;  // the largest factor
+  for (const Instr& in : p.instrs) {
+    const uint32_t ctl = (in.token >> 11) & 0x1FFF;
+    switch (in.op) {
+      case kHsDecls: continue;
+      case kHsControlPointPhase: phase = kControlPoints; continue;
+      case kHsForkPhase: case kHsJoinPhase: phase = kPatch; continue;
+      case kDclInputControlPointCount: case kDclOutputControlPointCount:
+        if ((ctl & 0x3F) != 1) return false;
+        continue;
+      case kDclTessDomain: quad = (ctl & 3) == 3; continue;
+      case kDclTessPartitioning: partitioning = ctl & 7; continue;
+      case kDclTessOutputPrimitive:
+        if ((ctl & 7) != 3 && (ctl & 7) != 4) return false;  // triangle_cw, triangle_ccw
+        prim = true;
+        *ccw = (ctl & 7) == 4;
+        continue;
+      case kDclOutputSiv:
+        if (!in.lits.empty() && in.lits[0] >= 11 && in.lits[0] <= 16) factors |= 1u << (in.lits[0] - 11);
+        continue;
+      case kRet: continue;
+      default: break;
+    }
+    if (IsDeclOp(in.op)) continue;
+    if (phase == kControlPoints) {
+      if (!CopiesRegister(in, true)) return false;
+      continue;
+    }
+    if (phase != kPatch || in.op != kMov || in.sat || in.ops.size() != 2) return false;
+    // The patch phases: the fork/join instance number into a temp (to
+    // index the factors by), and 1.0 into each factor.
+    const Operand& d = in.ops[0];
+    const Operand& s = in.ops[1];
+    if (d.type == kTemp && (s.type == kInputForkInstanceId || s.type == kInputJoinInstanceId)) continue;
+    if (d.type != kOutput || s.type != kImm32 || s.mod) return false;
+    for (uint32_t c = 0; c < (s.ncomp == 4 ? 4u : 1u); c++) {
+      // Each a whole number of segments, as the partitioning makes of it:
+      // integer any, pow2 a power of two, fractional_odd an odd number,
+      // fractional_even an even one (D3D11_TESSELLATOR_PARTITIONING 1-4).
+      float f;
+      std::memcpy(&f, &s.imm[c], 4);
+      const uint32_t n = uint32_t(f);
+      if (float(n) != f || n < 1 || n > 16) return false;
+      const bool whole = partitioning == 1 || (partitioning == 2 && !(n & (n - 1))) ||
+                         (partitioning == 3 && (n & 1)) || (partitioning == 4 && !(n & 1));
+      if (!whole) return false;
+      factor = std::max(factor, f);
+    }
+  }
+  if (!quad || !prim || factors != 0x3F) return false;
+  // Factors that differ (edges finer than the inside) are drawn as the
+  // grid of the largest: the same points on the edges, and more inside,
+  // where a sprite's domain shader is linear.
+  *segments = uint32_t(factor);
+  return true;
+}
 
 bool Translate(const void* dxbc, size_t size, Shader* out, bool annotate) {
   *out = Shader{};
