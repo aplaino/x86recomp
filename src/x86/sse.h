@@ -191,14 +191,14 @@ template <bool D>
 // else zero. pred is AVX's 5-bit predicate (0 EQ_OQ, 1 LT_OS, 2 LE_OS,
 // 3 UNORD_Q, 4 NEQ_UQ, 5 NLT_US, 6 NLE_US, 7 ORD_Q, 8 EQ_UQ, ...
 // 15 TRUE_UQ; 16-31 the same with signalling flipped); legacy SSE passes
-// imm8 & 7.
-void Cmp(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s, uint8_t pred,
-         uint64_t va);
+// imm8 & 7. The model alone (out of line); Cmp below is inline.
+void CmpModel(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s, uint8_t pred,
+              uint64_t va);
 
-// (U)COMISS/SD of the low lanes: 0 greater, 1 less, 2 equal, 3 unordered
-// (the caller sets ZF/PF/CF). `ordered` = COMIS (invalid on QNaN too).
-int Comi(Ctx& c, bool dbl, bool ordered, const Xmm& a, const Xmm& b,
-         uint64_t va);
+// The model alone of Comi below: (U)COMISS/SD of the low lanes (the
+// caller sets ZF/PF/CF). `ordered` = COMIS (invalid on QNaN too).
+int ComiModel(Ctx& c, bool dbl, bool ordered, const Xmm& a, const Xmm& b,
+              uint64_t va);
 
 // SQRTSD/SQRTSS/SQRTPD/SQRTPS: d = sqrt(s), lane-wise; scalar forms keep
 // the upper lanes of d.
@@ -219,11 +219,124 @@ uint32_t CvtToI32(Ctx& c, bool dbl, const Xmm& s, bool truncate, uint64_t va);
 // CVT(T)SS2SI / CVT(T)SD2SI to a 64-bit register.
 uint64_t CvtToI64(Ctx& c, bool dbl, const Xmm& s, bool truncate, uint64_t va);
 
+// The model alone of MinMax below (out of line).
+void MinMaxModel(Ctx& c, bool max, bool dbl, int lanes, Xmm& d, const Xmm& s,
+                 uint64_t va);
+
+namespace host {
+
+// Compares, MIN/MAX and (U)COMIS: the model raises IE for a NaN operand
+// and DE for a denormal one (unless DAZ makes it the zero of its sign,
+// which raises nothing) and otherwise orders the values as the host's
+// comparison does (zeros of either sign equal, infinities at the ends,
+// denormals in order: the host does not flush). So for lanes with neither,
+// whatever MXCSR holds, the host's comparison is the model's and no flag
+// changes. tests/x86/sse_host_test checks them against the models.
+template <bool D>
+[[gnu::always_inline]] inline bool Plain(typename Bits<D>::U& v, bool daz) {
+  using U = typename Bits<D>::U;
+  constexpr U kSign = U(1) << (sizeof(U) * 8 - 1);
+  const U e = v & Bits<D>::kExp;
+  if (e == Bits<D>::kExp) return !(v & Bits<D>::kFrac);  // a NaN is not
+  if (!e && (v & Bits<D>::kFrac)) {
+    if (!daz && !Mutated(9)) return false;
+    if (daz) v &= kSign;
+  }
+  return true;
+}
+
+template <bool D>
+[[gnu::always_inline]] inline bool HostCmp(Ctx& c, int lanes, Xmm& d, const Xmm& s, uint8_t pred) {
+  using U = typename Bits<D>::U;
+  using F = typename Bits<D>::F;
+  const bool daz = c.mxcsr & 0x40u;
+  Xmm r = d;
+  for (int i = 0; i < lanes; i++) {
+    U a = Lane<U>(d, i), b = Lane<U>(s, i);
+    if (!Plain<D>(a, daz) || !Plain<D>(b, daz)) return false;
+    F x, y;
+    std::memcpy(&x, &a, sizeof x);
+    std::memcpy(&y, &b, sizeof y);
+    bool res;
+    switch (pred & 15) {
+      case 0: case 8: res = x == y; break;
+      case 1: case 9: res = x < y; break;
+      case 2: case 10: res = x <= y; break;
+      case 3: case 11: res = false; break;
+      case 4: case 12: res = x != y; break;
+      case 5: case 13: res = !(x < y); break;
+      case 6: case 14: res = !(x <= y); break;
+      default: res = true; break;
+    }
+    SetLane<U>(r, i, res ? U(~U(0)) : U(0));
+  }
+  d = r;
+  return true;
+}
+
+template <bool D>
+[[gnu::always_inline]] inline bool HostMinMax(Ctx& c, bool max, int lanes, Xmm& d, const Xmm& s) {
+  using U = typename Bits<D>::U;
+  using F = typename Bits<D>::F;
+  const bool daz = c.mxcsr & 0x40u;
+  Xmm r = d;
+  for (int i = 0; i < lanes; i++) {
+    U a = Lane<U>(d, i), b = Lane<U>(s, i);
+    const U a0 = a;
+    if (!Plain<D>(a, daz) || !Plain<D>(b, daz)) return false;
+    F x, y;
+    std::memcpy(&x, &a, sizeof x);
+    std::memcpy(&y, &b, sizeof y);
+    // Equal values give s.
+    const bool pick_d = Mutated(8) ? (max ? x >= y : x <= y) : (max ? x > y : x < y);
+    SetLane<U>(r, i, pick_d ? (Mutated(10) ? a0 : a) : b);
+  }
+  d = r;
+  return true;
+}
+
+// 0 greater, 1 less, 2 equal; -1: the model's (a NaN or a denormal).
+template <bool D>
+[[gnu::always_inline]] inline int HostComi(Ctx& c, const Xmm& xa, const Xmm& xb) {
+  using U = typename Bits<D>::U;
+  using F = typename Bits<D>::F;
+  const bool daz = c.mxcsr & 0x40u;
+  U a = Lane<U>(xa, 0), b = Lane<U>(xb, 0);
+  if (!Plain<D>(a, daz) || !Plain<D>(b, daz)) return -1;
+  F x, y;
+  std::memcpy(&x, &a, sizeof x);
+  std::memcpy(&y, &b, sizeof y);
+  return x > y ? 0 : x < y ? 1 : 2;
+}
+
+}  // namespace host
+
 // MINSS/SD/PS/PD (max = false) and MAXSS/SD/PS/PD, lane-wise: d op s ? d : s.
 // A NaN in either operand (invalid, quiet ones too) or equal values,
 // zeros of either sign included, give s. Scalar forms keep d's upper lanes.
-void MinMax(Ctx& c, bool max, bool dbl, int lanes, Xmm& d, const Xmm& s,
-            uint64_t va);
+[[gnu::always_inline]] inline void MinMax(Ctx& c, bool max, bool dbl, int lanes, Xmm& d,
+                                          const Xmm& s, uint64_t va) {
+  if (dbl ? host::HostMinMax<true>(c, max, lanes, d, s) : host::HostMinMax<false>(c, max, lanes, d, s))
+    [[likely]] return;
+  MinMaxModel(c, max, dbl, lanes, d, s, va);
+}
+
+// CMPPS/PD/SS/SD: each lane of d becomes all ones if `d pred s` holds,
+// else zero (predicates above).
+[[gnu::always_inline]] inline void Cmp(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s,
+                                       uint8_t pred, uint64_t va) {
+  if (dbl ? host::HostCmp<true>(c, lanes, d, s, pred) : host::HostCmp<false>(c, lanes, d, s, pred))
+    [[likely]] return;
+  CmpModel(c, dbl, lanes, d, s, pred, va);
+}
+
+// (U)COMISS/SD of the low lanes: 0 greater, 1 less, 2 equal, 3 unordered.
+[[gnu::always_inline]] inline int Comi(Ctx& c, bool dbl, bool ordered, const Xmm& a,
+                                       const Xmm& b, uint64_t va) {
+  const int r = dbl ? host::HostComi<true>(c, a, b) : host::HostComi<false>(c, a, b);
+  if (r >= 0) [[likely]] return r;
+  return ComiModel(c, dbl, ordered, a, b, va);
+}
 
 // CVTSS2SD / CVTPS2PD (to_dbl, 1 or 2 lanes) and CVTSD2SS / CVTPD2PS.
 // Scalar forms keep d's other lanes; CVTPD2PS zeroes its upper half.
