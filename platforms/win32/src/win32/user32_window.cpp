@@ -435,6 +435,22 @@ void ActivateApp(uint32_t hwnd, bool active) {
 }
 
 void HandleSdlEvent(const SDL_Event& e) {
+  // Dev aid: <ID>_TRACE_INPUT=1 logs the keys and focus changes the host
+  // delivers, and whether a game window takes them.
+  static const bool trace = [] {
+    const char* v = Env("TRACE_INPUT");
+    return v && *v && *v != '0';
+  }();
+  if (trace) {
+    if (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP)
+      WarnF("input: key %s %s (window %u -> hwnd %X)\n", SDL_GetScancodeName(e.key.scancode),
+            e.type == SDL_EVENT_KEY_DOWN ? "down" : "up", unsigned(e.key.windowID),
+            HwndForSdl(e.key.windowID));
+    else if (e.type == SDL_EVENT_WINDOW_FOCUS_GAINED || e.type == SDL_EVENT_WINDOW_FOCUS_LOST)
+      WarnF("input: focus %s (window %u -> hwnd %X)\n",
+            e.type == SDL_EVENT_WINDOW_FOCUS_GAINED ? "gained" : "lost", unsigned(e.window.windowID),
+            HwndForSdl(e.window.windowID));
+  }
   switch (e.type) {
     case SDL_EVENT_QUIT: {
       std::lock_guard<std::recursive_mutex> l(g_mu);
