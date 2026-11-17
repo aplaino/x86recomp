@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <set>
 #include <vector>
 
 #include "runtime/log.h"
@@ -799,7 +800,10 @@ void GpuDraw(Device& dev, Context& x, const DrawCall& dc) {
   d.program = prog->id;
   d.state = PipelineOf(x, &ok);
   if (!ok) {
-    WARN_ONCE("d3d11: a draw with topology %u is skipped\n", x.topology);
+    static std::set<uint64_t> warned;
+    if (warned.insert(vs->hash).second)
+      WarnF("d3d11: a draw with topology %u (vertex shader %016llX) is skipped\n", x.topology,
+            (unsigned long long)vs->hash);
     return;
   }
   // Without a pixel shader only depth and stencil are written.
@@ -815,8 +819,15 @@ void GpuDraw(Device& dev, Context& x, const DrawCall& dc) {
     r.gpu_newer = true;
     if (!i) w = int(r.MipWidth(v.first_mip)), h = int(r.MipHeight(v.first_mip));
   }
-  for (int i = 4; i < 8; i++)
-    if (x.rtvs[i]) WARN_ONCE("d3d11: render targets past the fourth are not drawn\n");
+  // Past the fourth (gfx draws to four): a pixel shader that writes one
+  // loses that output, reported once per shader.
+  if (prog->targets >> 4) {
+    static std::set<uint64_t> warned;
+    for (int i = 4; i < 8; i++)
+      if (x.rtvs[i] && (prog->targets >> i & 1) && warned.insert(prog->ps_hash).second)
+        WarnF("d3d11: pixel shader %016llX writes render target %d, past the fourth: not drawn\n",
+              (unsigned long long)prog->ps_hash, i);
+  }
   if (x.dsv) {
     Resource& r = *x.dsv->res;
     EnsureImage(dev, r);
