@@ -178,6 +178,7 @@ struct ContextState {
     std::shared_ptr<State> samplers[16];
   };
   StageState stage[kStages];
+  bool geometry = false;  // a geometry shader is bound: draws are skipped
   std::shared_ptr<View> uavs[8];  // compute
   std::shared_ptr<InputLayout> layout;
   uint32_t topology = 0;

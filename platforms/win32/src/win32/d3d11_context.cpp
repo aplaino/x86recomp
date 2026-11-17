@@ -189,22 +189,25 @@ CTX_STAGE(PS, 1)
 CTX_STAGE(CS, 2)
 #undef CTX_STAGE
 
-// The geometry, hull and domain stages are not drawn. Geometry shaders
-// can only be unbound; the tessellation stages can be bound, as games
-// keep them bound for their tessellated draws: those draw patch lists,
-// which are skipped (TopologyOf, d3d11_gpu.cpp).
-#define CTX_UNUSED_STAGE(P, bindable)                                                       \
-  CTX_METHOD(P##SetShader) {                                                                \
-    if (Arg(c, 1) && !(bindable)) FatalF("d3d11: " #P " shaders are not supported");        \
-    return 0;                                                                               \
-  }                                                                                         \
+// The geometry, hull and domain stages are not drawn. Their shaders can
+// be bound: a draw with a geometry shader bound is skipped (GpuDraw), and
+// tessellated draws draw patch lists, which are skipped (TopologyOf,
+// d3d11_gpu.cpp).
+#define CTX_UNUSED_STAGE(P)                                                                 \
   CTX_METHOD(P##SetConstantBuffers) { return 0; }                                           \
   CTX_METHOD(P##SetShaderResources) { return 0; }                                           \
   CTX_METHOD(P##SetSamplers) { return 0; }
-CTX_UNUSED_STAGE(GS, false)
-CTX_UNUSED_STAGE(HS, true)
-CTX_UNUSED_STAGE(DS, true)
+CTX_UNUSED_STAGE(GS)
+CTX_UNUSED_STAGE(HS)
+CTX_UNUSED_STAGE(DS)
 #undef CTX_UNUSED_STAGE
+CTX_METHOD(GSSetShader) {
+  const bool on = Arg(c, 1) != 0;
+  Set(Ctx0(c), [on](Context& y) { y.geometry = on; });
+  return 0;
+}
+CTX_METHOD(HSSetShader) { return 0; }
+CTX_METHOD(DSSetShader) { return 0; }
 
 // Stream output, likewise: SOSetTargets(count, buffers, offsets) only
 // unbinding, and SOGetTargets finds nothing bound.
