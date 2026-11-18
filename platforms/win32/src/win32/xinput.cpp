@@ -4,12 +4,15 @@
 // A, east = B, west = X, north = Y); stick Y is up in XInput and down in
 // SDL. Automated runs (<ID>_BACKGROUND) see no pads, as they take no host
 // input. The gamepad subsystem starts on the main thread, where SDL's
-// events are pumped (callers on other threads see no pads until then).
+// events are pumped: a game that polls its pads from another thread has
+// it started there and sees them from the main thread's next pump on.
 // DirectInput and WMI list the same pads (xinput.h).
 
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 
@@ -31,18 +34,23 @@ struct Pad {
 };
 
 std::mutex g_mu;
-bool g_up = false;
+std::atomic<bool> g_up{false}, g_asked{false};
 Pad g_pads[4];
+
+void StartGamepads(void*) {
+  if (g_up) return;
+  if (SDL_InitSubSystem(SDL_INIT_GAMEPAD)) g_up = true;
+  else WarnF("xinput: SDL gamepad init failed: %s\n", SDL_GetError());
+}
 
 // Opens newly connected gamepads into free slots, frees disconnected ones.
 void Refresh() {
   if (!g_up) {
-    if (!OnMainThread() || Background()) return;
-    if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) {
-      WarnF("xinput: SDL gamepad init failed: %s\n", SDL_GetError());
-      return;
-    }
-    g_up = true;
+    if (Background()) return;
+    if (OnMainThread()) StartGamepads(nullptr);
+    else if (!g_asked.exchange(true) && !SDL_RunOnMainThread(StartGamepads, nullptr, false))
+      g_asked = false;  // asked again on the next call
+    if (!g_up) return;
   }
   for (Pad& p : g_pads) {
     if (p.gp && !SDL_GamepadConnected(p.gp)) {
@@ -60,6 +68,11 @@ void Refresh() {
     for (Pad& p : g_pads) {
       if (p.gp) continue;
       p.gp = SDL_OpenGamepad(ids[i]);
+      if (p.gp) {
+        const char* name = SDL_GetGamepadName(p.gp);
+        std::fprintf(stderr, "xinput: pad %d: %s (%04x:%04x)\n", int(&p - g_pads), name ? name : "?",
+                     SDL_GetGamepadVendor(p.gp), SDL_GetGamepadProduct(p.gp));
+      }
       break;
     }
   }
