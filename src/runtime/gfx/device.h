@@ -378,11 +378,22 @@ struct ProgramDraw {
   // draw's five words (index count, instance count, first index, base
   // vertex, first instance) and its 32-bit indices.
   BufferId indirect = 0;
+  // Instead of the counts and firsts: a GPU buffer's arguments, from
+  // byte args_at (a multiple of 4): four words (vertex count, instance count, first vertex,
+  // first instance), or with index_buffer (bound from its first_index'th)
+  // five (index count, instance count, first index, base vertex, first
+  // instance).
+  BufferId args = 0;
+  uint32_t args_at = 0;
   ProgramResources vs, fs;
 };
 struct ProgramDispatch {
   ProgramId program = 0;
   uint32_t groups[3] = {1, 1, 1};
+  // Instead of groups: a GPU buffer's three group counts, from byte
+  // args_at (a multiple of 4).
+  BufferId args = 0;
+  uint32_t args_at = 0;
   ProgramResources cs;
   const RwBufferData* rw_buffers = nullptr;
   const ColorTarget* rw_images = nullptr;  // storage images, at a level

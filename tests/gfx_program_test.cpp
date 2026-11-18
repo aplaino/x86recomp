@@ -2,8 +2,9 @@
 // draw reading a buffer, a uniform block and a texture into a colour
 // target, the scissor, clears and depth testing, a compute dispatch
 // writing a buffer (written back) and a storage image, GPU buffers read
-// by draws and dispatches and drawn from as indices, image layers, copies
-// and mip levels, and reading images back, on a device without a window.
+// by draws and dispatches and drawn from as indices, draws and dispatches
+// with arguments a dispatch wrote, image layers, copies and mip levels,
+// and reading images back, on a device without a window.
 // Needs a Vulkan device (lavapipe will do) or Metal; exits 77 (skipped)
 // without one.
 
@@ -48,6 +49,15 @@ void main() {
   uint i = gl_GlobalInvocationID.x;
   r_rw[r_rwbuf[0].x + i] = r_ld(0u, i) * 2u + 1u;
   if (i < 16u) imageStore(img, ivec2(i & 3u, i >> 2), uvec4(i * 10u));
+}
+)";
+
+// Indirect arguments: a draw's (words 0-3), an indexed draw's (4-8) and
+// a dispatch's groups (9-11).
+const char* kArgsCs = R"(
+void main() {
+  const uint a[12] = uint[](3u, 1u, 0u, 0u, 3u, 1u, 0u, 0u, 0u, 1u, 1u, 1u);
+  for (uint i = 0u; i < 12u; i++) r_rw[r_rwbuf[0].x + i] = a[i];
 }
 )";
 
@@ -225,7 +235,60 @@ int main() {
   ok = true;
   for (uint32_t i = 0; i < 64; i++) ok &= out[i] == (i + 100) * 2 + 1;
   Check(big != 0 && ok, "GPU buffers keep their contents when their room grows");
-  for (BufferId b : {vbuf, ibuf, gbuf, big}) dev->DestroyBuffer(b);
+
+  // Indirect work, its arguments written by a dispatch into a GPU buffer:
+  // they replace the counts and groups given.
+  ProgramDesc argd;
+  argd.cs.glsl = kArgsCs;
+  argd.cs.rw_buffers = 1;
+  argd.local_size[0] = 1;
+  const ProgramId aprog = dev->CreateProgram(argd);
+  const BufferId abuf = dev->CreateBuffer(48);
+  RwBufferData ab{nullptr, 48, abuf};
+  ProgramDispatch adp;
+  adp.program = aprog;
+  adp.rw_buffers = &ab;
+  dev->DispatchProgram(adp);
+  auto draw_args = [&](const float color[4], BufferId index_buffer, uint32_t first_index, uint32_t at) {
+    ProgramDraw d;
+    d.program = prog;
+    d.targets[0] = {rt, 0};
+    d.viewport = {0, 0, 4, 4, 0, 1};
+    d.scissor = {0, 0, 4, 4};
+    d.index_buffer = index_buffer;
+    d.first_index = first_index;
+    d.args = abuf;
+    d.args_at = at;
+    BufferData vb{cover.data(), 36};
+    d.vs.buffers = &vb;
+    d.fs.textures = &tex;
+    SamplerDesc smp;
+    d.fs.samplers = &smp;
+    d.fs.uniforms = color;
+    dev->DrawProgram(d);
+  };
+  dev->ClearImage(rt, 0, {0, 0, 0, 1});
+  draw_args(red, 0, 0, 0);
+  px = pixels();
+  Check(px[0] == 0xFF0000FFu && px[15] == 0xFF0000FFu, "a draw's counts from a GPU buffer a dispatch wrote");
+  draw_args(green, ibuf, 2, 16);
+  px = pixels();
+  Check(px[0] == 0xFF008000u && px[15] == 0xFF008000u, "an indexed draw's counts from a GPU buffer");
+  pdp.args = abuf;
+  pdp.args_at = 36;
+  std::fill(out.begin(), out.end(), 0xDEADBEEF);
+  dev->DispatchProgram(pdp);
+  ok = true;
+  for (uint32_t i = 0; i < 64; i++) ok &= out[i] == (i + 100) * 2 + 1;
+  Check(ok, "a dispatch's groups from a GPU buffer");
+  pdp.args_at = 8;  // groups (0, 0, 3): none
+  std::fill(out.begin(), out.end(), 0xDEADBEEF);
+  dev->DispatchProgram(pdp);
+  ok = true;
+  for (uint32_t i = 0; i < 64; i++) ok &= out[i] == 0xDEADBEEF;
+  Check(ok, "a dispatch of no groups from a GPU buffer runs nothing");
+  pdp.args = 0;
+  for (BufferId b : {vbuf, ibuf, gbuf, big, abuf}) dev->DestroyBuffer(b);
 
   // Images: one layer cleared, a draw into another, a copy between
   // images and mip levels generated from level 0.

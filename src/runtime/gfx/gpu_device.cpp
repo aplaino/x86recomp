@@ -1724,7 +1724,7 @@ void r_color0(inout vec4 c) {
     std::lock_guard<std::recursive_mutex> l(mu_);
     auto pit = programs_.find(d.program);
     if (pit == programs_.end() || pit->second.compute) return true;
-    if (!d.indirect && (!d.vertex_count || !d.instance_count)) return true;
+    if (!d.indirect && !d.args && (!d.vertex_count || !d.instance_count)) return true;
     Program& pr = pit->second;
     if (!ProgramReady(d.program, pr)) return false;
 
@@ -1768,6 +1768,17 @@ void r_color0(inout vec4 c) {
     c.viewport = {float(d.viewport.x), float(d.viewport.y), float(d.viewport.width),
                   float(d.viewport.height), d.viewport.min_z, d.viewport.max_z};
     c.stencil_ref = d.state.stencil_ref;
+    if (d.args) {
+      auto bit = gpu_buffers_.find(d.args);
+      if (bit == gpu_buffers_.end()) FatalF("gfx: DrawProgram: no buffer %u", d.args);
+      if (d.args_at % 4 || d.args_at > bit->second.size ||
+          bit->second.size - d.args_at < (d.index_buffer ? 20u : 16u))
+        FatalF("gfx: DrawProgram: arguments unaligned or past buffer %u's end", d.args);
+      if (d.indices || d.indirect) FatalF("gfx: DrawProgram: arguments with host indices or an indirect draw");
+      c.args = heap_;
+      c.args_at = bit->second.at + d.args_at;
+      DrawRead(d.args);
+    }
     if (d.indirect) {
       auto bit = gpu_buffers_.find(d.indirect);
       if (bit == gpu_buffers_.end()) FatalF("gfx: DrawProgram: no buffer %u", d.indirect);
@@ -1823,7 +1834,15 @@ void r_color0(inout vec4 c) {
     if (pit == programs_.end() || !pit->second.compute) return;
     const Program& pr = pit->second;
     const ProgramStage& st = pr.cs;
-    if (!d.groups[0] || !d.groups[1] || !d.groups[2]) return;
+    if (!d.args && (!d.groups[0] || !d.groups[1] || !d.groups[2])) return;
+    uint32_t args_at = 0;
+    if (d.args) {
+      auto bit = gpu_buffers_.find(d.args);
+      if (bit == gpu_buffers_.end()) FatalF("gfx: DispatchProgram: no buffer %u", d.args);
+      if (d.args_at % 4 || d.args_at > bit->second.size || bit->second.size - d.args_at < 12)
+        FatalF("gfx: DispatchProgram: arguments unaligned or past buffer %u's end", d.args);
+      args_at = bit->second.at + d.args_at;
+    }
     // What was drawn before comes first.
     Flush();
 
@@ -1948,7 +1967,8 @@ void r_color0(inout vec4 c) {
     if (!table.empty()) SDL_PushGPUComputeUniformData(cmd, slot++, table.data(), Uint32(table.size() * 4));
     if (st.uniform_bytes)
       SDL_PushGPUComputeUniformData(cmd, slot, d.cs.uniforms, st.uniform_bytes);
-    SDL_DispatchGPUCompute(cp, d.groups[0], d.groups[1], d.groups[2]);
+    if (d.args) SDL_DispatchGPUComputeIndirect(cp, heap_, args_at);
+    else SDL_DispatchGPUCompute(cp, d.groups[0], d.groups[1], d.groups[2]);
     SDL_EndGPUComputePass(cp);
 
     if (!rw_out.empty()) {
@@ -2104,6 +2124,8 @@ void r_color0(inout vec4 c) {
     uint32_t first = 0, count = 0;
     int32_t base = 0;
     SDL_GPUBuffer* indirect = nullptr;  // a GPU buffer's draw (ProgramDraw)
+    SDL_GPUBuffer* args = nullptr;      // a GPU buffer's arguments (ProgramDraw), at args_at
+    uint32_t args_at = 0;
     SDL_GPUBuffer* indices = nullptr;   // a GPU buffer's indices (ProgramDraw)
     uint32_t buffer_at = 0;             // that buffer's place in it
     bool short_indices = false;         // its indices are 16-bit
@@ -2604,7 +2626,14 @@ void r_color0(inout vec4 c) {
           SDL_SetGPUViewport(rp, &c.viewport);
           SDL_SetGPUScissor(rp, &c.scissor);
           SDL_SetGPUStencilReference(rp, c.stencil_ref);
-          if (c.indirect) {
+          if (c.args) {
+            if (c.indexed) {
+              bind_indices(c.indices, c.buffer_at + c.first * (c.short_indices ? 2 : 4), c.short_indices);
+              SDL_DrawGPUIndexedPrimitivesIndirect(rp, c.args, c.args_at, 1);
+            } else {
+              SDL_DrawGPUPrimitivesIndirect(rp, c.args, c.args_at, 1);
+            }
+          } else if (c.indirect) {
             bind_indices(c.indirect, c.buffer_at);
             SDL_DrawGPUIndexedPrimitivesIndirect(rp, c.indirect, c.buffer_at, 1);
           } else if (c.indexed) {
