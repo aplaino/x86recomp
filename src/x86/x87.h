@@ -97,6 +97,25 @@ void SetControlWord(State& s, uint16_t cw);  // FLDCW
 void ClearExceptions(State& s);   // FNCLEX
 uint16_t TagWord(const State& s);
 
+// --- MMX (Intel SDM vol. 1, 9.5) ------------------------------------
+// MMX register mm<k> is the significand of physical register R<k>. Every
+// MMX instruction but EMMS sets TOP to 0 and makes every register valid;
+// a write also sets the register's sign and exponent to all ones. EMMS
+// empties them all. The hardware's tags after MMX code are 00 (valid);
+// TagWord derives "special" (10) from those contents, a difference only
+// FNSTENV/FNSAVE after MMX code without EMMS would show.
+inline uint64_t MmxRead(State& s, int k) {
+  s.top = 0;
+  s.empty = 0;
+  return s.r[k].sig;
+}
+inline void MmxWrite(State& s, int k, uint64_t v) {
+  s.top = 0;
+  s.empty = 0;
+  s.r[k] = {v, 0xFFFF};
+}
+inline void Emms(State& s) { s.empty = 0xFF; }
+
 // --- loads (push) ----------------------------------------------------
 void LoadF32(State& s, uint32_t bits);   // FLD m32 (exact)
 void LoadF64(State& s, uint64_t bits);   // FLD m64 (exact)

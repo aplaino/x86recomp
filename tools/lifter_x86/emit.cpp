@@ -636,6 +636,8 @@ class InsnEmitter {
   void EmitString64(int n, StringKind kind, ZydisRegister seg);
   void EmitX87();
   void EmitSse();
+  void EmitMmx();
+  bool in_mmx_ = false;  // EmitSse on EmitMmx's Xmm copies of MMX registers
   void EmitAvx();
   // ---- AVX: VEX operands by 128-bit half (h = 0: c.xmm, 1: c.ymm_hi) ----
   static int VecIndex(ZydisRegister r) {
@@ -1580,12 +1582,87 @@ bool InsnEmitter::EmitX87Double(X87Sim& sim, const std::string& fail, bool* can_
   }
 }
 
+// MMX (x87.h, "MMX"): each MMX register operand becomes a copy in the low
+// half of an Xmm whose high half is zero, the instruction is the SSE one
+// on those copies where the low half of its result is the MMX result
+// (lane-wise arithmetic, logic, compares and shifts, the low unpacks,
+// moves, PMOVMSKB), and an MMX destination is written back. The high
+// unpacks take their operands' high halves first, the packs their source
+// as the high half of the destination. Other MMX forms are not lifted.
+void InsnEmitter::EmitMmx() {
+  const auto m = d_.mnemonic;
+  if (m == ZYDIS_MNEMONIC_EMMS) return L("::recomp::x87::Emms(c.fpu);");
+  bool special = false;
+  switch (m) {
+    case ZYDIS_MNEMONIC_PADDB: case ZYDIS_MNEMONIC_PADDW: case ZYDIS_MNEMONIC_PADDD:
+    case ZYDIS_MNEMONIC_PADDQ: case ZYDIS_MNEMONIC_PSUBB: case ZYDIS_MNEMONIC_PSUBW:
+    case ZYDIS_MNEMONIC_PSUBD: case ZYDIS_MNEMONIC_PSUBQ: case ZYDIS_MNEMONIC_PADDSB:
+    case ZYDIS_MNEMONIC_PADDSW: case ZYDIS_MNEMONIC_PADDUSB: case ZYDIS_MNEMONIC_PADDUSW:
+    case ZYDIS_MNEMONIC_PSUBSB: case ZYDIS_MNEMONIC_PSUBSW: case ZYDIS_MNEMONIC_PSUBUSB:
+    case ZYDIS_MNEMONIC_PSUBUSW: case ZYDIS_MNEMONIC_PMULLW: case ZYDIS_MNEMONIC_PMULHW:
+    case ZYDIS_MNEMONIC_PMULHUW: case ZYDIS_MNEMONIC_PMADDWD: case ZYDIS_MNEMONIC_PMULUDQ:
+    case ZYDIS_MNEMONIC_PAND: case ZYDIS_MNEMONIC_PANDN: case ZYDIS_MNEMONIC_POR:
+    case ZYDIS_MNEMONIC_PXOR: case ZYDIS_MNEMONIC_PCMPEQB: case ZYDIS_MNEMONIC_PCMPEQW:
+    case ZYDIS_MNEMONIC_PCMPEQD: case ZYDIS_MNEMONIC_PCMPGTB: case ZYDIS_MNEMONIC_PCMPGTW:
+    case ZYDIS_MNEMONIC_PCMPGTD: case ZYDIS_MNEMONIC_PSLLW: case ZYDIS_MNEMONIC_PSLLD:
+    case ZYDIS_MNEMONIC_PSLLQ: case ZYDIS_MNEMONIC_PSRLW: case ZYDIS_MNEMONIC_PSRLD:
+    case ZYDIS_MNEMONIC_PSRLQ: case ZYDIS_MNEMONIC_PSRAW: case ZYDIS_MNEMONIC_PSRAD:
+    case ZYDIS_MNEMONIC_PAVGB: case ZYDIS_MNEMONIC_PAVGW: case ZYDIS_MNEMONIC_PMINUB:
+    case ZYDIS_MNEMONIC_PMAXUB: case ZYDIS_MNEMONIC_PMINSW: case ZYDIS_MNEMONIC_PMAXSW:
+    case ZYDIS_MNEMONIC_PSADBW: case ZYDIS_MNEMONIC_PMOVMSKB: case ZYDIS_MNEMONIC_MOVD:
+    case ZYDIS_MNEMONIC_MOVQ: case ZYDIS_MNEMONIC_PUNPCKLBW: case ZYDIS_MNEMONIC_PUNPCKLWD:
+    case ZYDIS_MNEMONIC_PUNPCKLDQ:
+      break;
+    case ZYDIS_MNEMONIC_PUNPCKHBW: case ZYDIS_MNEMONIC_PUNPCKHWD: case ZYDIS_MNEMONIC_PUNPCKHDQ:
+    case ZYDIS_MNEMONIC_PACKSSWB: case ZYDIS_MNEMONIC_PACKSSDW: case ZYDIS_MNEMONIC_PACKUSWB:
+      special = true;
+      break;
+    default:
+      return Unimpl();
+  }
+  int dst = -1;
+  for (int i = 0; i < Nvis(); i++) {
+    if (!IsReg(i) || ZydisRegisterGetClass(Op(i).reg.value) != ZYDIS_REGCLASS_MMX) continue;
+    const int k = Op(i).reg.value - ZYDIS_REGISTER_MM0;
+    L(Fmt("::recomp::Xmm x%d{};", i));
+    L(Fmt("::recomp::sse::SetLane<uint64_t>(x%d, 0, ::recomp::x87::MmxRead(c.fpu, %d));", i, k));
+    xsub_[i] = Fmt("x%d", i);
+    if (i == 0) dst = k;
+  }
+  if (!special) {
+    in_mmx_ = true;
+    EmitSse();
+    in_mmx_ = false;
+  } else {
+    if (dst < 0 || !PrepareMem()) return Unimpl();
+    const std::string s = XmmSrc(1, false);
+    if (m == ZYDIS_MNEMONIC_PUNPCKHBW || m == ZYDIS_MNEMONIC_PUNPCKHWD || m == ZYDIS_MNEMONIC_PUNPCKHDQ) {
+      const char* t = m == ZYDIS_MNEMONIC_PUNPCKHBW   ? "uint8_t"
+                      : m == ZYDIS_MNEMONIC_PUNPCKHWD ? "uint16_t"
+                                                      : "uint32_t";
+      L("::recomp::sse::SetLane<uint64_t>(x0, 0, ::recomp::sse::Lane<uint64_t>(x0, 0) >> 32);");
+      L(Fmt("::recomp::Xmm h{};"));
+      L(Fmt("::recomp::sse::SetLane<uint64_t>(h, 0, ::recomp::sse::Lane<uint64_t>(%s, 0) >> 32);", s.c_str()));
+      L(Fmt("::recomp::sse::Unpck<%s>(x0, h, false);", t));
+    } else {
+      const char* tt = m == ZYDIS_MNEMONIC_PACKSSDW   ? "int32_t, int16_t"
+                       : m == ZYDIS_MNEMONIC_PACKSSWB ? "int16_t, int8_t"
+                                                      : "int16_t, uint8_t";
+      L(Fmt("::recomp::sse::SetLane<uint64_t>(x0, 1, ::recomp::sse::Lane<uint64_t>(%s, 0));", s.c_str()));
+      L(Fmt("::recomp::sse::Pack<%s>(x0, x0);", tt));
+    }
+  }
+  if (dst >= 0)
+    L(Fmt("::recomp::x87::MmxWrite(c.fpu, %d, ::recomp::sse::Lane<uint64_t>(x0, 0));", dst));
+  xsub_.clear();
+}
+
 void InsnEmitter::EmitSse() {
   using namespace std::string_literals;
   const auto m = d_.mnemonic;
-  for (int i = 0; i < Nvis(); i++)
+  for (int i = 0; i < Nvis() && !in_mmx_; i++)
     if (IsReg(i) && ZydisRegisterGetClass(Op(i).reg.value) == ZYDIS_REGCLASS_MMX)
-      return Unimpl();
+      return EmitMmx();
   if (!PrepareMem()) return Unimpl();
   const std::string va = Hex(in_.va);
   const bool aligned =
@@ -3271,6 +3348,9 @@ void InsnEmitter::Emit() {
     for (int i = 0; i < Nvis(); i++)
       if (IsReg(i) && VecIndex(Op(i).reg.value) >= 0) vex_vec = true;
   if (d_.meta.isa_set == ZYDIS_ISA_SET_AVX || vex_vec) return EmitAvx();
+  if (d_.meta.isa_set == ZYDIS_ISA_SET_PENTIUMMMX || d_.meta.isa_set == ZYDIS_ISA_SET_SSE2MMX ||
+      d_.meta.isa_set == ZYDIS_ISA_SET_SSSE3MMX)
+    return EmitMmx();
   if (IsSse(d_)) return EmitSse();
   if (d_.meta.category == ZYDIS_CATEGORY_STRINGOP) return EmitString();
 
