@@ -263,6 +263,7 @@ size_t MinOperands(uint32_t op) {
     case kDerivRtxFine: case kDerivRtyCoarse: case kDerivRtyFine: case kItof: case kUtof: case kFtoi:
     case kFtou: case kF32ToF16: case kF16ToF32: case kCountbits: case kFirstbitHi: case kFirstbitLo:
     case kFirstbitShi: case kBfrev: case kNot: case kIneg: case kBufinfo: case kSampleInfo:
+    case kImmAtomicAlloc: case kImmAtomicConsume:
       return 2;
     case kAdd: case kAnd: case kDiv: case kDp2: case kDp3: case kDp4: case kEq: case kGe: case kLt:
     case kNe: case kIadd: case kIeq: case kIge: case kIlt: case kImax: case kImin: case kIne: case kIshl:
@@ -994,7 +995,6 @@ class Translator {
           u.counter = (in.token >> 23) & 1;
         }
         if (stage_ != ShaderType::Compute) return Fail("UAVs outside compute shaders not translated yet");
-        if (u.counter) return Fail("structured UAVs with a counter not translated yet");
         if (u.dim == ResourceDim::Unknown || u.dim == ResourceDim::Texture2DMS ||
             u.dim == ResourceDim::Texture2DMSArray || u.dim == ResourceDim::TextureCube ||
             u.dim == ResourceDim::TextureCubeArray || uint32_t(u.dim) > uint32_t(ResourceDim::StructuredBuffer))
@@ -1121,6 +1121,13 @@ class Translator {
       if (IsBuffer(u.dim)) u.buffer = nrw++;
       else u.image = nimg++;
     }
+    // A counter: declared (RWStructuredBuffer's), or used (an append or
+    // consume buffer's, declared without the flag).
+    for (const Instr& in : p_.instrs)
+      if ((in.op == kImmAtomicAlloc || in.op == kImmAtomicConsume) && in.ops[1].type == kUav)
+        if (UnorderedAccess* u = Uav(in.ops[1].index[0].imm)) u->counter = true;
+    for (UnorderedAccess& u : sh_->uavs)
+      if (u.counter) u.counter_buffer = nrw++;
     sh_->stage.buffers = uint32_t(nbuf);
     sh_->stage.rw_buffers = uint32_t(nrw);
     sh_->stage.rw_images = uint32_t(nimg);
@@ -1691,6 +1698,7 @@ class Translator {
       case kImmAtomicCmpExch: case kImmAtomicImax: case kImmAtomicImin: case kImmAtomicUmax:
       case kImmAtomicUmin:
         return Atomic(in);
+      case kImmAtomicAlloc: case kImmAtomicConsume: return Counter(in);
       default:
         Fail("an instruction not translated yet");
     }
@@ -2246,6 +2254,22 @@ class Translator {
     }
     indent_--;
     Line("}");
+  }
+
+  // imm_atomic_alloc (the counter before its increment) and
+  // imm_atomic_consume (after its decrement) on a structured UAV's hidden
+  // counter: a word of its own read-write buffer.
+  void Counter(const Instr& in) {
+    if (in.ops[1].type != kUav) return void(Fail("a counter of an operand of this type"));
+    const UnorderedAccess* u = Uav(in.ops[1].index[0].imm);
+    if (!u) return void(Fail("a UAV not declared"));
+    const Dst d = DstOf(in.ops[0]);
+    const std::string b = std::to_string(u->counter_buffer);
+    const std::string word = "r_rw[r_rwbuf[" + b + "].x]", inside = "r_rwbuf[" + b + "].y >= 4u";
+    const std::string v = in.op == kImmAtomicAlloc ? "atomicAdd(" + word + ", 1u)"
+                                                   : "(atomicAdd(" + word + ", 0xFFFFFFFFu) - 1u)";
+    if (d.n) Assign(d, Splat("(" + inside + " ? " + v + " : 0u)", 'u', d.n), 'u', false);
+    else Line("if (" + inside + ") " + v + ";");
   }
 
   // ---- the stage's interface

@@ -157,6 +157,13 @@ Resource::~Resource() {
   if (gpu_buffer) d->gfx->DestroyBuffer(gpu_buffer);
 }
 
+View::~View() {
+  Device* d = TheDevice();
+  if (!d || !d->gfx || !counter) return;
+  std::lock_guard<std::recursive_mutex> l(d->gpu_mu);
+  d->gfx->DestroyBuffer(counter);
+}
+
 uint32_t Resource::RowPitch(uint32_t mip) const {
   bool block;
   uint32_t b = FormatBytes(format, &block);

@@ -77,6 +77,7 @@ StageBindings BindingsOf(const dxbc::Shader& s) {
   b.rw_images.resize(s.stage.rw_images);
   for (const dxbc::UnorderedAccess& u : s.uavs) {
     if (u.buffer >= 0) b.rw_buffers[size_t(u.buffer)] = u.slot;
+    if (u.counter_buffer >= 0) b.rw_buffers[size_t(u.counter_buffer)] = u.slot | StageBindings::kCounter;
     if (u.image >= 0) b.rw_images[size_t(u.image)] = u.slot;
     if (u.dim == dxbc::ResourceDim::Buffer) b.formats.push_back({true, u.slot});
   }

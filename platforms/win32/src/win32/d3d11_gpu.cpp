@@ -658,7 +658,10 @@ void BindStage(Device& dev, ContextState& x, int st, const StageBindings& b, con
               extent = std::max(extent, el.offset + FormatBytes(el.format, &block));
             }
         int64_t lo, hi;
-        if (per_instance) {
+        if (dc->args) {  // arguments on the GPU: all of it
+          lo = 0;
+          hi = vb.stride ? int64_t(r.byte_width / vb.stride) + 1 : 1;
+        } else if (per_instance) {
           lo = dc->first_instance;
           hi = lo + (step ? (dc->instances + step - 1) / step : 1);
         } else if (dc->indexed) {
@@ -786,11 +789,17 @@ void GpuSyncToCpu(Device& dev, Resource& r) {
 
 // ---- draws and dispatches -----------------------------------------------------------------------
 
-void GpuDraw(Device& dev, Context& x, const DrawCall& dc) {
+void GpuDraw(Device& dev, Context& x, const DrawCall& call) {
   std::lock_guard<std::recursive_mutex> l(dev.gpu_mu);
   if (!dev.gfx) return;
   dev.stats.draws++;
-  if (!dc.count || !dc.instances) return;
+  // Indirect arguments the GPU wrote are read there, with all of the
+  // vertex buffers bound; their first vertex and instance are taken as 0
+  // (SV_VertexID and SV_InstanceID count from them).
+  DrawCall dc = call;
+  if (dc.args && !(dc.args->gpu_newer && dc.args->gpu_buffer)) dc.args = nullptr;
+  if (dc.args) dc.first = dc.first_instance = 0, dc.base_vertex = 0;
+  else if (!dc.count || !dc.instances) return;
   if (x.geometry) {
     WARN_ONCE("d3d11: draws with a geometry shader are skipped\n");
     return;
@@ -814,6 +823,10 @@ void GpuDraw(Device& dev, Context& x, const DrawCall& dc) {
               x.hull ? (unsigned long long)x.hull->hash : 0ull, ds ? (unsigned long long)ds->hash : 0ull);
     }
     dev.stats.skipped++;
+    return;
+  }
+  if (dc.args && point_patch) {
+    WARN_ONCE("d3d11: indirect draws of point patches with arguments the GPU wrote are skipped\n");
     return;
   }
   bool ok;
@@ -896,6 +909,9 @@ void GpuDraw(Device& dev, Context& x, const DrawCall& dc) {
     if (InPlace(ib) && x.ib_offset % isize == 0 && EnsureGpuBuffer(dev, ib)) {
       d.index_buffer = ib.gpu_buffer;
       d.first_index = uint32_t(at / isize);
+    } else if (dc.args) {
+      WARN_ONCE("d3d11: indirect draws with arguments the GPU wrote, of indices from the host, are skipped\n");
+      return;
     } else {
       d.indices = ib.Data() + at;
     }
@@ -909,12 +925,37 @@ void GpuDraw(Device& dev, Context& x, const DrawCall& dc) {
   StageData vsd, psd;
   vsd.uniforms.draw[0] = dc.indexed ? dc.base_vertex : int32_t(dc.first);
   vsd.uniforms.draw[1] = int32_t(dc.first_instance);
+  if (dc.args) {
+    d.args = dc.args->gpu_buffer;
+    d.args_at = dc.args_at;
+  }
   BindStage(dev, x, point_patch ? kDomainStage : 0, prog->vs, &dc, vsd, s, &d.vs);
   BindStage(dev, x, 1, prog->ps, &dc, psd, s, &d.fs);
   if (!dev.gfx->DrawProgram(d)) dev.stats.waiting++;
 }
 
-void GpuDispatch(Device& dev, Context& x, uint32_t gx, uint32_t gy, uint32_t gz) {
+namespace {
+
+// A UAV's hidden counter, made (zero) when first used.
+gfx::BufferId CounterOf(Device& dev, View& v) {
+  if (!v.counter) {
+    v.counter = dev.gfx->CreateBuffer(4);
+    const uint32_t zero = 0;
+    dev.gfx->UpdateBuffer(v.counter, 0, &zero, 4);
+  }
+  return v.counter;
+}
+
+}  // namespace
+
+void GpuSetCounter(Device& dev, View& v, uint32_t count) {
+  std::lock_guard<std::recursive_mutex> l(dev.gpu_mu);
+  if (!dev.gfx) return;
+  dev.gfx->UpdateBuffer(CounterOf(dev, v), 0, &count, 4);
+}
+
+void GpuDispatch(Device& dev, Context& x, uint32_t gx, uint32_t gy, uint32_t gz, Resource* args,
+                 uint32_t args_at) {
   std::lock_guard<std::recursive_mutex> l(dev.gpu_mu);
   if (!dev.gfx) return;
   dev.stats.dispatches++;
@@ -928,15 +969,23 @@ void GpuDispatch(Device& dev, Context& x, uint32_t gx, uint32_t gy, uint32_t gz)
   gfx::ProgramDispatch d;
   d.program = prog->id;
   d.groups[0] = gx, d.groups[1] = gy, d.groups[2] = gz;
+  if (args && args->gpu_newer && args->gpu_buffer) {
+    d.args = args->gpu_buffer;
+    d.args_at = args_at;
+  }
   Scratch s;
   StageData sd;
   BindStage(dev, x, 2, prog->cs, nullptr, sd, s, &d.cs);
-  // UAVs: buffers stay on the GPU (written back there), textures are
-  // storage images.
-  for (uint32_t slot : prog->cs.rw_buffers) {
-    const View* v = slot < 8 ? x.uavs[slot].get() : nullptr;
+  // UAVs: buffers stay on the GPU (written back there), as do their
+  // hidden counters; textures are storage images.
+  for (uint32_t entry : prog->cs.rw_buffers) {
+    const uint32_t slot = entry & ~StageBindings::kCounter;
+    View* v = slot < 8 ? x.uavs[slot].get() : nullptr;
     gfx::RwBufferData rb;
-    if (v && v->res->dim == Dim::Buffer) {
+    if (v && (entry & StageBindings::kCounter)) {
+      rb.buffer = CounterOf(dev, *v);
+      rb.size = 4;
+    } else if (v && v->res->dim == Dim::Buffer) {
       Resource& r = *v->res;
       EnsureGpuBuffer(dev, r);
       const uint32_t eb = ElementBytes(*v);
