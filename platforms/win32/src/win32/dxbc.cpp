@@ -1035,7 +1035,8 @@ class Translator {
           return Fail("a domain shader of patches of more than one control point");
         return true;
       case kDclTessDomain:
-        if (stage_ == ShaderType::Domain && (ctl & 3) != 3) return Fail("a domain other than quads");
+        if (stage_ == ShaderType::Domain && (ctl & 3) != 3 && (ctl & 3) != 1)
+          return Fail("a domain other than quads and isolines");
         return true;
       case kDclInput: case kDclInputSgv: case kDclInputSiv: case kDclInputPs: case kDclInputPsSgv:
       case kDclInputPsSiv: case kDclOutput: case kDclOutputSgv: case kDclOutputSiv: {
@@ -2597,14 +2598,15 @@ bool PassThroughVertexShader(const void* dxbc, size_t size, std::vector<Constant
   return true;
 }
 
-bool PointToQuadHull(const void* dxbc, size_t size, bool* ccw, uint32_t* segments) {
+bool PointPatchHull(const void* dxbc, size_t size, PatchShape* shape) {
   Program p;
   if (!Load(dxbc, size, &p) || p.type != ShaderType::Hull) return false;
   enum { kDecls, kControlPoints, kPatch } phase = kDecls;
-  uint32_t factors = 0;  // the tessellation factors declared (bit: system value - 11)
-  bool quad = false, prim = false;
-  uint32_t partitioning = 0;
-  float factor = 0;  // the largest factor
+  // The tessellation factors declared: bits 0-5 a quad's (system values
+  // 11-16), 6 and 7 an isoline's (21 density, 22 detail).
+  uint32_t factors = 0;
+  uint32_t domain = 0, partitioning = 0, prim = 0;
+  float factor = 0, least = 64;  // the largest factor, the smallest
   std::vector<uint32_t> icb;  // the immediate constant buffer
   for (const Instr& in : p.instrs) {
     const uint32_t ctl = (in.token >> 11) & 0x1FFF;
@@ -2618,15 +2620,12 @@ bool PointToQuadHull(const void* dxbc, size_t size, bool* ccw, uint32_t* segment
       case kDclInputControlPointCount: case kDclOutputControlPointCount:
         if ((ctl & 0x3F) != 1) return false;
         continue;
-      case kDclTessDomain: quad = (ctl & 3) == 3; continue;
+      case kDclTessDomain: domain = ctl & 3; continue;
       case kDclTessPartitioning: partitioning = ctl & 7; continue;
-      case kDclTessOutputPrimitive:
-        if ((ctl & 7) != 3 && (ctl & 7) != 4) return false;  // triangle_cw, triangle_ccw
-        prim = true;
-        *ccw = (ctl & 7) == 4;
-        continue;
+      case kDclTessOutputPrimitive: prim = ctl & 7; continue;
       case kDclOutputSiv:
         if (!in.lits.empty() && in.lits[0] >= 11 && in.lits[0] <= 16) factors |= 1u << (in.lits[0] - 11);
+        if (!in.lits.empty() && (in.lits[0] == 21 || in.lits[0] == 22)) factors |= 1u << (in.lits[0] - 15);
         continue;
       case kRet: continue;
       default: break;
@@ -2652,6 +2651,7 @@ bool PointToQuadHull(const void* dxbc, size_t size, bool* ccw, uint32_t* segment
       const uint32_t n = uint32_t(f);
       if (float(n) != f || n < 1 || n > 16) return false;
       factor = std::max(factor, f);
+      least = std::min(least, f);
       return partitioning == 1 || (partitioning == 2 && !(n & (n - 1))) || (partitioning == 3 && (n & 1)) ||
              (partitioning == 4 && !(n & 1));
     };
@@ -2668,12 +2668,22 @@ bool PointToQuadHull(const void* dxbc, size_t size, bool* ccw, uint32_t* segment
       return false;
     }
   }
-  if (!quad || !prim || factors != 0x3F) return false;
-  // Factors that differ (edges finer than the inside) are drawn as the
-  // grid of the largest: the same points on the edges, and more inside,
-  // where a sprite's domain shader is linear.
-  *segments = uint32_t(factor);
-  return true;
+  // D3D11_SB_TESSELLATOR_DOMAIN quad 3, isoline 1; output primitive
+  // line 2, triangle_cw 3, triangle_ccw 4.
+  if (domain == 3 && factors == 0x3F && (prim == 3 || prim == 4)) {
+    // Factors that differ (edges finer than the inside) are drawn as the
+    // grid of the largest: the same points on the edges, and more inside,
+    // where a sprite's domain shader is linear.
+    *shape = {false, prim == 4, uint32_t(factor)};
+    return true;
+  }
+  // Isolines: which value went to which factor is not followed, so only
+  // equal ones.
+  if (domain == 1 && factors == 0xC0 && prim == 2 && factor == least) {
+    *shape = {true, false, uint32_t(factor)};
+    return true;
+  }
+  return false;
 }
 
 bool Translate(const void* dxbc, size_t size, Shader* out, bool annotate) {

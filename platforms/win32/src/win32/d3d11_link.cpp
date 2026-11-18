@@ -315,11 +315,10 @@ std::shared_ptr<const LinkedProgram> LinkProgram(gfx::Device& dev, const Shader&
 std::shared_ptr<const LinkedProgram> LinkPointPatchProgram(gfx::Device& dev, const Shader& vs,
                                                            const Shader& hs, const Shader& ds,
                                                            const Shader* ps, const InputLayout* layout) {
-  bool ccw = false;
-  uint32_t n = 0;
+  dxbc::PatchShape shape;
   std::vector<dxbc::ConstantOutput> constants;
   if (vs.stage != 0 || ds.stage != 4 || (ps && ps->stage != 1) ||
-      !dxbc::PointToQuadHull(hs.dxbc.data(), hs.dxbc.size(), &ccw, &n) ||
+      !dxbc::PointPatchHull(hs.dxbc.data(), hs.dxbc.size(), &shape) ||
       !dxbc::PassThroughVertexShader(vs.dxbc.data(), vs.dxbc.size(), &constants))
     return nullptr;
   const auto tv = Translated(vs);
@@ -333,11 +332,13 @@ std::shared_ptr<const LinkedProgram> LinkPointPatchProgram(gfx::Device& dev, con
 
   const std::string varyings = dxbc::VaryingDefines(&td->s, tp ? &tp->s : nullptr);
   gfx::ProgramDesc d;
-  // The domain stage: its domain point the corner of the patch's quad
-  // this vertex is, its control point the patch's vertex (the vertex
-  // shader passes its inputs through, and the hull shader its control
-  // point), fetched as the vertex shader's inputs.
-  p->patch_vertices = 6 * n * n;
+  // The domain stage: its domain point the corner of the patch's quad (or
+  // end of its line segment) this vertex is, its control point the
+  // patch's vertex (the vertex shader passes its inputs through, and the
+  // hull shader its control point), fetched as the vertex shader's inputs.
+  const uint32_t n = shape.segments;
+  p->patch_lines = shape.lines;
+  p->patch_vertices = (shape.lines ? 2 : 6) * n * n;
   const std::string per = std::to_string(p->patch_vertices) + "u";
   std::vector<uint32_t> slots;
   std::string fetch = VertexFetch(layout, tv->s, td->s.stage.buffers, &slots,
@@ -353,15 +354,22 @@ std::shared_ptr<const LinkedProgram> LinkPointPatchProgram(gfx::Device& dev, con
                std::to_string(k.bits) + "u;\n";
     fetch += "  return v;\n}\n";
   }
-  // Vertex k of a patch: corner k % 6 of quad k / 6 of the n x n grid.
-  const char* corners = ccw ? "vec2(0, 0), vec2(0, 1), vec2(1, 0), vec2(0, 1), vec2(1, 1), vec2(1, 0)"
-                            : "vec2(0, 0), vec2(1, 0), vec2(0, 1), vec2(0, 1), vec2(1, 0), vec2(1, 1)";
-  const std::string ns = std::to_string(n) + "u";
+  // Vertex k of a patch: corner k % 6 of quad k / 6 of the n x n grid; of
+  // isolines, end k % 2 of segment k / 2 (n of them a line), its line at
+  // v = line / n (the last one short of 1, as Direct3D's).
+  const char* corners = shape.ccw ? "vec2(0, 0), vec2(0, 1), vec2(1, 0), vec2(0, 1), vec2(1, 1), vec2(1, 0)"
+                                  : "vec2(0, 0), vec2(1, 0), vec2(0, 1), vec2(0, 1), vec2(1, 0), vec2(1, 1)";
+  const std::string ns = std::to_string(n) + "u", nf = std::to_string(n) + ".0";
   const std::string domain =
-      std::string("const vec2 r_corners[6] = vec2[](") + corners + ");\n" +
-      "vec3 r_domain_point() {\n  uint k = uint(gl_VertexIndex) % " + per + ", q = k / 6u;\n" +
-      "  return vec3((vec2(float(q % " + ns + "), float(q / " + ns + ")) + r_corners[k % 6u]) / " +
-      std::to_string(n) + ".0, 0.0);\n}\n#define R_DOMAIN_POINT r_domain_point()\n";
+      (shape.lines
+           ? "vec3 r_domain_point() {\n  uint k = uint(gl_VertexIndex) % " + per + ", q = k / 2u;\n" +
+                 "  return vec3(float(q % " + ns + " + (k & 1u)) / " + nf + ", float(q / " + ns + ") / " + nf +
+                 ", 0.0);\n}\n"
+           : std::string("const vec2 r_corners[6] = vec2[](") + corners + ");\n" +
+                 "vec3 r_domain_point() {\n  uint k = uint(gl_VertexIndex) % " + per + ", q = k / 6u;\n" +
+                 "  return vec3((vec2(float(q % " + ns + "), float(q / " + ns + ")) + r_corners[k % 6u]) / " +
+                 nf + ", 0.0);\n}\n") +
+      "#define R_DOMAIN_POINT r_domain_point()\n";
   d.vs = td->s.stage;
   d.vs.buffers = uint32_t(p->vs.buffers.size());
   d.vs.glsl = varyings + UniformBlock(p->vs, uint32_t(slots.size()), &d.vs.uniform_bytes) + fetch +
