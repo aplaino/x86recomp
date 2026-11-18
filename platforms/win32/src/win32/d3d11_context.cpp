@@ -13,6 +13,8 @@
 #include <array>
 #include <cstring>
 #include <memory>
+#include <new>
+#include <typeinfo>
 
 #include "runtime/log.h"
 #include "win32/com.h"
@@ -36,13 +38,17 @@ Context& Ctx0(Ctx& c) {
 
 Device& Dev() { return *TheDevice(); }
 
-// The host object behind a guest pointer of type T (null for 0).
+// The host object behind a guest pointer of type T (null for 0): of type T
+// itself (no class derives from these: a type check, not a cast), or
+// failing that whatever casts to it.
 template <typename T>
 std::shared_ptr<T> Obj(gaddr p) {
   if (!p) return nullptr;
-  auto o = std::dynamic_pointer_cast<T>(com::Lookup(p));
-  if (!o) FatalF("d3d11: %08llX is not the object expected", (unsigned long long)p);
-  return o;
+  std::shared_ptr<com::Object> o = com::Lookup(p);
+  if (o && typeid(*o) == typeid(T)) return std::static_pointer_cast<T>(std::move(o));
+  auto t = std::dynamic_pointer_cast<T>(std::move(o));
+  if (!t) FatalF("d3d11: %08llX is not the object expected", (unsigned long long)p);
+  return t;
 }
 
 // The guest pointer of a host object (0 for null), with a reference added
@@ -71,18 +77,39 @@ void Run(Context& x, F f) {
 }
 
 // A setter's arguments: up to kInline of them in place, the rest on the
-// heap (calls set a few slots; a vector allocated for every one).
+// heap (calls set a few slots; a vector allocated for every one). Only
+// the n given are made, moved and destroyed: a call binding one buffer
+// does not pay for kInline.
 template <typename T, uint32_t kInline = 16>
 struct Args {
   uint32_t n = 0;
-  T inl[kInline];
   std::vector<T> more;
+  Args() = default;
+  Args(const Args& o) : n(o.n), more(o.more) {
+    for (uint32_t i = 0; i < Inl(); i++) new (Slot(i)) T(*o.Ptr(i));
+  }
+  Args(Args&& o) noexcept : n(o.n), more(std::move(o.more)) {
+    for (uint32_t i = 0; i < Inl(); i++) new (Slot(i)) T(std::move(*o.Ptr(i)));
+  }
+  Args& operator=(const Args&) = delete;
+  ~Args() {
+    for (uint32_t i = 0; i < Inl(); i++) Ptr(i)->~T();
+  }
   void Push(T v) {
-    if (n < kInline) inl[n] = std::move(v);
+    if (n < kInline) new (Slot(n)) T(std::move(v));
     else more.push_back(std::move(v));
     n++;
   }
-  const T& operator[](uint32_t i) const { return i < kInline ? inl[i] : more[i - kInline]; }
+  const T& operator[](uint32_t i) const { return i < kInline ? *Ptr(i) : more[i - kInline]; }
+
+ private:
+  uint32_t Inl() const { return std::min(n, kInline); }
+  void* Slot(uint32_t i) { return inl_ + size_t(i) * sizeof(T); }
+  T* Ptr(uint32_t i) { return std::launder(reinterpret_cast<T*>(inl_ + size_t(i) * sizeof(T))); }
+  const T* Ptr(uint32_t i) const {
+    return std::launder(reinterpret_cast<const T*>(inl_ + size_t(i) * sizeof(T)));
+  }
+  alignas(T) unsigned char inl_[kInline * sizeof(T)];
 };
 
 ContextState& StateOf(Context& x) { return x; }
@@ -121,11 +148,26 @@ OpList& OpList::operator=(OpList&& o) noexcept {
   return *this;
 }
 
+namespace {
+// Free chunks of the two usual sizes, up to 64 MiB of them.
+std::mutex g_chunk_mu;
+std::vector<std::unique_ptr<uint8_t[]>> g_free_ops, g_free_bytes;
+constexpr size_t kPoolBytes = 64u << 20;
+}  // namespace
+
 void* OpList::Room(std::vector<Chunk>& chunks, size_t n, size_t chunk) {
   if (chunks.empty() || chunks.back().size - chunks.back().used < n) {
     Chunk c;
     c.size = std::max(n, chunk);
-    c.mem.reset(new uint8_t[c.size]);  // aligned for any scalar (16 bytes)
+    if (c.size == chunk) {
+      std::lock_guard<std::mutex> l(g_chunk_mu);
+      auto& pool = chunk == kOpChunk ? g_free_ops : g_free_bytes;
+      if (!pool.empty()) {
+        c.mem = std::move(pool.back());
+        pool.pop_back();
+      }
+    }
+    if (!c.mem) c.mem.reset(new uint8_t[c.size]);  // aligned for any scalar (16 bytes)
     chunks.push_back(std::move(c));
   }
   Chunk& c = chunks.back();
@@ -143,6 +185,16 @@ void OpList::Run(Context& x) const {
     }
 }
 
+void OpList::Recycle(std::vector<Chunk>& chunks) {
+  if (chunks.empty()) return;
+  std::lock_guard<std::mutex> l(g_chunk_mu);
+  for (Chunk& c : chunks) {
+    auto* pool = c.size == kOpChunk ? &g_free_ops : c.size == kByteChunk ? &g_free_bytes : nullptr;
+    if (pool && pool->size() * c.size < kPoolBytes / 2) pool->push_back(std::move(c.mem));
+  }
+  chunks.clear();
+}
+
 void OpList::Clear() {
   for (Chunk& c : ops_)
     for (size_t at = 0; at < c.used;) {
@@ -150,8 +202,8 @@ void OpList::Clear() {
       at += h->size;
       h->destroy(h + 1);
     }
-  ops_.clear();
-  bytes_.clear();
+  Recycle(ops_);
+  Recycle(bytes_);
 }
 
 #define D3D11_METHOD(iface, name) \
