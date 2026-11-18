@@ -16,6 +16,10 @@
 // CommitDeferredSettings. Cones and Doppler are stored, not applied.
 // Position notifications (IDirectSoundNotify) and effects are not
 // implemented: fatal and named.
+//
+// Audited for x64 guests: guest pointers are the guest's width (out
+// parameters, Lock's regions, DSBUFFERDESC's format, 40 bytes there),
+// and float arguments come as the guest's convention passes them (FArg).
 
 #include <cmath>
 #include <cstring>
@@ -69,8 +73,11 @@ uint32_t Bits(float f) {
   std::memcpy(&v, &f, 4);
   return v;
 }
-audio::Vec3 ReadVec(uint32_t va) { return {F(Rd32(va)), F(Rd32(va + 4)), F(Rd32(va + 8))}; }
-void WriteVec(uint32_t va, const audio::Vec3& v) {
+// Float argument i: on the stack in 32-bit guests, in xmm registers (the
+// first four arguments) in x64 ones.
+float FArg(const Ctx& c, int i) { return g_proc->x64 ? ArgF(c, i) : F(uint32_t(Arg(c, i))); }
+audio::Vec3 ReadVec(gaddr va) { return {F(Rd32(va)), F(Rd32(va + 4)), F(Rd32(va + 8))}; }
+void WriteVec(gaddr va, const audio::Vec3& v) {
   Wr32(va, Bits(v.x));
   Wr32(va + 4, Bits(v.y));
   Wr32(va + 8, Bits(v.z));
@@ -89,7 +96,7 @@ struct Format {
 struct Data {
   Format fmt;
   std::vector<uint8_t> bytes;
-  uint32_t mem = 0;
+  gaddr mem = 0;
   ~Data() {
     if (mem) HeapFreeProcess(mem);
   }
@@ -171,23 +178,23 @@ struct SoundBuffer : com::Object {
   int32_t volume = 0, pan = 0;
   uint32_t frequency = 0;  // 0: the format's rate
   Params3D p3d, pending3d;
-  uint32_t buffer3d = 0, listener = 0;  // guest pointers of interfaces handed out
+  gaddr buffer3d = 0, listener = 0;  // guest pointers of interfaces handed out
   ~SoundBuffer() override;
 };
 
 struct Buffer3D : com::Object {
-  uint32_t buffer = 0;  // the IDirectSoundBuffer it belongs to (referenced)
+  gaddr buffer = 0;  // the IDirectSoundBuffer it belongs to (referenced)
   ~Buffer3D() override;
 };
 
 struct Listener : com::Object {
-  uint32_t primary = 0;  // referenced
+  gaddr primary = 0;  // referenced
   ~Listener() override;
 };
 
 struct DirectSound : com::Object {
   uint32_t coop = 0;
-  uint32_t primary = 0;  // the primary buffer, created once
+  gaddr primary = 0;  // the primary buffer, created once
 };
 
 // Deferred 3D settings, applied by CommitDeferredSettings.
@@ -217,7 +224,7 @@ Listener::~Listener() {
   com::Release(primary);
 }
 
-uint32_t DirectSoundVtable() {
+gaddr DirectSoundVtable() {
   return com::Vtable("dsound.dll", "IDirectSound8",
                      {"QueryInterface", "AddRef", "Release", "CreateSoundBuffer", "GetCaps",
                       "DuplicateSoundBuffer", "SetCooperativeLevel", "Compact",
@@ -225,7 +232,7 @@ uint32_t DirectSoundVtable() {
                       "VerifyCertification"});
 }
 
-uint32_t BufferVtable() {
+gaddr BufferVtable() {
   return com::Vtable("dsound.dll", "IDirectSoundBuffer8",
                      {"QueryInterface", "AddRef", "Release", "GetCaps", "GetCurrentPosition",
                       "GetFormat", "GetVolume", "GetPan", "GetFrequency", "GetStatus",
@@ -234,7 +241,7 @@ uint32_t BufferVtable() {
                       "SetFX", "AcquireResources", "GetObjectInPath"});
 }
 
-uint32_t Buffer3DVtable() {
+gaddr Buffer3DVtable() {
   return com::Vtable("dsound.dll", "IDirectSound3DBuffer",
                      {"QueryInterface", "AddRef", "Release", "GetAllParameters",
                       "GetConeAngles", "GetConeOrientation", "GetConeOutsideVolume",
@@ -244,7 +251,7 @@ uint32_t Buffer3DVtable() {
                       "SetMinDistance", "SetMode", "SetPosition", "SetVelocity"});
 }
 
-uint32_t ListenerVtable() {
+gaddr ListenerVtable() {
   return com::Vtable("dsound.dll", "IDirectSound3DListener",
                      {"QueryInterface", "AddRef", "Release", "GetAllParameters",
                       "GetDistanceFactor", "GetDopplerFactor", "GetOrientation", "GetPosition",
@@ -256,7 +263,7 @@ uint32_t ListenerVtable() {
 template <typename T>
 T* Self(Ctx& c, const char* iface) {
   T* o = com::As<T>(Arg(c, 0));
-  if (!o) FatalF("%s call on unknown object %08X", iface, uint32_t(Arg(c, 0)));
+  if (!o) FatalF("%s call on unknown object %08llX", iface, (unsigned long long)Arg(c, 0));
   return o;
 }
 
@@ -309,7 +316,7 @@ void ChangedListener(uint32_t apply) {
 
 // ---- formats
 
-bool ReadFormat(uint32_t va, Format* f) {
+bool ReadFormat(gaddr va, Format* f) {
   if (!va) return false;
   uint16_t tag = uint16_t(Rd32(va)), channels = uint16_t(Rd32(va) >> 16);
   uint32_t rate = Rd32(va + 4);
@@ -321,7 +328,7 @@ bool ReadFormat(uint32_t va, Format* f) {
   return true;
 }
 
-void WriteFormat(uint32_t va, uint32_t size, const Format& f) {
+void WriteFormat(gaddr va, uint32_t size, const Format& f) {
   // WAVEFORMATEX, 18 bytes (cbSize 0); fewer if the caller's room is less.
   uint8_t w[18] = {};
   auto p16 = [&](int o, uint32_t v) { w[o] = uint8_t(v), w[o + 1] = uint8_t(v >> 8); };
@@ -338,38 +345,95 @@ void WriteFormat(uint32_t va, uint32_t size, const Format& f) {
 // ---- DirectSoundCreate8 and IDirectSound8
 
 // (lpcGuidDevice, ppDS8, pUnkOuter)
-HLE_NAMED("dsound.dll", "#11", DirectSoundCreate8, 3) {
+HLE_NAMED_X("dsound.dll", "#11", DirectSoundCreate8, 3, true) {
   if (!Arg(c, 1)) return DSERR_INVALIDPARAM;
-  Wr32(Arg(c, 1), 0);
+  WrPtr(Arg(c, 1), 0);
   if (Arg(c, 2)) return DSERR_NOAGGREGATION;
-  if (!M().Open(48000)) return DSERR_NODRIVER;
-  Wr32(Arg(c, 1), com::Publish(std::make_shared<DirectSound>(), DirectSoundVtable()));
+  // The mix runs at 44.1 kHz, the rate games' sounds and stream rings
+  // are made at: those play sample for sample, and SDL converts the mix to
+  // the device's rate with its band-limited resampler (mixed at 48 kHz,
+  // the mixer's linear interpolation is heard as a crackle on bright
+  // sounds).
+  if (!M().Open(44100)) return DSERR_NODRIVER;
+  WrPtr(Arg(c, 1), com::Publish(std::make_shared<DirectSound>(), DirectSoundVtable()));
   return DS_OK;
 }
 
-HLE_NAMED("dsound.dll", "IDirectSound8::QueryInterface", DS8_QueryInterface, 3) {
-  uint32_t riid = Arg(c, 1), out = Arg(c, 2);
+// The one output device: its GUID, what GetDeviceID gives for the default
+// playback device, and what the enumerations list.
+constexpr uint8_t kDeviceGuid[16] = {0x52, 0x45, 0x43, 0x4F, 0x4D, 0x50, 0x00, 0x00,
+                                     'D',  'S',  'O',  'U',  'N',  'D',  0x00, 0x01};
+
+// GetDeviceID(pGuidSrc, pGuidDest): a default device id (or our own GUID)
+// to the device GUID; capture devices do not exist.
+HLE_NAMED_X("dsound.dll", "#9", GetDeviceID, 2, true) {
+  const gaddr src = Arg(c, 0), dst = Arg(c, 1);
+  if (!dst) return DSERR_INVALIDPARAM;
+  // DSDEVID_DefaultCapture / DefaultVoiceCapture: DEF0FAE1 / DEF0FAE3-...
+  if (src && (Rd32(src) == 0xDEF00001 || Rd32(src) == 0xDEF00003)) return DSERR_NODRIVER;
+  std::memcpy(GPtr(dst), kDeviceGuid, 16);
+  return DS_OK;
+}
+
+// DirectSoundEnumerateA/W(callback, context): the primary driver (NULL
+// GUID, as Windows lists it first), then the device.
+uint32_t Enumerate(Ctx& c, bool wide) {
+  const gaddr cb = Arg(c, 0), ctx = Arg(c, 1);
+  const gaddr guid = HeapAllocProcess(16, false), desc = HeapAllocProcess(128, true),
+              module = HeapAllocProcess(64, true);
+  std::memcpy(GPtr(guid), kDeviceGuid, 16);
+  auto put = [&](gaddr va, const char* s) {
+    if (wide) PutWStr(va, s);
+    else PutStr(va, s);
+  };
+  put(desc, "Primary Sound Driver");
+  put(module, "");
+  if (CallGuest(c, cb, {0, desc, module, ctx})) {
+    put(desc, "Speakers");
+    put(module, "recomp.audio");
+    CallGuest(c, cb, {guid, desc, module, ctx});
+  }
+  HeapFreeProcess(guid);
+  HeapFreeProcess(desc);
+  HeapFreeProcess(module);
+  return DS_OK;
+}
+HLE_NAMED_X("dsound.dll", "#2", DirectSoundEnumerateA, 2, true) { return Enumerate(c, false); }
+HLE_NAMED_X("dsound.dll", "#3", DirectSoundEnumerateW, 2, true) { return Enumerate(c, true); }
+
+// The same entry points by name (GetProcAddress after LoadLibrary, as
+// middleware that probes for DirectSound does), and DirectSoundCreate (#1):
+// its IDirectSound is the IDirectSound8 object, which answers both.
+HLE_NAMED_X("dsound.dll", "#1", DirectSoundCreate, 3, true) { return hle_DirectSoundCreate8(c); }
+HLE_NAMED_X("dsound.dll", "DirectSoundCreate", DirectSoundCreateName, 3, true) { return hle_DirectSoundCreate8(c); }
+HLE_NAMED_X("dsound.dll", "DirectSoundCreate8", DirectSoundCreate8Name, 3, true) { return hle_DirectSoundCreate8(c); }
+HLE_NAMED_X("dsound.dll", "GetDeviceID", GetDeviceIDName, 2, true) { return hle_GetDeviceID(c); }
+HLE_NAMED_X("dsound.dll", "DirectSoundEnumerateA", DirectSoundEnumerateAName, 2, true) { return Enumerate(c, false); }
+HLE_NAMED_X("dsound.dll", "DirectSoundEnumerateW", DirectSoundEnumerateWName, 2, true) { return Enumerate(c, true); }
+
+HLE_NAMED_X("dsound.dll", "IDirectSound8::QueryInterface", DS8_QueryInterface, 3, true) {
+  const gaddr riid = Arg(c, 1), out = Arg(c, 2);
   if (com::GuidEq(riid, kIID_IDirectSound8) || com::GuidEq(riid, kIID_IDirectSound)) {
     com::AddRef(Arg(c, 0));
-    Wr32(out, Arg(c, 0));
+    WrPtr(out, Arg(c, 0));
     return com::kS_OK;
   }
-  Wr32(out, 0);
+  WrPtr(out, 0);
   return com::kE_NOINTERFACE;
 }
-HLE_NAMED("dsound.dll", "IDirectSound8::AddRef", DS8_AddRef, 1) { return com::AddRef(Arg(c, 0)); }
-HLE_NAMED("dsound.dll", "IDirectSound8::Release", DS8_Release, 1) { return com::Release(Arg(c, 0)); }
+HLE_NAMED_X("dsound.dll", "IDirectSound8::AddRef", DS8_AddRef, 1, true) { return com::AddRef(Arg(c, 0)); }
+HLE_NAMED_X("dsound.dll", "IDirectSound8::Release", DS8_Release, 1, true) { return com::Release(Arg(c, 0)); }
 
 // (hwnd, dwLevel)
-HLE_NAMED("dsound.dll", "IDirectSound8::SetCooperativeLevel", DS8_SetCooperativeLevel, 3) {
+HLE_NAMED_X("dsound.dll", "IDirectSound8::SetCooperativeLevel", DS8_SetCooperativeLevel, 3, true) {
   Self<DirectSound>(c, "IDirectSound8")->coop = Arg(c, 2);
   return DS_OK;
 }
 
 // (pDSCaps): DSCAPS, 96 bytes. Software only, as Windows reports since
 // Vista: no hardware mixing or 3D buffers.
-HLE_NAMED("dsound.dll", "IDirectSound8::GetCaps", DS8_GetCaps, 2) {
-  uint32_t p = Arg(c, 1);
+HLE_NAMED_X("dsound.dll", "IDirectSound8::GetCaps", DS8_GetCaps, 2, true) {
+  const gaddr p = Arg(c, 1);
   if (!p || Rd32(p) != 96) return DSERR_INVALIDPARAM;
   std::memset(GPtr(p + 4), 0, 92);
   Wr32(p + 4, 0xF1F);  // PRIMARY/SECONDARY MONO STEREO 8BIT 16BIT, CONTINUOUSRATE
@@ -380,7 +444,7 @@ HLE_NAMED("dsound.dll", "IDirectSound8::GetCaps", DS8_GetCaps, 2) {
 }
 
 // (pdwSpeakerConfig)
-HLE_NAMED("dsound.dll", "IDirectSound8::GetSpeakerConfig", DS8_GetSpeakerConfig, 2) {
+HLE_NAMED_X("dsound.dll", "IDirectSound8::GetSpeakerConfig", DS8_GetSpeakerConfig, 2, true) {
   if (!Arg(c, 1)) return DSERR_INVALIDPARAM;
   Wr32(Arg(c, 1), 4);  // DSSPEAKER_STEREO
   return DS_OK;
@@ -388,19 +452,24 @@ HLE_NAMED("dsound.dll", "IDirectSound8::GetSpeakerConfig", DS8_GetSpeakerConfig,
 
 // (pcDSBufferDesc, ppDSBuffer, pUnkOuter): DSBUFFERDESC {dwSize,
 // dwFlags, dwBufferBytes, dwReserved, lpwfxFormat, guid3DAlgorithm}.
-HLE_NAMED("dsound.dll", "IDirectSound8::CreateSoundBuffer", DS8_CreateSoundBuffer, 4) {
+HLE_NAMED_X("dsound.dll", "IDirectSound8::CreateSoundBuffer", DS8_CreateSoundBuffer, 4, true) {
   DirectSound* ds = Self<DirectSound>(c, "IDirectSound8");
-  uint32_t desc = Arg(c, 1), out = Arg(c, 2);
-  if (!desc || !out || (Rd32(desc) != 36 && Rd32(desc) != 20)) return DSERR_INVALIDPARAM;
-  Wr32(out, 0);
+  const gaddr desc = Arg(c, 1), out = Arg(c, 2);
+  // DSBUFFERDESC (36 bytes, 40 in x64) or DirectX 7's DSBUFFERDESC1 (no
+  // guid3DAlgorithm: 20, 24).
+  const bool x64 = g_proc->x64;
+  if (!desc || !out || (Rd32(desc) != (x64 ? 40u : 36u) && Rd32(desc) != (x64 ? 24u : 20u)))
+    return DSERR_INVALIDPARAM;
+  WrPtr(out, 0);
   if (Arg(c, 3)) return DSERR_NOAGGREGATION;
-  uint32_t flags = Rd32(desc + 4), bytes = Rd32(desc + 8), fmt = Rd32(desc + 16);
+  uint32_t flags = Rd32(desc + 4), bytes = Rd32(desc + 8);
+  const gaddr fmt = RdPtr(desc + 16);
   if (flags & DSBCAPS_CTRLFX) FatalF("dsound: buffers with effects (DSBCAPS_CTRLFX) are not supported");
   if (flags & DSBCAPS_PRIMARYBUFFER) {
     if (bytes || fmt) return DSERR_INVALIDPARAM;
     if (ds->primary) {  // one primary buffer per device
       com::AddRef(ds->primary);
-      Wr32(out, ds->primary);
+      WrPtr(out, ds->primary);
       return DS_OK;
     }
     auto b = std::make_shared<SoundBuffer>();
@@ -408,7 +477,7 @@ HLE_NAMED("dsound.dll", "IDirectSound8::CreateSoundBuffer", DS8_CreateSoundBuffe
     b->flags = flags;
     b->primary_format = {2, 16, 4, 22050};  // DirectSound's default
     ds->primary = com::Publish(b, BufferVtable());
-    Wr32(out, ds->primary);
+    WrPtr(out, ds->primary);
     return DS_OK;
   }
   auto d = std::make_shared<Data>();
@@ -431,14 +500,14 @@ HLE_NAMED("dsound.dll", "IDirectSound8::CreateSoundBuffer", DS8_CreateSoundBuffe
   b->voice->state = audio::Voice::State::Paused;
   b->pending3d = b->p3d;
   ApplyVoice(*b);
-  Wr32(out, com::Publish(b, BufferVtable()));
+  WrPtr(out, com::Publish(b, BufferVtable()));
   return DS_OK;
 }
 
 // (pDSBufferOriginal, ppDSBufferDuplicate): shares the samples.
-HLE_NAMED("dsound.dll", "IDirectSound8::DuplicateSoundBuffer", DS8_DuplicateSoundBuffer, 3) {
+HLE_NAMED_X("dsound.dll", "IDirectSound8::DuplicateSoundBuffer", DS8_DuplicateSoundBuffer, 3, true) {
   auto* o = com::As<SoundBuffer>(Arg(c, 1));
-  uint32_t out = Arg(c, 2);
+  const gaddr out = Arg(c, 2);
   if (!o || !out || o->primary) return DSERR_INVALIDPARAM;
   auto b = std::make_shared<SoundBuffer>();
   b->flags = o->flags;
@@ -455,7 +524,7 @@ HLE_NAMED("dsound.dll", "IDirectSound8::DuplicateSoundBuffer", DS8_DuplicateSoun
   b->frequency = o->frequency;
   b->p3d = b->pending3d = o->p3d;
   ApplyVoice(*b);
-  Wr32(out, com::Publish(b, BufferVtable()));
+  WrPtr(out, com::Publish(b, BufferVtable()));
   return DS_OK;
 }
 
@@ -463,13 +532,13 @@ HLE_NAMED("dsound.dll", "IDirectSound8::DuplicateSoundBuffer", DS8_DuplicateSoun
 
 SoundBuffer* Buf(Ctx& c) { return Self<SoundBuffer>(c, "IDirectSoundBuffer8"); }
 
-HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::QueryInterface", DSB8_QueryInterface, 3) {
+HLE_NAMED_X("dsound.dll", "IDirectSoundBuffer8::QueryInterface", DSB8_QueryInterface, 3, true) {
   SoundBuffer* b = Buf(c);
-  uint32_t riid = Arg(c, 1), out = Arg(c, 2);
-  Wr32(out, 0);
+  const gaddr riid = Arg(c, 1), out = Arg(c, 2);
+  WrPtr(out, 0);
   if (com::GuidEq(riid, kIID_IDirectSoundBuffer8) || com::GuidEq(riid, kIID_IDirectSoundBuffer)) {
     com::AddRef(Arg(c, 0));
-    Wr32(out, Arg(c, 0));
+    WrPtr(out, Arg(c, 0));
     return com::kS_OK;
   }
   if (com::GuidEq(riid, kIID_IDirectSound3DListener) && b->primary &&
@@ -482,7 +551,7 @@ HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::QueryInterface", DSB8_QueryInterfa
       com::AddRef(Arg(c, 0));
       b->listener = com::Publish(l, ListenerVtable());
     }
-    Wr32(out, b->listener);
+    WrPtr(out, b->listener);
     return com::kS_OK;
   }
   if (com::GuidEq(riid, kIID_IDirectSound3DBuffer) && !b->primary &&
@@ -495,21 +564,21 @@ HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::QueryInterface", DSB8_QueryInterfa
       com::AddRef(Arg(c, 0));
       b->buffer3d = com::Publish(t, Buffer3DVtable());
     }
-    Wr32(out, b->buffer3d);
+    WrPtr(out, b->buffer3d);
     return com::kS_OK;
   }
   if (com::GuidEq(riid, kIID_IDirectSoundNotify))
     FatalF("dsound: IDirectSoundNotify (position notifications) is not supported yet");
   return com::kE_NOINTERFACE;
 }
-HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::AddRef", DSB8_AddRef, 1) { return com::AddRef(Arg(c, 0)); }
-HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::Release", DSB8_Release, 1) { return com::Release(Arg(c, 0)); }
+HLE_NAMED_X("dsound.dll", "IDirectSoundBuffer8::AddRef", DSB8_AddRef, 1, true) { return com::AddRef(Arg(c, 0)); }
+HLE_NAMED_X("dsound.dll", "IDirectSoundBuffer8::Release", DSB8_Release, 1, true) { return com::Release(Arg(c, 0)); }
 
 // (pDSBufferCaps): DSBCAPS {dwSize, dwFlags, dwBufferBytes,
 // dwUnlockTransferRate, dwPlayCpuOverhead}.
-HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::GetCaps", DSB8_GetCaps, 2) {
+HLE_NAMED_X("dsound.dll", "IDirectSoundBuffer8::GetCaps", DSB8_GetCaps, 2, true) {
   SoundBuffer* b = Buf(c);
-  uint32_t p = Arg(c, 1);
+  const gaddr p = Arg(c, 1);
   if (!p || Rd32(p) != 20) return DSERR_INVALIDPARAM;
   Wr32(p + 4, b->flags | DSBCAPS_LOCSOFTWARE);
   Wr32(p + 8, b->primary ? 0 : uint32_t(b->data->bytes.size()));
@@ -526,7 +595,7 @@ int64_t PlayFrame(const SoundBuffer& b) {
 }
 
 // (pdwCurrentPlayCursor, pdwCurrentWriteCursor)
-HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::GetCurrentPosition", DSB8_GetCurrentPosition, 3) {
+HLE_NAMED_X("dsound.dll", "IDirectSoundBuffer8::GetCurrentPosition", DSB8_GetCurrentPosition, 3, true) {
   SoundBuffer* b = Buf(c);
   if (b->primary) FatalF("dsound: GetCurrentPosition of the primary buffer");
   uint32_t play, write;
@@ -550,7 +619,7 @@ HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::GetCurrentPosition", DSB8_GetCurre
 }
 
 // (pwfxFormat, dwSizeAllocated, pdwSizeWritten)
-HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::GetFormat", DSB8_GetFormat, 4) {
+HLE_NAMED_X("dsound.dll", "IDirectSoundBuffer8::GetFormat", DSB8_GetFormat, 4, true) {
   SoundBuffer* b = Buf(c);
   const Format& f = b->primary ? b->primary_format : b->data->fmt;
   if (Arg(c, 1)) WriteFormat(Arg(c, 1), Arg(c, 2), f);
@@ -558,7 +627,7 @@ HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::GetFormat", DSB8_GetFormat, 4) {
   return DS_OK;
 }
 
-HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::SetFormat", DSB8_SetFormat, 2) {
+HLE_NAMED_X("dsound.dll", "IDirectSoundBuffer8::SetFormat", DSB8_SetFormat, 2, true) {
   SoundBuffer* b = Buf(c);
   if (!b->primary) return DSERR_INVALIDCALL;
   Format f;
@@ -567,7 +636,7 @@ HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::SetFormat", DSB8_SetFormat, 2) {
   return DS_OK;
 }
 
-HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::GetVolume", DSB8_GetVolume, 2) {
+HLE_NAMED_X("dsound.dll", "IDirectSoundBuffer8::GetVolume", DSB8_GetVolume, 2, true) {
   SoundBuffer* b = Buf(c);
   if (!(b->flags & DSBCAPS_CTRLVOLUME)) return DSERR_CONTROLUNAVAIL;
   Wr32(Arg(c, 1), uint32_t(b->volume));
@@ -575,7 +644,7 @@ HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::GetVolume", DSB8_GetVolume, 2) {
 }
 
 // The primary buffer's volume is the master volume.
-HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::SetVolume", DSB8_SetVolume, 2) {
+HLE_NAMED_X("dsound.dll", "IDirectSoundBuffer8::SetVolume", DSB8_SetVolume, 2, true) {
   SoundBuffer* b = Buf(c);
   int32_t v = int32_t(Arg(c, 1));
   if (!(b->flags & DSBCAPS_CTRLVOLUME)) return DSERR_CONTROLUNAVAIL;
@@ -589,14 +658,14 @@ HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::SetVolume", DSB8_SetVolume, 2) {
   return DS_OK;
 }
 
-HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::GetPan", DSB8_GetPan, 2) {
+HLE_NAMED_X("dsound.dll", "IDirectSoundBuffer8::GetPan", DSB8_GetPan, 2, true) {
   SoundBuffer* b = Buf(c);
   if (!(b->flags & DSBCAPS_CTRLPAN)) return DSERR_CONTROLUNAVAIL;
   Wr32(Arg(c, 1), uint32_t(b->pan));
   return DS_OK;
 }
 
-HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::SetPan", DSB8_SetPan, 2) {
+HLE_NAMED_X("dsound.dll", "IDirectSoundBuffer8::SetPan", DSB8_SetPan, 2, true) {
   SoundBuffer* b = Buf(c);
   int32_t v = int32_t(Arg(c, 1));
   if (!(b->flags & DSBCAPS_CTRLPAN) || b->primary) return DSERR_CONTROLUNAVAIL;
@@ -607,7 +676,7 @@ HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::SetPan", DSB8_SetPan, 2) {
   return DS_OK;
 }
 
-HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::GetFrequency", DSB8_GetFrequency, 2) {
+HLE_NAMED_X("dsound.dll", "IDirectSoundBuffer8::GetFrequency", DSB8_GetFrequency, 2, true) {
   SoundBuffer* b = Buf(c);
   if (!(b->flags & DSBCAPS_CTRLFREQUENCY) || b->primary) return DSERR_CONTROLUNAVAIL;
   Wr32(Arg(c, 1), b->frequency ? b->frequency : b->data->fmt.rate);
@@ -615,7 +684,7 @@ HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::GetFrequency", DSB8_GetFrequency, 
 }
 
 // (dwFrequency): 0 restores the format's rate.
-HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::SetFrequency", DSB8_SetFrequency, 2) {
+HLE_NAMED_X("dsound.dll", "IDirectSoundBuffer8::SetFrequency", DSB8_SetFrequency, 2, true) {
   SoundBuffer* b = Buf(c);
   uint32_t v = Arg(c, 1);
   if (!(b->flags & DSBCAPS_CTRLFREQUENCY) || b->primary) return DSERR_CONTROLUNAVAIL;
@@ -626,7 +695,7 @@ HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::SetFrequency", DSB8_SetFrequency, 
   return DS_OK;
 }
 
-HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::GetStatus", DSB8_GetStatus, 2) {
+HLE_NAMED_X("dsound.dll", "IDirectSoundBuffer8::GetStatus", DSB8_GetStatus, 2, true) {
   SoundBuffer* b = Buf(c);
   uint32_t s = 0;
   if (b->primary) {
@@ -648,7 +717,7 @@ HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::GetStatus", DSB8_GetStatus, 2) {
 // (dwOffset, dwBytes, ppvAudioPtr1, pdwAudioBytes1, ppvAudioPtr2,
 // pdwAudioBytes2, dwFlags): the region in guest memory, in two parts if it
 // wraps.
-HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::Lock", DSB8_Lock, 8) {
+HLE_NAMED_X("dsound.dll", "IDirectSoundBuffer8::Lock", DSB8_Lock, 8, true) {
   SoundBuffer* b = Buf(c);
   if (b->primary) FatalF("dsound: Lock of the primary buffer (DSSCL_WRITEPRIMARY) is not supported");
   uint32_t size = uint32_t(b->data->bytes.size());
@@ -661,9 +730,9 @@ HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::Lock", DSB8_Lock, 8) {
   if (flags & DSBLOCK_ENTIREBUFFER) bytes = size;
   if (off >= size || !bytes || bytes > size || !Arg(c, 3) || !Arg(c, 4)) return DSERR_INVALIDPARAM;
   uint32_t first = std::min(bytes, size - off);
-  Wr32(Arg(c, 3), b->data->mem + off);
+  WrPtr(Arg(c, 3), b->data->mem + off);
   Wr32(Arg(c, 4), first);
-  if (Arg(c, 5)) Wr32(Arg(c, 5), first < bytes ? b->data->mem : 0);
+  if (Arg(c, 5)) WrPtr(Arg(c, 5), first < bytes ? b->data->mem : 0);
   if (Arg(c, 6)) Wr32(Arg(c, 6), bytes - first);
   if (first < bytes && !Arg(c, 5)) return DSERR_INVALIDPARAM;
   return DS_OK;
@@ -671,14 +740,15 @@ HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::Lock", DSB8_Lock, 8) {
 
 // (pvAudioPtr1, dwAudioBytes1, pvAudioPtr2, dwAudioBytes2): what was
 // written goes to the mixer's copy.
-HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::Unlock", DSB8_Unlock, 5) {
+HLE_NAMED_X("dsound.dll", "IDirectSoundBuffer8::Unlock", DSB8_Unlock, 5, true) {
   SoundBuffer* b = Buf(c);
   if (b->primary) return DSERR_INVALIDCALL;
   Data& d = *b->data;
   uint32_t size = uint32_t(d.bytes.size());
   std::lock_guard<std::mutex> l(M().mu());
   for (int part = 0; part < 2; part++) {
-    uint32_t p = Arg(c, 1 + 2 * part), n = Arg(c, 2 + 2 * part);
+    const gaddr p = Arg(c, 1 + 2 * part);
+    const uint32_t n = uint32_t(Arg(c, 2 + 2 * part));
     if (!p || !n) continue;
     if (p < d.mem || p - d.mem > size || n > size - (p - d.mem)) return DSERR_INVALIDPARAM;
     std::memcpy(d.bytes.data() + (p - d.mem), GPtr(p), n);
@@ -687,7 +757,7 @@ HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::Unlock", DSB8_Unlock, 5) {
 }
 
 // (dwReserved1, dwPriority, dwFlags)
-HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::Play", DSB8_Play, 4) {
+HLE_NAMED_X("dsound.dll", "IDirectSoundBuffer8::Play", DSB8_Play, 4, true) {
   SoundBuffer* b = Buf(c);
   b->playing = true;
   if (b->primary) return DS_OK;  // the mixer always runs
@@ -703,7 +773,7 @@ HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::Play", DSB8_Play, 4) {
   return DS_OK;
 }
 
-HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::Stop", DSB8_Stop, 1) {
+HLE_NAMED_X("dsound.dll", "IDirectSoundBuffer8::Stop", DSB8_Stop, 1, true) {
   SoundBuffer* b = Buf(c);
   b->playing = false;
   if (b->primary) return DS_OK;
@@ -717,7 +787,7 @@ HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::Stop", DSB8_Stop, 1) {
 }
 
 // (dwNewPosition): in bytes.
-HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::SetCurrentPosition", DSB8_SetCurrentPosition, 2) {
+HLE_NAMED_X("dsound.dll", "IDirectSoundBuffer8::SetCurrentPosition", DSB8_SetCurrentPosition, 2, true) {
   SoundBuffer* b = Buf(c);
   if (b->primary) return DSERR_INVALIDCALL;
   uint32_t pos = Arg(c, 1);
@@ -729,7 +799,7 @@ HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::SetCurrentPosition", DSB8_SetCurre
   return DS_OK;
 }
 
-HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::Restore", DSB8_Restore, 1) { return DS_OK; }
+HLE_NAMED_X("dsound.dll", "IDirectSoundBuffer8::Restore", DSB8_Restore, 1, true) { return DS_OK; }
 
 // ---- IDirectSound3DBuffer
 
@@ -740,30 +810,30 @@ SoundBuffer* Buf3D(Ctx& c) {
   return b;
 }
 
-HLE_NAMED("dsound.dll", "IDirectSound3DBuffer::QueryInterface", DS3DB_QueryInterface, 3) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DBuffer::QueryInterface", DS3DB_QueryInterface, 3, true) {
   Buffer3D* t = Self<Buffer3D>(c, "IDirectSound3DBuffer");
   if (com::GuidEq(Arg(c, 1), kIID_IDirectSound3DBuffer)) {
     com::AddRef(Arg(c, 0));
-    Wr32(Arg(c, 2), Arg(c, 0));
+    WrPtr(Arg(c, 2), Arg(c, 0));
     return com::kS_OK;
   }
   if (com::GuidEq(Arg(c, 1), kIID_IDirectSoundBuffer) || com::GuidEq(Arg(c, 1), kIID_IDirectSoundBuffer8)) {
     com::AddRef(t->buffer);
-    Wr32(Arg(c, 2), t->buffer);
+    WrPtr(Arg(c, 2), t->buffer);
     return com::kS_OK;
   }
-  Wr32(Arg(c, 2), 0);
+  WrPtr(Arg(c, 2), 0);
   return com::kE_NOINTERFACE;
 }
-HLE_NAMED("dsound.dll", "IDirectSound3DBuffer::AddRef", DS3DB_AddRef, 1) { return com::AddRef(Arg(c, 0)); }
-HLE_NAMED("dsound.dll", "IDirectSound3DBuffer::Release", DS3DB_Release, 1) { return com::Release(Arg(c, 0)); }
+HLE_NAMED_X("dsound.dll", "IDirectSound3DBuffer::AddRef", DS3DB_AddRef, 1, true) { return com::AddRef(Arg(c, 0)); }
+HLE_NAMED_X("dsound.dll", "IDirectSound3DBuffer::Release", DS3DB_Release, 1, true) { return com::Release(Arg(c, 0)); }
 
 // DS3DBUFFER: dwSize, vPosition, vVelocity, dwInsideConeAngle,
 // dwOutsideConeAngle, vConeOrientation, lConeOutsideVolume, flMinDistance,
 // flMaxDistance, dwMode (64 bytes).
-HLE_NAMED("dsound.dll", "IDirectSound3DBuffer::GetAllParameters", DS3DB_GetAllParameters, 2) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DBuffer::GetAllParameters", DS3DB_GetAllParameters, 2, true) {
   const Params3D& p = Buf3D(c)->pending3d;
-  uint32_t a = Arg(c, 1);
+  const gaddr a = Arg(c, 1);
   if (!a || Rd32(a) != 64) return DSERR_INVALIDPARAM;
   WriteVec(a + 4, p.pos);
   WriteVec(a + 16, p.vel);
@@ -777,9 +847,9 @@ HLE_NAMED("dsound.dll", "IDirectSound3DBuffer::GetAllParameters", DS3DB_GetAllPa
   return DS_OK;
 }
 
-HLE_NAMED("dsound.dll", "IDirectSound3DBuffer::SetAllParameters", DS3DB_SetAllParameters, 3) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DBuffer::SetAllParameters", DS3DB_SetAllParameters, 3, true) {
   SoundBuffer* b = Buf3D(c);
-  uint32_t a = Arg(c, 1);
+  const gaddr a = Arg(c, 1);
   if (!a || Rd32(a) != 64) return DSERR_INVALIDPARAM;
   Params3D& p = b->pending3d;
   p.pos = ReadVec(a + 4);
@@ -795,52 +865,52 @@ HLE_NAMED("dsound.dll", "IDirectSound3DBuffer::SetAllParameters", DS3DB_SetAllPa
   return DS_OK;
 }
 
-HLE_NAMED("dsound.dll", "IDirectSound3DBuffer::GetPosition", DS3DB_GetPosition, 2) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DBuffer::GetPosition", DS3DB_GetPosition, 2, true) {
   WriteVec(Arg(c, 1), Buf3D(c)->pending3d.pos);
   return DS_OK;
 }
 // (x, y, z, dwApply)
-HLE_NAMED("dsound.dll", "IDirectSound3DBuffer::SetPosition", DS3DB_SetPosition, 5) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DBuffer::SetPosition", DS3DB_SetPosition, 5, true) {
   SoundBuffer* b = Buf3D(c);
-  b->pending3d.pos = {F(Arg(c, 1)), F(Arg(c, 2)), F(Arg(c, 3))};
+  b->pending3d.pos = {FArg(c, 1), FArg(c, 2), FArg(c, 3)};
   Changed3D(*b, Arg(c, 4));
   return DS_OK;
 }
-HLE_NAMED("dsound.dll", "IDirectSound3DBuffer::GetVelocity", DS3DB_GetVelocity, 2) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DBuffer::GetVelocity", DS3DB_GetVelocity, 2, true) {
   WriteVec(Arg(c, 1), Buf3D(c)->pending3d.vel);
   return DS_OK;
 }
-HLE_NAMED("dsound.dll", "IDirectSound3DBuffer::SetVelocity", DS3DB_SetVelocity, 5) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DBuffer::SetVelocity", DS3DB_SetVelocity, 5, true) {
   SoundBuffer* b = Buf3D(c);
-  b->pending3d.vel = {F(Arg(c, 1)), F(Arg(c, 2)), F(Arg(c, 3))};
+  b->pending3d.vel = {FArg(c, 1), FArg(c, 2), FArg(c, 3)};
   Changed3D(*b, Arg(c, 4));
   return DS_OK;
 }
-HLE_NAMED("dsound.dll", "IDirectSound3DBuffer::GetMinDistance", DS3DB_GetMinDistance, 2) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DBuffer::GetMinDistance", DS3DB_GetMinDistance, 2, true) {
   Wr32(Arg(c, 1), Bits(Buf3D(c)->pending3d.min_dist));
   return DS_OK;
 }
-HLE_NAMED("dsound.dll", "IDirectSound3DBuffer::SetMinDistance", DS3DB_SetMinDistance, 3) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DBuffer::SetMinDistance", DS3DB_SetMinDistance, 3, true) {
   SoundBuffer* b = Buf3D(c);
-  b->pending3d.min_dist = F(Arg(c, 1));
+  b->pending3d.min_dist = FArg(c, 1);
   Changed3D(*b, Arg(c, 2));
   return DS_OK;
 }
-HLE_NAMED("dsound.dll", "IDirectSound3DBuffer::GetMaxDistance", DS3DB_GetMaxDistance, 2) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DBuffer::GetMaxDistance", DS3DB_GetMaxDistance, 2, true) {
   Wr32(Arg(c, 1), Bits(Buf3D(c)->pending3d.max_dist));
   return DS_OK;
 }
-HLE_NAMED("dsound.dll", "IDirectSound3DBuffer::SetMaxDistance", DS3DB_SetMaxDistance, 3) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DBuffer::SetMaxDistance", DS3DB_SetMaxDistance, 3, true) {
   SoundBuffer* b = Buf3D(c);
-  b->pending3d.max_dist = F(Arg(c, 1));
+  b->pending3d.max_dist = FArg(c, 1);
   Changed3D(*b, Arg(c, 2));
   return DS_OK;
 }
-HLE_NAMED("dsound.dll", "IDirectSound3DBuffer::GetMode", DS3DB_GetMode, 2) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DBuffer::GetMode", DS3DB_GetMode, 2, true) {
   Wr32(Arg(c, 1), Buf3D(c)->pending3d.mode);
   return DS_OK;
 }
-HLE_NAMED("dsound.dll", "IDirectSound3DBuffer::SetMode", DS3DB_SetMode, 3) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DBuffer::SetMode", DS3DB_SetMode, 3, true) {
   SoundBuffer* b = Buf3D(c);
   if (Arg(c, 1) > DS3DMODE_DISABLE) return DSERR_INVALIDPARAM;
   b->pending3d.mode = Arg(c, 1);
@@ -848,20 +918,20 @@ HLE_NAMED("dsound.dll", "IDirectSound3DBuffer::SetMode", DS3DB_SetMode, 3) {
   return DS_OK;
 }
 // Cones are stored, not applied.
-HLE_NAMED("dsound.dll", "IDirectSound3DBuffer::SetConeAngles", DS3DB_SetConeAngles, 4) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DBuffer::SetConeAngles", DS3DB_SetConeAngles, 4, true) {
   SoundBuffer* b = Buf3D(c);
   b->pending3d.inside_cone = Arg(c, 1);
   b->pending3d.outside_cone = Arg(c, 2);
   Changed3D(*b, Arg(c, 3));
   return DS_OK;
 }
-HLE_NAMED("dsound.dll", "IDirectSound3DBuffer::SetConeOrientation", DS3DB_SetConeOrientation, 5) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DBuffer::SetConeOrientation", DS3DB_SetConeOrientation, 5, true) {
   SoundBuffer* b = Buf3D(c);
-  b->pending3d.cone_orient = {F(Arg(c, 1)), F(Arg(c, 2)), F(Arg(c, 3))};
+  b->pending3d.cone_orient = {FArg(c, 1), FArg(c, 2), FArg(c, 3)};
   Changed3D(*b, Arg(c, 4));
   return DS_OK;
 }
-HLE_NAMED("dsound.dll", "IDirectSound3DBuffer::SetConeOutsideVolume", DS3DB_SetConeOutsideVolume, 3) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DBuffer::SetConeOutsideVolume", DS3DB_SetConeOutsideVolume, 3, true) {
   SoundBuffer* b = Buf3D(c);
   b->pending3d.cone_outside_volume = int32_t(Arg(c, 1));
   Changed3D(*b, Arg(c, 2));
@@ -870,23 +940,23 @@ HLE_NAMED("dsound.dll", "IDirectSound3DBuffer::SetConeOutsideVolume", DS3DB_SetC
 
 // ---- IDirectSound3DListener
 
-HLE_NAMED("dsound.dll", "IDirectSound3DListener::QueryInterface", DS3DL_QueryInterface, 3) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DListener::QueryInterface", DS3DL_QueryInterface, 3, true) {
   Listener* t = Self<Listener>(c, "IDirectSound3DListener");
   if (com::GuidEq(Arg(c, 1), kIID_IDirectSound3DListener)) {
     com::AddRef(Arg(c, 0));
-    Wr32(Arg(c, 2), Arg(c, 0));
+    WrPtr(Arg(c, 2), Arg(c, 0));
     return com::kS_OK;
   }
   if (com::GuidEq(Arg(c, 1), kIID_IDirectSoundBuffer) || com::GuidEq(Arg(c, 1), kIID_IDirectSoundBuffer8)) {
     com::AddRef(t->primary);
-    Wr32(Arg(c, 2), t->primary);
+    WrPtr(Arg(c, 2), t->primary);
     return com::kS_OK;
   }
-  Wr32(Arg(c, 2), 0);
+  WrPtr(Arg(c, 2), 0);
   return com::kE_NOINTERFACE;
 }
-HLE_NAMED("dsound.dll", "IDirectSound3DListener::AddRef", DS3DL_AddRef, 1) { return com::AddRef(Arg(c, 0)); }
-HLE_NAMED("dsound.dll", "IDirectSound3DListener::Release", DS3DL_Release, 1) { return com::Release(Arg(c, 0)); }
+HLE_NAMED_X("dsound.dll", "IDirectSound3DListener::AddRef", DS3DL_AddRef, 1, true) { return com::AddRef(Arg(c, 0)); }
+HLE_NAMED_X("dsound.dll", "IDirectSound3DListener::Release", DS3DL_Release, 1, true) { return com::Release(Arg(c, 0)); }
 
 ListenerParams& Pending(Ctx& c) {
   Self<Listener>(c, "IDirectSound3DListener");
@@ -895,9 +965,9 @@ ListenerParams& Pending(Ctx& c) {
 
 // DS3DLISTENER: dwSize, vPosition, vVelocity, vOrientFront, vOrientTop,
 // flDistanceFactor, flRolloffFactor, flDopplerFactor (64 bytes).
-HLE_NAMED("dsound.dll", "IDirectSound3DListener::GetAllParameters", DS3DL_GetAllParameters, 2) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DListener::GetAllParameters", DS3DL_GetAllParameters, 2, true) {
   const ListenerParams& p = Pending(c);
-  uint32_t a = Arg(c, 1);
+  const gaddr a = Arg(c, 1);
   if (!a || Rd32(a) != 64) return DSERR_INVALIDPARAM;
   WriteVec(a + 4, p.pos);
   WriteVec(a + 16, p.vel);
@@ -908,9 +978,9 @@ HLE_NAMED("dsound.dll", "IDirectSound3DListener::GetAllParameters", DS3DL_GetAll
   Wr32(a + 60, Bits(p.doppler));
   return DS_OK;
 }
-HLE_NAMED("dsound.dll", "IDirectSound3DListener::SetAllParameters", DS3DL_SetAllParameters, 3) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DListener::SetAllParameters", DS3DL_SetAllParameters, 3, true) {
   ListenerParams& p = Pending(c);
-  uint32_t a = Arg(c, 1);
+  const gaddr a = Arg(c, 1);
   if (!a || Rd32(a) != 64) return DSERR_INVALIDPARAM;
   p.pos = ReadVec(a + 4);
   p.vel = ReadVec(a + 16);
@@ -922,70 +992,70 @@ HLE_NAMED("dsound.dll", "IDirectSound3DListener::SetAllParameters", DS3DL_SetAll
   ChangedListener(Arg(c, 2));
   return DS_OK;
 }
-HLE_NAMED("dsound.dll", "IDirectSound3DListener::GetPosition", DS3DL_GetPosition, 2) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DListener::GetPosition", DS3DL_GetPosition, 2, true) {
   WriteVec(Arg(c, 1), Pending(c).pos);
   return DS_OK;
 }
-HLE_NAMED("dsound.dll", "IDirectSound3DListener::SetPosition", DS3DL_SetPosition, 5) {
-  Pending(c).pos = {F(Arg(c, 1)), F(Arg(c, 2)), F(Arg(c, 3))};
+HLE_NAMED_X("dsound.dll", "IDirectSound3DListener::SetPosition", DS3DL_SetPosition, 5, true) {
+  Pending(c).pos = {FArg(c, 1), FArg(c, 2), FArg(c, 3)};
   ChangedListener(Arg(c, 4));
   return DS_OK;
 }
-HLE_NAMED("dsound.dll", "IDirectSound3DListener::GetVelocity", DS3DL_GetVelocity, 2) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DListener::GetVelocity", DS3DL_GetVelocity, 2, true) {
   WriteVec(Arg(c, 1), Pending(c).vel);
   return DS_OK;
 }
-HLE_NAMED("dsound.dll", "IDirectSound3DListener::SetVelocity", DS3DL_SetVelocity, 5) {
-  Pending(c).vel = {F(Arg(c, 1)), F(Arg(c, 2)), F(Arg(c, 3))};
+HLE_NAMED_X("dsound.dll", "IDirectSound3DListener::SetVelocity", DS3DL_SetVelocity, 5, true) {
+  Pending(c).vel = {FArg(c, 1), FArg(c, 2), FArg(c, 3)};
   ChangedListener(Arg(c, 4));
   return DS_OK;
 }
 // (pvOrientFront, pvOrientTop)
-HLE_NAMED("dsound.dll", "IDirectSound3DListener::GetOrientation", DS3DL_GetOrientation, 3) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DListener::GetOrientation", DS3DL_GetOrientation, 3, true) {
   WriteVec(Arg(c, 1), Pending(c).front);
   WriteVec(Arg(c, 2), Pending(c).top);
   return DS_OK;
 }
 // (xFront, yFront, zFront, xTop, yTop, zTop, dwApply)
-HLE_NAMED("dsound.dll", "IDirectSound3DListener::SetOrientation", DS3DL_SetOrientation, 8) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DListener::SetOrientation", DS3DL_SetOrientation, 8, true) {
   ListenerParams& p = Pending(c);
-  p.front = {F(Arg(c, 1)), F(Arg(c, 2)), F(Arg(c, 3))};
-  p.top = {F(Arg(c, 4)), F(Arg(c, 5)), F(Arg(c, 6))};
+  p.front = {FArg(c, 1), FArg(c, 2), FArg(c, 3)};
+  p.top = {FArg(c, 4), FArg(c, 5), FArg(c, 6)};
   ChangedListener(Arg(c, 7));
   return DS_OK;
 }
-HLE_NAMED("dsound.dll", "IDirectSound3DListener::GetRolloffFactor", DS3DL_GetRolloffFactor, 2) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DListener::GetRolloffFactor", DS3DL_GetRolloffFactor, 2, true) {
   Wr32(Arg(c, 1), Bits(Pending(c).rolloff));
   return DS_OK;
 }
-HLE_NAMED("dsound.dll", "IDirectSound3DListener::SetRolloffFactor", DS3DL_SetRolloffFactor, 3) {
-  float r = F(Arg(c, 1));
+HLE_NAMED_X("dsound.dll", "IDirectSound3DListener::SetRolloffFactor", DS3DL_SetRolloffFactor, 3, true) {
+  float r = FArg(c, 1);
   if (!(r >= 0.0f && r <= 10.0f)) return DSERR_INVALIDPARAM;
   Pending(c).rolloff = r;
   ChangedListener(Arg(c, 2));
   return DS_OK;
 }
-HLE_NAMED("dsound.dll", "IDirectSound3DListener::GetDistanceFactor", DS3DL_GetDistanceFactor, 2) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DListener::GetDistanceFactor", DS3DL_GetDistanceFactor, 2, true) {
   Wr32(Arg(c, 1), Bits(Pending(c).distance_factor));
   return DS_OK;
 }
 // Distance and Doppler factors only scale Doppler, which is not applied.
-HLE_NAMED("dsound.dll", "IDirectSound3DListener::SetDistanceFactor", DS3DL_SetDistanceFactor, 3) {
-  Pending(c).distance_factor = F(Arg(c, 1));
+HLE_NAMED_X("dsound.dll", "IDirectSound3DListener::SetDistanceFactor", DS3DL_SetDistanceFactor, 3, true) {
+  Pending(c).distance_factor = FArg(c, 1);
   ChangedListener(Arg(c, 2));
   return DS_OK;
 }
-HLE_NAMED("dsound.dll", "IDirectSound3DListener::GetDopplerFactor", DS3DL_GetDopplerFactor, 2) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DListener::GetDopplerFactor", DS3DL_GetDopplerFactor, 2, true) {
   Wr32(Arg(c, 1), Bits(Pending(c).doppler));
   return DS_OK;
 }
-HLE_NAMED("dsound.dll", "IDirectSound3DListener::SetDopplerFactor", DS3DL_SetDopplerFactor, 3) {
-  Pending(c).doppler = F(Arg(c, 1));
+HLE_NAMED_X("dsound.dll", "IDirectSound3DListener::SetDopplerFactor", DS3DL_SetDopplerFactor, 3, true) {
+  Pending(c).doppler = FArg(c, 1);
   ChangedListener(Arg(c, 2));
   return DS_OK;
 }
 
-HLE_NAMED("dsound.dll", "IDirectSound3DListener::CommitDeferredSettings", DS3DL_CommitDeferredSettings, 1) {
+HLE_NAMED_X("dsound.dll", "IDirectSound3DListener::CommitDeferredSettings", DS3DL_CommitDeferredSettings, 1, true) {
   Self<Listener>(c, "IDirectSound3DListener");
   std::lock_guard<std::mutex> l(g_mu);
   if (g_listener_dirty) {
