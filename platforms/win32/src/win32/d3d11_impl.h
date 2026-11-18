@@ -129,12 +129,17 @@ struct Resource : Child {
 // A view of a resource (SRV, RTV, DSV, UAV): its description as given.
 enum class ViewKind { ShaderResource, RenderTarget, DepthStencil, UnorderedAccess };
 struct View : Child {
+  ~View() override;
   ViewKind kind;
   std::shared_ptr<Resource> res;
   uint32_t format = 0, view_dim = 0;
   uint32_t first_mip = 0, mips = 1, first_slice = 0, slices = 1;
   uint32_t first_element = 0, elements = 0, flags = 0;  // buffer views
   std::vector<uint8_t> desc;  // its description, as given or as Windows fills it in
+  // A structured buffer UAV's hidden counter (append, consume and counter
+  // buffers): a word on the GPU, made when first used (d3d11_gpu.cpp),
+  // under Device::gpu_mu.
+  gfx::BufferId counter = 0;
 };
 
 struct Shader : Child {
@@ -322,7 +327,10 @@ struct StageBindings {
   std::vector<Buffer> buffers;
   std::vector<Texture> textures;
   std::vector<int> samplers;  // apart from the textures (Texture::sampler indexes it): their slots
-  std::vector<uint32_t> rw_buffers, rw_images;  // compute: UAV slots
+  // Compute: UAV slots; a rw_buffers entry with kCounter is the slot's
+  // hidden counter.
+  std::vector<uint32_t> rw_buffers, rw_images;
+  static constexpr uint32_t kCounter = 1u << 31;
   std::vector<Format> formats;
   bool uniforms = false;
 };
@@ -417,9 +425,18 @@ struct DrawCall {
   uint32_t first = 0;      // first vertex, or first index
   int32_t base_vertex = 0;  // indexed
   uint32_t first_instance = 0;
+  // An indirect draw's arguments buffer and byte offset: when the GPU
+  // wrote them they are read there, not from the fields above.
+  Resource* args = nullptr;
+  uint32_t args_at = 0;
 };
 void GpuDraw(Device& dev, Context& x, const DrawCall& d);
-void GpuDispatch(Device& dev, Context& x, uint32_t gx, uint32_t gy, uint32_t gz);
+// Groups gx, gy, gz; or an indirect dispatch's, from `args` at byte
+// args_at when the GPU wrote them.
+void GpuDispatch(Device& dev, Context& x, uint32_t gx, uint32_t gy, uint32_t gz, Resource* args = nullptr,
+                 uint32_t args_at = 0);
+// Sets a UAV's hidden counter (CSSetUnorderedAccessViews' initial counts).
+void GpuSetCounter(Device& dev, View& v, uint32_t count);
 void GpuClearTarget(Device& dev, const View& v, const float color[4]);
 void GpuClearDepth(Device& dev, const View& v, uint32_t flags, float z, uint8_t stencil);
 void GpuClearUav(Device& dev, const View& v, const uint32_t values[4], bool floats);

@@ -284,9 +284,18 @@ CTX_METHOD(SOGetTargets) {
   return 0;
 }
 
-// CSSetUnorderedAccessViews(start, count, views, initial counts)
+// CSSetUnorderedAccessViews(start, count, views, initial counts): a
+// count other than -1 sets the view's hidden counter.
 CTX_METHOD(CSSetUnorderedAccessViews) {
   SetSlots<View, 8>(Ctx0(c), c, [](Context& y) -> auto& { return y.uavs; });
+  const uint32_t start = uint32_t(Arg(c, 1)), n = uint32_t(Arg(c, 2));
+  const gaddr views = Arg(c, 3), counts = Arg(c, 4);
+  if (!views || !counts) return 0;
+  for (uint32_t i = 0; i < n && start + i < 8; i++) {
+    const uint32_t count = Rd32(counts + 4 * i);
+    auto v = Obj<View>(Rd64(views + 8 * i));
+    if (v && count != 0xFFFFFFFFu) Run(Ctx0(c), [v, count](Context&) { GpuSetCounter(Dev(), *v, count); });
+  }
   return 0;
 }
 CTX_METHOD(CSGetUnorderedAccessViews) {
@@ -710,25 +719,18 @@ CTX_METHOD(Dispatch) {
 }
 
 // The indirect forms (args buffer, byte offset), with the arguments read
-// when the work runs, from the buffer as the host has it. Arguments the
-// GPU wrote (a compute shader's) are not read back yet: that draw or
-// dispatch is skipped.
+// when the work runs: from the buffer as the host has it, or on the GPU
+// when it wrote them (a compute shader's; GpuDraw, GpuDispatch).
 namespace {
 template <typename F>
 void Indirect(Ctx& c, uint32_t words, F f) {
   auto r = Obj<Resource>(Arg(c, 1));
   const uint32_t at = uint32_t(Arg(c, 2));
   Run(Ctx0(c), [r, at, words, f](Context& y) {
-    if (!r || uint64_t(at) + 4 * words > r->byte_width) return;
-    if (r->gpu_newer) {
-      static bool warned = false;
-      if (!warned) WarnF("d3d11: indirect arguments the GPU wrote are not read back: skipped\n");
-      warned = true;
-      return;
-    }
+    if (!r || at % 4 || uint64_t(at) + 4 * words > r->byte_width) return;
     uint32_t a[5] = {};
     std::memcpy(a, r->Data() + at, 4 * words);
-    f(y, a);
+    f(y, a, r.get(), at);
   });
 }
 }  // namespace
@@ -736,8 +738,10 @@ void Indirect(Ctx& c, uint32_t words, F f) {
 // DrawInstancedIndirect: vertices per instance, instances, first vertex,
 // first instance.
 CTX_METHOD(DrawInstancedIndirect) {
-  Indirect(c, 4, [](Context& y, const uint32_t* a) {
+  Indirect(c, 4, [](Context& y, const uint32_t* a, Resource* r, uint32_t at) {
     DrawCall d;
+    d.args = r;
+    d.args_at = at;
     d.count = a[0];
     d.instances = a[1];
     d.first = a[2];
@@ -749,8 +753,10 @@ CTX_METHOD(DrawInstancedIndirect) {
 // DrawIndexedInstancedIndirect: indices per instance, instances, first
 // index, base vertex, first instance.
 CTX_METHOD(DrawIndexedInstancedIndirect) {
-  Indirect(c, 5, [](Context& y, const uint32_t* a) {
+  Indirect(c, 5, [](Context& y, const uint32_t* a, Resource* r, uint32_t at) {
     DrawCall d;
+    d.args = r;
+    d.args_at = at;
     d.indexed = true;
     d.count = a[0];
     d.instances = a[1];
@@ -763,7 +769,9 @@ CTX_METHOD(DrawIndexedInstancedIndirect) {
 }
 // DispatchIndirect: the three group counts.
 CTX_METHOD(DispatchIndirect) {
-  Indirect(c, 3, [](Context& y, const uint32_t* a) { GpuDispatch(Dev(), y, a[0], a[1], a[2]); });
+  Indirect(c, 3, [](Context& y, const uint32_t* a, Resource* r, uint32_t at) {
+    GpuDispatch(Dev(), y, a[0], a[1], a[2], r, at);
+  });
   return 0;
 }
 

@@ -51,7 +51,10 @@
 //
 // Compute stages' UAVs: buffers (typed, raw, structured) are read-write
 // buffers in Shader::uavs order (UnorderedAccess::buffer; r_rwbuf[b].y
-// the view's size in bytes, accesses past it are dropped or read 0),
+// the view's size in bytes, accesses past it are dropped or read 0), then
+// the hidden counters of structured ones declared with one, a word each
+// (UnorderedAccess::counter_buffer: imm_atomic_alloc and
+// imm_atomic_consume),
 // textures storage images (UnorderedAccess::image, `layout(R_IMAGE(n))`,
 // writeonly unless the code reads them, then r32f/r32ui/r32i by the
 // declared return type, as Direct3D 11.0's typed UAV loads are only of
@@ -161,9 +164,10 @@ struct UnorderedAccess {
   ResourceDim dim = ResourceDim::Unknown;
   ReturnType ret = ReturnType::None;
   uint32_t stride = 0;
-  bool counter = false;  // structured with a hidden counter (not translated yet)
+  bool counter = false;  // structured with a hidden counter (declared, or used)
   bool read = false;     // the code reads it (ld_uav_typed, atomics)
   int buffer = -1;       // buffers: the gfx read-write buffer
+  int counter_buffer = -1;  // counter: its own read-write buffer (a word), after the UAVs'
   int image = -1;        // textures: the gfx storage image
 };
 
