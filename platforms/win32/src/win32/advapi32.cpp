@@ -127,7 +127,10 @@ std::string Join(const std::string& base, const std::string& sub) {
   return s.empty() ? base : base + "\\" + s;
 }
 
-HLE("advapi32.dll", RegOpenKeyExA, 5) {
+// The registry functions are audited for x64 guests: an HKEY is the
+// guest's pointer width (the keys handed out are small; the predefined
+// ones match by their low 32 bits, which x64 sign-extends).
+HLE64("advapi32.dll", RegOpenKeyExA, 5) {
   std::lock_guard<std::mutex> l(g_reg_mu);
   LoadOnce();
   std::string base = RootName(Arg(c, 0));
@@ -136,11 +139,11 @@ HLE("advapi32.dll", RegOpenKeyExA, 5) {
   if (!g_reg.count(path)) return kErrorFileNotFound;
   uint32_t h = g_next_hkey += 4;
   g_open[h] = path;
-  Wr32(Arg(c, 4), h);
+  WrPtr(Arg(c, 4), h);
   return kErrorSuccess;
 }
 
-HLE("advapi32.dll", RegCreateKeyExA, 9) {
+HLE64("advapi32.dll", RegCreateKeyExA, 9) {
   std::lock_guard<std::mutex> l(g_reg_mu);
   LoadOnce();
   std::string base = RootName(Arg(c, 0));
@@ -152,23 +155,23 @@ HLE("advapi32.dll", RegCreateKeyExA, 9) {
     if (i == path.size() || path[i] == '\\') g_reg[path.substr(0, i)];
   uint32_t h = g_next_hkey += 4;
   g_open[h] = path;
-  Wr32(Arg(c, 7), h);
+  WrPtr(Arg(c, 7), h);
   if (Arg(c, 8)) Wr32(Arg(c, 8), existed ? 2 : 1);  // REG_OPENED / CREATED
   if (!existed) Save();
   return kErrorSuccess;
 }
 
-HLE("advapi32.dll", RegCloseKey, 1) {
+HLE64("advapi32.dll", RegCloseKey, 1) {
   std::lock_guard<std::mutex> l(g_reg_mu);
   g_open.erase(Arg(c, 0));
   return kErrorSuccess;
 }
 
-HLE("advapi32.dll", RegQueryValueExA, 6) {
+HLE64("advapi32.dll", RegQueryValueExA, 6) {
   std::lock_guard<std::mutex> l(g_reg_mu);
   LoadOnce();
   std::string key = RootName(Arg(c, 0));
-  uint32_t type_out = Arg(c, 3), data = Arg(c, 4), size_ptr = Arg(c, 5);
+  const gaddr type_out = Arg(c, 3), data = Arg(c, 4), size_ptr = Arg(c, 5);
   auto k = g_reg.find(key);
   if (k == g_reg.end()) return kErrorInvalidHandle;
   auto v = k->second.find(Lower(GStr(Arg(c, 1))));
@@ -188,14 +191,14 @@ HLE("advapi32.dll", RegQueryValueExA, 6) {
   return kErrorSuccess;
 }
 
-HLE("advapi32.dll", RegSetValueExA, 6) {
+HLE64("advapi32.dll", RegSetValueExA, 6) {
   std::lock_guard<std::mutex> l(g_reg_mu);
   LoadOnce();
   std::string key = RootName(Arg(c, 0));
   if (!g_reg.count(key)) return kErrorInvalidHandle;
   RegValue v{uint32_t(Arg(c, 3)), {}};
   uint8_t* p = GPtr(Arg(c, 4));
-  v.data.assign(p, p + Arg(c, 5));
+  v.data.assign(p, p + uint32_t(Arg(c, 5)));
   g_reg[key][Lower(GStr(Arg(c, 1)))] = v;
   Save();
   return kErrorSuccess;
@@ -328,11 +331,11 @@ HLE("ole32.dll", IIDFromString, 2) {
 
 // ---- oleaut32 (imported by ordinal) -----------------------------------------
 
-HLE_NAMED("oleaut32.dll", "#2", SysAllocString, 1) {
+HLE_NAMED_X("oleaut32.dll", "#2", SysAllocString, 1, true) {
   return Arg(c, 0) ? com::AllocBstr(GWStr(Arg(c, 0))) : 0;
 }
 
-HLE_NAMED("oleaut32.dll", "#6", SysFreeString, 1) {
+HLE_NAMED_X("oleaut32.dll", "#6", SysFreeString, 1, true) {
   com::FreeBstr(Arg(c, 0));
   return 0;
 }
