@@ -795,14 +795,17 @@ namespace {
 // A draw's arguments the GPU wrote (four words at `at`), its vertex count
 // and first vertex times `per`, for a draw of that many vertices for each
 // (point patches, geometry shaders): written by a dispatch into the
-// device's buffer, which the draw then reads. One buffer does for every
-// such draw, as a dispatch submits the draws recorded before it.
+// device's buffer, which the draw then reads (0: the arguments are not
+// all in the buffer). One buffer does for every such draw, as a dispatch
+// submits the draws recorded before it. A count past 2^32 vertices is
+// clamped.
 gfx::BufferId ScaledArgs(Device& dev, Resource& args, uint32_t at, uint32_t per) {
+  if (at % 4 || at > args.byte_width || args.byte_width - at < 16) return 0;
   if (!dev.scale_args) {
     gfx::ProgramDesc d;
     d.cs.glsl =
         "layout(R_UNIFORMS) uniform U { uvec4 k; };\n"
-        "void main() {\n  uint w = r_rwbuf[0].x;\n  r_rw[w] = r_ld(0u, 0u) * k.x;\n"
+        "void main() {\n  uint w = r_rwbuf[0].x;\n  r_rw[w] = min(r_ld(0u, 0u), 0xFFFFFFFFu / k.x) * k.x;\n"
         "  r_rw[w + 1u] = r_ld(0u, 1u);\n  r_rw[w + 2u] = r_ld(0u, 2u) * k.x;\n  r_rw[w + 3u] = r_ld(0u, 3u);\n}\n";
     d.cs.buffers = 1;
     d.cs.rw_buffers = 1;
@@ -978,6 +981,7 @@ void GpuDraw(Device& dev, Context& x, const DrawCall& call) {
   if (dc.args) {
     d.args = expand ? ScaledArgs(dev, *dc.args, dc.args_at, prog->patch_vertices) : dc.args->gpu_buffer;
     d.args_at = expand ? 0 : dc.args_at;
+    if (!d.args) return;
   }
   BindStage(dev, x, gs ? kGeometryStage : point_patch ? kDomainStage : 0, prog->vs, &dc, vsd, s, &d.vs);
   BindStage(dev, x, 1, prog->ps, &dc, psd, s, &d.fs);
