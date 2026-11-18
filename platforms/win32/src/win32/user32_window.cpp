@@ -79,7 +79,8 @@ struct Window {
   std::string cls;
   gaddr wndproc = 0;
   uint32_t style = 0, exstyle = 0, parent = 0, id = 0;
-  uint32_t hinst = 0, class_style = 0;
+  gaddr hinst = 0;  // as CreateWindow was given (an x64 module's is past 4 GiB)
+  uint32_t class_style = 0;
   uint64_t userdata = 0;
   int x = 0, y = 0, w = 0, h = 0;  // window rect (screen)
   std::string title;
@@ -1332,8 +1333,8 @@ HLE("user32.dll", SetClassLongA, 3) {
 
 uint64_t CreateWindowImpl(Ctx& c, bool wide) {
   uint32_t exstyle = uint32_t(Arg(c, 0)), style = uint32_t(Arg(c, 3)),
-           parent = uint32_t(Arg(c, 8)), menu = uint32_t(Arg(c, 9)),
-           hinst = uint32_t(Arg(c, 10));
+           parent = uint32_t(Arg(c, 8)), menu = uint32_t(Arg(c, 9));
+  const gaddr hinst = Arg(c, 10);
   gaddr cls_va = Arg(c, 1), title_va = Arg(c, 2), param = Arg(c, 11);
   int32_t x = int32_t(Arg(c, 4)), y = int32_t(Arg(c, 5)), w = int32_t(Arg(c, 6)),
           h = int32_t(Arg(c, 7));
@@ -1411,7 +1412,7 @@ uint64_t CreateWindowImpl(Ctx& c, bool wide) {
     Wr32(cs + 72, exstyle);
   } else {
   Wr32(cs + 0, uint32_t(param));
-  Wr32(cs + 4, hinst);
+  Wr32(cs + 4, uint32_t(hinst));
   Wr32(cs + 8, menu);
   Wr32(cs + 12, parent);
   Wr32(cs + 16, uint32_t(h));
@@ -1729,33 +1730,66 @@ HLE("user32.dll", GetParent, 1) {
   return w ? w->parent : 0;
 }
 
-HLE("user32.dll", GetWindow, 2) {
-  // GW_OWNER (4) / GW_CHILD (5) / GW_HWNDNEXT (2) ... only owner is used.
-  std::lock_guard<std::recursive_mutex> l(g_mu);
-  Window* w = Win(Arg(c, 0));
-  if (!w) return 0;
-  return Arg(c, 1) == 4 ? w->parent : 0;
+// The children of `parent` (0: the top-level windows) from the top of the
+// Z order down. The Z order is not kept: the active window is on top,
+// then the others newest first, as a window is put on top of its
+// siblings when it is made.
+std::vector<uint32_t> ZOrder(uint32_t parent) {
+  std::vector<uint32_t> z;
+  for (auto it = g_windows.rbegin(); it != g_windows.rend(); ++it) {
+    const Window& w = it->second;
+    const bool child = (w.style & WS_CHILD) != 0;
+    if (w.destroyed || child != (parent != 0) || (child && w.parent != parent)) continue;
+    z.push_back(it->first);
+  }
+  const auto active = std::find(z.begin(), z.end(), g_active);
+  if (active != z.end()) std::rotate(z.begin(), active, active + 1);
+  return z;
 }
 
 // GetTopWindow(hWnd): the child of hWnd at the top of the Z order, or
-// with no window (or the desktop) the top-level one. The Z order is not
-// kept: the active window is on top, then the newest, as a window is put
-// on top of its siblings when it is made.
+// with no window (or the desktop) the top-level one.
 HLE64("user32.dll", GetTopWindow, 1) {
   const uint32_t parent = uint32_t(Arg(c, 0)) == 0x00010000 ? 0 : uint32_t(Arg(c, 0));
   std::lock_guard<std::recursive_mutex> l(g_mu);
-  if (!parent) {
-    if (Window* a = Win(g_active); a && !(a->style & WS_CHILD)) return g_active;
-  } else if (!Win(parent)) {
-    return 0;
+  if (parent && !Win(parent)) return 0;
+  const std::vector<uint32_t> z = ZOrder(parent);
+  return z.empty() ? 0 : z.front();
+}
+
+// GetWindow(hWnd, cmd): GW_HWNDFIRST 0, GW_HWNDLAST 1, GW_HWNDNEXT 2,
+// GW_HWNDPREV 3 among hWnd's siblings in the Z order; GW_OWNER 4 (the
+// parent kept), GW_CHILD 5 (the child on top).
+HLE64("user32.dll", GetWindow, 2) {
+  std::lock_guard<std::recursive_mutex> l(g_mu);
+  const uint32_t hwnd = uint32_t(Arg(c, 0)), cmd = uint32_t(Arg(c, 1));
+  Window* w = Win(hwnd);
+  if (!w) return 0;
+  if (cmd == 4) return w->parent;
+  if (cmd == 5) {
+    const std::vector<uint32_t> z = ZOrder(hwnd);
+    return z.empty() ? 0 : z.front();
   }
-  uint32_t top = 0;
-  for (auto& [h, w] : g_windows) {
-    if (w.destroyed || (parent ? w.parent != parent || !(w.style & WS_CHILD) : (w.style & WS_CHILD) != 0))
-      continue;
-    top = h;
+  if (cmd > 3) return 0;
+  const std::vector<uint32_t> z = ZOrder((w->style & WS_CHILD) ? w->parent : 0);
+  const auto at = std::find(z.begin(), z.end(), hwnd);
+  if (at == z.end()) return 0;
+  switch (cmd) {
+    case 0: return z.front();
+    case 1: return z.back();
+    case 2: return at + 1 == z.end() ? 0 : *(at + 1);
+    default: return at == z.begin() ? 0 : *(at - 1);
   }
-  return top;
+}
+
+// GetWindowThreadProcessId(hWnd, &pid): the thread that made the window;
+// every window is the process's.
+HLE64("user32.dll", GetWindowThreadProcessId, 2) {
+  std::lock_guard<std::recursive_mutex> l(g_mu);
+  Window* w = Win(uint32_t(Arg(c, 0)));
+  if (!w) return 0;
+  if (Arg(c, 1)) Wr32(Arg(c, 1), kGuestPid);
+  return w->tid;
 }
 
 HLE("user32.dll", GetLastActivePopup, 1) { return Arg(c, 0); }
@@ -1831,8 +1865,30 @@ uint64_t GetWindowLongImpl(Ctx& c) {
   }
   return 0;
 }
-HLE("user32.dll", GetWindowLongA, 2) { return GetWindowLongImpl(c); }
+HLE64("user32.dll", GetWindowLongA, 2) { return GetWindowLongImpl(c); }
 HLE64("user32.dll", GetWindowLongW, 2) { return GetWindowLongImpl(c); }
+
+// GetWindowLongPtrA/W (x64): the long values, with the pointer-sized ones
+// (GWLP_WNDPROC, GWLP_HINSTANCE, GWLP_USERDATA, extra bytes) 8 bytes.
+uint64_t GetWindowLongPtrImpl(Ctx& c) {
+  std::lock_guard<std::recursive_mutex> l(g_mu);
+  Window* w = Win(uint32_t(Arg(c, 0)));
+  const int32_t idx = int32_t(Arg(c, 1));
+  if (!w) return 0;
+  switch (idx) {
+    case GWL_WNDPROC: return w->wndproc;
+    case GWL_HINSTANCE: return w->hinst;
+    case GWL_USERDATA: return w->userdata;
+  }
+  if (idx >= 0) {
+    uint64_t v = 0;
+    if (uint32_t(idx) + 8 <= w->extra.size()) std::memcpy(&v, w->extra.data() + idx, 8);
+    return v;
+  }
+  return GetWindowLongImpl(c);
+}
+HLE64("user32.dll", GetWindowLongPtrA, 2) { return GetWindowLongPtrImpl(c); }
+HLE64("user32.dll", GetWindowLongPtrW, 2) { return GetWindowLongPtrImpl(c); }
 
 uint64_t SetWindowLongImpl(Ctx& c) {
   std::lock_guard<std::recursive_mutex> l(g_mu);
