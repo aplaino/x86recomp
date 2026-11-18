@@ -190,7 +190,7 @@ struct ContextState {
   };
   StageState stage[kStages];
   bool geometry = false;  // a geometry shader is bound: draws are skipped
-  std::shared_ptr<Shader> hull;  // point patches only (dxbc::PointToQuadHull)
+  std::shared_ptr<Shader> hull;  // point patches only (dxbc::PointPatchHull)
   std::shared_ptr<View> uavs[8];  // compute
   std::shared_ptr<InputLayout> layout;
   uint32_t topology = 0;
@@ -339,6 +339,7 @@ struct LinkedProgram {
   gfx::ProgramId id = 0;
   StageBindings vs, ps, cs;  // vs: the domain stage's, for a point patch
   uint32_t patch_vertices = 0;  // a point patch's: the vertices drawn for each patch
+  bool patch_lines = false;     // ... as a line list, not a triangle list
 };
 
 // A program for the bound shaders (null: none, the draw is skipped).
@@ -349,8 +350,8 @@ std::shared_ptr<const LinkedProgram> LinkProgram(gfx::Device& dev, const Shader&
 std::shared_ptr<const LinkedProgram> LinkComputeProgram(gfx::Device& dev, const Shader& cs);
 // A point patch's (dxbc.h): the domain shader as the vertex stage, run for
 // patch_vertices vertices a patch (two triangles for each quad of its
-// grid), each patch's vertex fetched as the pass-through vertex shader's
-// inputs. Null if the shaders are not those of point patches.
+// grid, or two ends for each line segment), each patch's vertex fetched
+// as the pass-through vertex shader's inputs. Null if the shaders are not those of point patches.
 std::shared_ptr<const LinkedProgram> LinkPointPatchProgram(gfx::Device& dev, const Shader& vs,
                                                            const Shader& hs, const Shader& ds,
                                                            const Shader* ps, const InputLayout* layout);

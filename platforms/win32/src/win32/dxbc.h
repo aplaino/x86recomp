@@ -221,19 +221,25 @@ struct Shader {
 // instruction's listing precedes its GLSL as a comment.
 bool Translate(const void* dxbc, size_t size, Shader* out, bool annotate = false);
 
-// Point patches, the tessellation games use to draw sprites: a patch of
-// one control point that the tessellator makes one quad of. A domain
-// shader translates as a vertex stage that runs for each corner of the
-// quad: its control point's registers are the stage's inputs (v#, from
-// r_fetch, the vertex shader's inputs) and its domain point is
-// R_DOMAIN_POINT (a vec3, defined by the link code). These say whether a
-// draw's other stages fit that:
+// Point patches, the tessellation games use to draw sprites and streaks:
+// a patch of one control point that the tessellator makes one quad, or
+// isolines, of. A domain shader translates as a vertex stage that runs for
+// each corner of the quad or end of a line segment: its control point's
+// registers are the stage's inputs (v#, from r_fetch, the vertex shader's
+// inputs) and its domain point is R_DOMAIN_POINT (a vec3, defined by the
+// link code). These say whether a draw's other stages fit that:
 // - a hull shader whose control points pass through unchanged and whose
-//   tessellation factors on a quad domain are whole numbers of segments
-//   (literals; the partitioning making that many of each), the largest N:
-//   the quad is drawn as an N x N grid (*segments) of two triangles each
-//   (*ccw: their winding in the domain);
-bool PointToQuadHull(const void* dxbc, size_t size, bool* ccw, uint32_t* segments);
+//   tessellation factors are whole numbers of segments (literals; the
+//   partitioning making that many of each), the largest N: a quad domain
+//   is drawn as an N x N grid of two triangles each (ccw: their winding
+//   in the domain); an isoline one, its factors all N, as N lines of N
+//   segments each.
+struct PatchShape {
+  bool lines = false;     // an isoline domain (drawn as a line list), not a quad
+  bool ccw = false;       // quads: the triangles' winding
+  uint32_t segments = 0;  // N
+};
+bool PointPatchHull(const void* dxbc, size_t size, PatchShape* shape);
 // - a vertex shader that only copies each input register to the output
 //   register of the same number, or writes constants (*constants) into
 //   them, so the domain shader's control point registers are the vertex's

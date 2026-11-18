@@ -834,7 +834,7 @@ void GpuDraw(Device& dev, Context& x, const DrawCall& call) {
   d.program = prog->id;
   d.state = PipelineOf(x, &ok);
   if (point_patch) {
-    d.state.topology = gfx::Topology::TriangleList;
+    d.state.topology = prog->patch_lines ? gfx::Topology::LineList : gfx::Topology::TriangleList;
     ok = true;
   }
   if (!ok) {
