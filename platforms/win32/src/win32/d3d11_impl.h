@@ -169,10 +169,12 @@ struct Query : Child {
 };
 
 // A context's pipeline state, as the guest set it.
-// vs, ps, cs and ds: the domain stage of point patches (dxbc.h), whose
-// domain shader is drawn as the vertex stage. No geometry stage.
-constexpr int kStages = 4;
+// vs, ps, cs, ds and gs: the domain stage of point patches and the
+// geometry stage of points made strips (dxbc.h), whose shaders are drawn
+// as the vertex stage.
+constexpr int kStages = 5;
 constexpr int kDomainStage = 3;
+constexpr int kGeometryStage = 4;
 struct ContextState {
   struct VertexBuffer {
     std::shared_ptr<Resource> res;
@@ -189,7 +191,6 @@ struct ContextState {
     std::shared_ptr<State> samplers[16];
   };
   StageState stage[kStages];
-  bool geometry = false;  // a geometry shader is bound: draws are skipped
   std::shared_ptr<Shader> hull;  // point patches only (dxbc::PointPatchHull)
   std::shared_ptr<View> uavs[8];  // compute
   std::shared_ptr<InputLayout> layout;
@@ -315,6 +316,9 @@ struct StageBindings {
     BufferKind kind = BufferKind::Constant;
     uint32_t slot = 0;
     uint32_t bytes = 0;  // Constant: at least this many (the declared size)
+    // The Direct3D stage whose constant buffer or view it is, when not
+    // the stage bound (a feeder vertex shader's, dxbc::TranslateFeeder).
+    int stage = -1;
   };
   struct Texture {
     uint32_t view = 0;
@@ -338,7 +342,7 @@ struct StageBindings {
 struct LinkedProgram {
   gfx::ProgramId id = 0;
   StageBindings vs, ps, cs;  // vs: the domain stage's, for a point patch
-  uint32_t patch_vertices = 0;  // a point patch's: the vertices drawn for each patch
+  uint32_t patch_vertices = 0;  // a point patch's (geometry shader's): the vertices drawn for each patch (point)
   bool patch_lines = false;     // ... as a line list, not a triangle list
 };
 
@@ -351,10 +355,17 @@ std::shared_ptr<const LinkedProgram> LinkComputeProgram(gfx::Device& dev, const 
 // A point patch's (dxbc.h): the domain shader as the vertex stage, run for
 // patch_vertices vertices a patch (two triangles for each quad of its
 // grid, or two ends for each line segment), each patch's vertex fetched
-// as the pass-through vertex shader's inputs. Null if the shaders are not those of point patches.
+// as the pass-through vertex shader's inputs, or computed by the vertex
+// shader run in the stage as a feeder (dxbc::TranslateFeeder). Null if the shaders are not those of point patches.
 std::shared_ptr<const LinkedProgram> LinkPointPatchProgram(gfx::Device& dev, const Shader& vs,
                                                            const Shader& hs, const Shader& ds,
                                                            const Shader* ps, const InputLayout* layout);
+// A geometry shader's of points made triangle strips (dxbc.h): the
+// geometry shader as the vertex stage, run for patch_vertices vertices a
+// point, its point fetched or computed as for point patches. Null if the
+// geometry shader is not of those.
+std::shared_ptr<const LinkedProgram> LinkGeometryProgram(gfx::Device& dev, const Shader& vs, const Shader& gs,
+                                                         const Shader* ps, const InputLayout* layout);
 
 // A stage's uniform block (std140, `l_` names: the translation keeps to
 // `r_`), filled per draw:
@@ -391,6 +402,14 @@ struct Device : com::Object {
   // the layout's serials.
   std::map<std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>, std::shared_ptr<const LinkedProgram>>
       point_patch_programs;
+  // Geometry shader programs, by the vertex, geometry and pixel shaders'
+  // and the layout's serials.
+  std::map<std::tuple<uint64_t, uint64_t, uint64_t, uint64_t>, std::shared_ptr<const LinkedProgram>>
+      geometry_programs;
+  // A draw's arguments the GPU wrote, scaled for one drawing more vertices
+  // for each (GpuDraw): the program, and the buffer it writes.
+  gfx::ProgramId scale_args = 0;
+  gfx::BufferId scaled_args = 0;
   // This frame's work, reported at Present.
   struct Stats {
     uint32_t draws = 0, skipped = 0, dispatches = 0, skipped_dispatches = 0, clears = 0;
@@ -469,5 +488,7 @@ std::shared_ptr<const LinkedProgram> ComputeProgramFor(Device& dev, const Shader
 std::shared_ptr<const LinkedProgram> PointPatchProgramFor(Device& dev, const Shader& vs, const Shader& hs,
                                                           const Shader& ds, const Shader* ps,
                                                           const InputLayout* layout);
+std::shared_ptr<const LinkedProgram> GeometryProgramFor(Device& dev, const Shader& vs, const Shader& gs,
+                                                        const Shader* ps, const InputLayout* layout);
 
 }  // namespace recomp::hle::d3d11

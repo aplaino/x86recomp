@@ -125,8 +125,9 @@ std::string Define(const std::string& name, const std::string& value) {
 
 std::string LinkCode(const dxbc::Shader& sh, gfx::ProgramStage* st) {
   std::string g;
-  // A domain shader is drawn as a vertex stage (dxbc.h, point patches).
-  const bool vertex = sh.type == dxbc::ShaderType::Vertex || sh.type == dxbc::ShaderType::Domain;
+  // Domain and geometry shaders are drawn as a vertex stage (dxbc.h).
+  const bool vertex = sh.type == dxbc::ShaderType::Vertex || sh.type == dxbc::ShaderType::Domain ||
+                      sh.type == dxbc::ShaderType::Geometry;
   if (vertex) g += dxbc::VaryingDefines(&sh, nullptr);
   if (sh.type == dxbc::ShaderType::Pixel) g += dxbc::VaryingDefines(nullptr, &sh);
   for (const dxbc::ShaderResource& r : sh.resources)
@@ -163,7 +164,8 @@ void Run(const Blob& b, Result* r, bool annotate) {
     return;
   }
   gfx::ProgramStage st = sh.stage;
-  const gfx::ShaderStage stage = sh.type == dxbc::ShaderType::Vertex || sh.type == dxbc::ShaderType::Domain
+  const gfx::ShaderStage stage = sh.type == dxbc::ShaderType::Vertex || sh.type == dxbc::ShaderType::Domain ||
+                                         sh.type == dxbc::ShaderType::Geometry
                                      ? gfx::ShaderStage::Vertex
                                  : sh.type == dxbc::ShaderType::Pixel ? gfx::ShaderStage::Fragment
                                                                       : gfx::ShaderStage::Compute;

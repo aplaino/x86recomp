@@ -63,6 +63,18 @@ std::shared_ptr<const LinkedProgram> PointPatchProgramFor(Device& dev, const Sha
   return p;
 }
 
+std::shared_ptr<const LinkedProgram> GeometryProgramFor(Device& dev, const Shader& vs, const Shader& gs,
+                                                        const Shader* ps, const InputLayout* layout) {
+  // By the objects' serials only, as point patches'.
+  const auto key = std::make_tuple(vs.serial, gs.serial, ps ? ps->serial : 0, layout ? layout->serial : 0);
+  auto it = dev.geometry_programs.find(key);
+  if (it != dev.geometry_programs.end()) return it->second;
+  auto p = LinkGeometryProgram(*dev.gfx, vs, gs, ps, layout);
+  if (p) dev.stats.linked++;
+  dev.geometry_programs.emplace(key, p);
+  return p;
+}
+
 std::shared_ptr<const LinkedProgram> ComputeProgramFor(Device& dev, const Shader& cs) {
   const auto key = std::make_tuple(cs.serial, uint64_t(0), uint64_t(0));
   auto it = dev.programs.find(key);
