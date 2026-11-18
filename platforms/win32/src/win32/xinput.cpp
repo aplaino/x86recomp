@@ -6,6 +6,10 @@
 // input. The gamepad subsystem starts on the main thread, where SDL's
 // events are pumped: a game that polls its pads from another thread has
 // it started there and sees them from the main thread's next pump on.
+// On macOS SDL reads every pad through its own (HIDAPI) drivers, not the
+// GameController framework: SDL leaves wired Xbox pads to that framework,
+// which need not list them, and such a pad is then not seen at all (an
+// SDL_JOYSTICK_MFI in the environment still decides).
 // DirectInput and WMI list the same pads (xinput.h).
 
 #include <SDL3/SDL.h>
@@ -39,6 +43,9 @@ Pad g_pads[4];
 
 void StartGamepads(void*) {
   if (g_up) return;
+#ifdef __APPLE__
+  SDL_SetHint(SDL_HINT_JOYSTICK_MFI, "0");
+#endif
   if (SDL_InitSubSystem(SDL_INIT_GAMEPAD)) g_up = true;
   else WarnF("xinput: SDL gamepad init failed: %s\n", SDL_GetError());
 }
