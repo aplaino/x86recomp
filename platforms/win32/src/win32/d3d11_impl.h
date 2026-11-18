@@ -258,8 +258,12 @@ class OpList {
     size_t size = 0, used = 0;
   };
   // n bytes (a multiple of kAlign) at the end of the last chunk, or of a
-  // new one of at least `chunk` bytes.
+  // new one of at least `chunk` bytes. Chunks of the two usual sizes come
+  // from, and go back to, a pool shared by every list: lists are recorded
+  // and freed by the dozen each frame, and memory freed back to the system
+  // would be faulted in again for the next.
   static void* Room(std::vector<Chunk>& chunks, size_t n, size_t chunk);
+  static void Recycle(std::vector<Chunk>& chunks);
   std::vector<Chunk> ops_, bytes_;
 };
 
