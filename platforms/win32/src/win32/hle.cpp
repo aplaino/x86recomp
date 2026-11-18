@@ -26,11 +26,18 @@ std::map<std::string, std::set<std::string>>& DeclaredExports() {
 // a PE header; nothing in the game dereferences these, so a recognisable
 // value outside the arena's used ranges is enough.
 const std::vector<std::string>& KnownDlls() {
-  static const std::vector<std::string> dlls = {
-      "kernel32.dll", "user32.dll",  "gdi32.dll",    "advapi32.dll",
-      "ole32.dll",    "version.dll", "winmm.dll",    "wsock32.dll",
-      "ddraw.dll",    "mss32.dll",   "binkw32.dll",  "dbghelp.dll",
-      "imm32.dll",    "shfolder.dll", "ntdll.dll",   "opengl32.dll"};
+  static const std::vector<std::string> dlls = [] {
+    std::vector<std::string> d = {
+        "kernel32.dll", "user32.dll",  "gdi32.dll",    "advapi32.dll",
+        "ole32.dll",    "version.dll", "winmm.dll",    "wsock32.dll",
+        "ddraw.dll",    "mss32.dll",   "binkw32.dll",  "dbghelp.dll",
+        "imm32.dll",    "shfolder.dll", "ntdll.dll",   "opengl32.dll"};
+    // Loadable only where the game links their HLE library: middleware
+    // that probes for them (LoadLibrary) picks another output without.
+    // Appended, so the handles above stay put.
+    if (HasHandler("dsound.dll", "#11")) d.push_back("dsound.dll");  // DirectSoundCreate8
+    return d;
+  }();
   return dlls;
 }
 
