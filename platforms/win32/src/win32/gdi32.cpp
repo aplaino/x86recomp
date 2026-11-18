@@ -5,10 +5,12 @@
 
 #include <atomic>
 #include <cstring>
+#include <string>
 
 #include "runtime/log.h"
 #include "win32/hle.h"
 #include "win32/input_state.h"
+#include "win32/win32.h"
 
 namespace recomp::hle {
 namespace {
@@ -24,6 +26,22 @@ HLE("gdi32.dll", CreateHatchBrush, 2) { return NewGdi(); }
 HLE("gdi32.dll", CreateSolidBrush, 1) { return NewGdi(); }
 HLE("gdi32.dll", CreateCompatibleDC, 1) { return NewGdi(); }
 HLE("gdi32.dll", CreateCompatibleBitmap, 3) { return NewGdi(); }
+// System fonts: none to enumerate and none to create. Callers look one up
+// for a glyph their own fonts lack (typed text, say) and do without it when
+// the lookup finds nothing.
+HLE64("gdi32.dll", EnumFontFamiliesExW, 5) {
+  static std::atomic<bool> warned{false};
+  if (gaddr lf = Arg(c, 1); lf && !warned.exchange(true)) {
+    std::u16string face;
+    for (gaddr p = lf + 0x1C; face.size() < 32 && Rd16(p); p += 2)  // lfFaceName
+      face.push_back(char16_t(Rd16(p)));
+    bool bad;
+    WarnF("EnumFontFamiliesExW(\"%s\"): no system fonts; none enumerated\n",
+          win32::Utf16ToUtf8(face.data(), face.size(), &bad).c_str());
+  }
+  return 1;
+}
+HLE64("gdi32.dll", CreateFontW, 14) { return 0; }
 HLE("gdi32.dll", DeleteObject, 1) { return 1; }
 HLE("gdi32.dll", DeleteDC, 1) { return 1; }
 HLE("gdi32.dll", SelectObject, 2) { return 0x00E00000u; }
