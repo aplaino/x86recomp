@@ -178,6 +178,15 @@ struct TextureBinding {
   uint32_t resource = 0;
   int sampler = -1;
   bool comparison = false;  // sampled with comparison (a shadow sampler)
+  int apart = -1;           // with samplers apart: its sampler's in Shader::samplers_apart
+};
+
+// A sampler of a stage whose textures have their samplers apart
+// (gfx::ProgramStage::samplers): its slot (-1: one for texel loads only)
+// and whether it compares.
+struct SamplerApart {
+  int slot = -1;
+  bool comparison = false;
 };
 
 struct Shader {
@@ -189,6 +198,7 @@ struct Shader {
   std::vector<UnorderedAccess> uavs;        // by slot
   std::vector<Sampler> samplers;            // by slot
   std::vector<TextureBinding> textures;     // gfx textures, in this order
+  std::vector<SamplerApart> samplers_apart; // more than 16 textures: their samplers
   uint32_t local_size[3] = {1, 1, 1};       // compute: dcl_thread_group
   uint32_t tgsm_bytes = 0;                  // compute: group-shared memory declared
   bool writes_depth = false;                // pixel: SV_Depth

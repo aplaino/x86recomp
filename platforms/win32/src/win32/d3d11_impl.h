@@ -321,6 +321,7 @@ struct StageBindings {
   };
   std::vector<Buffer> buffers;
   std::vector<Texture> textures;
+  std::vector<int> samplers;  // apart from the textures (Texture::sampler indexes it): their slots
   std::vector<uint32_t> rw_buffers, rw_images;  // compute: UAV slots
   std::vector<Format> formats;
   bool uniforms = false;
