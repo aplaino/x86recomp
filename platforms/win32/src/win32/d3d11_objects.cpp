@@ -507,7 +507,8 @@ D3D11_METHOD(ID3D11Device, CreateVertexShader) { return CreateShader(c, 0, "ID3D
 D3D11_METHOD(ID3D11Device, CreatePixelShader) { return CreateShader(c, 1, "ID3D11PixelShader"); }
 D3D11_METHOD(ID3D11Device, CreateComputeShader) { return CreateShader(c, 2, "ID3D11ComputeShader"); }
 // The tessellation and geometry stages: their shaders are made and kept;
-// binding one for a draw is not supported yet (the context's setters).
+// draws with them are drawn when they are point patches or points made
+// triangle strips (dxbc.h), skipped otherwise.
 D3D11_METHOD(ID3D11Device, CreateHullShader) { return CreateShader(c, 3, "ID3D11HullShader"); }
 D3D11_METHOD(ID3D11Device, CreateDomainShader) { return CreateShader(c, 4, "ID3D11DomainShader"); }
 D3D11_METHOD(ID3D11Device, CreateGeometryShader) { return CreateShader(c, 5, "ID3D11GeometryShader"); }

@@ -205,6 +205,7 @@ struct Shader {
   std::vector<SamplerApart> samplers_apart; // more than 16 textures: their samplers
   uint32_t local_size[3] = {1, 1, 1};       // compute: dcl_thread_group
   uint32_t tgsm_bytes = 0;                  // compute: group-shared memory declared
+  uint32_t gs_max_vertices = 0;             // geometry: dcl_maxout
   bool writes_depth = false;                // pixel: SV_Depth
   bool discards = false;                    // pixel: discard
   uint32_t targets = 0;                     // pixel: SV_Target bits
@@ -220,6 +221,28 @@ struct Shader {
 // in the program and its disassembly). With `annotate`, each
 // instruction's listing precedes its GLSL as a comment.
 bool Translate(const void* dxbc, size_t size, Shader* out, bool annotate = false);
+
+// Geometry shaders of points expanded into triangle strips (sprites) are
+// translated as a vertex stage too, run for each corner of each triangle
+// its strips can make: 3 * (gs_max_vertices - 2) vertices a point. Each
+// runs the shader through and keeps the vertex emitted as corner
+// R_GS_CORNER % 3 of triangle R_GS_CORNER / 3 (a uint the link code
+// defines, from 0), odd triangles of a strip with their first two
+// corners swapped as Direct3D draws them; a corner of a triangle never
+// made is at the origin with w 0, so its triangle is not drawn. The
+// point's registers are the stage's inputs (from r_fetch, as a domain
+// shader's control point), whatever their system value; vPrim is
+// R_PRIMITIVE_ID. One stream only, no instancing.
+
+// A vertex shader translated as a function for the stage drawn after it
+// (a domain or geometry shader run as the vertex stage, whose vertex it
+// computes): `void f_run()` fetches its inputs with r_fetch_vertex(reg),
+// which the link code defines, as r_fetch otherwise, and leaves its
+// output registers in `uvec4 f_o[]`; its own names start with f_ where a
+// stage's start with r_. Its buffers are numbered from first_buffer (the
+// main stage's come first). It has no varyings, and may have no textures,
+// samplers or typed buffer views.
+bool TranslateFeeder(const void* dxbc, size_t size, uint32_t first_buffer, Shader* out);
 
 // Point patches, the tessellation games use to draw sprites and streaks:
 // a patch of one control point that the tessellator makes one quad, or

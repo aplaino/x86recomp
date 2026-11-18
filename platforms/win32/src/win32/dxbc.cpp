@@ -879,7 +879,9 @@ const char* const kHelpers[][2] = {
 
 class Translator {
  public:
-  Translator(const Program& p, Shader* sh, bool annotate) : p_(p), sh_(sh), annotate_(annotate) {}
+  Translator(const Program& p, Shader* sh, bool annotate, bool feeder = false, uint32_t first_buffer = 0)
+      : p_(p), sh_(sh), annotate_(annotate), feeder_(feeder), first_buffer_(first_buffer),
+        v_(feeder ? "f_v" : "r_v"), o_(feeder ? "f_o" : "r_o"), icb_name_(feeder ? "f_icb" : "r_icb") {}
 
   bool Run() {
     sh_->type = p_.type;
@@ -887,8 +889,9 @@ class Translator {
     sh_->minor = p_.minor;
     stage_ = p_.type;
     if (stage_ != ShaderType::Vertex && stage_ != ShaderType::Pixel && stage_ != ShaderType::Compute &&
-        stage_ != ShaderType::Domain)
-      return Fail("a shader type not translated (vertex, pixel, compute and domain are)");
+        stage_ != ShaderType::Domain && stage_ != ShaderType::Geometry)
+      return Fail("a shader type not translated (vertex, pixel, compute, domain and geometry are)");
+    if (feeder_ && stage_ != ShaderType::Vertex) return Fail("a feeder that is no vertex shader");
     for (const Instr& in : p_.instrs) {
       cur_ = &in;
       if (IsDeclOp(in.op) && !Declare(in)) return false;
@@ -954,6 +957,23 @@ class Translator {
           icb_ = in.lits;
         }
         return true;
+      // Geometry shaders: points in, one triangle strip stream out.
+      case kDclGsInputPrimitive:
+        if ((ctl & 0x3F) != 1) return Fail("a geometry shader of primitives other than points");
+        return true;
+      case kDclGsOutputTopology:
+        if ((ctl & 0x7F) != 5) return Fail("a geometry shader emitting other than triangle strips");
+        return true;
+      case kDclMaxOutputVertexCount:
+        if (in.lits.empty() || in.lits[0] < 3 || in.lits[0] > 64)
+          return Fail("a geometry shader of fewer than 3 or more than 64 vertices");
+        sh_->gs_max_vertices = in.lits[0];
+        return true;
+      case kDclStream:
+        if (in.ops.empty() || in.ops[0].ndim != 1 || in.ops[0].index[0].imm != 0)
+          return Fail("a geometry shader stream other than 0");
+        return true;
+      case kDclGsInstanceCount: return Fail("an instanced geometry shader");
       case kDclGlobalFlags:
         early_depth_ = (ctl >> 2) & 1;
         if ((ctl >> 1) & 1) return Fail("double-precision instructions not translated yet");
@@ -1042,8 +1062,10 @@ class Translator {
       case kDclInputPsSiv: case kDclOutput: case kDclOutputSgv: case kDclOutputSiv: {
         const Operand& o = in.ops[0];
         const bool out = in.op >= kDclOutput;
-        // A domain shader's control point (its only one) is its inputs.
-        const bool point = !out && o.type == kInputControlPoint && stage_ == ShaderType::Domain;
+        // A domain shader's control point (its only one) is its inputs, as
+        // a geometry shader's point (v[1][reg]).
+        const bool point = !out && ((o.type == kInputControlPoint && stage_ == ShaderType::Domain) ||
+                                    (o.type == kInput && stage_ == ShaderType::Geometry));
         if (o.type == (out ? kOutput : kInput) || point) {
           if (point && (o.ndim != 2 || o.index[1].rel >= 0)) return Fail("a control point input of this form");
           if (!point && (o.ndim != 1 || o.index[0].rel >= 0))
@@ -1113,7 +1135,7 @@ class Translator {
     std::sort(sh_->resources.begin(), sh_->resources.end(), by_slot);
     std::sort(sh_->uavs.begin(), sh_->uavs.end(), by_slot);
     std::sort(sh_->samplers.begin(), sh_->samplers.end(), by_slot);
-    int nbuf = 0;
+    int nbuf = int(first_buffer_);
     for (const ConstantBuffer& cb : sh_->cbuffers) cb_[cb.slot] = nbuf++;
     for (ShaderResource& r : sh_->resources)
       if (IsBuffer(r.dim)) r.buffer = nbuf++;
@@ -1280,17 +1302,23 @@ class Translator {
         if (o.index[0].imm >= temps_) return Fail("a temp past dcl_temps"), "r0";
         return "r" + std::to_string(o.index[0].imm);
       case kInput: {
-        if (o.ndim != 1) return Fail("an input of more than one index"), "r_v[0]";
+        if (stage_ == ShaderType::Geometry) {
+          if (o.ndim != 2 || o.index[0].rel >= 0 || o.index[0].imm != 0 || o.index[1].rel >= 0)
+            return Fail("a geometry shader input other than the point's"), v_ + "[0]";
+          if (o.index[1].imm >= InputCount()) return Fail("an input not declared"), v_ + "[0]";
+          return v_ + "[" + std::to_string(o.index[1].imm) + "]";
+        }
+        if (o.ndim != 1) return Fail("an input of more than one index"), v_ + "[0]";
         const std::string i = Index(o, 0);
-        if (o.index[0].rel >= 0) return "r_v[min(" + i + ", " + UintLit(InputCount() - 1) + ")]";
-        if (o.index[0].imm >= InputCount()) return Fail("an input not declared"), "r_v[0]";
-        return "r_v[" + std::to_string(o.index[0].imm) + "]";
+        if (o.index[0].rel >= 0) return v_ + "[min(" + i + ", " + UintLit(InputCount() - 1) + ")]";
+        if (o.index[0].imm >= InputCount()) return Fail("an input not declared"), v_ + "[0]";
+        return v_ + "[" + std::to_string(o.index[0].imm) + "]";
       }
       case kOutput: {
         const std::string i = Index(o, 0);
-        if (o.index[0].rel >= 0) return "r_o[min(" + i + ", " + UintLit(OutputCount() - 1) + ")]";
-        if (o.index[0].imm >= OutputCount()) return Fail("an output not declared"), "r_o[0]";
-        return "r_o[" + std::to_string(o.index[0].imm) + "]";
+        if (o.index[0].rel >= 0) return o_ + "[min(" + i + ", " + UintLit(OutputCount() - 1) + ")]";
+        if (o.index[0].imm >= OutputCount()) return Fail("an output not declared"), o_ + "[0]";
+        return o_ + "[" + std::to_string(o.index[0].imm) + "]";
       }
       case kIndexableTemp: {
         auto it = xtemps_.find(o.index[0].imm);
@@ -1305,14 +1333,15 @@ class Translator {
         const uint32_t n = uint32_t(icb_.size() / 4);
         if (!n) return Fail("an immediate constant buffer not declared"), "r0";
         const std::string i = Index(o, 0);
-        if (o.index[0].rel >= 0) return "r_icb[min(" + i + ", " + UintLit(n - 1) + ")]";
-        return "r_icb[" + std::to_string(std::min(o.index[0].imm, n - 1)) + "]";
+        if (o.index[0].rel >= 0) return icb_name_ + "[min(" + i + ", " + UintLit(n - 1) + ")]";
+        return icb_name_ + "[" + std::to_string(std::min(o.index[0].imm, n - 1)) + "]";
       }
       case kInputThreadId: return "uvec4(gl_GlobalInvocationID, 0u)";
       case kInputThreadGroupId: return "uvec4(gl_WorkGroupID, 0u)";
       case kInputThreadIdInGroup: return "uvec4(gl_LocalInvocationID, 0u)";
       case kInputThreadIdInGroupFlattened: return "uvec4(gl_LocalInvocationIndex)";
-      case kInputPrimitiveId: return "uvec4(uint(gl_PrimitiveID))";
+      case kInputPrimitiveId:
+        return stage_ == ShaderType::Geometry ? "uvec4(R_PRIMITIVE_ID)" : "uvec4(uint(gl_PrimitiveID))";
       case kInputCoverageMask: return "uvec4(r_cov)";
       case kInputControlPoint: {
         if (o.ndim != 2 || o.index[0].rel >= 0 || o.index[0].imm != 0 || o.index[1].rel >= 0)
@@ -1471,6 +1500,10 @@ class Translator {
 
   void Emit(const Instr& in) {
     switch (in.op) {
+      // Geometry shaders' vertices (stream 0, the only one declared).
+      case kEmit: case kEmitStream: return Line("r_gs_emit();");
+      case kCut: case kCutStream: return Line("r_gs_cut();");
+      case kEmitThenCut: case kEmitThenCutStream: return Line("r_gs_emit();"), Line("r_gs_cut();");
       // Floating point.
       case kAdd: return Bin(in, "f", 'f', "+");
       case kMul: return Bin(in, "f", 'f', "*");
@@ -2292,9 +2325,11 @@ class Translator {
     return n;
   }
 
-  // The stages whose outputs are the vertex's (a domain shader is drawn
-  // as a vertex stage, dxbc.h).
-  bool VertexLike() const { return stage_ == ShaderType::Vertex || stage_ == ShaderType::Domain; }
+  // The stages whose outputs are the vertex's (domain and geometry
+  // shaders are drawn as a vertex stage, dxbc.h).
+  bool VertexLike() const {
+    return stage_ == ShaderType::Vertex || stage_ == ShaderType::Domain || stage_ == ShaderType::Geometry;
+  }
 
   static char CompType(uint32_t t) { return t == 1 ? 'u' : t == 2 ? 'i' : 'f'; }
   static std::string Vec4Of(char t) { return t == 'u' ? "uvec4" : t == 'i' ? "ivec4" : "vec4"; }
@@ -2308,6 +2343,12 @@ class Translator {
   bool Finish() {
     std::string g, pre, post;
     char b[256];
+    if (feeder_) {
+      if (!sh_->textures.empty() || !sh_->samplers_apart.empty() || !sh_->uavs.empty())
+        return Fail("a feeder with textures, samplers or UAVs");
+      for (const ShaderResource& r : sh_->resources)
+        if (r.dim == ResourceDim::Buffer) return Fail("a feeder with a typed buffer view");
+    }
     if (early_depth_ && stage_ == ShaderType::Pixel) g += "layout(early_fragment_tests) in;\n";
     // Textures and images.
     for (size_t i = 0; i < sh_->textures.size(); i++) {
@@ -2366,7 +2407,7 @@ class Translator {
     }
     if (!icb_.empty()) {
       const size_t n = icb_.size() / 4;
-      g += "const uvec4 r_icb[" + std::to_string(n) + "] = uvec4[](";
+      g += "const uvec4 " + icb_name_ + "[" + std::to_string(n) + "] = uvec4[](";
       for (size_t i = 0; i < n; i++)
         g += Fmt("%suvec4(0x%Xu, 0x%Xu, 0x%Xu, 0x%Xu)", i ? ",\n    " : "\n    ", icb_[4 * i], icb_[4 * i + 1],
                  icb_[4 * i + 2], icb_[4 * i + 3]);
@@ -2381,9 +2422,11 @@ class Translator {
     }
     if (VertexLike()) {
       for (const auto& [reg, decls] : ins_) {
-        const std::string r = "r_v[" + std::to_string(reg) + "]";
-        if (Fetched(reg)) pre += "  " + r + " = r_fetch(" + UintLit(reg) + ");\n";
+        const std::string r = v_ + "[" + std::to_string(reg) + "]";
+        if (Fetched(reg) || stage_ == ShaderType::Geometry)
+          pre += "  " + r + " = " + (feeder_ ? "r_fetch_vertex(" : "r_fetch(") + UintLit(reg) + ");\n";
         for (const IoDecl& d : decls) {
+          if (stage_ == ShaderType::Geometry) break;  // the vertex's registers, whatever they were
           int c[4];
           const int n = Comps(d.mask, c);
           switch (d.sv) {
@@ -2397,9 +2440,10 @@ class Translator {
       g += "#ifndef R_VERTEX_ID\n#define R_VERTEX_ID uint(gl_VertexIndex)\n#endif\n"
            "#ifndef R_INSTANCE_ID\n#define R_INSTANCE_ID uint(gl_InstanceIndex)\n#endif\n";
       // Every varying of the signature is written, those the shader does
-      // not declare as 0: a pixel shader may read them all.
+      // not declare as 0: a pixel shader may read them all. A feeder's
+      // outputs stay in its registers.
       int clip = 0;
-      for (size_t e = 0; e < sh_->outputs.size(); e++) {
+      for (size_t e = 0; e < sh_->outputs.size() && !feeder_; e++) {
         const SignatureElement& el = sh_->outputs[e];
         if (!el.mask || (!outs_.count(el.reg) && (el.system_value != 0 || el.reg >= 32))) continue;
         const std::string r = "r_o[" + std::to_string(el.reg) + "]";
@@ -2425,7 +2469,7 @@ class Translator {
       if (clip)
         g += "out gl_PerVertex {\n  vec4 gl_Position;\n  float gl_PointSize;\n  float gl_ClipDistance[" +
              std::to_string(clip) + "];\n};\n";
-      post += "  gl_PointSize = 1.0;\n";
+      if (!feeder_) post += "  gl_PointSize = 1.0;\n";
     } else if (stage_ == ShaderType::Pixel) {
       for (const auto& [reg, decls] : ins_)
       for (const IoDecl& d : decls) {
@@ -2498,12 +2542,37 @@ class Translator {
         pre += "  r_cov = uint(gl_SampleMaskIn[0]);\n";
       }
     }
-    if (nin) g += "uvec4 r_v[" + std::to_string(nin) + "];\n";
-    if (nout) g += "uvec4 r_o[" + std::to_string(nout) + "];\n";
+    if (nin) g += "uvec4 " + v_ + "[" + std::to_string(nin) + "];\n";
+    if (nout) g += "uvec4 " + o_ + "[" + std::to_string(nout) + "];\n";
+    // Each helper once where a feeder's code and its stage's are one.
     for (const auto& h : kHelpers)
-      if (helpers_.count(h[0])) g += h[1];
+      if (helpers_.count(h[0])) g += std::string("#ifndef R_HAVE_") + h[0] + "\n#define R_HAVE_" + h[0] + "\n" + h[1] + "#endif\n";
+    if (stage_ == ShaderType::Geometry) {
+      // The strip so far (vertices, its last two), the triangles made, and
+      // the vertex kept (dxbc.h).
+      if (!nout || !sh_->gs_max_vertices) return Fail("a geometry shader without outputs or dcl_maxout");
+      const std::string n = std::to_string(nout);
+      g += "#ifndef R_GS_CORNER\n#define R_GS_CORNER 0u\n#endif\n#ifndef R_PRIMITIVE_ID\n#define R_PRIMITIVE_ID 0u\n#endif\n"
+           "uint r_gs_c = 0u, r_gs_t = 0u;\nuvec4 r_gs_p0[" + n + "], r_gs_p1[" + n + "], r_gs_pick[" + n + "];\n"
+           "void r_gs_emit() {\n"
+           "  if (r_gs_c >= 2u) {\n"
+           "    if (r_gs_t == R_GS_CORNER / 3u) {\n"
+           "      uint j = R_GS_CORNER % 3u;\n"
+           "      if (j < 2u && ((r_gs_c & 1u) != 0u)) j ^= 1u;\n"
+           "      if (j == 0u) r_gs_pick = r_gs_p0;\n"
+           "      else if (j == 1u) r_gs_pick = r_gs_p1;\n"
+           "      else r_gs_pick = r_o;\n"
+           "    }\n"
+           "    r_gs_t++;\n"
+           "  }\n"
+           "  r_gs_p0 = r_gs_p1;\n  r_gs_p1 = r_o;\n  r_gs_c++;\n}\n"
+           "void r_gs_cut() { r_gs_c = 0u; }\n";
+      pre += "  for (int i = 0; i < " + n + "; i++) r_gs_pick[i] = uvec4(0u);\n";
+      post = "  r_o = r_gs_pick;\n" + post;
+    }
 
-    g += "void r_main() {\n";
+    const std::string fmain = feeder_ ? "f_main" : "r_main";
+    g += "void " + fmain + "() {\n";
     for (uint32_t i = 0; i < temps_; i++)
       g += std::string(i % 8 ? ", " : i ? ";\n  uvec4 " : "  uvec4 ") + "r" + std::to_string(i) + " = uvec4(0u)";
     if (temps_) g += ";\n";
@@ -2513,11 +2582,11 @@ class Translator {
       g += "  for (int i = 0; i < " + std::to_string(size) + "; i++) " + x + "[i] = uvec4(0u);\n";
     }
     g += body_;
-    g += "}\nvoid main() {\n";
+    g += feeder_ ? "}\nvoid f_run() {\n" : "}\nvoid main() {\n";
     for (uint32_t i = 0; i < nin; i++)
-      if (!VertexLike() || !Fetched(i)) g += "  r_v[" + std::to_string(i) + "] = uvec4(0u);\n";
-    if (nout) g += "  for (int i = 0; i < " + std::to_string(nout) + "; i++) r_o[i] = uvec4(0u);\n";
-    g += pre + "  r_main();\n" + post + "}\n";
+      if (!VertexLike() || !Fetched(i)) g += "  " + v_ + "[" + std::to_string(i) + "] = uvec4(0u);\n";
+    if (nout) g += "  for (int i = 0; i < " + std::to_string(nout) + "; i++) " + o_ + "[i] = uvec4(0u);\n";
+    g += pre + "  " + fmain + "();\n" + post + "}\n";
     sh_->stage.glsl = std::move(g);
     return true;
   }
@@ -2525,6 +2594,9 @@ class Translator {
   const Program& p_;
   Shader* sh_;
   const bool annotate_;
+  const bool feeder_;  // TranslateFeeder's
+  const uint32_t first_buffer_;
+  const std::string v_, o_, icb_name_;  // the input and output registers, the icb
   ShaderType stage_ = ShaderType::Pixel;
   const Instr* cur_ = nullptr;
   std::string body_;
@@ -2700,6 +2772,28 @@ bool Translate(const void* dxbc, size_t size, Shader* out, bool annotate) {
   Program prog;
   if (!LoadProgram(chunks, &prog, &out->error)) return false;
   Translator t(prog, out, annotate);
+  if (!t.Run()) {
+    out->error = t.error_;
+    out->stage.glsl.clear();
+    return false;
+  }
+  return true;
+}
+
+bool TranslateFeeder(const void* dxbc, size_t size, uint32_t first_buffer, Shader* out) {
+  *out = Shader{};
+  std::vector<Chunk> chunks;
+  if (!Chunks(static_cast<const uint8_t*>(dxbc), size, &chunks, &out->error)) return false;
+  for (const Chunk& c : chunks) {
+    if (c.fourcc == FourCC("ISGN") || c.fourcc == FourCC("ISG1")) {
+      if (!Signature(c, &out->inputs, &out->error)) return false;
+    } else if (c.fourcc == FourCC("OSGN") || c.fourcc == FourCC("OSG1") || c.fourcc == FourCC("OSG5")) {
+      if (!Signature(c, &out->outputs, &out->error)) return false;
+    }
+  }
+  Program prog;
+  if (!LoadProgram(chunks, &prog, &out->error)) return false;
+  Translator t(prog, out, false, true, first_buffer);
   if (!t.Run()) {
     out->error = t.error_;
     out->stage.glsl.clear();

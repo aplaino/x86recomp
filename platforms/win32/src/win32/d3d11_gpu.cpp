@@ -592,9 +592,10 @@ void BindStage(Device& dev, ContextState& x, int st, const StageBindings& b, con
   for (size_t i = 0; i < b.buffers.size(); i++) {
     const StageBindings::Buffer& e = b.buffers[i];
     gfx::BufferData& bd = sd.buffers[i];
+    const ContextState::StageState& es = e.stage >= 0 ? x.stage[e.stage] : ss;
     switch (e.kind) {
       case StageBindings::BufferKind::Constant: {
-        const ContextState::ConstantBuffer& cb = e.slot < 14 ? ss.cbs[e.slot] : ContextState::ConstantBuffer{};
+        const ContextState::ConstantBuffer& cb = e.slot < 14 ? es.cbs[e.slot] : ContextState::ConstantBuffer{};
         if (!cb.res) {
           bd.data = s.Zeros(e.bytes);
           bd.size = std::max(e.bytes, 16u);
@@ -617,7 +618,7 @@ void BindStage(Device& dev, ContextState& x, int st, const StageBindings& b, con
         break;
       }
       case StageBindings::BufferKind::View: {
-        const View* v = e.slot < 128 ? ss.srvs[e.slot].get() : nullptr;
+        const View* v = e.slot < 128 ? es.srvs[e.slot].get() : nullptr;
         if (!v || v->res->dim != Dim::Buffer) {
           bd.data = s.Zeros(16);
           bd.size = 16;
@@ -789,6 +790,43 @@ void GpuSyncToCpu(Device& dev, Resource& r) {
 
 // ---- draws and dispatches -----------------------------------------------------------------------
 
+namespace {
+
+// A draw's arguments the GPU wrote (four words at `at`), its vertex count
+// and first vertex times `per`, for a draw of that many vertices for each
+// (point patches, geometry shaders): written by a dispatch into the
+// device's buffer, which the draw then reads. One buffer does for every
+// such draw, as a dispatch submits the draws recorded before it.
+gfx::BufferId ScaledArgs(Device& dev, Resource& args, uint32_t at, uint32_t per) {
+  if (!dev.scale_args) {
+    gfx::ProgramDesc d;
+    d.cs.glsl =
+        "layout(R_UNIFORMS) uniform U { uvec4 k; };\n"
+        "void main() {\n  uint w = r_rwbuf[0].x;\n  r_rw[w] = r_ld(0u, 0u) * k.x;\n"
+        "  r_rw[w + 1u] = r_ld(0u, 1u);\n  r_rw[w + 2u] = r_ld(0u, 2u) * k.x;\n  r_rw[w + 3u] = r_ld(0u, 3u);\n}\n";
+    d.cs.buffers = 1;
+    d.cs.rw_buffers = 1;
+    d.cs.uniform_bytes = 16;
+    dev.scale_args = dev.gfx->CreateProgram(d);
+    dev.scaled_args = dev.gfx->CreateBuffer(16);
+    if (!dev.scale_args || !dev.scaled_args) FatalF("d3d11: no program to scale indirect arguments");
+  }
+  gfx::ProgramDispatch pd;
+  pd.program = dev.scale_args;
+  const gfx::BufferData in{nullptr, 16, args.gpu_buffer, at};
+  pd.cs.buffers = &in;
+  const uint32_t k[4] = {per, 0, 0, 0};
+  pd.cs.uniforms = k;
+  gfx::RwBufferData out;
+  out.buffer = dev.scaled_args;
+  out.size = 16;
+  pd.rw_buffers = &out;
+  dev.gfx->DispatchProgram(pd);
+  return dev.scaled_args;
+}
+
+}  // namespace
+
 void GpuDraw(Device& dev, Context& x, const DrawCall& call) {
   std::lock_guard<std::recursive_mutex> l(dev.gpu_mu);
   if (!dev.gfx) return;
@@ -800,21 +838,32 @@ void GpuDraw(Device& dev, Context& x, const DrawCall& call) {
   if (dc.args && !(dc.args->gpu_newer && dc.args->gpu_buffer)) dc.args = nullptr;
   if (dc.args) dc.first = dc.first_instance = 0, dc.base_vertex = 0;
   else if (!dc.count || !dc.instances) return;
-  if (x.geometry) {
-    WARN_ONCE("d3d11: draws with a geometry shader are skipped\n");
-    return;
-  }
   const Shader* vs = x.stage[0].shader.get();
   // A list of patches of one control point (D3D11_PRIMITIVE_TOPOLOGY_1_
   // CONTROL_POINT_PATCHLIST) with a domain shader: point patches, drawn as
-  // their quads' triangles (dxbc.h), when the shaders are those.
+  // their quads' triangles (dxbc.h), when the shaders are those. A point
+  // list with a geometry shader: the triangles of its strips, likewise.
+  // Both draw patch_vertices vertices for each of the draw's (expand).
   const Shader* ds = x.stage[kDomainStage].shader.get();
+  const Shader* gs = x.stage[kGeometryStage].shader.get();
   const bool point_patch = x.topology == 33 && x.hull && ds;
+  const bool expand = point_patch || gs;
   std::shared_ptr<const LinkedProgram> prog;
-  if (vs && point_patch)
+  if (vs && gs) {
+    if (x.topology == 1) prog = GeometryProgramFor(dev, *vs, *gs, x.stage[1].shader.get(), x.layout.get());
+    if (!prog || !prog->id) {
+      static std::set<uint64_t> warned;
+      if (warned.insert(gs->hash).second)
+        WarnF("d3d11: a draw with geometry shader %016llX (topology %u) is skipped: not points made strips\n",
+              (unsigned long long)gs->hash, x.topology);
+      dev.stats.skipped++;
+      return;
+    }
+  } else if (vs && point_patch) {
     prog = PointPatchProgramFor(dev, *vs, *x.hull, *ds, x.stage[1].shader.get(), x.layout.get());
-  else if (vs && x.topology != 33)
+  } else if (vs && x.topology != 33) {
     prog = ProgramFor(dev, *vs, x.stage[1].shader.get(), x.layout.get());
+  }
   if (!prog || !prog->id) {
     if (vs && x.topology == 33) {
       static std::set<uint64_t> warned;
@@ -825,15 +874,16 @@ void GpuDraw(Device& dev, Context& x, const DrawCall& call) {
     dev.stats.skipped++;
     return;
   }
-  if (dc.args && point_patch) {
-    WARN_ONCE("d3d11: indirect draws of point patches with arguments the GPU wrote are skipped\n");
+  if (dc.args && expand && dc.indexed) {
+    WARN_ONCE("d3d11: indexed indirect draws of point patches or geometry shaders, with arguments the GPU "
+              "wrote, are skipped\n");
     return;
   }
   bool ok;
   gfx::ProgramDraw d;
   d.program = prog->id;
   d.state = PipelineOf(x, &ok);
-  if (point_patch) {
+  if (expand) {
     d.state.topology = prog->patch_lines ? gfx::Topology::LineList : gfx::Topology::TriangleList;
     ok = true;
   }
@@ -879,7 +929,7 @@ void GpuDraw(Device& dev, Context& x, const DrawCall& call) {
   // of patch p is the patch's control point's vertex times the vertices a
   // patch has, plus j (the domain stage divides it back).
   std::vector<uint32_t> patch_indices;
-  if (point_patch && dc.indexed) {
+  if (expand && dc.indexed) {
     if (!x.ib) return;
     const Resource& ib = *x.ib;
     const uint32_t isize = x.ib_format == 42 ? 4 : 2, per = prog->patch_vertices;
@@ -915,7 +965,7 @@ void GpuDraw(Device& dev, Context& x, const DrawCall& call) {
     } else {
       d.indices = ib.Data() + at;
     }
-  } else if (point_patch) {
+  } else if (expand) {
     d.vertex_count = dc.count * prog->patch_vertices;
     d.base_vertex = int32_t(dc.first * prog->patch_vertices);
   } else {
@@ -926,10 +976,10 @@ void GpuDraw(Device& dev, Context& x, const DrawCall& call) {
   vsd.uniforms.draw[0] = dc.indexed ? dc.base_vertex : int32_t(dc.first);
   vsd.uniforms.draw[1] = int32_t(dc.first_instance);
   if (dc.args) {
-    d.args = dc.args->gpu_buffer;
-    d.args_at = dc.args_at;
+    d.args = expand ? ScaledArgs(dev, *dc.args, dc.args_at, prog->patch_vertices) : dc.args->gpu_buffer;
+    d.args_at = expand ? 0 : dc.args_at;
   }
-  BindStage(dev, x, point_patch ? kDomainStage : 0, prog->vs, &dc, vsd, s, &d.vs);
+  BindStage(dev, x, gs ? kGeometryStage : point_patch ? kDomainStage : 0, prog->vs, &dc, vsd, s, &d.vs);
   BindStage(dev, x, 1, prog->ps, &dc, psd, s, &d.fs);
   if (!dev.gfx->DrawProgram(d)) dev.stats.waiting++;
 }

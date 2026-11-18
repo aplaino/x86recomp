@@ -247,24 +247,18 @@ CTX_STAGE(VS, 0)
 CTX_STAGE(PS, 1)
 CTX_STAGE(CS, 2)
 CTX_STAGE(DS, kDomainStage)
+CTX_STAGE(GS, kGeometryStage)
 #undef CTX_STAGE
 
-// The geometry stage is not drawn, nor the hull stage's resources: a draw
-// with a geometry shader bound is skipped (GpuDraw), and of tessellated
-// draws only point patches are drawn (dxbc.h), whose hull shader is kept
-// to be recognised and whose domain stage is a stage of its own above.
+// The hull stage's resources are not used: of tessellated draws only
+// point patches are drawn (dxbc.h), whose hull shader is kept to be
+// recognised and whose domain stage is a stage of its own above.
 #define CTX_UNUSED_STAGE(P)                                                                 \
   CTX_METHOD(P##SetConstantBuffers) { return 0; }                                           \
   CTX_METHOD(P##SetShaderResources) { return 0; }                                           \
   CTX_METHOD(P##SetSamplers) { return 0; }
-CTX_UNUSED_STAGE(GS)
 CTX_UNUSED_STAGE(HS)
 #undef CTX_UNUSED_STAGE
-CTX_METHOD(GSSetShader) {
-  const bool on = Arg(c, 1) != 0;
-  Set(Ctx0(c), [on](Context& y) { y.geometry = on; });
-  return 0;
-}
 CTX_METHOD(HSSetShader) {
   auto s = Obj<Shader>(Arg(c, 1));
   Set(Ctx0(c), [s](Context& y) { y.hull = s; });
