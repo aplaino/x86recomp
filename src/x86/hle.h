@@ -31,9 +31,19 @@ namespace recomp::hle {
 
 inline constexpr int kCdecl = -1;
 
-// >0 while an HLE handler runs on this thread (0 again inside CallGuest).
-// A host fault then is a runtime bug, not a guest access violation.
-extern thread_local int t_hle_depth;
+// This thread's place in imports, kept by CallThunk in one thread-local
+// (each is a lookup of its own in a shared library, on every call):
+// - name, ret: the innermost import it is inside and its guest return
+//   address, null outside imports, for hang dumps (exception unwinds
+//   through an import leave them stale, so dumps say "last");
+// - depth: >0 while an HLE handler runs (0 again inside CallGuest); a host
+//   fault then is a runtime bug, not a guest access violation.
+struct HleNesting {
+  const char* name = nullptr;
+  uint64_t ret = 0;
+  int depth = 0;
+};
+extern thread_local HleNesting t_hle;
 
 using Fn = uint64_t (*)(Ctx& c);
 

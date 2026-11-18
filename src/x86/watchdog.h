@@ -22,10 +22,5 @@ void WatchdogFrame();
 // The game was (de)activated; frames are only expected while active.
 void WatchdogAppActive(bool active);
 
-// The import a thread is executing (innermost) and its guest return
-// address, maintained by hle::CallThunk; null outside imports. Exception
-// unwinds through an import leave them stale, so dumps say "last".
-extern thread_local const char* t_wd_hle_name;
-extern thread_local uint64_t t_wd_hle_ret;
 
 }  // namespace recomp
