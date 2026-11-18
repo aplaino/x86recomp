@@ -70,7 +70,9 @@ StageBindings BindingsOf(const dxbc::Shader& s) {
     if (r.buffer >= 0) b.buffers[size_t(r.buffer)] = {StageBindings::BufferKind::View, r.slot, 0};
     if (r.dim == dxbc::ResourceDim::Buffer) b.formats.push_back({false, r.slot});
   }
-  for (const dxbc::TextureBinding& t : s.textures) b.textures.push_back({t.resource, t.sampler});
+  for (const dxbc::TextureBinding& t : s.textures)
+    b.textures.push_back({t.resource, t.apart >= 0 ? t.apart : t.sampler});
+  for (const dxbc::SamplerApart& a : s.samplers_apart) b.samplers.push_back(a.slot);
   b.rw_buffers.resize(s.stage.rw_buffers);
   b.rw_images.resize(s.stage.rw_images);
   for (const dxbc::UnorderedAccess& u : s.uavs) {
@@ -246,7 +248,12 @@ std::string VertexFetch(const InputLayout* layout, const dxbc::Shader& vs, uint3
 
 // Whether the device can take a stage this large; if not, says why.
 bool Fits(const Shader& sh, const dxbc::Shader& s, const StageBindings& b) {
-  const char* why = s.stage.textures > 16      ? "more than 16 textures"
+#if defined(__APPLE__)
+  const uint32_t max_textures = s.stage.samplers ? gfx::kMaxStageTextures : 16;
+#else
+  const uint32_t max_textures = 16;  // samplers apart are drawn on Metal only
+#endif
+  const char* why = s.stage.textures > max_textures ? "more than 16 textures"
                     : s.stage.rw_images > 8    ? "more than 8 storage images"
                     : b.formats.size() > kMaxTypedViews ? "more than 16 typed buffer views"
                                                         : nullptr;

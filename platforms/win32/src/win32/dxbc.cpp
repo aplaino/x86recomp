@@ -1187,7 +1187,29 @@ class Translator {
       n = ntex++;
       sh_->textures.push_back({std::get<0>(k), std::get<1>(k), std::get<2>(k)});
     }
-    if (ntex > 16) return Fail(Fmt("%d textures (the device binds 16)", ntex));
+    if (ntex > 16) {
+      // More than the device binds with their samplers: the samplers
+      // apart, each (slot, comparison) once, and texel loads with any.
+      if (stage_ == ShaderType::Compute || ntex > int(gfx::kMaxStageTextures))
+        return Fail(Fmt("%d textures (the device binds 16, or %u with samplers apart)", ntex,
+                        gfx::kMaxStageTextures));
+      auto apart = [&](int slot, bool cmp) {
+        for (size_t k = 0; k < sh_->samplers_apart.size(); k++)
+          if (sh_->samplers_apart[k].slot == slot && sh_->samplers_apart[k].comparison == cmp) return int(k);
+        sh_->samplers_apart.push_back({slot, cmp});
+        return int(sh_->samplers_apart.size() - 1);
+      };
+      for (TextureBinding& t : sh_->textures)
+        if (t.sampler >= 0) t.apart = apart(t.sampler, t.comparison);
+      for (TextureBinding& t : sh_->textures)
+        if (t.sampler < 0) {
+          for (size_t k = 0; k < sh_->samplers_apart.size() && t.apart < 0; k++)
+            if (!sh_->samplers_apart[k].comparison) t.apart = int(k);
+          if (t.apart < 0) t.apart = apart(-1, false);
+        }
+      if (sh_->samplers_apart.size() > 16) return Fail("more than 16 samplers");
+      sh_->stage.samplers = uint32_t(sh_->samplers_apart.size());
+    }
     sh_->stage.textures = uint32_t(ntex);
     for (int i = 0; i < ntex; i++) {
       const ShaderResource* r = Srv(sh_->textures[size_t(i)].resource);
@@ -2279,9 +2301,25 @@ class Translator {
       }
       if (t.comparison && (pfx != 'f' || r->dim == ResourceDim::Texture3D))
         return Fail("a comparison sample of an integer or 3D texture");
+      const char* type = pfx == 'f' ? "" : pfx == 'u' ? "u" : "i";
+      if (t.apart >= 0) {
+        // The texture apart, and r_tex<n> the pair made where it is used.
+        std::snprintf(b, sizeof b, "layout(R_TEXTURE(%zu)) uniform %stexture%s r_timg%zu;  // t%u, s%d\n", i,
+                      type, kind, i, t.resource, t.sampler);
+        g += b;
+        std::snprintf(b, sizeof b, "#define r_tex%zu %ssampler%s%s(r_timg%zu, r_smp%d)\n", i, type, kind,
+                      t.comparison ? "Shadow" : "", i, t.apart);
+        g += b;
+        continue;
+      }
       std::snprintf(b, sizeof b, "layout(R_TEXTURE(%zu)) uniform %ssampler%s%s r_tex%zu;  // t%u, s%d\n", i,
-                    pfx == 'f' ? "" : pfx == 'u' ? "u" : "i", kind, t.comparison ? "Shadow" : "", i, t.resource,
-                    t.sampler);
+                    type, kind, t.comparison ? "Shadow" : "", i, t.resource, t.sampler);
+      g += b;
+    }
+    for (size_t k = 0; k < sh_->samplers_apart.size(); k++) {
+      const SamplerApart& s = sh_->samplers_apart[k];
+      std::snprintf(b, sizeof b, "layout(R_SAMPLER(%zu)) uniform sampler%s r_smp%zu;  // s%d\n", k,
+                    s.comparison ? "Shadow" : "", k, s.slot);
       g += b;
     }
     for (const UnorderedAccess& u : sh_->uavs) {
@@ -2543,10 +2581,14 @@ bool PointToQuadHull(const void* dxbc, size_t size, bool* ccw, uint32_t* segment
   bool quad = false, prim = false;
   uint32_t partitioning = 0;
   float factor = 0;  // the largest factor
+  std::vector<uint32_t> icb;  // the immediate constant buffer
   for (const Instr& in : p.instrs) {
     const uint32_t ctl = (in.token >> 11) & 0x1FFF;
     switch (in.op) {
       case kHsDecls: continue;
+      case kCustomData:
+        if ((in.token >> 11) == 3) icb = in.lits;
+        continue;
       case kHsControlPointPhase: phase = kControlPoints; continue;
       case kHsForkPhase: case kHsJoinPhase: phase = kPatch; continue;
       case kDclInputControlPointCount: case kDclOutputControlPointCount:
@@ -2576,19 +2618,30 @@ bool PointToQuadHull(const void* dxbc, size_t size, bool* ccw, uint32_t* segment
     const Operand& d = in.ops[0];
     const Operand& s = in.ops[1];
     if (d.type == kTemp && (s.type == kInputForkInstanceId || s.type == kInputJoinInstanceId)) continue;
-    if (d.type != kOutput || s.type != kImm32 || s.mod) return false;
-    for (uint32_t c = 0; c < (s.ncomp == 4 ? 4u : 1u); c++) {
-      // Each a whole number of segments, as the partitioning makes of it:
-      // integer any, pow2 a power of two, fractional_odd an odd number,
-      // fractional_even an even one (D3D11_TESSELLATOR_PARTITIONING 1-4).
+    if (d.type != kOutput || s.mod) return false;
+    // Each a whole number of segments, as the partitioning makes of it:
+    // integer any, pow2 a power of two, fractional_odd an odd number,
+    // fractional_even an even one (D3D11_TESSELLATOR_PARTITIONING 1-4).
+    auto whole = [&](uint32_t bits) {
       float f;
-      std::memcpy(&f, &s.imm[c], 4);
+      std::memcpy(&f, &bits, 4);
       const uint32_t n = uint32_t(f);
       if (float(n) != f || n < 1 || n > 16) return false;
-      const bool whole = partitioning == 1 || (partitioning == 2 && !(n & (n - 1))) ||
-                         (partitioning == 3 && (n & 1)) || (partitioning == 4 && !(n & 1));
-      if (!whole) return false;
       factor = std::max(factor, f);
+      return partitioning == 1 || (partitioning == 2 && !(n & (n - 1))) || (partitioning == 3 && (n & 1)) ||
+             (partitioning == 4 && !(n & 1));
+    };
+    if (s.type == kImm32) {
+      for (uint32_t c = 0; c < (s.ncomp == 4 ? 4u : 1u); c++)
+        if (!whole(s.imm[c])) return false;
+    } else if (s.type == kImmConstantBuffer && !icb.empty()) {
+      // A factor from the immediate constant buffer (by the fork phase's
+      // instance): every vector's component it reads.
+      const uint32_t c = s.ncomp == 4 && s.mode != 0 ? s.swz[0] : 0;
+      for (size_t v = 0; v + 3 < icb.size(); v += 4)
+        if (!whole(icb[v + c])) return false;
+    } else {
+      return false;
     }
   }
   if (!quad || !prim || factors != 0x3F) return false;

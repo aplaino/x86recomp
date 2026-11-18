@@ -699,13 +699,20 @@ void BindStage(Device& dev, ContextState& x, int st, const StageBindings& b, con
     }
   }
   sd.textures.resize(b.textures.size());
-  sd.samplers.resize(b.textures.size());
+  // A sampler per texture, or the samplers apart.
+  const bool apart = !b.samplers.empty();
+  sd.samplers.resize(apart ? b.samplers.size() : b.textures.size());
+  for (size_t k = 0; k < b.samplers.size(); k++) {
+    const int slot = b.samplers[k];
+    sd.samplers[k] = slot >= 0 && slot < 16 ? SamplerOf(ss.samplers[slot].get()) : gfx::SamplerDesc{};
+  }
   for (size_t i = 0; i < b.textures.size(); i++) {
     const StageBindings::Texture& t = b.textures[i];
     const View* v = t.view < 128 ? ss.srvs[t.view].get() : nullptr;
     sd.textures[i] = v && v->res->dim != Dim::Buffer ? TextureOf(dev, *v->res) : 0;
-    sd.samplers[i] = t.sampler >= 0 && t.sampler < 16 ? SamplerOf(ss.samplers[t.sampler].get())
-                                                      : gfx::SamplerDesc{};
+    if (!apart)
+      sd.samplers[i] = t.sampler >= 0 && t.sampler < 16 ? SamplerOf(ss.samplers[t.sampler].get())
+                                                        : gfx::SamplerDesc{};
   }
   // The typed buffer views' formats (R_FMT_T#, R_FMT_U#): 0 for none,
   // which the translation reads as zeros.

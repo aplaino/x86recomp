@@ -75,6 +75,8 @@ std::string Prelude(const gfx::ProgramStage& st, gfx::ShaderStage stage, const u
   std::string pre = "#version 450\n";
   std::snprintf(b, sizeof b, "#define R_TEXTURE(n) set = %d, binding = (n)\n", res);
   pre += b;
+  std::snprintf(b, sizeof b, "#define R_SAMPLER(n) set = %d, binding = (n)\n", res);
+  pre += b;
   if (st.buffers) {
     std::snprintf(b, sizeof b,
                   "layout(std430, set = %d, binding = %u) readonly buffer RMem { uint r_mem[]; };\n"
