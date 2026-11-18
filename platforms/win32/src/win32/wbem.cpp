@@ -5,7 +5,9 @@
 // the DeviceID Windows gives an XInput HID gamepad,
 // HID\VID_045E&PID_028E&IG_00\<instance>: "IG_" marks an XInput
 // interface, and VID/PID match the product GUID DirectInput reports for
-// the pad (dinput8.cpp).
+// the pad (dinput8.cpp). Audited for x64 guests: pointers (out
+// parameters, the objects Next returns, a VARIANT's BSTR) are the guest's
+// width, and a VARIANT is 24 bytes there.
 
 #include <cctype>
 #include <cstdio>
@@ -49,12 +51,12 @@ struct Instance : com::Object {
   std::u16string device_id;
 };
 
-uint32_t LocatorVtable() {
+gaddr LocatorVtable() {
   return com::Vtable("wbemprox.dll", "IWbemLocator",
                      {"QueryInterface", "AddRef", "Release", "ConnectServer"});
 }
 
-uint32_t ServicesVtable() {
+gaddr ServicesVtable() {
   return com::Vtable(
       "wbemprox.dll", "IWbemServices",
       {"QueryInterface", "AddRef", "Release", "OpenNamespace", "CancelAsyncCall",
@@ -67,13 +69,13 @@ uint32_t ServicesVtable() {
        "ExecMethodAsync"});
 }
 
-uint32_t EnumVtable() {
+gaddr EnumVtable() {
   return com::Vtable("wbemprox.dll", "IEnumWbemClassObject",
                      {"QueryInterface", "AddRef", "Release", "Reset", "Next",
                       "NextAsync", "Clone", "Skip"});
 }
 
-uint32_t InstanceVtable() {
+gaddr InstanceVtable() {
   return com::Vtable(
       "wbemprox.dll", "IWbemClassObject",
       {"QueryInterface", "AddRef", "Release", "GetQualifierSet", "Get", "Put",
@@ -88,17 +90,17 @@ uint32_t InstanceVtable() {
 template <typename T>
 T* Self(Ctx& c, const char* iface) {
   T* o = com::As<T>(Arg(c, 0));
-  if (!o) FatalF("%s call on unknown object %08X", iface, uint32_t(Arg(c, 0)));
+  if (!o) FatalF("%s call on unknown object %08llX", iface, (unsigned long long)Arg(c, 0));
   return o;
 }
 
 uint32_t QueryInterfaceFor(Ctx& c, const GUID& iid) {
   if (com::GuidEq(Arg(c, 1), iid) || com::GuidEq(Arg(c, 1), kIID_IUnknown)) {
     com::AddRef(Arg(c, 0));
-    Wr32(Arg(c, 2), Arg(c, 0));
+    WrPtr(Arg(c, 2), Arg(c, 0));
     return S_OK;
   }
-  Wr32(Arg(c, 2), 0);
+  WrPtr(Arg(c, 2), 0);
   return E_NOINTERFACE;
 }
 
@@ -123,42 +125,42 @@ com::CoClassRegistrar reg_locator{kCLSID_WbemLocator, &CreateLocator};
 
 // ---- IWbemLocator -------------------------------------------------------------
 
-HLE_NAMED("wbemprox.dll", "IWbemLocator::QueryInterface", Loc_QueryInterface, 3) {
+HLE_NAMED_X("wbemprox.dll", "IWbemLocator::QueryInterface", Loc_QueryInterface, 3, true) {
   return QueryInterfaceFor(c, kIID_IWbemLocator);
 }
-HLE_NAMED("wbemprox.dll", "IWbemLocator::AddRef", Loc_AddRef, 1) { return com::AddRef(Arg(c, 0)); }
-HLE_NAMED("wbemprox.dll", "IWbemLocator::Release", Loc_Release, 1) { return com::Release(Arg(c, 0)); }
+HLE_NAMED_X("wbemprox.dll", "IWbemLocator::AddRef", Loc_AddRef, 1, true) { return com::AddRef(Arg(c, 0)); }
+HLE_NAMED_X("wbemprox.dll", "IWbemLocator::Release", Loc_Release, 1, true) { return com::Release(Arg(c, 0)); }
 
 // (strNetworkResource, strUser, strPassword, strLocale, lSecurityFlags,
 // strAuthority, pCtx, ppNamespace): the local root\cimv2 only.
-HLE_NAMED("wbemprox.dll", "IWbemLocator::ConnectServer", Loc_ConnectServer, 9) {
+HLE_NAMED_X("wbemprox.dll", "IWbemLocator::ConnectServer", Loc_ConnectServer, 9, true) {
   Self<Locator>(c, "IWbemLocator");
-  uint32_t out = Arg(c, 8);
+  const gaddr out = Arg(c, 8);
   if (!out) return E_POINTER;
-  Wr32(out, 0);
+  WrPtr(out, 0);
   std::u16string ns = Arg(c, 1) ? GWStr(Arg(c, 1)) : u"";
   if (!EqualsIgnoreCase(ns, "\\\\.\\root\\cimv2") && !EqualsIgnoreCase(ns, "root\\cimv2")) {
     WarnF("wbem: ConnectServer(%s): namespace not available\n", win32::Narrow(ns).c_str());
     return WBEM_E_INVALID_NAMESPACE;
   }
-  Wr32(out, com::Publish(std::make_shared<Services>(), ServicesVtable()));
+  WrPtr(out, com::Publish(std::make_shared<Services>(), ServicesVtable()));
   return S_OK;
 }
 
 // ---- IWbemServices ------------------------------------------------------------
 
-HLE_NAMED("wbemprox.dll", "IWbemServices::QueryInterface", Svc_QueryInterface, 3) {
+HLE_NAMED_X("wbemprox.dll", "IWbemServices::QueryInterface", Svc_QueryInterface, 3, true) {
   return QueryInterfaceFor(c, kIID_IWbemServices);
 }
-HLE_NAMED("wbemprox.dll", "IWbemServices::AddRef", Svc_AddRef, 1) { return com::AddRef(Arg(c, 0)); }
-HLE_NAMED("wbemprox.dll", "IWbemServices::Release", Svc_Release, 1) { return com::Release(Arg(c, 0)); }
+HLE_NAMED_X("wbemprox.dll", "IWbemServices::AddRef", Svc_AddRef, 1, true) { return com::AddRef(Arg(c, 0)); }
+HLE_NAMED_X("wbemprox.dll", "IWbemServices::Release", Svc_Release, 1, true) { return com::Release(Arg(c, 0)); }
 
 // (strFilter, lFlags, pCtx, ppEnum): Win32_PNPEntity, the XInput pads.
-HLE_NAMED("wbemprox.dll", "IWbemServices::CreateInstanceEnum", Svc_CreateInstanceEnum, 5) {
+HLE_NAMED_X("wbemprox.dll", "IWbemServices::CreateInstanceEnum", Svc_CreateInstanceEnum, 5, true) {
   Self<Services>(c, "IWbemServices");
-  uint32_t out = Arg(c, 4);
+  const gaddr out = Arg(c, 4);
   if (!out) return E_POINTER;
-  Wr32(out, 0);
+  WrPtr(out, 0);
   std::u16string cls = Arg(c, 1) ? GWStr(Arg(c, 1)) : u"";
   if (!EqualsIgnoreCase(cls, "Win32_PNPEntity")) {
     WarnF("wbem: CreateInstanceEnum(%s): class not available\n", win32::Narrow(cls).c_str());
@@ -171,34 +173,36 @@ HLE_NAMED("wbemprox.dll", "IWbemServices::CreateInstanceEnum", Svc_CreateInstanc
                   p.pid, p.index + 1);
     e->device_ids.push_back(win32::Widen(id));
   }
-  Wr32(out, com::Publish(e, EnumVtable()));
+  WrPtr(out, com::Publish(e, EnumVtable()));
   return S_OK;
 }
 
 // ---- IEnumWbemClassObject -----------------------------------------------------
 
-HLE_NAMED("wbemprox.dll", "IEnumWbemClassObject::QueryInterface", Enum_QueryInterface, 3) {
+HLE_NAMED_X("wbemprox.dll", "IEnumWbemClassObject::QueryInterface", Enum_QueryInterface, 3, true) {
   return QueryInterfaceFor(c, kIID_IEnumWbemClassObject);
 }
-HLE_NAMED("wbemprox.dll", "IEnumWbemClassObject::AddRef", Enum_AddRef, 1) { return com::AddRef(Arg(c, 0)); }
-HLE_NAMED("wbemprox.dll", "IEnumWbemClassObject::Release", Enum_Release, 1) { return com::Release(Arg(c, 0)); }
+HLE_NAMED_X("wbemprox.dll", "IEnumWbemClassObject::AddRef", Enum_AddRef, 1, true) { return com::AddRef(Arg(c, 0)); }
+HLE_NAMED_X("wbemprox.dll", "IEnumWbemClassObject::Release", Enum_Release, 1, true) { return com::Release(Arg(c, 0)); }
 
-HLE_NAMED("wbemprox.dll", "IEnumWbemClassObject::Reset", Enum_Reset, 1) {
+HLE_NAMED_X("wbemprox.dll", "IEnumWbemClassObject::Reset", Enum_Reset, 1, true) {
   Self<InstanceEnum>(c, "IEnumWbemClassObject")->next = 0;
   return S_OK;
 }
 
 // (lTimeout, uCount, apObjects, puReturned): WBEM_S_FALSE once fewer than
 // uCount are left.
-HLE_NAMED("wbemprox.dll", "IEnumWbemClassObject::Next", Enum_Next, 5) {
+HLE_NAMED_X("wbemprox.dll", "IEnumWbemClassObject::Next", Enum_Next, 5, true) {
   InstanceEnum* e = Self<InstanceEnum>(c, "IEnumWbemClassObject");
-  uint32_t count = Arg(c, 2), objects = Arg(c, 3), returned = Arg(c, 4);
+  const uint32_t count = uint32_t(Arg(c, 2));
+  const gaddr objects = Arg(c, 3), returned = Arg(c, 4);
+  const uint32_t ptr = g_proc->x64 ? 8 : 4;
   if (!objects || !returned) return E_POINTER;
   uint32_t n = 0;
   for (; n < count && e->next < e->device_ids.size(); n++) {
     auto inst = std::make_shared<Instance>();
     inst->device_id = e->device_ids[e->next++];
-    Wr32(objects + 4 * n, com::Publish(inst, InstanceVtable()));
+    WrPtr(objects + ptr * n, com::Publish(inst, InstanceVtable()));
   }
   Wr32(returned, n);
   return n == count ? S_OK : WBEM_S_FALSE;
@@ -206,25 +210,25 @@ HLE_NAMED("wbemprox.dll", "IEnumWbemClassObject::Next", Enum_Next, 5) {
 
 // ---- IWbemClassObject ---------------------------------------------------------
 
-HLE_NAMED("wbemprox.dll", "IWbemClassObject::QueryInterface", Obj_QueryInterface, 3) {
+HLE_NAMED_X("wbemprox.dll", "IWbemClassObject::QueryInterface", Obj_QueryInterface, 3, true) {
   return QueryInterfaceFor(c, kIID_IWbemClassObject);
 }
-HLE_NAMED("wbemprox.dll", "IWbemClassObject::AddRef", Obj_AddRef, 1) { return com::AddRef(Arg(c, 0)); }
-HLE_NAMED("wbemprox.dll", "IWbemClassObject::Release", Obj_Release, 1) { return com::Release(Arg(c, 0)); }
+HLE_NAMED_X("wbemprox.dll", "IWbemClassObject::AddRef", Obj_AddRef, 1, true) { return com::AddRef(Arg(c, 0)); }
+HLE_NAMED_X("wbemprox.dll", "IWbemClassObject::Release", Obj_Release, 1, true) { return com::Release(Arg(c, 0)); }
 
 // (wszName, lFlags, pVal, pType, plFlavor): DeviceID, as a VT_BSTR VARIANT
 // the caller frees (VariantClear).
-HLE_NAMED("wbemprox.dll", "IWbemClassObject::Get", Obj_Get, 6) {
+HLE_NAMED_X("wbemprox.dll", "IWbemClassObject::Get", Obj_Get, 6, true) {
   Instance* o = Self<Instance>(c, "IWbemClassObject");
   std::u16string name = Arg(c, 1) ? GWStr(Arg(c, 1)) : u"";
   if (!EqualsIgnoreCase(name, "DeviceID")) {
     WarnF("wbem: Win32_PNPEntity property %s not available\n", win32::Narrow(name).c_str());
     return WBEM_E_NOT_FOUND;
   }
-  if (uint32_t v = Arg(c, 3)) {
-    std::memset(GPtr(v), 0, 16);
+  if (const gaddr v = Arg(c, 3)) {
+    std::memset(GPtr(v), 0, g_proc->x64 ? 24 : 16);  // VARIANT
     Wr16(v, VT_BSTR);
-    Wr32(v + 8, com::AllocBstr(o->device_id));
+    WrPtr(v + 8, com::AllocBstr(o->device_id));
   }
   if (Arg(c, 4)) Wr32(Arg(c, 4), CIM_STRING);
   if (Arg(c, 5)) Wr32(Arg(c, 5), 0);

@@ -184,16 +184,16 @@ CreateFn FindCoClass(gaddr clsid) {
   return nullptr;
 }
 
-uint32_t AllocBstr(const std::u16string& s) {
+gaddr AllocBstr(const std::u16string& s) {
   const uint32_t bytes = uint32_t(s.size() * 2);
-  const uint32_t p = HeapAllocProcess(4 + bytes + 2, false);
+  const gaddr p = HeapAllocProcess(4 + bytes + 2, false);
   Wr32(p, bytes);
   std::memcpy(GPtr(p + 4), s.data(), bytes);
   Wr16(p + 4 + bytes, 0);
   return p + 4;
 }
 
-void FreeBstr(uint32_t bstr) {
+void FreeBstr(gaddr bstr) {
   if (bstr) HeapFreeProcess(bstr - 4);
 }
 
