@@ -127,6 +127,51 @@ template <bool D>
   return e != Bits<D>::kExp && (e || !(v & Bits<D>::kFrac));
 }
 
+// A packed instruction's lanes all at once, where every lane is the
+// common case of the proof above: operands normal or zero, and a result
+// that is normal and not of the smallest normal magnitude, or zero from
+// ADD or SUB, or a zero product or quotient of a zero operand. No
+// denormal goes in or comes out, so DAZ and FTZ change nothing, and no
+// flag but PE is raised; the host's vector arithmetic is its scalar
+// arithmetic lane by lane (the same FPCR/MXCSR), so each lane gets the bits
+// HostArith below gives it. A packed instruction with any other lane
+// takes HostArith (and from there perhaps the model).
+template <bool D>
+[[gnu::always_inline]] inline bool HostArithPacked(Op op, Xmm& d, const Xmm& s) {
+  using U = typename Bits<D>::U;
+  using F = typename Bits<D>::F;
+  using S = std::make_signed_t<U>;
+  typedef U UV __attribute__((vector_size(16)));
+  typedef F FV __attribute__((vector_size(16)));
+  typedef S SV __attribute__((vector_size(16)));
+  constexpr U kSign = U(1) << (sizeof(U) * 8 - 1), kMinNormal = Bits<D>::kFrac + 1;
+  constexpr U kExp = Bits<D>::kExp, kFrac = Bits<D>::kFrac;
+  UV a, b, v;
+  std::memcpy(&a, d.b, 16);
+  std::memcpy(&b, s.b, 16);
+  const UV ea = a & kExp, eb = b & kExp;
+  SV bad = (ea == kExp) | (eb == kExp) | ((ea == 0) & ((a & kFrac) != 0)) | ((eb == 0) & ((b & kFrac) != 0));
+  FV x, y, f;
+  std::memcpy(&x, &a, 16);
+  std::memcpy(&y, &b, 16);
+  switch (op) {
+    case kAdd: f = x + y; break;
+    case kSub: f = x - y; break;
+    case kMul: f = x * y; break;
+    default: f = x / y; break;
+  }
+  std::memcpy(&v, &f, 16);
+  const UV mag = v & ~kSign;
+  bad |= (mag >= kExp) | ((v & kExp) == 0 & mag != 0);
+  if (!Mutated(12)) bad |= mag == kMinNormal;
+  if ((op == kMul || op == kDiv) && !Mutated(11)) bad |= (mag == 0) & ((a & ~kSign) != 0) & ((b & ~kSign) != 0);
+  S any = 0;
+  for (size_t i = 0; i < 16 / sizeof(U); i++) any |= bad[i];
+  if (any) return false;
+  std::memcpy(d.b, &v, 16);
+  return true;
+}
+
 template <bool D>
 [[gnu::always_inline]] inline bool HostArith(Ctx& c, Op op, int lanes, Xmm& d, const Xmm& s) {
   using U = typename Bits<D>::U;
@@ -181,9 +226,13 @@ template <bool D>
 // keep it, the host's arithmetic where it is proven the model's.
 [[gnu::always_inline]] inline void Arith(Ctx& c, Op op, bool dbl, int lanes, Xmm& d,
                                          const Xmm& s, uint64_t va) {
-  if (host::UsualMxcsr(c.mxcsr) &&
-      (dbl ? host::HostArith<true>(c, op, lanes, d, s) : host::HostArith<false>(c, op, lanes, d, s)))
-    [[likely]] return;
+  if (host::UsualMxcsr(c.mxcsr)) {
+    if (lanes == (dbl ? 2 : 4) &&
+        (dbl ? host::HostArithPacked<true>(op, d, s) : host::HostArithPacked<false>(op, d, s)))
+      [[likely]] return;
+    if (dbl ? host::HostArith<true>(c, op, lanes, d, s) : host::HostArith<false>(c, op, lanes, d, s))
+      [[likely]] return;
+  }
   ArithModel(c, op, dbl, lanes, d, s, va);
 }
 
