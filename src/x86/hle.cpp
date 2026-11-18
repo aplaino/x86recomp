@@ -15,7 +15,7 @@
 
 namespace recomp::hle {
 
-thread_local int t_hle_depth = 0;
+thread_local HleNesting t_hle;
 
 namespace {
 
@@ -163,17 +163,18 @@ void CallThunk(Ctx& c, gaddr thunk) {
   // guest exception's unwind (GuestResume) may leave through the handler,
   // so this is undone on the way out either way.
   struct Inside {
-    const char* saved_name = t_wd_hle_name;
-    uint64_t saved_ret = t_wd_hle_ret;
+    HleNesting& n = t_hle;
+    const char* saved_name = n.name;
+    uint64_t saved_ret = n.ret;
     Inside(const char* name, uint64_t ret) {
-      t_wd_hle_name = name;
-      t_wd_hle_ret = ret;
-      ++t_hle_depth;
+      n.name = name;
+      n.ret = ret;
+      ++n.depth;
     }
     ~Inside() {
-      --t_hle_depth;
-      t_wd_hle_name = saved_name;
-      t_wd_hle_ret = saved_ret;
+      --n.depth;
+      n.name = saved_name;
+      n.ret = saved_ret;
     }
   };
   uint64_t r;

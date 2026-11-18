@@ -73,7 +73,11 @@ Thread* CurrentThread() { return t_current; }
 
 uint32_t GuestProcessorCount() {
   unsigned n = std::thread::hardware_concurrency();
-  return std::clamp<unsigned>(n, 2, 8);  // capped: 2002 code may assume few
+  // Capped: 2002 code may assume few. <ID>_PROCESSORS sets another cap
+  // (a dev switch, to measure how a game's job threads scale).
+  unsigned cap = 8;
+  if (const char* e = g_proc ? Env("PROCESSORS") : nullptr; e && *e) cap = unsigned(std::strtoul(e, nullptr, 10));
+  return std::clamp<unsigned>(n, 2, std::max(cap, 2u));
 }
 
 bool Background() {
@@ -135,9 +139,9 @@ void PutWStr(gaddr va, const std::string& s) {
 uint64_t CallGuest(Ctx& c, gaddr va, std::initializer_list<uint64_t> args) {
   // Guest code runs here: faults are guest access violations again.
   struct DepthGuard {
-    int saved = hle::t_hle_depth;
-    DepthGuard() { hle::t_hle_depth = 0; }
-    ~DepthGuard() { hle::t_hle_depth = saved; }
+    int saved = hle::t_hle.depth;
+    DepthGuard() { hle::t_hle.depth = 0; }
+    ~DepthGuard() { hle::t_hle.depth = saved; }
   } guard;
   if (g_proc->sysv) {
     // System V: rdi, rsi, rdx, rcx, r8, r9, then the stack above the
@@ -332,7 +336,7 @@ static void* ServiceThreadMain(void* arg) {
   CheckHostFp();
   InstallSignalStack();
   RegisterGuestHostThread("service", s->t->tid);
-  hle::t_hle_depth = 1;
+  hle::t_hle.depth = 1;
   s->fn();
   t_current = nullptr;
   ReleaseThread(s->t);
