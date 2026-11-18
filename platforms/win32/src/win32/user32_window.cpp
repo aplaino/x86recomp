@@ -1737,6 +1737,27 @@ HLE("user32.dll", GetWindow, 2) {
   return Arg(c, 1) == 4 ? w->parent : 0;
 }
 
+// GetTopWindow(hWnd): the child of hWnd at the top of the Z order, or
+// with no window (or the desktop) the top-level one. The Z order is not
+// kept: the active window is on top, then the newest, as a window is put
+// on top of its siblings when it is made.
+HLE64("user32.dll", GetTopWindow, 1) {
+  const uint32_t parent = uint32_t(Arg(c, 0)) == 0x00010000 ? 0 : uint32_t(Arg(c, 0));
+  std::lock_guard<std::recursive_mutex> l(g_mu);
+  if (!parent) {
+    if (Window* a = Win(g_active); a && !(a->style & WS_CHILD)) return g_active;
+  } else if (!Win(parent)) {
+    return 0;
+  }
+  uint32_t top = 0;
+  for (auto& [h, w] : g_windows) {
+    if (w.destroyed || (parent ? w.parent != parent || !(w.style & WS_CHILD) : (w.style & WS_CHILD) != 0))
+      continue;
+    top = h;
+  }
+  return top;
+}
+
 HLE("user32.dll", GetLastActivePopup, 1) { return Arg(c, 0); }
 
 uint64_t FindWindowImpl(Ctx& c, bool wide) {
