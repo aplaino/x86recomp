@@ -1406,9 +1406,10 @@ void r_color0(inout vec4 c) {
     // What a draw or dispatch binds: ProgramStageCmd's textures and
     // DispatchProgram's storage images.
     for (const ProgramStage* st : {&d.vs, &d.fs, &d.cs})
-      if (st->textures > 16 || st->rw_images > 8)
-        FatalF("gfx: a program stage with %u textures and %u storage images (at most 16 and 8)",
-               st->textures, st->rw_images);
+      if (st->textures > (st->samplers ? kMaxStageTextures : 16) || st->samplers > 16 ||
+          (st->samplers && (st->textures <= 16 || st == &d.cs)) || st->rw_images > 8)
+        FatalF("gfx: a program stage with %u textures, %u samplers apart and %u storage images", st->textures,
+               st->samplers, st->rw_images);
     Program pr;
     pr.vs = d.vs;
     pr.fs = d.fs;
@@ -1463,7 +1464,8 @@ void r_color0(inout vec4 c) {
     si.entrypoint = code.entry;
     si.format = code.format;
     si.stage = vertex ? SDL_GPU_SHADERSTAGE_VERTEX : SDL_GPU_SHADERSTAGE_FRAGMENT;
-    si.num_samplers = st.textures;
+    si.num_samplers = std::min(st.textures, 16u);
+    si.num_storage_textures = st.textures > 16 ? st.textures - 16 : 0;
     si.num_storage_buffers = st.buffers ? 2 : 0;
     si.num_uniform_buffers = ProgramUniformBlocks(st);
     SDL_GPUShader* sh = SDL_CreateGPUShader(dev_, &si);
@@ -2577,10 +2579,15 @@ void r_color0(inout vec4 c) {
               else SDL_PushGPUVertexUniformData(cmd, i, data, sc.ulen[i]);
             }
             SDL_GPUTextureSamplerBinding tb[16];
-            for (uint32_t i = 0; i < sc.ntex; i++) tb[i] = {sc.tex[i], sc.smp[i]};
-            if (sc.ntex) {
-              if (st) SDL_BindGPUFragmentSamplers(rp, 0, tb, sc.ntex);
-              else SDL_BindGPUVertexSamplers(rp, 0, tb, sc.ntex);
+            const uint32_t pairs = std::min(sc.ntex, 16u);
+            for (uint32_t i = 0; i < pairs; i++) tb[i] = {sc.tex[i], sc.smp[i]};
+            if (pairs) {
+              if (st) SDL_BindGPUFragmentSamplers(rp, 0, tb, pairs);
+              else SDL_BindGPUVertexSamplers(rp, 0, tb, pairs);
+            }
+            if (sc.ntex > 16) {
+              if (st) SDL_BindGPUFragmentStorageTextures(rp, 0, sc.tex + 16, sc.ntex - 16);
+              else SDL_BindGPUVertexStorageTextures(rp, 0, sc.tex + 16, sc.ntex - 16);
             }
             if (sc.storage) {
               SDL_GPUBuffer* bufs[2] = {pbuf_, heap_};
@@ -3583,7 +3590,7 @@ void r_color0(inout vec4 c) {
   // in ubytes_ (the buffer table, then the program's own) and whether it
   // reads the arena (pmem_).
   struct ProgramStageCmd {
-    SDL_GPUTexture* tex[16] = {};
+    SDL_GPUTexture* tex[kMaxStageTextures] = {};  // past 16: storage textures
     SDL_GPUSampler* smp[16] = {};
     uint32_t ntex = 0, nuni = 0;
     uint32_t uoff[2] = {}, ulen[2] = {};
@@ -3639,11 +3646,12 @@ void r_color0(inout vec4 c) {
   // read-only storage buffers, then the read-write one.
   static std::string CompileProgramStage(const ProgramStage& st, ShaderStage stage,
                                          const uint32_t* local_size) {
-    if (st.textures > 16) FatalF("gfx: a program stage with %u textures", st.textures);
 #if defined(__APPLE__)
     const bool metal = true;
 #else
     const bool metal = false;
+    // SDL_GPU's Vulkan backend binds textures with their samplers only.
+    if (st.samplers) FatalF("gfx: a program stage with samplers apart from its textures (Metal only)");
 #endif
     const int res = metal ? 0 : stage == ShaderStage::Fragment ? 2 : 0;
     const int uni = metal ? 0 : stage == ShaderStage::Vertex ? 1 : stage == ShaderStage::Fragment ? 3 : 2;
@@ -3652,6 +3660,8 @@ void r_color0(inout vec4 c) {
     char b[256];
     std::string pre = "#version 450\n";
     std::snprintf(b, sizeof b, "#define R_TEXTURE(n) set = %d, binding = (n)\n", res);
+    pre += b;
+    std::snprintf(b, sizeof b, "#define R_SAMPLER(n) set = %d, binding = (n)\n", res);
     pre += b;
     if (st.buffers) {
       std::snprintf(b, sizeof b,
@@ -3819,6 +3829,11 @@ void r_color0(inout vec4 c) {
   void RecordStage(ProgramStageCmd& sc, const ProgramStage& st, const ProgramResources& r,
                    bool draw = false) {
     sc.ntex = st.textures;
+    // Samplers apart: slot i holds sampler i (the textures past the
+    // samplers' count are bound with a default one, unused).
+    if (st.samplers)
+      for (uint32_t i = 0; i < 16; i++)
+        sc.smp[i] = ProgramSampler(r.samplers && i < st.samplers ? r.samplers[i] : SamplerDesc{});
     for (uint32_t i = 0; i < st.textures; i++) {
       const TextureId id = r.textures ? r.textures[i] : 0;
       SDL_GPUTexture* t = nullptr;
@@ -3833,7 +3848,7 @@ void r_color0(inout vec4 c) {
         }
       }
       sc.tex[i] = t;
-      sc.smp[i] = ProgramSampler(r.samplers ? r.samplers[i] : SamplerDesc{});
+      if (!st.samplers) sc.smp[i] = ProgramSampler(r.samplers ? r.samplers[i] : SamplerDesc{});
     }
     if (!draw) return;
     if (st.buffers) {

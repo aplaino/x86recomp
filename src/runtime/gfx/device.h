@@ -244,12 +244,21 @@ using BufferId = uint32_t;  // 0: none
 
 enum class TextureKind : uint8_t { Tex2D, Tex2DArray, Cube, Tex3D };
 
+// A vertex or fragment stage's textures: 16 each with a sampler of its own
+// (`layout(R_TEXTURE(n)) uniform sampler2D`), or up to kMaxStageTextures
+// with `samplers` samplers apart (`layout(R_TEXTURE(n)) uniform texture2D`,
+// `layout(R_SAMPLER(n)) uniform sampler`), on Metal: shaders that sample
+// more textures than SDL_GPU has texture-sampler slots (16), the textures
+// past them bound as its read-only storage textures.
+inline constexpr uint32_t kMaxStageTextures = 24;
+
 struct ProgramStage {
   std::string glsl;  // empty: no such stage
   uint32_t textures = 0, buffers = 0;
+  uint32_t samplers = 0;                   // samplers apart from the textures; 0: none
   uint32_t rw_buffers = 0, rw_images = 0;  // compute only
   uint32_t uniform_bytes = 0;              // 0: no uniform block
-  TextureKind texture_kinds[16] = {};      // what an unbound texture is
+  TextureKind texture_kinds[kMaxStageTextures] = {};  // what an unbound texture is
 };
 // Vertex and fragment stages, or a compute one (cs) with its workgroup
 // size.
@@ -343,7 +352,7 @@ struct RwBufferData {  // read, and written back once the dispatch has run
 // declares.
 struct ProgramResources {
   const TextureId* textures = nullptr;
-  const SamplerDesc* samplers = nullptr;  // one per texture
+  const SamplerDesc* samplers = nullptr;  // one per texture, or per sampler apart (samplers)
   const BufferData* buffers = nullptr;
   const void* uniforms = nullptr;  // uniform_bytes
 };
