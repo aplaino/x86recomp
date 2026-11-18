@@ -71,8 +71,8 @@ struct CoClassRegistrar {
 
 // BSTRs (oleaut32 SysAllocString/SysFreeString): the byte length, then
 // the characters and a NUL; the pointer is to the characters.
-uint32_t AllocBstr(const std::u16string& s);
-void FreeBstr(uint32_t bstr);
+gaddr AllocBstr(const std::u16string& s);
+void FreeBstr(gaddr bstr);
 
 constexpr uint32_t kS_OK = 0, kE_NOINTERFACE = 0x80004002;
 
